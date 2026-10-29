@@ -15,8 +15,8 @@ budget_ceiling() {
     *)      echo "$c" ;;
   esac
 }
-# budget_usage <budget>: "<weekly%> <window%>", or "0 0" if the feed fails
-budget_usage() { bash -c "${BUDGET_USAGE[$1]}" 2>/dev/null || echo "0 0"; }
+# budget_usage <budget>: "<weekly%> <window%>"; a failed feed reads "100 100" (fail safe: blocks night launches, wakes the watch)
+budget_usage() { local o; o=$(bash -c "${BUDGET_USAGE[$1]}" 2>/dev/null) && [ -n "$o" ] && echo "$o" || echo "100 100"; }
 # budget_tiers <budget>: tiers drawing on it
 budget_tiers() { local t; for t in $TIERS; do [ "${TIER_BUDGET[$t]:-}" = "$1" ] && printf '%s ' "$t"; done; }
 mem_avail_gb() { awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo; }
