@@ -19,6 +19,10 @@ declare -A BUDGET_USAGE=(
   [main]="tail -1 \$HOME/.claude/usage-history.jsonl | jq -r '\"\\((.weekly*100)|floor) \\((.session*100)|floor)\"'"
   [cheap]=""        # no feed: manual (watch the vendor console) or unlimited
 )
+# Reset feed: a command printing the short window's reset time as epoch seconds (reset times vary).
+declare -A BUDGET_RESET=(
+  [main]="tail -1 \$HOME/.claude/usage-history.jsonl | jq -r .session_reset"
+)
 declare -A BUDGET_CEILING=( [main]="file:$HOME/.config/claude-usage-ceiling.json" [cheap]="" )
 DEFAULT_CEILING=40
 
@@ -32,7 +36,9 @@ MEM_LOW_GB=4            # watch wakes the machine coordinator below this (2 poll
 SWAP_HIGH_GB=12         # ... or above this much swap used
 WINDOW_WATCH_PCT=90     # watch wakes at this window use of a metered budget
 WINDOW_NIGHT_PCT=80     # night: no new lanes on a budget at this window use
-NIGHT_MEM_MIN_GB=8      # night: no launches below this much available memory
+NIGHT_MEM_MIN_GB=8
+WINDOW_WARN_PCT=95      # window guard: coordinators start nothing new
+WINDOW_STOP_PCT=98      # window guard: limit imminent, lanes push WIP      # night: no launches below this much available memory
 POLL_SECS=30
 
 # --- Project coordinators: name -> Rove main task id; one engine tab for all ---
