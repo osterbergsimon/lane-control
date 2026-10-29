@@ -23,7 +23,7 @@ for t in $TIERS; do
     elif [ "$used" -ge "$night_cap" ]; then a="none: budget $b used ${used}% tonight (cap ${night_cap}%)"
     elif [ "$ss" -ge "$WINDOW_NIGHT_PCT" ]; then a="none until the window resets (budget $b at ${ss}%)"
     else a="within caps"; [ "$t" = deep ] && a="within caps; at most 1 deep worker tonight"; fi
-    summary="$summary $b: weekly ${wk}% (night +${used}%), window ${ss}%;"
+    case "$summary" in *" $b:"*) ;; *) summary="$summary $b: weekly ${wk}% (night +${used}%), window ${ss}%;" ;; esac
   else a="within caps (no usage feed: $b)"; fi
   allow="$allow $t: $a;"
 done
