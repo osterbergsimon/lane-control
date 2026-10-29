@@ -1,0 +1,5 @@
+{
+  "ceiling": 40,
+  "set": "<date> (week to <date>; owner: may be raised, owner authorizes any extra)",
+  "note": "Weekly usage ceiling in percent for one metered budget, set by the owner per week. Derived: pressure signal at ceiling-15, no new work at ceiling-10, WIP+stop at ceiling-7, stop all at ceiling-4, never past ceiling."
+}

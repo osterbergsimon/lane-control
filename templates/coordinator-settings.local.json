@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${ROVE_TASK_ID:-}\" = \"<COORDINATOR_TASK_ID>\" ] || exit 0; rove api context --repo <REPO_PATH> --text 2>/dev/null | jq -c '{hookSpecificOutput:{hookEventName:\"UserPromptSubmit\",additionalContext:(\"Rove task state for the <PROJECT> coordinator. Handle every waiting-on-you / ready-for-review / unknown row before other work: verify the worker report, decide, follow up, record the outcome on its issue, raise owner decisions as Rove gates (rove api gate-raise) and lead the reply with them.\\n\"+.text)}}' 2>/dev/null || true",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${ROVE_TASK_ID:-}\" = \"<COORDINATOR_TASK_ID>\" ] || exit 0; rove api context --repo <REPO_PATH> --text 2>/dev/null | jq -c '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"Rove task state for the <PROJECT> coordinator (session start: reports may have arrived while no session was alive; read bd memory handover-latest). Handle every waiting-on-you / ready-for-review / unknown row before other work: verify the worker report, decide, follow up, record the outcome on its issue, raise owner decisions as Rove gates (rove api gate-raise) and lead the reply with them.\\n\"+.text)}}' 2>/dev/null || true",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bd list *)",
+      "Bash(bd show *)",
+      "Bash(bd memories *)",
+      "Bash(bd search *)",
+      "Bash(bd ready *)",
+      "Bash(bd recall *)",
+      "Bash(rove api list *)",
+      "Bash(rove api read-output *)",
+      "Bash(rove api get-task *)",
+      "Bash(rove api schema *)",
+      "Bash(rove skill status)",
+      "Bash(rove repo show *)",
+      "Bash(opencode models *)",
+      "Bash(opencode debug config *)",
+      "Bash(opencode auth list)",
+      "Bash(opencode session list *)",
+      "Bash(rove api add *)",
+      "Bash(rove api spawn *)"
+    ]
+  },
+  "enabledPlugins": {
+    "<unneeded-plugin>@<marketplace>": false
+  },
+  "disableClaudeAiConnectors": true
+}
