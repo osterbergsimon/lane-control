@@ -1,6 +1,7 @@
 # Shared by the watch scripts: loads the config, defines budget helpers.
 CONF="${PLAYBOOK_CONFIG:-$HOME/.config/rove/playbook.conf.sh}"
 declare -A COORD_CEILING_ADD=( )   # default: no per-project raise (config may override)
+declare -A COORD_REPO=( )
 [ -r "$CONF" ] || { echo "no config: $CONF (copy config.example.sh)" >&2; exit 2; }
 # shellcheck disable=SC1090
 . "$CONF"

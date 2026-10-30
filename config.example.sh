@@ -51,6 +51,9 @@ declare -A COORD_TASK=(
   ["<PROJECT_B>"]="<COORDINATOR_TASK_ID_B>"
 )
 COORD_TAB=tab-1
+declare -A COORD_REPO=(   # project checkout, for scripts/stale-claims.sh
+  ["<PROJECT_A>"]="$HOME/code/<project_a>"
+)
 # Optional: raise one project's weekly ceiling by N points (e.g. a project that mostly uses a cheap tier)
 declare -A COORD_CEILING_ADD=( )
 

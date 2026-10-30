@@ -51,7 +51,8 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
   branch `<key_prefix>-<n>-<slug>` (lower case, ≤ 40 chars); one issue, one task, one branch;
   a follow-up round on the same issue reuses the branch. Never rename a branch after its first push.
 - Issues live in **beads** (`bd`; the DB may be a separate repo shared by all worktrees). Find or file
-  the issue, `bd update <id> --claim`, put the id in the PR title, file follow-ups with `bd create`.
+  the issue, `bd update <id> --claim`, put the id in the PR title. Issues follow `issues.md` (claim at
+  launch, close at merge, follow-ups only with evidence at P2+, weekly grooming).
   Queue order is dependencies (`bd ready`). Tasks never sync beads or close the issues a merge names;
   the coordinator does, after the merge. Owner decisions and coordinator rules are bd memories.
 - Work only on your task branch; commit and push it; never push to main. The coordinator gates and
@@ -61,8 +62,9 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
   (`bd update <id> --notes`), so a fresh task can continue.
 - **Worker contract** (every Rove task, any engine): first `git fetch origin && git merge origin/main`;
   never `git stash` (shared across worktrees; commit instead) or switch branches; check each item of
-  the brief against current code (already fixed → say so, change nothing); scoped changes only, file
-  unrelated problems with `bd create`. Before reporting: the "Build and test" commands for what you
+  the brief against current code (already fixed → say so, change nothing); scoped changes only; file an
+  unrelated problem with `bd create` only if it is a real defect with evidence (P2+; search first), else
+  note it in the PR body. Before reporting: the "Build and test" commands for what you
   touched, in every workspace. Stop only processes you started, by the PID you saved. Commit by
   explicit path, push, open a PR to `main` (`gh pr create`, issue id in the title;
   `rove api pr-attach --url <pr>`), never merge. Last step, the bare form (no `--task-id`), with a

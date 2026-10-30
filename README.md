@@ -19,10 +19,11 @@ swift (cheap third-party), standard, deep, top (rare second opinion via the mach
 |---|---|
 | `roles.md` | jobs and rules of the machine coordinator and a project coordinator |
 | `model-routing.md` | tiers, routing by path map, escalation, limits, thresholds, night mode, message protocol |
+| `issues.md` | beads doctrine: claim, close, filing bar, weekly grooming, stale-claim check |
 | `reliability.md` | numbered failure → fix → reuse log; read before setting up a coordinator |
 | `machine.md` | what is machine-specific; check on a new box |
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
-| `scripts/` | `machine-watch.sh`, `machine-night-watch.sh`, `docs-review-launch.sh` (+ `lib.sh`) |
+| `scripts/` | `machine-watch.sh`, `machine-night-watch.sh`, `window-guard.sh`, `stale-claims.sh`, `docs-review-launch.sh` (+ `lib.sh`) |
 | `templates/` | AGENTS sections, hook settings, project settings, init script, briefs, ceiling file |
 | `lane-ledger.tsv` | header only; one row per finished task, used to calibrate routing |
 
