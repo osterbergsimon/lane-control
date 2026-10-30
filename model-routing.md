@@ -65,7 +65,7 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 ## Unattended limits
 - **Wall clock per lane:** swift 2 h, standard 4 h, deep 8 h, checked by the watch routine.
 - **Stall:** no push for 2 h while running gets one ping, then the lane is stopped, its WIP committed, and it is requeued one tier up.
-- **In flight:** at most 3 tasks per project, at most 1 deep worker per project at night.
+- **In flight:** per-project caps set by the owner (machine coordinator records them).
 - **A blocked lane parks** on a Rove gate (needs owner) instead of idling or guessing.
 
 ## Night mode
