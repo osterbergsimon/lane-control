@@ -5,7 +5,7 @@
 #   >= WINDOW_STOP_PCT: limit imminent; have lanes commit and push WIP and update Resume notes.
 #   after the reset:    rebuild from rove api context and resume stalled lanes.
 # Weekly ceiling steps, once each per climb: ceiling-15 pressure on (notice only), -STEP_NO_NEW no new
-# work on the budget, -STEP_WIP_STOP lanes push WIP and stop, -STEP_STOP_ALL everything on the budget stops; pressure off when back under -15.
+# work on the budget, -STEP_WIP_STOP lanes push WIP and stop, -STEP_STOP_ALL everything on the budget stops; pressure off when back under -17. Per project: COORD_CEILING_ADD[p] raises p's ceiling.
 # Reset times vary: read from BUDGET_RESET (a command printing the window's reset as epoch seconds).
 here=$(dirname "$0"); . "$here/lib.sh"
 declare -A wstage stage reset_at handled   # handled: last reset acted on (a stale feed repeats it)
@@ -15,6 +15,10 @@ tell() {  # tell <message>: every coordinator, plain send (a busy session queues
     rove api send --task-id "${COORD_TASK[$p]}" --tab "$COORD_TAB" --prompt "$1" >/dev/null 2>&1
   done
   echo "$(date +%H:%M) $1"
+}
+tell_one() {  # tell_one <project> <message>
+  rove api send --task-id "${COORD_TASK[$1]}" --tab "$COORD_TAB" --prompt "$2" >/dev/null 2>&1
+  echo "$(date +%H:%M) [$1] $2"
 }
 while true; do
   for b in $(metered); do
@@ -26,13 +30,16 @@ while true; do
       handled[$b]=${reset_at[$b]}; stage[$b]=0; reset_at[$b]=0; continue
     fi
     [ "$ss" -ge 100 ] && [ "$rs" = 0 ] && continue   # failed feed reads 100: never act on it
-    ceil=$(budget_ceiling "$b"); ws=${wstage[$b]:-0}; tiers=$(budget_tiers "$b")
-    if   [ "$wk" -ge $((ceil-STEP_STOP_ALL)) ]  && [ "$ws" -lt 4 ]; then wstage[$b]=4; tell "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_STOP_ALL} (${ceil}%). Stop all work on tiers ${tiers}now: lanes commit and push WIP and stop; coordinators too. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."
-    elif [ "$wk" -ge $((ceil-STEP_WIP_STOP)) ]  && [ "$ws" -lt 3 ]; then wstage[$b]=3; tell "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_WIP_STOP} (${ceil}%). Lanes on tiers ${tiers}commit and push WIP and stop; coordinators only review and merge. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."
-    elif [ "$wk" -ge $((ceil-STEP_NO_NEW)) ] && [ "$ws" -lt 2 ]; then wstage[$b]=2; tell "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_NO_NEW} (${ceil}%). No new work on tiers ${tiers}; running lanes finish. No reply."
-    elif [ "$wk" -ge $((ceil-PRESSURE_MARGIN)) ] && [ "$ws" -lt 1 ]; then wstage[$b]=1; tell "ORDER (budget guard): PRESSURE ON, budget $b weekly ${wk}% >= ceiling-${PRESSURE_MARGIN} (${ceil}%); no new work from ${ceil}-${STEP_NO_NEW}%. Caps unchanged until then. No reply."
-    elif [ "$wk" -lt $((ceil-PRESSURE_MARGIN-2)) ] && [ "$ws" -gt 0 ]; then wstage[$b]=0; tell "FYI (budget guard): PRESSURE OFF, budget $b weekly ${wk}% (ceiling ${ceil}%). Normal caps apply."
-    fi
+    tiers=$(budget_tiers "$b")
+    for p in "${!COORD_TASK[@]}"; do   # per project: COORD_CEILING_ADD raises one project's ceiling
+      ceil=$(( $(budget_ceiling "$b") + ${COORD_CEILING_ADD[$p]:-0} )); k="$b:$p"; ws=${wstage[$k]:-0}
+      if   [ "$wk" -ge $((ceil-STEP_STOP_ALL)) ]  && [ "$ws" -lt 4 ]; then wstage[$k]=4; tell_one "$p" "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_STOP_ALL} (${ceil}%). Stop all work on tiers ${tiers}now: lanes commit and push WIP and stop; coordinators too. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."
+      elif [ "$wk" -ge $((ceil-STEP_WIP_STOP)) ]  && [ "$ws" -lt 3 ]; then wstage[$k]=3; tell_one "$p" "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_WIP_STOP} (${ceil}%). Lanes on tiers ${tiers}commit and push WIP and stop; coordinators only review and merge. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."
+      elif [ "$wk" -ge $((ceil-STEP_NO_NEW)) ] && [ "$ws" -lt 2 ]; then wstage[$k]=2; tell_one "$p" "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_NO_NEW} (${ceil}%). No new work on tiers ${tiers}; running lanes finish. No reply."
+      elif [ "$wk" -ge $((ceil-PRESSURE_MARGIN)) ] && [ "$ws" -lt 1 ]; then wstage[$k]=1; tell_one "$p" "FYI (budget guard): PRESSURE ON, budget $b weekly ${wk}% >= ceiling-${PRESSURE_MARGIN} (${ceil}%); no new work from $((ceil-STEP_NO_NEW))%. Caps unchanged until then. No reply."
+      elif [ "$wk" -lt $((ceil-PRESSURE_MARGIN-2)) ] && [ "$ws" -gt 0 ]; then wstage[$k]=0; tell_one "$p" "FYI (budget guard): PRESSURE OFF, budget $b weekly ${wk}% (ceiling ${ceil}%). Normal caps apply."
+      fi
+    done
     [ "$rs" -le "${handled[$b]:-0}" ] && continue    # feed not updated since the last reset
     if [ "$ss" -ge "$WINDOW_STOP_PCT" ] && [ "$st" -lt 2 ]; then
       stage[$b]=2; reset_at[$b]=$rs
