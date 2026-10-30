@@ -31,7 +31,7 @@ while true; do
     elif [ "$wk" -ge $((ceil-STEP_WIP_STOP)) ]  && [ "$ws" -lt 3 ]; then wstage[$b]=3; tell "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_WIP_STOP} (${ceil}%). Lanes on tiers ${tiers}commit and push WIP and stop; coordinators only review and merge. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."
     elif [ "$wk" -ge $((ceil-STEP_NO_NEW)) ] && [ "$ws" -lt 2 ]; then wstage[$b]=2; tell "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_NO_NEW} (${ceil}%). No new work on tiers ${tiers}; running lanes finish. No reply."
     elif [ "$wk" -ge $((ceil-PRESSURE_MARGIN)) ] && [ "$ws" -lt 1 ]; then wstage[$b]=1; tell "ORDER (budget guard): PRESSURE ON, budget $b weekly ${wk}% >= ceiling-${PRESSURE_MARGIN} (${ceil}%); no new work from ${ceil}-${STEP_NO_NEW}%. Caps unchanged until then. No reply."
-    elif [ "$wk" -lt $((ceil-PRESSURE_MARGIN)) ] && [ "$ws" -gt 0 ]; then wstage[$b]=0; tell "FYI (budget guard): PRESSURE OFF, budget $b weekly ${wk}% (ceiling ${ceil}%). Normal caps apply."
+    elif [ "$wk" -lt $((ceil-PRESSURE_MARGIN-2)) ] && [ "$ws" -gt 0 ]; then wstage[$b]=0; tell "FYI (budget guard): PRESSURE OFF, budget $b weekly ${wk}% (ceiling ${ceil}%). Normal caps apply."
     fi
     [ "$rs" -le "${handled[$b]:-0}" ] && continue    # feed not updated since the last reset
     if [ "$ss" -ge "$WINDOW_STOP_PCT" ] && [ "$st" -lt 2 ]; then
