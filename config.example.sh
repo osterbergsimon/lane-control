@@ -16,12 +16,12 @@ declare -A TIER_BUDGET=( [swift]=cheap [standard]=main [deep]=main [top]=main ) 
 # Feed: a command printing "<weekly%> <window%>" (integers). Ceiling: a number (percent) or file:<path>
 # to a JSON {"ceiling": <percent>} that the owner updates.
 declare -A BUDGET_USAGE=(
-  [main]="tail -1 \$HOME/.claude/usage-history.jsonl | jq -r '\"\\((.weekly*100)|floor) \\((.session*100)|floor)\"'"
+  [main]="tail -60 \$HOME/.claude/usage-history.jsonl | jq -rs '(map(.weekly_reset)|max) as \$w | (map(.session_reset)|max) as \$s | \"\\((map(select(.weekly_reset==\$w).weekly)|max*100)|floor) \\((map(select(.session_reset==\$s).session)|max*100)|floor)\"'"   # max of recent samples: idle sessions log stale values
   [cheap]=""        # no feed: manual (watch the vendor console) or unlimited
 )
 # Reset feed: a command printing the short window's reset time as epoch seconds (reset times vary).
 declare -A BUDGET_RESET=(
-  [main]="tail -1 \$HOME/.claude/usage-history.jsonl | jq -r .session_reset"
+  [main]="tail -60 \$HOME/.claude/usage-history.jsonl | jq -s 'map(.session_reset)|max'"
 )
 declare -A BUDGET_CEILING=( [main]="file:$HOME/.config/claude-usage-ceiling.json" [cheap]="" )
 DEFAULT_CEILING=40
