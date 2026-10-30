@@ -54,13 +54,13 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 ## Budget thresholds (per metered budget; ceiling = the owner's weekly percent)
 | Weekly use | Action |
 |---|---|
-| ceiling-15 | pressure signal to all coordinators; no night launches |
-| ceiling-10 | no new work on that budget anywhere |
-| ceiling-7 | commit WIP and stop lanes on it |
-| ceiling-4 | stop all lanes on it; never past the ceiling |
+| ceiling-15 | pressure notice to all coordinators (no restriction) |
+| ceiling-STEP_NO_NEW (7) | no new work on that budget anywhere |
+| ceiling-STEP_WIP_STOP (4) | lanes commit WIP and stop; coordinators write their handover |
+| ceiling-STEP_STOP_ALL (2) | stop all lanes on it; never past the ceiling |
 - Read the usage feed and ceiling before every launch on a metered budget.
 - A tier with no feed (manual or unlimited) has no automatic thresholds: its caps are the limit, and the owner reports vendor usage. The scripts skip it.
-- Ceiling/7 per day is a **cap**, not a target.
+- The ceiling steps are the only budget limit: no per-day or per-night share. Day or night, caps apply.
 
 ## Unattended limits
 - **Wall clock per lane:** swift 2 h, standard 4 h, deep 8 h, checked by the watch routine.
@@ -70,7 +70,7 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 
 ## Night mode
 - The machine coordinator runs it. The owner says "leaving" or "back" to it (or to any coordinator, which forwards it); it sets the mode file to `night` or `day`.
-- At night the hourly script routine (`scripts/machine-night-watch.sh`, no tokens) revives each project coordinator's tab and prods it to check its lanes, with a launch allowance per tier from machine state: none at ceiling-15, under the memory minimum, past the night's share (half of ceiling/7), or with the window at its night limit; otherwise within caps, at most 1 deep worker per project. The top tier is never launched by the watch.
+- At night the hourly script routine (`scripts/machine-night-watch.sh`, no tokens) revives each project coordinator's tab and prods it to check its lanes, with a launch allowance per tier from machine state: none from ceiling-STEP_NO_NEW, under the memory minimum, or with the window at its night limit; otherwise within caps. The top tier is never launched by the watch.
 - Coordinators report each prod with `rove api report`; the machine coordinator reads `rove api deliveries` for the morning report.
 
 ## Message protocol

@@ -15,15 +15,11 @@ for t in $TIERS; do
   if [ "$avail" -lt "$NIGHT_MEM_MIN_GB" ]; then a="none: ${avail} GB memory available"
   elif [ -n "${BUDGET_USAGE[$b]:-}" ]; then
     read -r wk ss < <(budget_usage "$b"); ceil=$(budget_ceiling "$b")
-    sf="$NIGHT_START_DIR/$b"
-    [ "$(stat -c %Y "$sf" 2>/dev/null || echo 0)" -lt $(( $(date +%s) - 12*3600 )) ] && echo "$wk" > "$sf"
-    used=$(( wk - $(cat "$sf") ))
-    night_cap=$(( ceil / 7 / 2 > 1 ? ceil / 7 / 2 : 1 ))   # half a day's share per night
-    if   [ "$wk" -ge $((ceil-PRESSURE_MARGIN)) ]; then a="none: budget $b weekly ${wk}% at ceiling-${PRESSURE_MARGIN} (${ceil}%)"
-    elif [ "$used" -ge "$night_cap" ]; then a="none: budget $b used ${used}% tonight (cap ${night_cap}%)"
+    # the only budget limit is the owner's weekly ceiling steps (no nightly share)
+    if   [ "$wk" -ge $((ceil-STEP_NO_NEW)) ]; then a="none: budget $b weekly ${wk}% at ceiling-${STEP_NO_NEW} (${ceil}%)"
     elif [ "$ss" -ge "$WINDOW_NIGHT_PCT" ]; then a="none until the window resets (budget $b at ${ss}%)"
-    else a="within caps"; [ "$t" = deep ] && a="within caps; at most 1 deep worker tonight"; fi
-    case "$summary" in *" $b:"*) ;; *) summary="$summary $b: weekly ${wk}% (night +${used}%), window ${ss}%;" ;; esac
+    else a="within caps"; fi
+    case "$summary" in *" $b:"*) ;; *) summary="$summary $b: weekly ${wk}% (ceiling ${ceil}%), window ${ss}%;" ;; esac
   else a="within caps (no usage feed: $b)"; fi
   allow="$allow $t: $a;"
 done
