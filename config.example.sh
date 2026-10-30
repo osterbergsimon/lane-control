@@ -31,6 +31,9 @@ MODE_FILE="${TMPDIR:-/tmp}/coordinator-mode"
 NIGHT_START_DIR="${TMPDIR:-/tmp}/night-start"   # per-budget weekly snapshot at the start of the night
 
 # --- Thresholds ---
+STEP_NO_NEW=7           # weekly >= ceiling-7: no new work on the budget
+STEP_WIP_STOP=4         # weekly >= ceiling-4: lanes push WIP and stop; coordinators write their handover
+STEP_STOP_ALL=2         # weekly >= ceiling-2: everything on the budget stops
 PRESSURE_MARGIN=15      # weekly >= ceiling-15: pressure signal, no night launches
 MEM_LOW_GB=4            # watch wakes the machine coordinator below this (2 polls in a row)
 SWAP_HIGH_GB=12         # ... or above this much swap used
