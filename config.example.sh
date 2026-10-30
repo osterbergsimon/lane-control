@@ -37,6 +37,7 @@ SWAP_HIGH_GB=12         # ... or above this much swap used
 WINDOW_WATCH_PCT=90     # watch wakes at this window use of a metered budget
 WINDOW_NIGHT_PCT=80     # night: no new lanes on a budget at this window use
 NIGHT_MEM_MIN_GB=8
+HANDOVER_HINT="done, open, decisions for the owner, how to resume; in your handover memory, detailed enough for a new session"
 WINDOW_WARN_PCT=95      # window guard: coordinators start nothing new
 WINDOW_STOP_PCT=98      # window guard: limit imminent, lanes push WIP      # night: no launches below this much available memory
 POLL_SECS=30
