@@ -27,6 +27,8 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 - No deterministic machine-wide slot caps in scripts: silent stalls and throttling the owner's own load are footguns. Arbitration is judgment.
 - Keep turns short when nothing needs action.
 
+- Public posts (`rove api feedback`, issues or comments on other people's repos) go to the owner first, worded generically (no project, host, customer or task-key names).
+
 ## Project coordinator
 The Rove main task on the project's main checkout. It is the planning lane and the only gate to main.
 

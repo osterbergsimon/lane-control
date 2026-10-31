@@ -60,6 +60,10 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
   authorized), then deletes the task (`rove api delete`).
 - Long runs: commit and push WIP at stopping points and keep a "Resume" note in the issue
   (`bd update <id> --notes`), so a fresh task can continue.
+- **Public posts** (owner 2026-10-31): nothing goes outside the owner's own repos (`rove api feedback`,
+  issues, discussions, PRs or comments on other people's repos) without the owner's approval, and it is
+  worded generically: no project, host, customer, path or task-key names. `rove api feedback` publishes
+  a public GitHub discussion under the owner's account.
 - **Worker contract** (every Rove task, any engine): first `git fetch origin && git merge origin/main`;
   never `git stash` (shared across worktrees; commit instead) or switch branches; check each item of
   the brief against current code (already fixed → say so, change nothing); scoped changes only; file an
