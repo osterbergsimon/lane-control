@@ -1,59 +1,92 @@
-# Coordinator playbook (portable)
+# lane-control
 
-How projects run with **coordinators**: long-lived agent main tasks (Rove) that queue work in beads, launch worker lanes, gate and review their PRs, merge, and surface only owner decisions. Project-independent: drop this directory on a new machine, fill in `config.example.sh`, adopt it per project. Keep private details (customers, deployments, task ids) out of it.
+A coordinator platform on top of Rove (the agent task runner): scripts, templates and written doctrine for keeping several software projects moving with coding agents, unattended, within a budget. You decide only what matters; the rest is queued, launched, reviewed and merged by agents that verify each other's claims.
 
-Goal: queue work, settle decisions up front, and let coordinators run unattended (nights, then days). Only decisions that need the owner surface, as Rove gates.
+## What it is
+Three layers of agents, all Rove tasks:
+- **Machine coordinator** (optional, one per machine): judgment only. Splits the budget across projects, watches memory and load, runs night mode, approves rare top-tier requests, writes the owner's one report.
+- **Project coordinator** (one per repo): the repo's main task. Queues work in beads (`bd`), writes briefs, launches worker lanes, reruns the gates, reviews, merges, raises owner decisions as Rove gates.
+- **Worker lanes**: Rove child tasks, one issue, one branch, one PR each, on a **tier**.
 
-## Parts
-- **Owner:** sets priorities, budgets and ceilings; answers gates; says "leaving" / "back".
-- **Machine coordinator (optional, one per machine):** judgment only. Budget across projects, machine resources, night mode, playbook upkeep, the owner's one report, approval of top-tier requests. Needed once two or more projects share a machine or a budget; skip it for one project.
-- **Project coordinator (one per project):** the Rove main task on the repo. Queues issues, writes briefs, launches and reviews lanes, merges, raises gates.
-- **Worker lanes:** Rove child tasks, one issue, one branch, one PR each, on a tier (swift, standard, deep).
-- **Designers / leads:** long-lived peers of a coordinator (design, architecture). They talk to the coordinator, not to workers, and are not workers.
+Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so cheap third-party or local models (through opencode) and Claude models mix freely. Any tier may be "none".
 
-## Tiers (roles, not model names)
-swift (cheap third-party), standard, deep, top (rare second opinion via the machine coordinator). The machine config maps each to an engine, command, model and budget; any may be "none". Everything outside `config.example.sh` speaks only of tiers.
+Why: the real constraint is a budget (say a weekly plan limit), not attention. Work is routed by the paths it touches, reviewed by risk, and throttled by lane count, never by lowering the tier. The owner sees one report and a short list of decisions.
 
-## Files
+What it is not: not a CI system, not a substitute for human review on risky changes, not a hosted service, and not tied to one project or vendor. It assumes a single owner who trusts the agents with their repos.
+
+## Requirements
+- Rove, daemon running, with its skill installed for each engine you use (`rove skill install --global --agent <engine>`)
+- Claude Code (or whichever engines your tiers use), logged in
+- beads (`bd`), `gh` (authenticated), `jq`, `git`, bash
+- Optional, for sandboxed third-party lanes: `opencode`, bubblewrap, pasta, systemd user scopes. The sandbox is tested on NixOS only (it fetches `bubblewrap`, `passt` and `curl` through `nix`).
+
+## Quickstart
+About half an hour for one project. Everything marked **planned** is manual today.
+
+1. **Clone and configure.**
+   ```bash
+   git clone https://github.com/osterbergsimon/lane-control ~/code/lane-control
+   mkdir -p ~/.config/rove
+   cp ~/code/lane-control/config.example.sh ~/.config/rove/playbook.conf.sh
+   $EDITOR ~/.config/rove/playbook.conf.sh    # tiers, budgets, thresholds, coordinators
+   bash -n ~/code/lane-control/scripts/*.sh
+   ```
+   A budget with a usage feed needs a ceiling: copy `templates/budget-ceiling.json` and point `BUDGET_CEILING` at it (`machine.md` explains feeds). Link `model-routing.md`, `reliability.md` and `lane-ledger.tsv` into `~/.config/rove/` if coordinators should find them there.
+2. **Start the watches** (background tasks of the machine coordinator, or any terminal multiplexer):
+   ```bash
+   bash ~/code/lane-control/scripts/window-guard.sh     # never exits; window and weekly-step orders
+   bash ~/code/lane-control/scripts/machine-watch.sh    # exits on low memory or budget pressure: re-arm after each wake
+   ```
+3. **Create the routines.** They run scripts inside the Rove daemon and spend no tokens; times are the daemon host's local time.
+   ```bash
+   LC=~/code/lane-control
+   rove api routine-create --repo "$LC" --name "machine night watch" \
+     --schedule '5 22-23,0-6 * * *' \
+     --precheck 'grep -qx night "${TMPDIR:-/tmp}/coordinator-mode"' \
+     --script "bash $LC/scripts/machine-night-watch.sh"
+   rove api routine-create --repo "$LC" --name "beads stale-claim check" \
+     --schedule '30 9 * * *' --script "bash $LC/scripts/stale-claims.sh"
+   rove api routine-create --repo "$LC" --name "beads park check" \
+     --schedule '35 9 * * *' --script "bash $LC/scripts/park-check.sh"
+   ```
+   The night watch runs only while the mode file (`MODE_FILE` in the config) says `night`: write `night` when you leave and `day` when you return. Run a supervised pilot night before leaving it unattended. An optional weekly docs review: `scripts/docs-review-launch.sh <PROJECT>` with a brief from `templates/docs-review-brief.md`.
+4. **Set up a project.**
+   - `rove add <path>`: the repo's main task is its coordinator. Put its task id in `COORD_TASK` and the checkout in `COORD_REPO` in the config.
+   - `bd init` in the checkout; no bd git hooks (`issues.md`).
+   - Copy the sections of `templates/AGENTS-coordination.md` into the project's `AGENTS.md` and fill in the **path map** (which paths need which tier), gate commands and private data directories.
+   - Install `templates/project-settings.json` as the project's agent settings, `templates/coordinator-settings.local.json` as the coordinator's gitignored local settings, and `templates/rove-init.sh` as `.rove/init.sh`.
+   - For third-party lanes: pin the model in `templates/opencode.json`, list private paths in `SANDBOX_PRIVATE_PATHS`, run `scripts/test-opencode-sandbox.sh` once.
+5. **Start the coordinators.** Open the machine coordinator's main task on a repo holding your instance notes (owner decisions, caps, priorities) and have it read `README.md`, `roles.md`, `model-routing.md`, `reliability.md` and the config. Open each project coordinator on its repo, pointing at its `AGENTS.md`. Queue issues, then tell it to go.
+
+**Planned:** a bootstrap script for steps 1 to 3 and the per-project files of step 4, and a doctor command that checks an install against `machine.md`.
+
+## Map of files
 | File | What |
 |---|---|
 | `roles.md` | jobs and rules of the machine coordinator and a project coordinator |
-| `model-routing.md` | tiers, routing by path map, escalation, limits, thresholds, night mode, message protocol; weekly/window steps, owner-decided limits, sandboxed swift lanes, context protocol, cloud sessions |
-| `issues.md` | beads doctrine: claim, close, filing bar, weekly grooming, stale-claim check |
-| `reliability.md` | numbered failure → fix → reuse log; read before setting up a coordinator |
-| `machine.md` | what is machine-specific; check on a new box; CI runner patterns (capped slice on a shared machine, dedicated box) |
+| `model-routing.md` | tiers, routing by path map, escalation, limits, weekly and window steps, night mode, message protocol, sandbox conventions, context protocol, cloud sessions |
+| `issues.md` | beads doctrine: claim, close, parking, filing bar, weekly grooming, stale claims |
+| `reliability.md` | numbered failure, fix, reuse log; read before setting up a coordinator |
+| `machine.md` | what is machine-specific; checks for a new box; CI runner patterns |
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
-| `scripts/` | `machine-watch.sh` (wakes on low memory or budget pressure), `machine-night-watch.sh` (hourly night prod), `window-guard.sh` (window and weekly-step orders; state persists across restarts), `stale-claims.sh` (daily stale-claim check), `park-check.sh` (daily parked-lane check), `docs-review-launch.sh`, `opencode-sandbox.sh` (deny-by-default sandbox for third-party swift lanes; header = contract), `test-opencode-sandbox.sh` (its proof; run from a scratch linked worktree on a non-main branch), `lib.sh` |
-| `templates/` | AGENTS sections, hook settings, project settings, init script, briefs, ceiling file |
-| `docs/multi-machine.md` | design proposal (not implemented): running several machines, an always-on box plus a workstation; home lease, hand-off, budgets, failure modes, minimal pilot |
-| `lane-ledger.tsv` | header only; one row per finished task, used to calibrate routing |
+| `scripts/` | `window-guard.sh`, `machine-watch.sh`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared). Each header is its contract |
+| `templates/` | AGENTS sections, project and coordinator settings, init script, worker and review briefs, budget ceiling, opencode config |
+| `docs/multi-machine.md` | design (not implemented): projects pinned to machines, one global coordinator over SSH |
+| `lane-ledger.tsv` | one row per finished task, used to calibrate routing |
 
-## Principles
-1. **Truth lives in files, not in a session:** AGENTS.md, beads issues and memories, this playbook. A crashed coordinator rebuilds from them.
-2. **Verify, do not trust.** The coordinator reruns every deterministic gate itself, in every workspace, and checks reviewer claims as well as worker claims.
-3. **Review by what a PR touches** (tiers A/B/C); **route by the paths a task touches** (swift/standard/deep). Correctness over token cost.
-4. **Decisions surface as Rove gates** with a recommendation, repeated in chat. No report sits unhandled.
-5. **Deterministic checks beat model reviews** wherever a finding can be made mechanical.
-6. **Budget limits how many lanes run, never the tier.**
-7. **Messages are few and terse:** one per handoff, no acknowledgements.
-8. **Every failure with a durable fix** goes into `reliability.md`.
+## Doctrines
+- **Truth lives in files**, not sessions: `AGENTS.md`, beads issues and memories. A crashed coordinator rebuilds from them (`roles.md`, context protocol in `model-routing.md`).
+- **Verify, do not trust**: coordinators rerun every deterministic gate and check reviewer claims as well as worker claims.
+- **Route by paths, review by risk**, correctness over token cost; the budget limits lane count, never the tier (`model-routing.md`).
+- **One issue, one key, one lane**; claim at launch, close at merge, park resumably (`issues.md`).
+- **Decisions surface as Rove gates** with a recommendation; messages are few, terse and event-driven.
+- **Scripts enforce only limits the owner decided**; no silent machine-wide caps.
+- **Every failure with a durable fix** goes into `reliability.md`.
 
-## Setup: new machine
-- [ ] Install Rove and beads; install the Rove skill for every engine used (`rove skill install --global --agent <engine>`).
-- [ ] Read `machine.md` and check every item.
-- [ ] Copy this directory somewhere stable; copy `config.example.sh` to `~/.config/rove/playbook.conf.sh` (or set `PLAYBOOK_CONFIG`) and fill it in: tiers, budgets, thresholds.
-- [ ] Usage feed for every metered budget (`machine.md`); a ceiling file per metered budget from `templates/budget-ceiling.json`.
-- [ ] Link `model-routing.md`, `reliability.md`, `lane-ledger.tsv` into `~/.config/rove/`.
-- [ ] If you run a machine coordinator: a Rove main task on a repo holding the playbook, its instructions from `roles.md`, `scripts/machine-watch.sh` and `scripts/window-guard.sh` as its background watches (re-arm machine-watch after each wake), `scripts/machine-night-watch.sh` as an hourly overnight Rove script routine with a precheck on the mode file.
-- [ ] `bash -n scripts/*.sh`, then run `machine-watch.sh` once with a low threshold to see it fire.
+## Sandbox
+`scripts/opencode-sandbox.sh` runs opencode for third-party model lanes in bubblewrap: a deny-by-default filesystem (the lane's worktree, a private git dir, a few read-only system files), its own network namespace through pasta (internet only, no host loopback), a memory cap in a systemd scope, and a relay so the lane can push its own branch and open its PR without holding credentials. `test-opencode-sandbox.sh` checks the denials.
 
-## Setup: new project
-- [ ] `rove add <path>`; the main task is the coordinator. Add it to `COORD_TASK` in the config.
-- [ ] Beads: issues and memories; queue order as dependencies; a task key per issue (`<KEY_PREFIX>-<n>` as `--external-ref`).
-- [ ] AGENTS.md from `templates/AGENTS-coordination.md`: write the **path map** (deep/standard/swift), gate commands, workspaces, host-acting routes, private data dirs.
-- [ ] `.claude/settings.json`-style project settings from `templates/project-settings.json`. The owner installs it: auto mode blocks self-modification.
-- [ ] Coordinator hook settings (gitignored, coordinator's checkout only) from `templates/coordinator-settings.local.json`, guarded by the coordinator's task id.
-- [ ] `.rove/init.sh` and the third-party engine config if the project has private data or third-party lanes. Swift lanes run through `scripts/opencode-sandbox.sh` (conventions in `model-routing.md`): copy worker rules and skills into the worktree, pin the model in `.opencode/opencode.json`, give the lane its own key; list private paths in `SANDBOX_PRIVATE_PATHS` and run `scripts/test-opencode-sandbox.sh` once.
-- [ ] CI: deterministic gates in one script, on a self-hosted runner if the gate needs local data. Pin runner versions.
-- [ ] Tell the machine coordinator the project's caps request (`REQ`) and priority; the owner confirms.
-- [ ] Routines: a weekly docs review (`scripts/docs-review-launch.sh <PROJECT>`, brief from `templates/docs-review-brief.md`); a night watch only after a supervised pilot night.
+This is a practical boundary for code-only lanes, not a security guarantee. It is tested on one NixOS setup, depends on the host kernel and on bubblewrap and pasta behaving as documented, and has not been independently audited. Review the script and its test before trusting it with hostile code, and keep private material off any machine that runs third-party lanes.
+
+## License
+MIT, see `LICENSE`.
