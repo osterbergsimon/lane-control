@@ -25,6 +25,7 @@ swift (cheap third-party), standard, deep, top (rare second opinion via the mach
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
 | `scripts/` | `machine-watch.sh` (wakes on low memory or budget pressure), `machine-night-watch.sh` (hourly night prod), `window-guard.sh` (window and weekly-step orders; state persists across restarts), `stale-claims.sh` (daily stale-claim check), `park-check.sh` (daily parked-lane check), `docs-review-launch.sh`, `opencode-sandbox.sh` (deny-by-default sandbox for third-party swift lanes; header = contract), `test-opencode-sandbox.sh` (its proof; run from a scratch linked worktree on a non-main branch), `lib.sh` |
 | `templates/` | AGENTS sections, hook settings, project settings, init script, briefs, ceiling file |
+| `docs/multi-machine.md` | design proposal (not implemented): running several machines, an always-on box plus a workstation; home lease, hand-off, budgets, failure modes, minimal pilot |
 | `lane-ledger.tsv` | header only; one row per finished task, used to calibrate routing |
 
 ## Principles
