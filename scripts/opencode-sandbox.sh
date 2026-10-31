@@ -53,7 +53,7 @@
 #   read-only   /nix/store, /etc pieces (DNS, TLS, passwd, profiles), ~/.config/opencode/opencode.jsonc
 #               and plugins/rove-agent-state.js, ~/.config/git, the lane key (the bare key, a file of its
 #               own), the opencode binary, the day/night switch file
-#   absent      everything else: the rest of $HOME (corpus, other worktrees, the main checkout,
+#   absent      everything else: the rest of $HOME (private data, other worktrees, the main checkout,
 #               ~/.rove, ~/.config/gh, ~/.ssh, other projects' caches, beads), /run (user bus, rove.sock,
 #               Claude sockets, docker.sock, nix daemon), the shared repo's refs, config and hooks
 #   network     own namespace through pasta: the internet only; host loopback ports (rove, sccache,
