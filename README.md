@@ -1,6 +1,6 @@
 # lane-control
 
-A coordinator platform on top of Rove (the agent task runner): scripts, templates and written doctrine for keeping several software projects moving with coding agents, unattended, within a budget. You decide only what matters; the rest is queued, launched, reviewed and merged by agents that verify each other's claims.
+A coordinator platform on top of [Rove](https://github.com/Sma1lboy/rove) (the agent task runner): scripts, templates and written doctrine for keeping several software projects moving with coding agents, unattended, within a budget. You decide only what matters; the rest is queued, launched, reviewed and merged by agents that verify each other's claims.
 
 ## What it is
 Three layers of agents, all Rove tasks:
