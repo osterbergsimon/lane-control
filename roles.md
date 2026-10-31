@@ -26,8 +26,9 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 - Confidentiality: no customer or deployment details in anything committed; word things generically.
 - No deterministic machine-wide slot caps in scripts: silent stalls and throttling the owner's own load are footguns. Arbitration is judgment.
 - Keep turns short when nothing needs action.
+- Offload hands-on work (builds, setup, iterating on configs, verification runs, mechanical edits) to cheaper models with a tight brief (a subagent on a lower tier); keep design, judgment and the owner-facing summary. The expensive tier's turns are the scarce budget. Do not also run the work yourself.
 
-- Public posts (`rove api feedback`, issues or comments on other people's repos) go to the owner first, worded generically (no project, host, customer or task-key names).
+- Public posts (`rove api feedback`, which becomes a public discussion under the owner's account; issues, discussions, PRs or comments on other people's repos) need the owner's approval first and generic wording (no project, host, customer, path or task-key names). Later edits stay in the public history.
 
 ## Project coordinator
 The Rove main task on the project's main checkout. It is the planning lane and the only gate to main.
@@ -46,5 +47,6 @@ The Rove main task on the project's main checkout. It is the planning lane and t
 - All rules live in AGENTS.md and beads memories, not in the session. Keep a `handover-latest` memory.
 - Never trust a worker's or reviewer's numbers; check the disputed point in the code.
 - Messages to the machine coordinator only on events (`REQ`/`FYI`), batched, one line each.
+- Refresh the `handover-latest` memory at every natural stop (a merge, a batch finished, before going cold), not only when stopping: a new session must be able to resume from it alone (context protocol in `model-routing.md`).
 - Keep the coordinator's inbox hook out of committed settings and guard it with the coordinator's task id.
 - Never merge a PR touching a path above its lane's tier; never let a third-party lane see private data.
