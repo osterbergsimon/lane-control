@@ -12,6 +12,7 @@ Owner-approved 2026-10-30. Applies to every project; a project's AGENTS.md carri
 - No bd git hooks (`core.hooksPath` unset, nothing bd in `.git/hooks`) and no `issues.jsonl` export lying in `.beads/`: a hook that imports an old export reopens closed issues (calvin, 2026-10-30). Keep exports in `.beads/backup/`.
 
 ## Filing
+- Sandboxed lanes (third-party model lanes in the opencode sandbox) have no `bd`: they put Resume notes and follow-ups in the PR body or their report, and the coordinator claims, notes and files for them.
 - Lanes file a follow-up only for a real defect or missing piece, with evidence (command, file, observed vs expected), at P2 or higher.
 - Nits, ideas and "could also" go in the PR body or the issue's notes, not in beads.
 - Before filing, search (`bd search`) and add to an existing issue instead of duplicating.
