@@ -27,6 +27,10 @@ done
 }
 for p in "${!COORD_TASK[@]}"; do
   t=${COORD_TASK[$p]}; allowance "${COORD_CEILING_ADD[$p]:-0}"
+  stopped=""   # past its stop-all step on a metered budget: do not wake it (each prod costs a turn)
+  for b in $(metered); do read -r wk _ < <(budget_usage "$b")
+    [ "$wk" -ge $(( $(budget_ceiling "$b") + ${COORD_CEILING_ADD[$p]:-0} - STEP_STOP_ALL )) ] && stopped=$b; done
+  [ -n "$stopped" ] && { echo "$p: skipped (budget $stopped past stop-all)"; continue; }
   rove api tab-revive --task-id "$t" --tab "$COORD_TAB" >/dev/null 2>&1
   r=$(rove api send --if-runnable --expect-report --task-id "$t" --tab "$COORD_TAB" --prompt-file - <<MSG
 [NIGHT WATCH $(date +%H:%M)] Owner away. Check your lanes (context): nudge stuck or unsubmitted first prompts, revive dead tabs, handle reports per your standing rules, enforce the wall-clock and stall limits (model-routing.md, Unattended limits). New launches per tier:${allow} Owner decisions go to gates. Report tersely.
