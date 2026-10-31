@@ -54,6 +54,7 @@ COORD_TAB=tab-1
 declare -A COORD_REPO=(   # project checkout, for scripts/stale-claims.sh
   ["<PROJECT_A>"]="$HOME/code/<project_a>"
 )
+declare -A COORD_SLOTS=( )   # optional: working lanes the night watch wants busy per project (default 1): it prods a coordinator with ready issues and fewer working lanes
 # Optional: raise one project's weekly ceiling by N points (e.g. a project that mostly uses a cheap tier)
 declare -A COORD_CEILING_ADD=( )
 
