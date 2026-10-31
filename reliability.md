@@ -4,7 +4,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 
 ## 1. Read usage, never assume it is unknowable
 - **Failure:** a coordinator told a peer that weekly usage could not be read, and kept working at 95-98 % of the weekly limit, past the owner's ceiling.
-- **Fix:** for each metered budget, a usage feed (a file or command giving the weekly and window fractions) and a ceiling the owner sets per week. Thresholds: pressure signal at ceiling-15, no new work at ceiling-10, WIP+stop at ceiling-7, stop all at ceiling-4.
+- **Fix:** for each metered budget, a usage feed (a file or command giving the weekly and window fractions) and a ceiling the owner sets per week. Thresholds are offsets below the ceiling, set in the config: pressure notice at ceiling-15, then no new work, WIP+handover, stop all (`model-routing.md`).
 - **Reuse:** read feed and ceiling before every launch on a metered budget. Share a "PRESSURE on/off" signal between coordinators. Budgets with no feed are managed by caps and by the owner's reports.
 
 ## 2. Never let a worker report sit unhandled
@@ -78,3 +78,56 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Failure:** designers could not start the browser-automation MCP: it defaulted to a browser channel the OS does not have, and parallel sessions would have shared one browser profile.
 - **Fix:** in the harness env settings, point it at an installed browser binary, run headless (no windows on the owner's desktop) and isolated (a profile per session). Sessions pick it up only after a restart.
 - **Reuse:** test a browser tool once from a fresh session before briefing designers on it. See `machine.md`.
+
+## 14. Briefs must keep workers out of every main checkout
+- **Failure:** a brief told a worker to commit a script into another repo's checkout. The worker switched that main checkout to its branch, and the owning coordinator's next commit swept up the worker's uncommitted edits. Separately, a review agent briefly detached a project's main checkout. Nothing was lost, but both collided with a coordinator's working tree.
+- **Fix:** every brief that touches another repo says "use your own worktree: `git -C <repo> worktree add <dir> <branch>`; never edit or check out anything in a main checkout". Every review brief says "inspect branches with `git diff origin/...`, or in a scratch worktree; never switch the main checkout".
+
+## 15. A merge script must stop all follow-up steps when the merge fails
+- **Failure:** a coordinator ran `set -e; ...; git merge ... && git push ...` and then, on separate lines, closed the issue, appended the ledger row, deleted the worker task and resumed another lane. The merge conflicted, and `set -e` does not stop on a failure inside an `&&` list, so every follow-up ran anyway: issue closed and task deleted before anything merged (the branch was pushed, so nothing was lost).
+- **Fix:** chain the whole sequence with `&&`, or test the merge result explicitly (`if git merge ...; then ...; fi`), and run follow-up steps only after the push succeeded and `gh pr view <n> --json state` says MERGED.
+
+## 16. Deleting a finished task: remove its private-data links first, by literal path
+- **Failure:** `rove api delete` refuses a worktree with gitignored content (`DIRTY_WORKTREE`): private-data symlinks the init script adds to every task, a cache directory. An `rm "$d/$l"` loop to clear them was blocked by the harness safety check (an unbounded variable could expand to `/`).
+- **Fix:** after the merge, `ls -la <worktree> | grep -- '->'`, then `rm` each link by its literal absolute path (never `-r`, never a bare variable; `"${d:?}/..."` if a variable is unavoidable), delete caches by literal path, then `rove api delete`. Better: have the init script record what it links, so a cleanup can undo exactly that.
+
+## 17. Night caps can OOM a workspace test run
+- **Failure:** a project's night profile ran the whole workspace's tests with many threads in the same memory-capped scope as day. The scope was OOM-killed: exit 143 with an empty log, which looks like a hang or a crash, not a test failure.
+- **Fix:** rerun with day caps before judging a branch; a gate script logs the exit code per step so a 143 is visible at once. Set night caps with the memory scope in mind (`machine.md`).
+
+## 18. A lane on a common dev port kills someone else's server
+- **Failure:** a lane started its dev server on the framework's default port with a strict-port flag, the port the owner's own dev server held. It read the listener's pid from `ss` and killed it, twice; its screenshots may have shown the other app.
+- **Fix:** lanes take a free or per-worktree port, never a framework default, and kill only PIDs they started (`$!`), never a pid read off a port or matched by name. Reserve ports for the owner's stack.
+
+## 19. Decision dialogs get overwritten by lane messages
+- **Failure:** several times an interactive question dialog came back with a lane's report text in place of the owner's answer. A report delivered while the dialog was open took the answer slot, so the dialog recorded no real answer.
+- **Fix:** never act on a dialog answer that is not one of its options or the owner's own words. While lanes are active, put owner decisions in Rove gates (`gate-raise`; answers come back as a gate-answered message) and list them in chat as well. Use the dialog only when no lane is likely to report.
+
+## 20. `pkill -f <pattern>` kills your own shell
+- **Failure:** a coordinator ran `pkill -f '<script path>'` in a compound command whose own command line contained that pattern. It killed its own shell (exit 144), and the stale process kept running.
+- **Fix:** stop your own processes by PID (`pgrep` first, check `/proc/<pid>/cwd`, then `kill <pid>` and its children). Never use `pkill -f` with a pattern that also appears in the command you are running.
+
+## 21. The usage feed interleaves stale samples
+- **Failure:** every session's status line appends to the usage history, and an idle session keeps logging its last-known values. The last line jumped between two weekly values second by second.
+- **Fix:** read the max of the last 60 samples for the newest reset (`BUDGET_USAGE` in `config.example.sh`); usage only rises within a window.
+
+## 22. `rove api feedback` is a public post under the owner's account
+- **Failure:** a coordinator filed a bug with `rove api feedback`; it became a public discussion naming two private projects and their gate ids. Editing it later leaves the original in the public edit history; only the repo maintainer can delete that.
+- **Fix:** public posts need the owner's approval first and generic wording (`roles.md`, `model-routing.md`).
+
+## 23. First sandboxed-lane rollout
+- **Failures:** the documented launch form broke on Rove's appended brief (needs `--auto --prompt`); the engine's new-session flag froze the TUI size; an explicit branch override lost to the caller's task env; files outside the worktree (worker rules, symlinked skills) vanished inside; no `bd`, no CI read, no host loopback; the header said no key was needed.
+- **Fixes:** launch form and conventions in `model-routing.md` (sandboxed swift lanes); the flag gated; a read-only CI-checks relay; an explicit branch wins; `issues.md` says sandboxed lanes file through the coordinator. Positive: auto-approve inside the sandbox ended permission-prompt stalls (an unsandboxed lane had sat 8 h on a prompt).
+- **Rollout rule:** supervised first lane per project; the test suite (`scripts/test-opencode-sandbox.sh`) from a scratch worktree after every sandbox change.
+
+## 24. A crash-looping tool inside a lane floods the host with core dumps
+- **Failure:** a browser binary downloaded inside a lane crashed in a loop; the host's core-dump handler tried to process every dump and overloaded the machine.
+- **Fix:** the sandbox sets `RLIMIT_CORE` to 0, soft and hard, inherited by everything inside (a lane cannot raise it). Do the same for any unattended workload that can run untrusted or flaky binaries.
+
+## 25. opencode 2.x keeps credentials in its own database
+- **Failure:** after an upgrade, lanes were logged out: a 2.x data directory never imports `auth.json` (that happens only when migrating an old database), so a lane with a fresh per-lane data dir had no key.
+- **Fix:** give the lane key as the provider's `apiKey` (a `{file:...}` reference in an inline config), restrict the config to the one provider with no free models (no silent fallback model), fail loud at launch on a rejected key or unavailable pinned model. Verify with the engine's own `models` listing after any engine upgrade.
+
+## 26. A git credential prompt can pop up on the owner's desktop
+- **Failure:** a relay running `git`/`gh` outside any terminal fell back to an askpass program when a credential was missing, opening a window on the owner's desktop.
+- **Fix:** every script that runs git or gh unattended sets `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` and `SSH_ASKPASS` to `false`, `GCM_INTERACTIVE=never`, `GH_PROMPT_DISABLED=1`: a missing credential then fails fast with an error. The sandbox test proves no askpass runs.
