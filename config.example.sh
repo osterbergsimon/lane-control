@@ -64,3 +64,17 @@ BRIEF_DIR="$HOME/.config/rove"     # <PROJECT>-docs-review.md lives here
 DOCS_REVIEW_WAIT=90                # seconds before checking the first prompt was submitted
 # Run in the worktree; empty output = first prompt not submitted. Empty setting = always nudge once.
 DOCS_REVIEW_SUBMITTED_CMD="opencode session list"
+
+# --- Sandbox for third-party (swift) lanes: scripts/opencode-sandbox.sh and its test ---
+# The sandbox is deny-by-default (it mounts only the worktree, a lane-private git dir and a few system files),
+# so nothing here is needed to run a lane. The test proves private data is invisible inside:
+# globs of private files/dirs that exist on this machine (data dirs, other projects' caches, issue-tracker repos).
+SANDBOX_PRIVATE_PATHS=(
+  "$HOME/code/<project_a>/<private-data-dir>"
+  "$HOME/.cache/<project_a>-*"
+  "$HOME/code/*-beads"
+)
+# Model pin for the test's scratch worktree when it has no .opencode/opencode.json (default: TIER_MODEL[swift]).
+# SBX_TEST_MODEL="<provider>/<model-id>"
+# Env, per launch (not config): OPENCODE_SANDBOX_PR_BASE / _PR_BRANCH / _MEM / _MODE_FILE, see the script header.
+# The day/night MODE_FILE above is shown to the lane read-only (for a project's own resource-cap script).
