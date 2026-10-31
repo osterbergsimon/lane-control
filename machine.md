@@ -24,3 +24,21 @@ Check each item on a new box before adopting the playbook.
 - [ ] Persistent background jobs (watches, dev servers) die with the session; use approved user services if they must survive.
 - [ ] Host-acting software (anything that can reboot, shut down or reconfigure the machine) must be guarded or stubbed in worker environments.
 - [ ] Clock and timezone: night mode and routine times assume the owner's local time.
+
+## CI runners (patterns)
+Gates that need local data or minutes the hosted CI does not have run on self-hosted runners. Two patterns; choose by how much the owner uses the machine.
+
+### A. Runner on the shared workstation, in a capped user slice
+- Run the runner as the owner's user, inside a systemd user slice with low priority and hard caps: `CPUWeight=idle` (the owner's work wins every contention), `CPUQuota=<n>00%`, `MemoryHigh`/`MemoryMax` for all runners together, a low `IOWeight`. One job at a time per runner.
+- Anything a job starts outside the slice (container service daemons, `systemd-run` scopes) escapes the caps: give it its own.
+- Pin the runner image or OS version; treat a sudden repo-wide red as environment drift first (`reliability.md`).
+- Do not let the runner share state with the owner's dev stack (ports, caches, credentials); a job must not need the owner's logged-in session.
+
+### B. A dedicated small box
+For a project whose CI should not touch the workstation at all (also fits an old spare machine):
+- **OS as code:** a NixOS flake describing the box, plus an offline installer ISO built from the same flake (a single "install" command that wipes the disk after a typed confirmation; no network needed to install). The ISO boots into a headless installer reachable over SSH, so no monitor is needed once the firmware boots USB first.
+- **Access:** key-only SSH (passwords refused), a non-root admin user with the owner's key, firewall closed except SSH. Put the box on its own network segment with internet only: no route to the owner's LAN.
+- **Runner:** ephemeral (a fresh runner per job, state wiped after it), one job at a time, registered to the one repository.
+- **Secrets:** the registration token lives outside the runner's state directory (root-owned, mode 600, short-lived, issued from a trusted machine per registration); the runner's own user cannot read it.
+- **Changes:** edit the flake on the workstation and deploy as root over SSH (`nixos-rebuild switch --flake .#<box> --target-host <admin>@<box> --use-remote-sudo`); the box also auto-upgrades weekly from its local config.
+- An instance may keep its box's flake in its own repo (`infra/` as an example only); this playbook describes the pattern, not a concrete box.

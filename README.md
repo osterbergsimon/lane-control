@@ -18,12 +18,12 @@ swift (cheap third-party), standard, deep, top (rare second opinion via the mach
 | File | What |
 |---|---|
 | `roles.md` | jobs and rules of the machine coordinator and a project coordinator |
-| `model-routing.md` | tiers, routing by path map, escalation, limits, thresholds, night mode, message protocol |
+| `model-routing.md` | tiers, routing by path map, escalation, limits, thresholds, night mode, message protocol; weekly/window steps, owner-decided limits, sandboxed swift lanes, context protocol, cloud sessions |
 | `issues.md` | beads doctrine: claim, close, filing bar, weekly grooming, stale-claim check |
 | `reliability.md` | numbered failure → fix → reuse log; read before setting up a coordinator |
-| `machine.md` | what is machine-specific; check on a new box |
+| `machine.md` | what is machine-specific; check on a new box; CI runner patterns (capped slice on a shared machine, dedicated box) |
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
-| `scripts/` | `machine-watch.sh`, `machine-night-watch.sh`, `window-guard.sh`, `stale-claims.sh`, `docs-review-launch.sh` (+ `lib.sh`) |
+| `scripts/` | `machine-watch.sh` (wakes on low memory or budget pressure), `machine-night-watch.sh` (hourly night prod), `window-guard.sh` (window and weekly-step orders; state persists across restarts), `stale-claims.sh` (daily stale-claim check), `docs-review-launch.sh`, `opencode-sandbox.sh` (deny-by-default sandbox for third-party swift lanes; header = contract), `test-opencode-sandbox.sh` (its proof; run from a scratch linked worktree on a non-main branch), `lib.sh` |
 | `templates/` | AGENTS sections, hook settings, project settings, init script, briefs, ceiling file |
 | `lane-ledger.tsv` | header only; one row per finished task, used to calibrate routing |
 
@@ -43,7 +43,7 @@ swift (cheap third-party), standard, deep, top (rare second opinion via the mach
 - [ ] Copy this directory somewhere stable; copy `config.example.sh` to `~/.config/rove/playbook.conf.sh` (or set `PLAYBOOK_CONFIG`) and fill it in: tiers, budgets, thresholds.
 - [ ] Usage feed for every metered budget (`machine.md`); a ceiling file per metered budget from `templates/budget-ceiling.json`.
 - [ ] Link `model-routing.md`, `reliability.md`, `lane-ledger.tsv` into `~/.config/rove/`.
-- [ ] If you run a machine coordinator: a Rove main task on a repo holding the playbook, its instructions from `roles.md`, `scripts/machine-watch.sh` as its background watch, `scripts/machine-night-watch.sh` as an hourly overnight Rove script routine with a precheck on the mode file.
+- [ ] If you run a machine coordinator: a Rove main task on a repo holding the playbook, its instructions from `roles.md`, `scripts/machine-watch.sh` and `scripts/window-guard.sh` as its background watches (re-arm machine-watch after each wake), `scripts/machine-night-watch.sh` as an hourly overnight Rove script routine with a precheck on the mode file.
 - [ ] `bash -n scripts/*.sh`, then run `machine-watch.sh` once with a low threshold to see it fire.
 
 ## Setup: new project
@@ -52,7 +52,7 @@ swift (cheap third-party), standard, deep, top (rare second opinion via the mach
 - [ ] AGENTS.md from `templates/AGENTS-coordination.md`: write the **path map** (deep/standard/swift), gate commands, workspaces, host-acting routes, private data dirs.
 - [ ] `.claude/settings.json`-style project settings from `templates/project-settings.json`. The owner installs it: auto mode blocks self-modification.
 - [ ] Coordinator hook settings (gitignored, coordinator's checkout only) from `templates/coordinator-settings.local.json`, guarded by the coordinator's task id.
-- [ ] `.rove/init.sh` and the third-party engine config if the project has private data or third-party lanes.
+- [ ] `.rove/init.sh` and the third-party engine config if the project has private data or third-party lanes. Swift lanes run through `scripts/opencode-sandbox.sh` (conventions in `model-routing.md`): copy worker rules and skills into the worktree, pin the model in `.opencode/opencode.json`, give the lane its own key; list private paths in `SANDBOX_PRIVATE_PATHS` and run `scripts/test-opencode-sandbox.sh` once.
 - [ ] CI: deterministic gates in one script, on a self-hosted runner if the gate needs local data. Pin runner versions.
 - [ ] Tell the machine coordinator the project's caps request (`REQ`) and priority; the owner confirms.
 - [ ] Routines: a weekly docs review (`scripts/docs-review-launch.sh <PROJECT>`, brief from `templates/docs-review-brief.md`); a night watch only after a supervised pilot night.
