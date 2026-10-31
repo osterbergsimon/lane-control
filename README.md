@@ -23,7 +23,7 @@ swift (cheap third-party), standard, deep, top (rare second opinion via the mach
 | `reliability.md` | numbered failure → fix → reuse log; read before setting up a coordinator |
 | `machine.md` | what is machine-specific; check on a new box; CI runner patterns (capped slice on a shared machine, dedicated box) |
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
-| `scripts/` | `machine-watch.sh` (wakes on low memory or budget pressure), `machine-night-watch.sh` (hourly night prod), `window-guard.sh` (window and weekly-step orders; state persists across restarts), `stale-claims.sh` (daily stale-claim check), `docs-review-launch.sh`, `opencode-sandbox.sh` (deny-by-default sandbox for third-party swift lanes; header = contract), `test-opencode-sandbox.sh` (its proof; run from a scratch linked worktree on a non-main branch), `lib.sh` |
+| `scripts/` | `machine-watch.sh` (wakes on low memory or budget pressure), `machine-night-watch.sh` (hourly night prod), `window-guard.sh` (window and weekly-step orders; state persists across restarts), `stale-claims.sh` (daily stale-claim check), `park-check.sh` (daily parked-lane check), `docs-review-launch.sh`, `opencode-sandbox.sh` (deny-by-default sandbox for third-party swift lanes; header = contract), `test-opencode-sandbox.sh` (its proof; run from a scratch linked worktree on a non-main branch), `lib.sh` |
 | `templates/` | AGENTS sections, hook settings, project settings, init script, briefs, ceiling file |
 | `lane-ledger.tsv` | header only; one row per finished task, used to calibrate routing |
 

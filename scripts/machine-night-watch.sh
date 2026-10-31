@@ -48,7 +48,7 @@ done
 }
 # needed <project> <task>: sets reason (empty = nothing needs the coordinator)
 needed() {
-  local p=$1 t=$2 repo=${COORD_REPO[$1]:-} ctx sum n ready slots working id
+  local p=$1 t=$2 repo=${COORD_REPO[$1]:-} ctx sum n ready parked np slots working id
   reason=""
   [ -n "$repo" ] || { reason="no repo configured, cannot read context"; return; }
   ctx=$(rove api context --repo "$repo" 2>/dev/null)
@@ -84,8 +84,15 @@ needed() {
   # (c) idle capacity
   working=$(printf '%s' "$sum" | jq -r '.working|length'); slots=${COORD_SLOTS[$p]:-1}
   if [ "$working" -lt "$slots" ] && [[ "$allow" == *": within caps"* ]]; then
-    ready=$(cd "$repo" 2>/dev/null && bd ready --json 2>/dev/null | jq -r 'if type=="array" then length else ((.issues // []) | length) end' 2>/dev/null)
-    [ "${ready:-0}" -gt 0 ] && reason="free slot ($working/$slots working lanes), $ready ready issue(s)"
+    local cnt='if type=="array" then . else (.issues // []) end'
+    ready=$(cd "$repo" 2>/dev/null && bd ready --json 2>/dev/null | jq -r "($cnt)|length" 2>/dev/null)
+    parked=$(cd "$repo" 2>/dev/null && bd ready --label parked --json 2>/dev/null | jq -r "($cnt)|map(.id)|join(\", \")" 2>/dev/null)
+    if [ "${ready:-0}" -gt 0 ] || [ -n "$parked" ]; then
+      np=0; [ -n "$parked" ] && np=$(tr ',' '\n' <<<"$parked" | wc -l)
+      if [ "$np" -gt 0 ]; then reason="free slot ($working/$slots working lanes): $np parked to resume ($parked)"
+        [ $((ready-np)) -gt 0 ] && reason="$reason, $((ready-np)) other ready"
+      else reason="free slot ($working/$slots working lanes), $ready ready issue(s)"; fi
+    fi
   fi
 }
 # wait_runnable <task>: poll should-run (exit 0 = a turn would be used) up to NIGHT_COMPACT_WAIT seconds
