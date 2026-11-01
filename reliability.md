@@ -131,3 +131,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 ## 26. A git credential prompt can pop up on the owner's desktop
 - **Failure:** a relay running `git`/`gh` outside any terminal fell back to an askpass program when a credential was missing, opening a window on the owner's desktop.
 - **Fix:** every script that runs git or gh unattended sets `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` and `SSH_ASKPASS` to `false`, `GCM_INTERACTIVE=never`, `GH_PROMPT_DISABLED=1`: a missing credential then fails fast with an error. The sandbox test proves no askpass runs.
+
+## 27. The NixOS GitHub runner module needs four changes for container CI jobs
+- **Failure:** on a dedicated NixOS runner box (`services.github-runners`), container jobs failed in turn: "Could not find a part of the path '/proc/1/cgroup'" (ProtectProc=invisible); no Docker group access (PrivateUsers=yes); "No space left on device" in `uv sync` (the default work dir is a small RAM-backed runtime dir); and an ephemeral runner that could not re-register after its first job (registration tokens expire after an hour).
+- **Fix:** serviceOverrides ProtectProc="default", PrivateUsers=false, ReadWritePaths=[workDir]; workDir on disk with an age-out tmpfiles rule; tokenFile holding a fine-grained PAT scoped to the one repo with only Administration read-write (the module mints a registration token per job); job containers with `--init` so killed children are reaped.
