@@ -64,7 +64,7 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
   issues, discussions, PRs or comments on other people's repos) without the owner's approval, and it is
   worded generically: no project, host, customer, path or task-key names. `rove api feedback` publishes
   a public GitHub discussion under the owner's account.
-- **Identity** (owner rule): commits, PRs and comments carry only the owner's identity (set `git config user.name/user.email` to the owner's before the first commit, cloud sessions included); no AI attribution (no Co-Authored-By, session links or "Generated with" lines). The repo commits Claude Code settings with commit and PR attribution turned off.
+- **Identity** (owner rule; drop this line if you want AI attribution): commits, PRs and comments carry only the owner's identity (set `git config user.name/user.email` to the owner's before the first commit, cloud sessions included); no AI attribution (no Co-Authored-By, session links or "Generated with" lines). The repo commits Claude Code settings with commit and PR attribution turned off.
 - **Worker contract** (every Rove task, any engine): first `git fetch origin && git merge origin/main`;
   never `git stash` (shared across worktrees; commit instead) or switch branches; check each item of
   the brief against current code (already fixed → say so, change nothing); scoped changes only; file an

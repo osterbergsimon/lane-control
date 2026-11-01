@@ -60,6 +60,13 @@ About half an hour for one project. Everything marked **planned** is manual toda
 
 **Planned:** a bootstrap script for steps 1 to 3 and the per-project files of step 4, and a doctor command that checks an install against `machine.md`.
 
+### Commit identity and AI attribution
+By default Claude Code (local and cloud sessions) signs commits as `Claude <noreply@anthropic.com>` or adds `Co-Authored-By` and session-link trailers, and footers to PR bodies. **You will probably want to turn this off** if commits should carry only your identity:
+- commit `templates/project-settings.json` (it sets `"attribution": {"commit": "", "pr": "", "sessionUrl": false}` and `"includeCoAuthoredBy": false`) as the repo's `.claude/settings.json`: cloud sessions read the committed file;
+- have every brief set `git config user.name/user.email` to yours before the first commit (the AGENTS template's **Identity** line);
+- squash-merge PRs whose commits are AI-authored, with you as author.
+Keep attribution if you prefer it; then drop the Identity line from your AGENTS.md and the two keys from the settings.
+
 ## Map of files
 | File | What |
 |---|---|
