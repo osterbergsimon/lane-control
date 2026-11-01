@@ -24,5 +24,11 @@
   "enabledPlugins": {
     "<unneeded-plugin>@<marketplace>": false
   },
-  "disableClaudeAiConnectors": true
+  "disableClaudeAiConnectors": true,
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
+  "includeCoAuthoredBy": false
 }
