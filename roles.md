@@ -30,6 +30,8 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 
 - Public posts (`rove api feedback`, which becomes a public discussion under the owner's account; issues, discussions, PRs or comments on other people's repos) need the owner's approval first and generic wording (no project, host, customer, path or task-key names). Later edits stay in the public history.
 
+- Identity: everything an agent commits or posts is authored as the owner with no AI attribution; AI-authored PR commits are squash-merged with the owner as author.
+
 ## Project coordinator
 The Rove main task on the project's main checkout. It is the planning lane and the only gate to main.
 
