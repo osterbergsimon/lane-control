@@ -3,7 +3,8 @@
 # Spends no machine-coordinator tokens. Per project coordinator, in order:
 #  1. Skip it when its budget is past the stop-all step (each prod costs a turn).
 #  2. NEEDED check: read `rove api context --repo <repo>` (+ `bd ready`, get-task) and prod only when:
-#     (a) a row is waiting-on-you / ready-for-review / landing / unknown, or an unhandled inbox item;
+#     (a) a non-archived row is waiting-on-you / landing / unknown, or ready-for-review with a PR not yet
+#         merged or closed, or an unhandled inbox item;
 #     (b) a `working` lane's engine tab is dead;
 #     (c) idle capacity: ready issues > 0, some tier's allowance is not "none", and fewer `working`
 #         lanes than COORD_SLOTS[project] (default 1);
@@ -48,12 +49,14 @@ done
 }
 # needed <project> <task>: sets reason (empty = nothing needs the coordinator)
 needed() {
-  local p=$1 t=$2 repo=${COORD_REPO[$1]:-} ctx sum n ready parked np slots working id
+  local p=$1 t=$2 repo=${COORD_REPO[$1]:-} ctx sum n ready parked np slots working id archived
   reason=""
   [ -n "$repo" ] || { reason="no repo configured, cannot read context"; return; }
   ctx=$(rove api context --repo "$repo" 2>/dev/null)
-  sum=$(printf '%s' "$ctx" | jq -c --argjson stall "$STALL_SECS" '
-    def tasks: (.tasks // .rows // .worktrees // []);
+  # context also reports ARCHIVED tasks (group "unknown"); they never need anyone
+  archived=$(rove api list --archived 2>/dev/null | jq -c '[.tasks[]?.id]' 2>/dev/null); [ -n "$archived" ] || archived='[]'
+  sum=$(printf '%s' "$ctx" | jq -c --argjson stall "$STALL_SECS" --argjson archived "$archived" '
+    def tasks: ((.tasks // .rows // .worktrees // []) | map(select((.taskId // .id // "") as $i | ($archived | index($i)) == null)));
     def g: (.group // "unknown");
     def title: (.title // .branch // .taskId // .id // "?");
     def age: ( .activitySecs // .activitySeconds // .idleSecs // .activity.secs // .activity.seconds // .activity.sinceSecs // .activity.forSecs
@@ -63,12 +66,25 @@ needed() {
                       else (try (now - ($ts | sub("\\.[0-9]+";"") | fromdateiso8601)) catch null) end) );
     if (has("tasks") or has("rows") or has("worktrees")) then
     { ok: true,
-      attn: [tasks[] | select(g | IN("waiting-on-you","ready-for-review","landing","unknown")) | "\(g): \(title)"],
-      inbox: ((.inbox // .attention // .unhandled // []) | if type=="array" then length elif type=="object" then ((.items // .rows // []) | length) else 0 end),
+      attn: [tasks[] | select(g | IN("waiting-on-you","landing","unknown")) | "\(g): \(title)"],
+      review: [tasks[] | select(g=="ready-for-review") | {t: "\(g): \(title)", pr: (.pr // null)}],
+      # inbox: skip archived tasks and plain finished turns (unread stays set until a person opens the row)
+      inbox: ((.inbox // .attention // .unhandled // []) | (if type=="array" then . elif type=="object" then (.items // .rows // []) else [] end)
+              | map(select(((.taskId // "") as $i | ($archived | index($i)) == null) and ((.state // "") | IN("turn_complete","idle") | not))) | length),
       working: [tasks[] | select(g=="working") | (.taskId // .id // "")],
       stalled: [tasks[] | select(g | IN("working","idle")) | select((age) != null and (age) > $stall) | title] }
     else {ok: false} end' 2>/dev/null)
   [ "$(printf '%s' "$sum" | jq -r '.ok // false' 2>/dev/null)" = true ] || { reason="context unreadable or unrecognised, prodding to be safe"; return; }
+  # ready-for-review from a stale PR observation: skip it when the PR is already merged or closed
+  local r pr st
+  while IFS=$'\t' read -r pr r; do
+    [ -n "$r" ] || continue
+    if [[ "$pr" =~ ^[0-9]+$ ]]; then
+      st=$(cd "$repo" && gh pr view "$pr" --json state -q .state 2>/dev/null)
+      case "$st" in MERGED|CLOSED) continue;; esac
+    fi
+    sum=$(printf '%s' "$sum" | jq -c --arg r "$r" '.attn += [$r]')
+  done < <(printf '%s' "$sum" | jq -r '.review[] | "\(.pr // "")\t\(.t)"')
   n=$(printf '%s' "$sum" | jq -r '.attn|length'); inbox=$(printf '%s' "$sum" | jq -r '.inbox')
   if [ "$n" -gt 0 ]; then reason="$n row(s) need attention ($(printf '%s' "$sum" | jq -r '.attn|join("; ")'))"; return; fi
   if [ "$inbox" -gt 0 ]; then reason="$inbox unhandled inbox item(s)"; return; fi
