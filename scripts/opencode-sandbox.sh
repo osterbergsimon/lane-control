@@ -19,7 +19,7 @@
 #   PLAYBOOK_CONFIG=<file>                      # the playbook config (default ~/.config/rove/playbook.conf.sh), read only for MODE_FILE
 #
 # Launch as a Rove task:
-#   rove api spawn --prompt-file <brief> --command "<lane-control>/scripts/opencode-sandbox.sh --auto --prompt"
+#   rove api add --repo <repo> --prompt-file <brief> --command "<lane-control>/scripts/opencode-sandbox.sh --auto --prompt"
 # (any args go to opencode; Rove appends the brief as the last argument, so it must follow --prompt;
 # the swift tier uses `--auto`, see model-routing.md). Proof: scripts/test-opencode-sandbox.sh.
 # Instance paths are not hardcoded here: private paths the test checks are SANDBOX_TEST_* in the playbook config.

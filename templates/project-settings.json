@@ -17,8 +17,7 @@
       "Bash(opencode debug config *)",
       "Bash(opencode auth list)",
       "Bash(opencode session list *)",
-      "Bash(rove api add *)",
-      "Bash(rove api spawn *)"
+      "Bash(rove api add *)"
     ]
   },
   "enabledPlugins": {

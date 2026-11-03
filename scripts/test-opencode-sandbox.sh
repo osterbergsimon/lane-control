@@ -163,7 +163,7 @@ c "gh api refused"               must_fail "not available in the opencode sandbo
 c "gh pr merge refused"          must_fail "not available in the opencode sandbox" gh pr merge 77
 c "gh run rerun refused"         must_fail "not available in the opencode sandbox" gh run rerun 555
 c "gh pr comment refused"        must_fail "not available in the opencode sandbox" gh pr comment 77 -b x
-c "rove api spawn refused"       must_fail "not available in the opencode sandbox" rove api spawn --title sbx
+c "rove api add refused"         must_fail "not available in the opencode sandbox" rove api add --repo . --title sbx
 c "rove send to other task"      must_fail "only the bare form" rove api send --task-id X --prompt hi
 c "gh token refused"             must_fail "not available in the opencode sandbox" gh auth token
 c "no token/secret in env"       bash -c '! env | grep -qiE "token|secret|password|^GH_|^GITHUB_"'
@@ -171,7 +171,7 @@ c "gh config absent"             bash -c '[ ! -e "\$HOME/.config/gh" ] && [ ! -e
 c "real gh has no token"         must_fail "" $(printf '%q' "$realgh") auth token
 c "real gh api fails"            must_fail "" $(printf '%q' "$realgh") api user
 c "real git push has no creds"   must_fail "" env GIT_TERMINAL_PROMPT=0 $(printf '%q' "$realgit") push --dry-run $(printf '%q' "$url") HEAD:refs/heads/sbx-never
-[ ! -x /run/current-system/sw/bin/rove ] || c "system rove fails" must_fail "" /run/current-system/sw/bin/rove api spawn --title sbx
+[ ! -x /run/current-system/sw/bin/rove ] || c "system rove fails" must_fail "" /run/current-system/sw/bin/rove api add --repo . --title sbx
 for port in $ports; do c "host loopback :\$port refused" must_fail "" bash -c "exec 3<>/dev/tcp/127.0.0.1/\$port"; done
 c "gateway :7878 refused"        must_fail "" bash -c 'gw=\$(ip route | sed -n "s/^default via \\([^ ]*\\).*/\\1/p" | head -n 1); [ -n "\$gw" ] && exec 3<>/dev/tcp/\$gw/7878'
 [ -z $(printf '%q' "$x11") ] || c "X11 abstract socket refused" must_fail "Connection refused" python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect("\0"+sys.argv[1][1:])' $(printf '%q' "$x11")

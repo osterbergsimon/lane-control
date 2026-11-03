@@ -40,7 +40,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - A routine aimed at a dead tab does nothing: night routines revive the tab first (`rove api tab-revive`).
 
 ## 7. The agent harness itself
-- **Auto mode:** it blocks a coordinator from editing its own permission settings ("self-modification") and from launching auto-approving agents. The owner installs the project allow rules for `rove api add` and `rove api spawn` once.
+- **Auto mode:** it blocks a coordinator from editing its own permission settings ("self-modification") and from launching auto-approving agents. The owner installs the project allow rules for `rove api add` once.
 - **MCP servers and connectors:** turn off those a project does not need in the project settings; every tool schema costs context.
 
 ## 8. Verify reviewers too, and rerun every workspace

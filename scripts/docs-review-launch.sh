@@ -11,7 +11,10 @@ t=$DOCS_REVIEW_TIER
 [ -n "${TIER_ENGINE[$t]:-}" ] && [ "${TIER_ENGINE[$t]}" != none ] || { echo "tier $t is not configured"; exit 1; }
 d=$(date +%F)
 cmd=${TIER_CMD[$t]:-}
-R=$(rove api spawn --parent "$parent" --title "Weekly docs review $d" \
+repo=${COORD_REPO[$p]:?no repo for $p in config}
+# base on the default branch, not the coordinator checkout's current branch (add nests under --parent)
+base=$(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##'); base=${base:-main}
+R=$(rove api add --repo "$repo" --parent "$parent" --base-branch "$base" --title "Weekly docs review $d" \
       ${cmd:+--command "$cmd"} --prompt-file "$BRIEF_DIR/$p-docs-review.md")
 id=$(printf '%s' "$R" | jq -r '.taskId')
 rove api update --task-id "$id" --branch "docs-review-$d" >/dev/null
