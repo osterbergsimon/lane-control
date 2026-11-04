@@ -97,7 +97,7 @@ bwrap=$(nixpkg bubblewrap)/bin/bwrap
 pasta=$(nixpkg passt)/bin/pasta
 curl=$(nixpkg curl)/bin/curl
 [ -x "$bwrap" ] && [ -x "$pasta" ] && [ -x "$curl" ] || die "no bwrap/pasta/curl from nixpkgs"
-for t in git gh rove jq opencode systemd-run; do command -v "$t" >/dev/null || die "$t not on PATH"; done
+for t in git gh rove jq opencode systemd-run setsid; do command -v "$t" >/dev/null || die "$t not on PATH"; done
 git=$(readlink -f "$(command -v git)") gh=$(command -v gh) rove=$(command -v rove) jq=$(command -v jq)
 
 work=$(realpath "$PWD")
@@ -543,7 +543,13 @@ relay $$ &
 relay_pid=$!
 trap 'kill "$relay_pid" 2>/dev/null || true' EXIT
 rc=0
-systemd-run --user --scope -q --expand-environment=no \
+# When the lane's terminal closes (tab closed, Rove restarted), this launcher dies of SIGHUP but pasta
+# ignores it, so the scope used to live on with no terminal (idle, ~0.5 GB each). A watchdog in its own
+# session stops the named scope as soon as this launcher is gone.
+unit="opencode-sandbox-$$-$(date +%s)"
+setsid -f bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 5; done; systemctl --user stop "$2.scope" 2>/dev/null' \
+  _ "$$" "$unit" </dev/null >/dev/null 2>&1
+systemd-run --user --scope -q --expand-environment=no --unit="$unit" \
   -p MemoryMax="${OPENCODE_SANDBOX_MEM:-4G}" -p MemorySwapMax=0 -- \
   "$pasta" --config-net -q -T none -U none -t none -u none --no-map-gw -- \
   "$bwrap" "${args[@]}" -- "${cmd[@]}" || rc=$?
