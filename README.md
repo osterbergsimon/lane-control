@@ -77,7 +77,7 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 | `reliability.md` | numbered failure, fix, reuse log; read before setting up a coordinator |
 | `machine.md` | what is machine-specific; checks for a new box; CI runner patterns |
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
-| `scripts/` | `window-guard.sh`, `machine-watch.sh`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared). Each header is its contract |
+| `scripts/` | `window-guard.sh`, `machine-watch.sh`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared); for the Orca/Cotal and wsp trials (`docs/orca.md`, `docs/wsp.md`): `cotal-agent`, `orca-cotal-task` (WIP), `wsp-owner-code.mjs`. Each header is its contract |
 | `templates/` | AGENTS sections, project and coordinator settings, init script, worker and review briefs, budget ceiling, opencode config |
 | `docs/multi-machine.md` | design (not implemented): projects pinned to machines, one global coordinator over SSH |
 | `docs/orca.md` | trial notes: Orca for SSH remote agents and OpenCode 2, plus Cotal for coordinator-to-lane messaging that never disturbs a half-typed prompt; setup, what was verified, gotchas, Rove verb map, evaluation checklist |

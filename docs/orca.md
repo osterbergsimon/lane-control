@@ -86,6 +86,56 @@ Notes [tested]:
   `cotal service add web --preset web --creds <file> --read-only` and an SSH tunnel to port 7799. It cannot post
   messages in 0.145.1 (read-only is forced).
 
+## 5b. WIP: Orca makes the tasks, Cotal is only the agent
+**Status: work in progress, stopped mid-test (the model quota ran out).** This is the intended layout. Section 5 has
+Cotal's manager open terminals in Orca. Here **Orca sets up everything it can** (task, worktree, branch, nesting
+under the coordinator, terminal), and Cotal provides only the agent that runs in that terminal and its messaging. One
+task is the coordinator; it creates more Orca tasks the same way, and all of them talk over Cotal's mesh.
+
+Pieces (in `scripts/`, install on the host's `PATH`):
+- `cotal-agent`: starts OpenCode as a Cotal agent **in the current terminal** (`cotal spawn` in the foreground, so no
+  Cotal manager and no `--runtime orca`), named after the worktree it runs in. Configure it in Orca as a custom
+  agent ("OpenCode (Cotal)", command `cotal-agent`) for tasks you create by hand. Env: `COTAL_SPACE`,
+  `COTAL_AGENT_MODEL`, `COTAL_AGENT_EXTRA` (default `--no-events`, for OpenCode 2.x).
+- `orca-cotal-task <name> "<first task>" [--role R]`: run **from inside a worktree** (the coordinator runs it in its
+  own shell). Asks Orca for a new worktree nested under the caller's (`orca worktree create … --parent-worktree
+  worktree:<caller>`), then opens a terminal in it running `cotal-agent --role R -p "<first task>"`
+  (`orca terminal create --command`). Prints `{"name","worktree","branch","terminal"}`. The brief is shell-quoted,
+  since Orca types `--command` into the terminal's shell.
+
+Setup on the host (beyond section 5's install; the Cotal manager is not needed for this path, the broker and delivery
+daemon from `cotal up` are):
+```bash
+install -m 755 scripts/cotal-agent scripts/orca-cotal-task /usr/local/bin/
+cd <main checkout of the repo, open in Orca>
+orca-cotal-task boss "You are the project coordinator … To create a teammate run: orca-cotal-task <name> \"<task>\" …" \
+  --role coordinator
+```
+Then DM the coordinator (`cotal send -t boss "…"` or `cotal chat`) and have it create its teammates.
+
+Why not Orca's own agent launch: `orca worktree create --agent` and `orca agent launch` accept only Orca's known
+agents, so a Cotal agent goes in with `orca terminal create --command`.
+
+Reached so far (2026-11-05) [tested]:
+- `orca-cotal-task boss … --role coordinator` from the repo's main checkout: Orca created worktree `boss` on branch
+  `boss` under `~/orca/workspaces/<repo>/`, nested under the main worktree, opened a terminal titled `cotal-boss`, and
+  `cotal-agent` started OpenCode 2.2.1 there (terminal title `cotal:demo:boss`, Cotal connector process running).
+- `cotal ps` does not list such agents (it lists manager-launched seats only); use `cotal who`.
+
+Not yet verified:
+- **the agent joining the mesh: it did not.** About 3 minutes after launch `boss` was not in `cotal who`, although
+  its OpenCode TUI and Cotal connector were running. Not diagnosed. Candidates: a foreground spawn from a folder
+  outside the space's project root (the worktree lives under `~/orca/workspaces/`), or the connector stuck before
+  joining (the free-model quota was exhausted at that moment). First thing to check: run `cotal-agent` by hand in a
+  worktree terminal and read what `cotal spawn` prints before the TUI takes the screen;
+- the first task given with `-p` reaching the agent;
+- the coordinator running `orca-cotal-task` itself, and the new tasks nesting under its worktree;
+- two task agents messaging each other directly, and the coordinator steering them by DM;
+- draft safety in this mode (expected to match section 6: it is the same OpenCode plugin).
+
+Next session: re-run the steps above with a model that has quota (Orca's OpenCode profile key, or `COTAL_AGENT_MODEL`),
+then fill in this list and fold the result into section 6.
+
 ## 6. What was verified
 | Check | Result |
 |---|---|

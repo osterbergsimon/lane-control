@@ -1,0 +1,10 @@
+#!/bin/sh
+# cotal-agent: run OpenCode as a Cotal agent IN THIS TERMINAL. Orca opens the terminal in the task's worktree;
+# the agent is named after that worktree (override with COTAL_AGENT_NAME) and joins the space's mesh.
+#   cotal-agent [-p "first task"] [--role <role>] [other `cotal spawn` options]
+# Env: COTAL_SPACE (default demo), COTAL_AGENT_MODEL (provider/model), COTAL_AGENT_EXTRA (e.g. --no-events for OpenCode 2).
+PATH="$HOME/.orca/cli/bin:/usr/local/bin:$PATH"; export PATH
+[ -d "$HOME/tmp" ] && export TMPDIR="${TMPDIR:-$HOME/tmp}"   # trial box: /tmp is noexec
+name="${COTAL_AGENT_NAME:-$(basename "$PWD")}"
+exec cotal spawn -n "$name" --space "${COTAL_SPACE:-demo}" --harness opencode \
+  -m "${COTAL_AGENT_MODEL:-opencode/deepseek-v4.1-flash-free}" ${COTAL_AGENT_EXTRA:---no-events} "$@"
