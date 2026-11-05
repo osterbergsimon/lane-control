@@ -14,7 +14,8 @@ lane-control's scripts call `rove api` and do **not** run unchanged on either. W
 | OpenCode 2.x in a real terminal (its own TUI) | yes ("OpenCode 2 beta") [tested] | yes, with `--no-events` [tested] |
 | Coordinator starts lanes and gets their results | Orca orchestration: experimental, its panel is disabled in 1.4.249+ [docs] | `cotal_spawn` + DMs from inside the agents [tested] |
 | Messages to an agent never land in a half-typed prompt | not documented: worker delivery is `dispatch --inject` into the terminal (the docs' example waits for `tui-idle` first) [docs] | yes: Cotal's OpenCode plugin injects a message as its own turn through OpenCode's server (section 6) |
-| Lanes nested under the coordinator in the sidebar | worktrees nest under a parent ("N children" chip) [docs] | **no**: Cotal opens each agent as a terminal tab in the worktree containing its folder, side by side [tested] |
+| Lanes nested under the coordinator in the sidebar | worktrees nest under a parent ("N children" chip) [docs] | **no** by itself: Cotal opens each agent as a terminal tab in the worktree containing its folder, side by side [tested]; maybe with a worktree per lane (section 9, item 4) |
+| A worktree (branch) per task | yes, Orca's core unit [docs] | **no**: Cotal never creates worktrees [tested] |
 | Chat UI instead of a TUI | "structured native chat", but **not over SSH** ("SSH sessions continue to use terminal-backed Chat UI") [docs] | n/a |
 
 Rule of thumb: **Orca is the cockpit** (SSH, terminals, editor, git per worktree). **Cotal is the radio** (who
@@ -130,5 +131,10 @@ beads (`bd`), `gh` and the AGENTS.md templates are unaffected.
 1. Connect a real VPS from the workstation; confirm agents keep running when the laptop sleeps or the link drops.
 2. One project, Orca alone: coordinator plus two lanes, each in its own child worktree; judge the sidebar.
 3. Same project with Cotal: does the coordinator run lanes on its own; do messages ever disturb what you type.
-4. Decide whether lanes-as-tabs (Cotal) or lanes-as-worktrees (Orca) matters more; the two do not combine today.
+4. Worktrees: Orca makes one per task natively; Cotal never creates one (it runs an agent in the folder it is given,
+   and the Orca runtime only looks up the enclosing worktree). **Untested combination worth trying first:** the
+   coordinator creates a child worktree per lane (`orca worktree create … ` with its own worktree as parent), then
+   starts the lane with Cotal inside that folder (`cotal spawn -C <worktree path>`, or `cotal_spawn` if its tool takes
+   a working directory). That would give one branch per lane, lanes nested under the coordinator in Orca's sidebar, and
+   Cotal's draft-safe messaging. Check that the coordinator can run `~/.orca/cli/bin/orca` on the host.
 5. Check telemetry is off in both, and which hosts the box contacted (proxy log).
