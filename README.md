@@ -15,7 +15,7 @@ Why: the real constraint is a budget (say a weekly plan limit), not attention. W
 What it is not: not a CI system, not a substitute for human review on risky changes, not a hosted service, and not tied to one project or vendor. It assumes a single owner who trusts the agents with their repos.
 
 ## Requirements
-(Rove is the supported runner. For [wsp](https://github.com/wsp-labs/wsp) instead, see `docs/wsp.md`: the doctrine carries over, the scripts do not.)
+(Rove is the supported runner. Alternatives, from trials: [Orca](https://github.com/stablyai/orca), optionally with [Cotal](https://github.com/Cotal-AI/Cotal) for messaging, in `docs/orca.md`; [wsp](https://github.com/wsp-labs/wsp) in `docs/wsp.md`. The doctrine carries over, the scripts do not.)
 - Rove, daemon running, with its skill installed for each engine you use (`rove skill install --global --agent <engine>`)
 - Claude Code (or whichever engines your tiers use), logged in
 - beads (`bd`), `gh` (authenticated), `jq`, `git`, bash
@@ -80,6 +80,7 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 | `scripts/` | `window-guard.sh`, `machine-watch.sh`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared). Each header is its contract |
 | `templates/` | AGENTS sections, project and coordinator settings, init script, worker and review briefs, budget ceiling, opencode config |
 | `docs/multi-machine.md` | design (not implemented): projects pinned to machines, one global coordinator over SSH |
+| `docs/orca.md` | trial notes: Orca for SSH remote agents and OpenCode 2, plus Cotal for coordinator-to-lane messaging that never disturbs a half-typed prompt; setup, what was verified, gotchas, Rove verb map, evaluation checklist |
 | `docs/wsp.md` | trial notes: running coordinators and lanes on wsp instead of Rove (setup on an SSH-only box, OpenCode versions, Rove-to-wsp verb map, what has no equivalent); `scripts/wsp-owner-code.mjs` pairs its web UI as owner |
 | `lane-ledger.tsv` | one row per finished task, used to calibrate routing |
 
