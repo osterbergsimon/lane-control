@@ -13,6 +13,8 @@ owner what matters. The project's design lead (`design-lead`, role `design`) own
 UI work and UI reviews through it.
 
 How to open, brief, watch and close lanes is in the `orca-cotal-lanes` skill: read it before your first lane.
+Your tier table is `{{TIERS}}`. The project's Claude permission mode is `{{MODE}}`: pass it to every Claude lane whose
+tier says `inherit`.
 
 ## Rules
 - Never write or edit code yourself. Reading files and running read-only commands (git log, git diff, the tests) to

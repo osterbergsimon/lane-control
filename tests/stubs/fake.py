@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-tool = Path(sys.argv[0]).name
+tool = "orca" if Path(sys.argv[0]).name.startswith("orca") else Path(sys.argv[0]).name
 args = sys.argv[1:]
 state_path = Path(os.environ["STUB_STATE"])
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -46,6 +46,7 @@ def orca():
         state["repos"].append(repo)
         out({"ok": True, "result": {"repo": repo}})
     if cmd == "skills install":
+        Path(os.environ["HOME"], ".agents", "skills", "orca-cli").mkdir(parents=True, exist_ok=True)
         out({"ok": True, "result": {"installed": ["orca-cli"]}})
     if cmd == "worktree list":
         rows = [{"id": f"{w['repo']}::{w['path']}", "displayName": w["name"], "path": w["path"],
@@ -68,6 +69,9 @@ def cotal():
     if args[:1] == ["--version"]:
         print("cotal-ai 0.145.1")
         sys.exit(0)
+    if args[:2] == ["ext", "list"]:
+        print("@cotal-ai/orca  0.145.1  added  runtime:orca" if state.get("orca_ext", True) else "@cotal-ai/web")
+        sys.exit(0)
     if args[:1] == ["telemetry"]:
         sys.exit(0)
     if args[:2] == ["space", "create"]:
@@ -81,6 +85,9 @@ def cotal():
             out({"outcome": "refused", "result": None, "error": {"code": "TARGET_UNAVAILABLE"}}, 1)
         out({"outcome": "ok", "result": {"name": args[2], "root": root}})
     if args[:1] == ["setup"]:
+        if state.get("setup_fails"):
+            state["setup_fails"] -= 1
+            out({"outcome": "refused", "error": "stub: setup failed"}, 1)
         out({"outcome": "ok"})
     if args[:1] == ["up"]:
         state["broker"] = True

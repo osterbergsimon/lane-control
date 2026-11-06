@@ -45,7 +45,7 @@ class PersonaTests(unittest.TestCase):
     def test_personas_carry_placeholders(self):
         for name in ("coordinator.md", "design-lead.md"):
             text = (PERSONAS / name).read_text()
-            for ph in ("{{HARNESS}}", "{{MODEL}}", "{{LAUNCH}}", "{{PROJECT}}"):
+            for ph in ("{{HARNESS}}", "{{MODEL}}", "{{LAUNCH}}", "{{PROJECT}}", "{{MODE}}", "{{TIERS}}"):
                 self.assertIn(ph, text, f"{name} lacks {ph}")
 
 

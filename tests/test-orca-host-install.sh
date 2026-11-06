@@ -48,6 +48,21 @@ if docker inspect "$proxy" >/dev/null 2>&1; then
   check "no nodejs.org/onorca.dev egress" [ "$hits" -eq 0 ]
 fi
 
+# A foreign listener on the requested port is refused, not mistaken for orcad.
+r "setsid nohup python3 -m http.server 6771 --bind 127.0.0.1 >/dev/null 2>&1 < /dev/null & sleep 1"
+out5=$("$here/scripts/orca-host-install" "$host" --port 6771 --pair 2>&1); rc5=$?
+r "pkill -u \$(id -u) -f '[h]ttp.server 6771'"
+check "foreign listener refused" [ "$rc5" -ne 0 ]
+check "foreign listener named" sh -c 'echo "$1" | grep -q "in use"' _ "$out5"
+
+# An older orcad of ours on the port (Orca upgraded since): stopped and replaced by the current slot.
+r "mkdir -p ~/tmp/old-orcad; printf 'import http.server,sys\nhttp.server.HTTPServer((\"127.0.0.1\",int(sys.argv[-1])),http.server.BaseHTTPRequestHandler).serve_forever()\n' > ~/tmp/old-orcad/orcad.js; cd ~/tmp/old-orcad; setsid nohup python3 orcad.js --json --bind 127.0.0.1 --port 6772 >/dev/null 2>&1 < /dev/null & sleep 1"
+out6=$("$here/scripts/orca-host-install" "$host" --port 6772 --pair --no-tunnel 2>&1); rc6=$?
+echo "$out6" | sed 's/^/  | /'
+check "older orcad replaced" sh -c 'echo "$1" | grep -q "stopped older orcad 6772" && echo "$1" | grep -q "started orcad 6772"' _ "$out6"
+check "replacement runs the current slot" r "pgrep -af 'orcad[.]js' | grep -F 'orcad-$ver/orcad.js' | grep -q -- '--port 6772'"
+r "pkill -u \$(id -u) -f 'orcad[.]js .*--port 6772'" 2>/dev/null
+
 check "refuses root without --allow-root" sh -c '! "$1/scripts/orca-host-install" "root@${2#*@}" --port "$3" >/dev/null 2>&1' _ "$here" "$host" "$port"
 
 echo "$fails failure(s)"

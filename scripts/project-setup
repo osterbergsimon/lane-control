@@ -24,6 +24,8 @@ HERE = Path(__file__).resolve().parent.parent  # lane-control checkout (or its c
 HARNESSES = ("claude", "opencode")
 MODES = ("auto", "bypassPermissions", "default")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
+ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
+PORTS = range(14200, 15000)
 
 
 class Fail(Exception):
@@ -46,18 +48,54 @@ def harness_model(spec: str) -> tuple:
     return harness, model
 
 
-def render_persona(text: str, harness: str, model: str, mode: str, project: str) -> str:
+def render_persona(text: str, harness: str, model: str, mode: str, project: str, tiers: str = "") -> str:
     launch = "events: false" if harness == "opencode" else f'launchOptions: {{ "permission-mode": "{mode}" }}'
-    return (text.replace("{{HARNESS}}", harness).replace("{{MODEL}}", model)
-            .replace("{{LAUNCH}}", launch).replace("{{PROJECT}}", project))
+    return (text.replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
+            .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers))
+
+
+def orca_cli() -> str:
+    home = Path(os.environ.get("HOME", str(Path.home())))
+    for c in (os.environ.get("ORCA_CLI"), home / ".orca" / "cli" / "bin" / "orca",
+              home / ".config" / "orca" / "linux-orca-cli-shim" / "orca"):
+        if c and os.access(str(c), os.X_OK):
+            return str(c)
+    return shutil.which("orca") or "orca"
+
+
+def free_port(start: int) -> int:
+    """The first port from `start` (wrapping inside PORTS) that nothing listens on at 127.0.0.1."""
+    import socket
+    order = [p for p in PORTS if p >= start] + [p for p in PORTS if p < start] if start in PORTS else [start]
+    for p in order:
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", p))
+                return p
+            except OSError:
+                continue
+    raise Fail("no free broker port in 14200-14999")
+
+
+def record(repo: Path, **kw) -> dict:
+    f = repo / ".cotal" / "lane-control.json"
+    data = json.loads(f.read_text()) if f.exists() else {}
+    if kw:
+        data.update(kw)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(data, indent=2) + "\n")
+    return data
 
 
 def say(step: str, what: str, detail: str = "") -> None:
     print(f"{step}: {what}" + (f" {detail}" if detail else ""), flush=True)
 
 
-def run(cmd, cwd=None, check=True):
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+def run(cmd, cwd=None, check=True, timeout=180):
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Fail(f"{' '.join(cmd[:3])} timed out after {timeout}s")
     if check and p.returncode != 0:
         msg = (p.stderr.strip() or p.stdout.strip()).splitlines()
         raise Fail(f"{' '.join(cmd[:3])} failed: {msg[-1] if msg else p.returncode}")
@@ -103,16 +141,18 @@ def on_host(host: str, argv: list, target: str) -> int:
         if x.startswith("--host="):
             continue
         args.append(x)  # --tiers, like the target, is a path on the host
-    cmd = f"{remote}/scripts/project-setup " + " ".join(shlex.quote(x) if not x.startswith("~") else x for x in args)
+    def q(x):  # keep a leading ~/ for the remote shell to expand, quote the rest
+        return "~/" + shlex.quote(x[2:]) if x.startswith("~/") else shlex.quote(x)
+    cmd = f"{remote}/scripts/project-setup " + " ".join(q(x) for x in args)
     return subprocess.run(["ssh", host, cmd], stdin=subprocess.DEVNULL).returncode
 
 
 # --- steps -------------------------------------------------------------------------------------------------------
 
 def preflight(needed_harnesses):
-    if not shutil.which("orca"):
-        raise Fail("orca CLI not on PATH (on an Orca host it is ~/.orca/cli/bin/orca)")
-    p = run(["orca", "status", "--json"], check=False)
+    if not shutil.which(ORCA):
+        raise Fail("Orca CLI not found (on an Orca host it is ~/.orca/cli/bin/orca; or set ORCA_CLI)")
+    p = run([ORCA, "status", "--json"], check=False, timeout=30)
     try:
         rt = json.loads(p.stdout)["result"]["runtime"]
         ok = rt.get("reachable") and rt.get("state") == "ready"
@@ -122,6 +162,8 @@ def preflight(needed_harnesses):
         raise Fail("orca runtime not reachable (`orca status`): start orcad or connect the host in Orca first")
     if not shutil.which("cotal"):
         raise Fail("cotal not on PATH (npm i -g cotal-ai)")
+    if "@cotal-ai/orca" not in run(["cotal", "ext", "list"], check=False, timeout=60).stdout:
+        raise Fail("cotal has no Orca runtime: run `cotal ext add @cotal-ai/orca`")
     for h in sorted(needed_harnesses):
         if not shutil.which(h):
             raise Fail(f"{h} not on PATH, but this project launches {h} agents")
@@ -151,6 +193,9 @@ def resolve_repo(target: str, dest: Path, name: str) -> Path:
     if top.returncode == 0:
         say("repo", "exists", top.stdout.strip())
         return Path(top.stdout.strip())
+    if "not a git repository" not in top.stderr:
+        # Inside .git, a bare repo, "dubious ownership"...: a repository is there, never init over it.
+        raise Fail(f"{d}: git says: {top.stderr.strip().splitlines()[-1] if top.stderr.strip() else 'unusable'}")
     run(["git", "init", "-q", "-b", "main"], cwd=d)
     run(["git", "commit", "-q", "--allow-empty", "-m", "Initial commit"], cwd=d)
     say("repo", "created", f"{d} (git init)")
@@ -158,34 +203,42 @@ def resolve_repo(target: str, dest: Path, name: str) -> Path:
 
 
 def orca_repo(repo: Path) -> str:
-    repos = jrun(["orca", "repo", "list", "--json"])["result"]["repos"]
+    repos = jrun([ORCA, "repo", "list", "--json"])["result"]["repos"]
     for r in repos:
         if Path(r["path"]) == repo:
             say("orca-repo", "exists", r["id"])
             return r["id"]
-    rid = jrun(["orca", "repo", "add", "--path", str(repo), "--json"])["result"]["repo"]["id"]
+    rid = jrun([ORCA, "repo", "add", "--path", str(repo), "--json"])["result"]["repo"]["id"]
     say("orca-repo", "created", rid)
     return rid
 
 
-def skills(repo: Path):
-    dst = repo / ".agents" / "skills" / "orca-cotal-lanes"
-    src = HERE / "skills" / "orca-cotal-lanes"
-    brief = (HERE / "templates" / "lane-brief.md").read_text()
+def skills():
+    """User-level, because lane worktrees carry only committed files: ~/.agents/skills, linked for Claude and OpenCode."""
+    home = Path(os.environ.get("HOME", str(Path.home())))
+    root = home / ".agents" / "skills"
+    dst = root / "orca-cotal-lanes"
+    want = {"SKILL.md": (HERE / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text(),
+            "brief.md": (HERE / "templates" / "lane-brief.md").read_text()}
     fresh = not dst.exists()
-    changed = fresh or (dst / "SKILL.md").read_text() != (src / "SKILL.md").read_text() \
-        or (dst / "brief.md").read_text() != brief
-    if fresh:
-        run(["orca", "skills", "install", "--skill", "orca-cli", "--local", "--json"], cwd=repo, check=False)
-    if changed:
-        dst.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src / "SKILL.md", dst / "SKILL.md")
-        (dst / "brief.md").write_text(brief)
-    link = repo / ".claude" / "skills" / "orca-cotal-lanes"
-    if not link.is_symlink() and not link.exists():
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(Path("..") / ".." / ".agents" / "skills" / "orca-cotal-lanes")
-    say("skills", "created" if fresh else ("updated" if changed else "exists"), "orca-cli, orca-cotal-lanes")
+    changed = False
+    if not (root / "orca-cli").exists():
+        run([ORCA, "skills", "install", "--skill", "orca-cli", "--agent", "universal", "--json"])
+        changed = True
+    for name, text in want.items():
+        f = dst / name
+        if not f.exists() or f.read_text() != text:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text)
+            changed = True
+    for agent_dir in (home / ".claude" / "skills", home / ".config" / "opencode" / "skills"):
+        for name in ("orca-cotal-lanes", "orca-cli"):
+            link = agent_dir / name
+            if not link.is_symlink() and not link.exists() and (root / name).exists():
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(root / name)
+                changed = True
+    say("skills", "created" if fresh else ("updated" if changed else "exists"), f"orca-cli, orca-cotal-lanes in {root}")
 
 
 def write_if_changed(path: Path, text: str) -> str:
@@ -197,7 +250,7 @@ def write_if_changed(path: Path, text: str) -> str:
     return state
 
 
-def cotal_space(repo: Path, space: str, uses_claude: bool):
+def cotal_space(repo: Path, space: str):
     shown = run(["cotal", "space", "show", space, "--json"], cwd=repo, check=False)
     try:
         info = json.loads(shown.stdout)
@@ -211,15 +264,24 @@ def cotal_space(repo: Path, space: str, uses_claude: bool):
         return
     run(["cotal", "space", "create", space, "--root", str(repo)], cwd=repo)
     run(["cotal", "telemetry", "off"], cwd=repo, check=False)
-    if uses_claude:
-        run(["cotal", "setup", "--destination", "local", "-H", "claude", "--runtime", "orca", "--project",
-             str(repo), "-s", space, "-y", "--configure-only"], cwd=repo)
     say("space", "created", space)
 
 
+def claude_wiring(repo: Path, space: str):
+    """Cotal's Claude plugin and wake channel for this space; recorded only once `cotal setup` succeeded."""
+    if record(repo).get("claude_setup"):
+        say("claude-wiring", "exists", space)
+        return
+    run(["cotal", "setup", "--destination", "local", "-H", "claude", "--runtime", "orca", "--project", str(repo),
+         "-s", space, "-y", "--configure-only"], cwd=repo, timeout=600)
+    record(repo, claude_setup=True)
+    say("claude-wiring", "created", space)
+
+
 def personas_and_tiers(repo: Path, project: str, coord, lead, mode: str, tiers: Path):
+    table = str(repo / ".cotal" / "lanes.tsv")
     for name, (h, m) in (("coordinator", coord), ("design-lead", lead)):
-        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project)
+        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project, table)
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
     say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
     gi = repo / ".gitignore"
@@ -236,11 +298,14 @@ def services(repo: Path, space: str):
     return {s["name"]: s["state"] for s in inv}
 
 
-def start_stack(repo: Path, space: str, port: int):
+def start_stack(repo: Path, space: str, port_flag):
     svc = services(repo, space)
+    recorded = record(repo).get("port")
     if svc.get("stack-broker") == "running":
-        say("broker", "exists", f"nats://127.0.0.1:{port}")
+        say("broker", "exists", f"nats://127.0.0.1:{recorded or port_flag or derive_port(space)}")
     else:
+        port = port_flag or recorded or free_port(derive_port(space))
+        record(repo, port=port)
         run(["cotal", "up", "--no-manager", "--server", f"nats://127.0.0.1:{port}", "--space", space], cwd=repo)
         say("broker", "created", f"nats://127.0.0.1:{port}")
         svc = services(repo, space)
@@ -271,16 +336,16 @@ def spawn(repo: Path, space: str, name: str, harness: str, model: str, mode: str
         return
     cmd = ["cotal", "spawn", name, "-d", "--harness", harness, "-m", model, "--cwd", str(cwd)]
     cmd += ["--no-events"] if harness == "opencode" else ["--opt", f"permission-mode={mode}"]
-    run(cmd + ["-p", kickoff, "--space", space], cwd=repo)
+    run(cmd + ["-p", kickoff, "--space", space], cwd=repo, timeout=300)
     say(f"agent {name}", "created", f"{harness}/{model} in {cwd}")
 
 
 def design_worktree(repo: Path, repo_id: str) -> Path:
-    for w in jrun(["orca", "worktree", "list", "--json"])["result"]["worktrees"]:
+    for w in jrun([ORCA, "worktree", "list", "--json"])["result"]["worktrees"]:
         if w["id"].startswith(repo_id + "::") and w.get("displayName") == "design-lead":
             say("worktree design-lead", "exists", w["path"])
             return Path(w["path"])
-    res = jrun(["orca", "worktree", "create", "--repo", f"id:{repo_id}", "--name", "design-lead",
+    res = jrun([ORCA, "worktree", "create", "--repo", f"id:{repo_id}", "--name", "design-lead",
                 "--parent-worktree", f"path:{repo}", "--setup", "inherit", "--json"])["result"]
     path = Path(res["worktree"]["path"])
     say("worktree design-lead", "created", str(path))
@@ -290,7 +355,7 @@ def design_worktree(repo: Path, repo_id: str) -> Path:
 def verify(repo: Path, space: str, wt: Path):
     agents = live_agents(repo, space)
     missing = [n for n in ("coordinator", "design-lead") if n not in agents]
-    rows = jrun(["orca", "worktree", "list", "--json"])["result"]["worktrees"]
+    rows = jrun([ORCA, "worktree", "list", "--json"])["result"]["worktrees"]
     lead = [w for w in rows if Path(w["path"]) == wt]
     parent_ok = bool(lead) and (lead[0].get("parentWorktreeId") or "").endswith("::" + str(repo))
     if missing or not parent_ok:
@@ -322,10 +387,15 @@ def main(argv=None) -> int:
         print(f"project-setup: --permission-mode must be one of {', '.join(MODES)}", file=sys.stderr)
         return 2
     coord, lead = harness_model(a.coordinator), harness_model(a.design_lead)
-    tiers = Path(a.tiers)
+    tiers = Path(a.tiers).expanduser()
     if a.host:
         return on_host(a.host, argv, a.target)
+    if not tiers.is_file():
+        print(f"project-setup: tier table {tiers} not found", file=sys.stderr)
+        return 2
+    global ORCA
     add_orca_cli_to_path()
+    ORCA = orca_cli()
     tier_harnesses = {l.split("\t")[1] for l in tiers.read_text().splitlines()[1:]
                       if l and not l.startswith("#") and len(l.split("\t")) > 1} & set(HARNESSES)
     needed = {coord[0], lead[0]}
@@ -339,22 +409,23 @@ def main(argv=None) -> int:
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
         project = a.name or repo.name
         space = slug(project)
-        port = a.port or derive_port(space)
         repo_id = orca_repo(repo)
-        skills(repo)
-        cotal_space(repo, space, "claude" in needed | tier_harnesses)
+        skills()
+        cotal_space(repo, space)
+        if "claude" in needed | tier_harnesses:
+            claude_wiring(repo, space)
         personas_and_tiers(repo, project, coord, lead, a.permission_mode, tiers)
         if a.no_start:
             say("start", "skipped", "--no-start")
             return 0
-        start_stack(repo, space, port)
+        start_stack(repo, space, a.port)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = design_worktree(repo, repo_id)
         spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
               "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
         verify(repo, space, wt)
-        print(f"summary: {project} · space {space} · broker 127.0.0.1:{port} · orca repo {repo_id}")
+        print(f"summary: {project} · space {space} · broker 127.0.0.1:{record(repo).get('port')} · orca repo {repo_id}")
         print(f"  open Orca: the project {repo.name}, its main checkout (coordinator) and child task design-lead")
         return 0
     except Fail as e:

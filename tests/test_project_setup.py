@@ -197,7 +197,7 @@ class RunTests(unittest.TestCase):
         calls = self.e.calls()
         self.assertTrue(in_order(calls, [
             f"orca repo add --path {repo}",
-            "orca skills install --skill orca-cli --local",
+            "orca skills install --skill orca-cli --agent universal",
             f"cotal space create shop --root {repo}",
             "cotal setup --destination local -H claude --runtime orca",
             "cotal up --no-manager --server nats://127.0.0.1:",
@@ -213,9 +213,7 @@ class RunTests(unittest.TestCase):
         self.assertIn("--opt permission-mode=auto", spawn_dl)
         agents = repo / ".cotal" / "agents"
         self.assertIn("model: opus", (agents / "coordinator.md").read_text())
-        self.assertTrue((repo / ".agents" / "skills" / "orca-cotal-lanes" / "SKILL.md").exists())
-        self.assertTrue((repo / ".agents" / "skills" / "orca-cotal-lanes" / "brief.md").exists())
-        self.assertTrue((repo / ".claude" / "skills" / "orca-cotal-lanes").is_symlink())
+        self.assertFalse((repo / ".agents").exists())  # skills are user-level (lane worktrees lack untracked files)
         self.assertIn("swift\topencode", (repo / ".cotal" / "lanes.tsv").read_text())
         self.assertIn("verify: ok", r.stdout)
 
@@ -308,6 +306,121 @@ class RunTests(unittest.TestCase):
         with mock.patch.dict(m.os.environ, {"PATH": "/usr/bin", "HOME": str(self.e.home)}):
             m.add_orca_cli_to_path()
             self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
+
+    # --- review fixes ---------------------------------------------------------------------------------------
+    def test_orca_cli_env_wins_over_path_orca(self):
+        slicer = self.e.home / "slicer"
+        slicer.mkdir()
+        (slicer / "orca").write_text("#!/bin/sh\necho SLICER >> \"$STUB_LOG\"\nsleep 30\n")
+        (slicer / "orca").chmod(0o755)
+        (self.e.bin / "orca").unlink()
+        self.e.env["PATH"] = f"{slicer}:{self.e.env['PATH']}"
+        self.e.env["ORCA_CLI"] = str(STUB.parent / "orca-via-env")
+        link = STUB.parent / "orca-via-env"
+        if not link.exists():
+            link.symlink_to("fake.py")
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("SLICER", self.e.log.read_text())
+
+    def test_failed_claude_setup_is_retried(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_fails=1)
+        self.assertNotEqual(self.e.run(str(repo)).returncode, 0)
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sum(1 for c in self.e.calls() if c.startswith("cotal setup")), 2)
+
+    def test_claude_setup_when_project_later_uses_claude(self):
+        repo = self.e.repo()
+        oc = "opencode/opencode/x"
+        tiers = self.e.home / "tiers.tsv"
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x\t-\n")
+        self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--design-lead", oc, "--tiers", str(tiers)).returncode, 0)
+        self.assertFalse(any(c.startswith("cotal setup") for c in self.e.calls()))
+        r = self.e.run(str(repo), "--coordinator", "claude/opus", "--design-lead", oc, "--tiers", str(tiers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any(c.startswith("cotal setup") for c in self.e.calls()))
+
+    def test_skills_are_installed_for_the_user(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo)).returncode, 0)
+        skill = self.e.home / ".agents" / "skills" / "orca-cotal-lanes"
+        self.assertTrue((skill / "SKILL.md").exists())
+        self.assertTrue((skill / "brief.md").exists())
+        self.assertTrue((self.e.home / ".claude" / "skills" / "orca-cotal-lanes").is_symlink())
+        self.assertTrue((self.e.home / ".config" / "opencode" / "skills" / "orca-cotal-lanes").is_symlink())
+        self.assertTrue(any(c.startswith("orca skills install --skill orca-cli") and "--local" not in c
+                            for c in self.e.calls()))
+
+    def test_partial_skill_install_recovers(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo)).returncode, 0)
+        (self.e.home / ".agents" / "skills" / "orca-cotal-lanes" / "brief.md").unlink()
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.e.home / ".agents" / "skills" / "orca-cotal-lanes" / "brief.md").exists())
+        self.assertIn("skills: updated", r.stdout)
+
+    def test_preflight_requires_cotal_orca_extension(self):
+        repo = self.e.repo()
+        self.e.set_state(orca_ext=False)
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("@cotal-ai/orca", r.stderr)
+        self.assertFalse(any("repo add" in c or "space create" in c for c in self.e.calls()))
+        self.assertFalse((repo / ".gitignore").exists())
+
+    def test_missing_tiers_file_is_a_clean_error(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--tiers", str(self.e.home / "nope.tsv"))
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_never_inits_inside_a_git_dir(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo / ".git"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse((repo / ".git" / ".git").exists())
+        log = subprocess.run(["git", "log", "--oneline"], cwd=repo, capture_output=True, text=True).stdout
+        self.assertEqual(len(log.splitlines()), 1)
+
+    def test_port_is_recorded_and_reused(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--port", "14999").returncode, 0)
+        rec = json.loads((repo / ".cotal" / "lane-control.json").read_text())
+        self.assertEqual(rec["port"], 14999)
+        r = self.e.run(str(repo))
+        self.assertIn("nats://127.0.0.1:14999", r.stdout)
+
+    def test_busy_port_moves_to_next_free(self):
+        import socket
+        m = load()
+        s = socket.socket()
+        busy = m.free_port(14900)  # a free port inside the broker range, then occupy it
+        s.bind(("127.0.0.1", busy))
+        s.listen()
+        try:
+            self.assertNotEqual(m.free_port(busy), busy)
+        finally:
+            s.close()
+
+    def test_personas_carry_mode_and_tier_path(self):
+        repo = self.e.repo()
+        oc = "opencode/opencode/x"
+        self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--permission-mode", "bypassPermissions").returncode, 0)
+        text = (repo / ".cotal" / "agents" / "coordinator.md").read_text()
+        self.assertIn("`bypassPermissions`", text)
+        self.assertIn(str(repo / ".cotal" / "lanes.tsv"), text)
+        self.assertNotIn("{{", text)
+
+    def test_host_mode_quotes_tilde_paths(self):
+        self._ssh_stub()
+        r = self.e.run("~/My Repo;touch x", "--host", "dev@box")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        remote = [c for c in self.e.calls() if c.startswith("ssh ")][1]
+        self.assertIn("~/'My Repo;touch x'", remote)
 
     def test_bad_permission_mode(self):
         repo = self.e.repo()

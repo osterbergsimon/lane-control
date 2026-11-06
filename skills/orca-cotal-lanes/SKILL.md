@@ -14,7 +14,8 @@ Never type into an agent's terminal: never use `orca terminal send` on an agent,
 
 ## 1. Pick the tier, then harness and model
 Tier by the paths the task touches (lane-control model-routing: highest tier wins, in doubt one tier up; swift only
-for prose docs, scripts without private data and CI). Then look the tier up in `.cotal/lanes.tsv` at the repo root:
+for prose docs, scripts without private data and CI). Then look the tier up in the tier table your persona names (the
+project's `.cotal/lanes.tsv`, by absolute path, because lane worktrees do not carry it):
 
 ```
 tier      harness   model                          permission
@@ -24,7 +25,7 @@ deep      claude    opus                           inherit
 ```
 
 A tier whose harness is `none` is skipped: go one tier up. `inherit` means the project's Claude permission mode, which
-is in your own persona's `launchOptions` (`permission-mode`); pass the same value.
+your persona names; pass that value.
 
 ## 2. Open the lane
 From your own worktree (its cwd makes the new task your child):
@@ -42,7 +43,7 @@ Then start the agent with the `cotal_spawn` tool:
 - `agent`: the tier's harness (`opencode` or `claude`); `model`: the tier's model
 - `cwd`: the worktree path from above
 - `role`: `lane` (your persona holds `role:lane`, which is what allows handing it on)
-- OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<your mode>"}`
+- OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<the project's mode>"}`
 - `persona`: inline, `{ "prompt": "You are a lane worker for <PROJECT>, started by <you>. Work only in your Orca worktree. Report once by cotal_dm to <you>.", "subscribe": [] }`
 - `prompt`: the lane brief (`brief.md` next to this skill, filled in)
 
