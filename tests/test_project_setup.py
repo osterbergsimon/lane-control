@@ -266,6 +266,41 @@ class RunTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(any(" up " in c or "spawn" in c or "worktree create" in c for c in self.e.calls()))
 
+    def _ssh_stub(self):
+        ssh = self.e.bin / "ssh"
+        ssh.write_text("#!/bin/sh\necho \"ssh $*\" >> \"$STUB_LOG\"\ncat > /dev/null\n")
+        ssh.chmod(0o755)
+
+    def test_host_mode_copies_and_reexecs(self):
+        self._ssh_stub()
+        r = self.e.run("https://example.com/acme/shop.git", "--host", "dev@box", "--permission-mode",
+                       "bypassPermissions")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = [c for c in self.e.calls() if c.startswith("ssh ")]
+        self.assertEqual(len(calls), 2, calls)
+        self.assertIn("dev@box", calls[0])
+        self.assertIn("tar -C ~/.local/share/lane-control -xf -", calls[0])
+        self.assertIn("dev@box", calls[1])
+        self.assertIn(".local/share/lane-control/scripts/project-setup", calls[1])
+        self.assertIn("https://example.com/acme/shop.git", calls[1])
+        self.assertIn("bypassPermissions", calls[1])
+        self.assertNotIn("--host", calls[1])
+        self.assertFalse(any(c.startswith(("orca ", "cotal ")) for c in self.e.calls()))
+
+    def test_host_mode_refuses_relative_dir(self):
+        self._ssh_stub()
+        r = self.e.run("some/dir", "--host", "dev@box")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.e.calls(), [])
+
+    def test_orca_cli_dir_added_to_path(self):
+        m = load()
+        d = self.e.home / ".orca" / "cli" / "bin"
+        d.mkdir(parents=True)
+        with mock.patch.dict(m.os.environ, {"PATH": "/usr/bin", "HOME": str(self.e.home)}):
+            m.add_orca_cli_to_path()
+            self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
+
     def test_bad_permission_mode(self):
         repo = self.e.repo()
         r = self.e.run(str(repo), "--permission-mode", "yolo")

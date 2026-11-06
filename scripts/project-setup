@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,41 @@ def jrun(cmd, cwd=None):
         return json.loads(p.stdout)
     except json.JSONDecodeError:
         raise Fail(f"{' '.join(cmd[:3])}: unreadable JSON output")
+
+
+def add_orca_cli_to_path():
+    """On an Orca host the CLI lives in ~/.orca/cli/bin, which non-interactive ssh shells do not put on PATH."""
+    d = Path(os.environ.get("HOME", str(Path.home()))) / ".orca" / "cli" / "bin"
+    if d.is_dir() and str(d) not in os.environ.get("PATH", "").split(":"):
+        os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
+
+
+def on_host(host: str, argv: list, target: str) -> int:
+    """Copy what project-setup needs to the host and run it there with the same arguments minus --host."""
+    if not re.match(r"^(https?|ssh|git|file)://|^[\w.-]+@[\w.-]+:|^/|^~", target):
+        print("project-setup: with --host, give a URL or an absolute (or ~/) path on the host", file=sys.stderr)
+        return 2
+    remote = "~/.local/share/lane-control"
+    pack = subprocess.Popen(["tar", "-C", str(HERE), "-cf", "-", "scripts/project-setup", "personas", "skills",
+                             "templates"], stdout=subprocess.PIPE)
+    copy = subprocess.run(["ssh", host, f"mkdir -p {remote} && tar -C {remote} -xf -"], stdin=pack.stdout)
+    pack.stdout.close()
+    if pack.wait() != 0 or copy.returncode != 0:
+        print(f"project-setup: copying lane-control to {host} failed", file=sys.stderr)
+        return 1
+    args, skip = [], False
+    for i, x in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if x == "--host":
+            skip = True
+            continue
+        if x.startswith("--host="):
+            continue
+        args.append(x)  # --tiers, like the target, is a path on the host
+    cmd = f"{remote}/scripts/project-setup " + " ".join(shlex.quote(x) if not x.startswith("~") else x for x in args)
+    return subprocess.run(["ssh", host, cmd], stdin=subprocess.DEVNULL).returncode
 
 
 # --- steps -------------------------------------------------------------------------------------------------------
@@ -268,6 +304,7 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int)
     ap.add_argument("--tiers", default=str(HERE / "templates" / "lanes.tsv"))
     ap.add_argument("--no-start", action="store_true")
+    argv = sys.argv[1:] if argv is None else argv
     a = ap.parse_args(argv)
 
     if os.geteuid() == 0:
@@ -278,6 +315,9 @@ def main(argv=None) -> int:
         return 2
     coord, lead = harness_model(a.coordinator), harness_model(a.design_lead)
     tiers = Path(a.tiers)
+    if a.host:
+        return on_host(a.host, argv, a.target)
+    add_orca_cli_to_path()
     tier_harnesses = {l.split("\t")[1] for l in tiers.read_text().splitlines()[1:]
                       if l and not l.startswith("#") and len(l.split("\t")) > 1} & set(HARNESSES)
     needed = {coord[0], lead[0]}
