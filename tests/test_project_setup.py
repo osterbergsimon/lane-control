@@ -219,6 +219,14 @@ class RunTests(unittest.TestCase):
         self.assertIn("swift\topencode", (repo / ".cotal" / "lanes.tsv").read_text())
         self.assertIn("verify: ok", r.stdout)
 
+    def test_cotal_calls_name_the_space(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for c in self.e.calls():
+            if c.startswith(("cotal svc", "cotal ps", "cotal spawn", "cotal up")):
+                self.assertRegex(c, r"(-s|--space) shop\b", c)
+
     def test_mgr_definition_carries_proxy_env_refs(self):
         repo = self.e.repo()
         self.e.env["HTTPS_PROXY"] = "http://proxy:3128"

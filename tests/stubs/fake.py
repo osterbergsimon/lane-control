@@ -71,10 +71,15 @@ def cotal():
     if args[:1] == ["telemetry"]:
         sys.exit(0)
     if args[:2] == ["space", "create"]:
-        root = Path(opt("--root"))
-        (root / ".cotal").mkdir(parents=True, exist_ok=True)
-        (root / ".cotal" / f"space.{args[2]}").write_text("")
+        # Like cotal 0.145: registers name -> root; .cotal/space.<hex> appears only once the stack starts.
+        state.setdefault("spaces", {})[args[2]] = opt("--root")
+        Path(opt("--root"), ".cotal").mkdir(parents=True, exist_ok=True)
         out({"outcome": "ok"})
+    if args[:2] == ["space", "show"]:
+        root = state.get("spaces", {}).get(args[2])
+        if root is None:
+            out({"outcome": "refused", "result": None, "error": {"code": "TARGET_UNAVAILABLE"}}, 1)
+        out({"outcome": "ok", "result": {"name": args[2], "root": root}})
     if args[:1] == ["setup"]:
         out({"outcome": "ok"})
     if args[:1] == ["up"]:

@@ -198,7 +198,15 @@ def write_if_changed(path: Path, text: str) -> str:
 
 
 def cotal_space(repo: Path, space: str, uses_claude: bool):
-    if list((repo / ".cotal").glob("space.*")):
+    shown = run(["cotal", "space", "show", space, "--json"], cwd=repo, check=False)
+    try:
+        info = json.loads(shown.stdout)
+    except json.JSONDecodeError:
+        info = {}
+    if info.get("outcome") == "ok" and info.get("result"):
+        root = info["result"].get("root")
+        if root and Path(root) != repo:
+            raise Fail(f"space {space} already belongs to {root}; pass another --name")
         say("space", "exists", space)
         return
     run(["cotal", "space", "create", space, "--root", str(repo)], cwd=repo)
@@ -223,19 +231,19 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, mode: str, tiers: 
         say("gitignore", "updated", ".cotal/")
 
 
-def services(repo: Path):
-    inv = jrun(["cotal", "svc", "--json"], cwd=repo)["result"]["services"]
+def services(repo: Path, space: str):
+    inv = jrun(["cotal", "svc", "--json", "-s", space], cwd=repo)["result"]["services"]
     return {s["name"]: s["state"] for s in inv}
 
 
 def start_stack(repo: Path, space: str, port: int):
-    svc = services(repo)
+    svc = services(repo, space)
     if svc.get("stack-broker") == "running":
         say("broker", "exists", f"nats://127.0.0.1:{port}")
     else:
-        run(["cotal", "up", "--no-manager", "--server", f"nats://127.0.0.1:{port}"], cwd=repo)
+        run(["cotal", "up", "--no-manager", "--server", f"nats://127.0.0.1:{port}", "--space", space], cwd=repo)
         say("broker", "created", f"nats://127.0.0.1:{port}")
-        svc = services(repo)
+        svc = services(repo, space)
     if svc.get("mgr") == "running":
         say("manager", "exists", "mgr (runtime orca)")
         return
@@ -247,23 +255,23 @@ def start_stack(repo: Path, space: str, port: int):
                       "readiness": {"type": "adapter", "timeoutMs": 60000}, "envRefs": refs}
         f = repo / ".cotal" / "mgr-service.json"
         f.write_text(json.dumps(definition, indent=2) + "\n")
-        run(["cotal", "svc", "add", "mgr", "--file", str(f)], cwd=repo)
-    run(["cotal", "svc", "start", "mgr"], cwd=repo)
+        run(["cotal", "svc", "add", "mgr", "--file", str(f), "-s", space], cwd=repo)
+    run(["cotal", "svc", "start", "mgr", "-s", space], cwd=repo)
     say("manager", "created", "mgr (runtime orca)")
 
 
-def live_agents(repo: Path) -> dict:
-    items = jrun(["cotal", "ps", "--json"], cwd=repo)["result"]["items"]
+def live_agents(repo: Path, space: str) -> dict:
+    items = jrun(["cotal", "ps", "--json", "-s", space], cwd=repo)["result"]["items"]
     return {a["name"]: a for a in items if a.get("status") == "running"}
 
 
-def spawn(repo: Path, name: str, harness: str, model: str, mode: str, cwd: Path, kickoff: str):
-    if name in live_agents(repo):
+def spawn(repo: Path, space: str, name: str, harness: str, model: str, mode: str, cwd: Path, kickoff: str):
+    if name in live_agents(repo, space):
         say(f"agent {name}", "exists", str(cwd))
         return
     cmd = ["cotal", "spawn", name, "-d", "--harness", harness, "-m", model, "--cwd", str(cwd)]
     cmd += ["--no-events"] if harness == "opencode" else ["--opt", f"permission-mode={mode}"]
-    run(cmd + ["-p", kickoff], cwd=repo)
+    run(cmd + ["-p", kickoff, "--space", space], cwd=repo)
     say(f"agent {name}", "created", f"{harness}/{model} in {cwd}")
 
 
@@ -279,8 +287,8 @@ def design_worktree(repo: Path, repo_id: str) -> Path:
     return path
 
 
-def verify(repo: Path, repo_id: str, wt: Path):
-    agents = live_agents(repo)
+def verify(repo: Path, space: str, wt: Path):
+    agents = live_agents(repo, space)
     missing = [n for n in ("coordinator", "design-lead") if n not in agents]
     rows = jrun(["orca", "worktree", "list", "--json"])["result"]["worktrees"]
     lead = [w for w in rows if Path(w["path"]) == wt]
@@ -340,12 +348,12 @@ def main(argv=None) -> int:
             say("start", "skipped", "--no-start")
             return 0
         start_stack(repo, space, port)
-        spawn(repo, "coordinator", *coord, a.permission_mode, repo,
+        spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = design_worktree(repo, repo_id)
-        spawn(repo, "design-lead", *lead, a.permission_mode, wt,
+        spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
               "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
-        verify(repo, repo_id, wt)
+        verify(repo, space, wt)
         print(f"summary: {project} · space {space} · broker 127.0.0.1:{port} · orca repo {repo_id}")
         print(f"  open Orca: the project {repo.name}, its main checkout (coordinator) and child task design-lead")
         return 0
