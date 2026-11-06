@@ -116,7 +116,9 @@ composer. [tested]
   - Without `--pair`, add the host in Orca and connect: Orca finds the install and reuses it.
   - Either way the host needs no `nodejs.org` or `onorca.dev`.
   - `--pair` keeps the tunnel up as a systemd user unit `orca-tunnel-<host>` on the workstation.
-  - If orcad's port is taken (another user's Orca), use `--port`.
+  - If orcad's port is taken (another user's Orca), the script refuses; pick another with `--port`.
+  - After the desktop updates Orca, a re-run installs the new server and replaces the old running one.
+  - `--pair --no-tunnel` starts orcad and prints its pairing code, without a tunnel or a saved environment.
 
 ### Project: one command
 ```bash
@@ -127,12 +129,14 @@ scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
 2. Runs `orca repo add`.
-3. Installs the skills into the project (`.agents/skills/`, linked into `.claude/skills/`): Orca's `orca-cli` and
-   lane-control's `orca-cotal-lanes`.
+3. Installs the skills for the agent user (`~/.agents/skills/`, linked into `~/.claude/skills/` and
+   `~/.config/opencode/skills/`): Orca's `orca-cli` and lane-control's `orca-cotal-lanes`. They are user-level
+   because a lane worktree carries only committed files.
 4. Creates the Cotal space (`cotal space create`; plus `cotal setup -H claude` for the Claude plugin and wake channel).
 5. Renders the personas from `personas/` and the tier table `templates/lanes.tsv` into `.cotal/`, and gitignores
-   `.cotal/`.
-6. Starts the broker (`cotal up --no-manager`, on a per-project port) and a manager service `mgr` on the Orca runtime.
+   `.cotal/`. Each persona names the tier table by absolute path and the project's Claude permission mode.
+6. Starts the broker (`cotal up --no-manager`, on a per-project port recorded in `.cotal/lane-control.json`) and a
+   manager service `mgr` on the Orca runtime.
    `mgr` carries `envRefs` for the proxy variables, because `cotal up` gives its manager a fixed environment without
    them.
 7. Starts the coordinator in the main checkout.
