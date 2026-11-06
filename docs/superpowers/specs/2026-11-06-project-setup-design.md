@@ -170,3 +170,39 @@ Box prep: user `dev` (no sudo needed for agents); Claude Code via npm; proxy all
 ## Left to the builder
 Script language (POSIX sh + small python3 for JSON is fine), exact file names inside `scripts/`, port derivation,
 rendering of placeholders, wording of personas within the sources above.
+
+## Spike results (2026-11-06, trial-vps, user dev)
+- **Manager-launched agents land in existing Orca worktrees.** `cotal spawn -d --cwd <orca worktree>` with runtime orca
+  opens one terminal tab titled `cotal-<name>` in that worktree. No new worktree is created; the other tab is the plain
+  shell Orca opens with every new worktree. Verified for OpenCode (deepseek free) and Claude (sonnet, `--opt
+  permission-mode=auto`, as non-root; auto mode accepted).
+- **The coordinator flow works end to end.**
+  1. A Claude coordinator in the root checkout runs `orca worktree create --parent-worktree active`, and the lineage
+     records parent = root checkout.
+  2. It calls `cotal_spawn` with agent, model, `events:false`, cwd, role and an inline `persona`.
+  3. The OpenCode lane does the work and DMs back.
+  4. The DM wakes the coordinator as its own turn.
+- **Required persona settings.** `cotal_spawn` needs an inline `persona` unless the name is a saved persona. Handing a
+  role needs `role:<r>` in the spawner's `capabilities`, so the coordinator gets `[spawn, "role:lane"]` (and
+  `"role:design"` if it spawns the design lead; project-setup spawns that one itself).
+- **The manager env is scrubbed.** `cotal up` starts the manager as a service with a fixed environment allow-list
+  (PATH, HOME, USER, LOGNAME, TMPDIR, LANG, XDG…, no proxy vars). `spawn.env` in `~/.config/cotal/config.json` is a
+  *list of names* passed through from the manager's environment. So proxy vars need a manager service definition
+  carrying `envRefs`. project-setup:
+  1. runs `cotal up --no-manager`;
+  2. runs `cotal service add mgr --file <def>` (`launch: {type: adapter, adapter: manager-service, options: {root,
+     runtime: orca}}`, envRefs for the proxy names present in the caller's env);
+  3. runs `cotal service start mgr`.
+  Without proxy vars in the env, envRefs is empty and the same path applies.
+- **Claude wiring.** It needs `cotal setup --destination local -H claude --runtime orca --project <repo> -s <space> -y
+  --configure-only` once per space (plugin, MCP entry, skills). It also writes `~/.agents/skills` (cross-vendor).
+- **Host hygiene.**
+  - Debian's umask 002 makes `~/.config` group-writable, and Cotal refuses that (no getfacl). project-setup sets
+    umask 022 and runs `chmod g-w ~/.config ~/.config/cotal`.
+  - OpenCode 2's managed service port (49374) collides between users; set it per user (`opencode service set port`).
+- **Survival.** Services started over ssh (setsid) survive logout. There is no restart after a reboot without a user
+  systemd manager (the trial box has none; documented).
+- **Draft safety.**
+  - OpenCode: a draft in the composer survived an incoming DM, and the agent answered.
+  - Claude: not testable by script, because `orca terminal send` text never shows in Claude's prompt. The owner checks
+    it by hand in Task 6.
