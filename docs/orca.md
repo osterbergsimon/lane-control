@@ -14,8 +14,8 @@ lane-control's scripts call `rove api` and do **not** run unchanged on either. W
 | OpenCode 2.x in a real terminal (its own TUI) | yes ("OpenCode 2 beta") [tested] | yes, with `--no-events` [tested] |
 | Coordinator starts lanes and gets their results | Orca orchestration: experimental, its panel is disabled in 1.4.249+ [docs] | `cotal_spawn` + DMs from inside the agents [tested] |
 | Messages to an agent never land in a half-typed prompt | not documented: worker delivery is `dispatch --inject` into the terminal (the docs' example waits for `tui-idle` first) [docs] | yes: Cotal's OpenCode plugin injects a message as its own turn through OpenCode's server (section 6) |
-| Lanes nested under the coordinator in the sidebar | worktrees nest under a parent ("N children" chip) [docs] | **no** by itself: Cotal opens each agent as a terminal tab in the worktree containing its folder, side by side [tested]; maybe with a worktree per lane (section 9, item 4) |
-| A worktree (branch) per task | yes, Orca's core unit [docs] | **no**: Cotal never creates worktrees [tested] |
+| Lanes nested under the coordinator in the sidebar | worktrees nest under a parent ("N children" chip) [docs] | yes, with a worktree per lane: the coordinator runs `orca worktree create --parent-worktree active`, then `cotal_spawn` into it (section 5b) [tested] |
+| A worktree (branch) per task | yes, Orca's core unit [docs] | yes, Orca creates it; Cotal only runs the agent in it (section 5b) [tested] |
 | Chat UI instead of a TUI | "structured native chat", but **not over SSH** ("SSH sessions continue to use terminal-backed Chat UI") [docs] | n/a |
 
 Rule of thumb: **Orca is the cockpit** (SSH, terminals, editor, git per worktree). **Cotal is the radio** (who
@@ -36,9 +36,10 @@ when a coordinator should run lanes and talk to them while you type.
 1. Add the host in Orca (SSH alias from `~/.ssh/config`, or host, user and key). [tested]
 2. Add the repo with **Run on: <host>**. On first connect Orca installs its own pinned server under
    `~/.orca-remote/` and `~/.orca/` on the host; terminals then live there and survive closing the desktop. [tested]
-3. Host prerequisites: git, the agent CLIs, and either internet to `nodejs.org` (Orca downloads its Node runtime) or a
-   Node mirror (Orca offers "Use a Node.js mirror" on the connection error). For a proxied or air-gapped host allow or
-   mirror `nodejs.org` and `onorca.dev` in addition to npm, PyPI and GitHub. [tested]
+3. Host prerequisites: git, the agent CLIs, and Orca's server. By default Orca installs that on first connect and
+   downloads its Node runtime from `nodejs.org` (or a mirror). On an air-gapped host run `scripts/orca-host-install
+   <host>` first (section 5b): it copies the server and Node from your Orca install, so the host needs neither
+   `nodejs.org` nor `onorca.dev`. [tested]
 4. Model credentials: set the provider key in Orca's OpenCode account profile (worked in the trial), or log in on the
    host with `opencode auth login` in an Orca terminal. **Do not copy `auth.json` from the workstation** (section 7). [tested]
 5. The `orca` CLI is installed on the host at `~/.orca/cli/bin/orca` and reaches the host's runtime as is:
@@ -86,55 +87,112 @@ Notes [tested]:
   `cotal service add web --preset web --creds <file> --read-only` and an SSH tunnel to port 7799. It cannot post
   messages in 0.145.1 (read-only is forced).
 
-## 5b. WIP: Orca makes the tasks, Cotal is only the agent
-**Status: work in progress, stopped mid-test (the model quota ran out).** This is the intended layout. Section 5 has
-Cotal's manager open terminals in Orca. Here **Orca sets up everything it can** (task, worktree, branch, nesting
-under the coordinator, terminal), and Cotal provides only the agent that runs in that terminal and its messaging. One
-task is the coordinator; it creates more Orca tasks the same way, and all of them talk over Cotal's mesh.
+## 5b. project-setup: Orca tasks, Cotal agents (recommended)
+Verified end to end on 2026-11-06 (trial box, user `dev`, Orca 1.4.250, Cotal 0.145.1, OpenCode 2.2.1, Claude Code
+2.1.319). Each project gets:
+- its own Cotal space;
+- a **coordinator** in the main checkout;
+- a **frontend design lead** in its own Orca worktree, nested under the main checkout.
 
-Pieces (in `scripts/`, install on the host's `PATH`):
-- `cotal-agent`: starts OpenCode as a Cotal agent **in the current terminal** (`cotal spawn` in the foreground, so no
-  Cotal manager and no `--runtime orca`), named after the worktree it runs in. Configure it in Orca as a custom
-  agent ("OpenCode (Cotal)", command `cotal-agent`) for tasks you create by hand. Env: `COTAL_SPACE`,
-  `COTAL_AGENT_MODEL`, `COTAL_AGENT_EXTRA` (default `--no-events`, for OpenCode 2.x).
-- `orca-cotal-task <name> "<first task>" [--role R]`: run **from inside a worktree** (the coordinator runs it in its
-  own shell). Asks Orca for a new worktree nested under the caller's (`orca worktree create … --parent-worktree
-  worktree:<caller>`), then opens a terminal in it running `cotal-agent --role R -p "<first task>"`
-  (`orca terminal create --command`). Prints `{"name","worktree","branch","terminal"}`. The brief is shell-quoted,
-  since Orca types `--command` into the terminal's shell.
+Lanes are Orca child tasks with one Cotal agent each, routed by tier to OpenCode or Claude. Messages never type into a
+composer. [tested]
 
-Setup on the host (beyond section 5's install; the Cotal manager is not needed for this path, the broker and delivery
-daemon from `cotal up` are):
+### Host: once per machine, as a normal user (not root)
+- Agents never run as root: Claude refuses `bypassPermissions` as root, and nothing needs it.
+- Install `cotal-ai` and the harnesses (`@opencode/cli`, `@anthropic-ai/claude-code`) from npm. Then, as the agent
+  user:
+  ```bash
+  cotal ext add @cotal-ai/orca
+  echo '{ "spawn": { "env": ["HTTP_PROXY","HTTPS_PROXY","NO_PROXY","http_proxy","https_proxy","no_proxy","TMPDIR"] } }' \
+    > ~/.config/cotal/config.json                    # names to pass through, not values
+  claude                                             # sign in once; for bypass mode also run
+  claude --permission-mode bypassPermissions          # once, and accept the warning
+  ```
+- From the workstation, put Orca's server on the host without the host downloading anything:
+  ```bash
+  scripts/orca-host-install <user@host> --pair        # copies orcad + node from your Orca install, starts orcad,
+                                                      # tunnels 127.0.0.1:6768 and pairs (environment <user-host>)
+  ```
+  - Without `--pair`, add the host in Orca and connect: Orca finds the install and reuses it.
+  - Either way the host needs no `nodejs.org` or `onorca.dev`.
+  - `--pair` keeps the tunnel up as a systemd user unit `orca-tunnel-<host>` on the workstation.
+  - If orcad's port is taken (another user's Orca), use `--port`.
+
+### Project: one command
 ```bash
-install -m 755 scripts/cotal-agent scripts/orca-cotal-task /usr/local/bin/
-cd <main checkout of the repo, open in Orca>
-orca-cotal-task boss "You are the project coordinator … To create a teammate run: orca-cotal-task <name> \"<task>\" …" \
-  --role coordinator
+scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
+  [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
+  [--tiers file.tsv] [--port N] [--no-start]
 ```
-Then DM the coordinator (`cotal send -t boss "…"` or `cotal chat`) and have it create its teammates.
+It does each step only if it is not already done, so a re-run prints `exists` for every step:
+1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
+2. Runs `orca repo add`.
+3. Installs the skills into the project (`.agents/skills/`, linked into `.claude/skills/`): Orca's `orca-cli` and
+   lane-control's `orca-cotal-lanes`.
+4. Creates the Cotal space (`cotal space create`; plus `cotal setup -H claude` for the Claude plugin and wake channel).
+5. Renders the personas from `personas/` and the tier table `templates/lanes.tsv` into `.cotal/`, and gitignores
+   `.cotal/`.
+6. Starts the broker (`cotal up --no-manager`, on a per-project port) and a manager service `mgr` on the Orca runtime.
+   `mgr` carries `envRefs` for the proxy variables, because `cotal up` gives its manager a fixed environment without
+   them.
+7. Starts the coordinator in the main checkout.
+8. Creates the Orca worktree `design-lead` as a child of the main checkout and starts the design lead there.
+9. Verifies that both agents are live and that the design lead's task is nested.
 
-Why not Orca's own agent launch: `orca worktree create --agent` and `orca agent launch` accept only Orca's known
-agents, so a Cotal agent goes in with `orca terminal create --command`.
+With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
 
-Reached so far (2026-11-05) [tested]:
-- `orca-cotal-task boss … --role coordinator` from the repo's main checkout: Orca created worktree `boss` on branch
-  `boss` under `~/orca/workspaces/<repo>/`, nested under the main worktree, opened a terminal titled `cotal-boss`, and
-  `cotal-agent` started OpenCode 2.2.1 there (terminal title `cotal:demo:boss`, Cotal connector process running).
-- `cotal ps` does not list such agents (it lists manager-launched seats only); use `cotal who`.
+### Lanes
+The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
+1. Pick the tier per `model-routing.md`, then look up the harness and model in `.cotal/lanes.tsv`.
+2. Run `orca worktree create --name <key> --parent-worktree active --json`, so the new task nests under the caller in
+   the GUI.
+3. Call `cotal_spawn` with `agent`, `model`, `cwd` = that worktree, role `lane`, an inline `persona`, and the lane
+   brief as `prompt`. For OpenCode add `events: false`; for Claude, `launchOptions: {"permission-mode": …}`.
+4. The lane reports by `cotal_dm`, and the DM wakes the parent as its own turn.
+5. Task cards show state via `orca worktree set --comment/--workspace-status`.
 
-Not yet verified:
-- **the agent joining the mesh: it did not.** About 3 minutes after launch `boss` was not in `cotal who`, although
-  its OpenCode TUI and Cotal connector were running. Not diagnosed. Candidates: a foreground spawn from a folder
-  outside the space's project root (the worktree lives under `~/orca/workspaces/`), or the connector stuck before
-  joining (the free-model quota was exhausted at that moment). First thing to check: run `cotal-agent` by hand in a
-  worktree terminal and read what `cotal spawn` prints before the TUI takes the screen;
-- the first task given with `-p` reaching the agent;
-- the coordinator running `orca-cotal-task` itself, and the new tasks nesting under its worktree;
-- two task agents messaging each other directly, and the coordinator steering them by DM;
-- draft safety in this mode (expected to match section 6: it is the same OpenCode plugin).
+Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
 
-Next session: re-run the steps above with a model that has quota (Orca's OpenCode profile key, or `COTAL_AGENT_MODEL`),
-then fill in this list and fold the result into section 6.
+### Permission modes (Claude)
+- `auto` is the default: Claude screens each tool call, as `--opt permission-mode=auto` on spawn.
+- `bypassPermissions` is an option (non-root only, after accepting its warning once).
+- The project's mode is written into the personas, and lanes inherit it (tier table `inherit`).
+
+### Verified on 2026-11-06 [tested]
+- A manager-launched agent opens as one tab `cotal-<name>` inside an *existing* Orca worktree (next to the shell Orca
+  opens with every worktree), and joins the roster. Tested with OpenCode and with Claude.
+- The coordinator flow end to end, run as a spike:
+  1. A Claude coordinator created a child worktree (`parentWorktreeId` = the main checkout).
+  2. It spawned an OpenCode lane there with `cotal_spawn`.
+  3. The lane did the work and DMed `DONE`.
+  4. The DM woke the coordinator, which replied without claiming to have checked the file itself.
+- The `cotal_spawn` requirements that run surfaced:
+  - It needs an inline `persona` unless the name is a saved persona.
+  - Handing role `lane` needs `role:lane` in the spawner's `capabilities`, which the personas carry.
+- `project-setup` from the workstation with `--host`:
+  - Both agents came up and loaded the skill, and the design lead reported ready to the coordinator by DM.
+  - A re-run is all `exists`.
+- The coordinator refused a request that arrived as a DM from the CLI ("only your words in this tab instruct me"),
+  and asked one question with its recommendation instead.
+- Draft safety: an OpenCode agent kept a half-typed draft through an incoming DM. Claude: not testable by script
+  (`orca terminal send` text never shows in Claude's prompt). Check it by hand: type in the coordinator's tab while
+  a lane reports.
+
+### Host gotchas found
+- **Manager environment.** `cotal up` starts the manager with a fixed environment allow-list, so proxy variables
+  never reach agents through `spawn.env`. Hence the `mgr` service with `envRefs`.
+- **Wrong space.** Run every `cotal` call with `-s <space>`. Otherwise it acts on the space last chosen with
+  `cotal use`: an early run saw another project's broker and manager.
+- **Debian umask 002** makes `~/.config` group-writable, and Cotal refuses to seed extensions. Use umask 022 and
+  `chmod g-w ~/.config ~/.config/cotal`; project-setup does both.
+- **OpenCode 2's managed service port (49374)** is per machine. A second user needs `opencode service set port <n>`.
+- **A global `TMPDIR` in `/etc/environment`** pointing into one user's home breaks orcad for everyone else.
+  orca-host-install falls back to `~/tmp`.
+- **No systemd user manager** (the trial container lacks `pam_systemd`): orcad and the Cotal services run detached
+  and survive logout, but don't restart after a reboot.
+
+`scripts/cotal-agent` and `scripts/orca-cotal-task` are the superseded 2026-11-05 attempt, a foreground agent typed
+into an Orca terminal, which never joined the mesh. Kept for reference; project-setup replaces them.
 
 ## 6. What was verified
 | Check | Result |
