@@ -1,7 +1,8 @@
 #!/bin/sh
 # Integration test for scripts/orca-host-install against a real SSH host (default: the trial box as user dev).
 #   TEST_HOST=dev@trial-vps TEST_PORT=6769 PROXY_CONTAINER=agent-mux-trial-proxy-1 tests/test-orca-host-install.sh
-# Destructive on the host: removes ~/.orca-remote and ~/.orca of the test user first.
+# Destructive on the host: removes ~/.orca-remote and ~/.orca of the test user first; refuses (exit 3) when that
+# user's Orca has projects, unless TEST_DESTRUCTIVE=1.
 set -u
 here=$(cd "$(dirname "$0")/.." && pwd)
 host=${TEST_HOST:-dev@trial-vps}
@@ -15,6 +16,11 @@ bad()  { echo "FAIL $*"; fails=$((fails + 1)); }
 check() { desc=$1; shift; if "$@"; then ok "$desc"; else bad "$desc"; fi; }
 r() { ssh "$host" "$@"; }
 
+# Refuse to wipe a user whose Orca knows projects (their repos, worktrees and agent tabs would be lost).
+if [ "${TEST_DESTRUCTIVE:-0}" != 1 ] && r 'ls ~/.orca/profiles/*/profile-state.db >/dev/null 2>&1 && [ -n "$(~/.orca/cli/bin/orca repo list --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)[\"result\"][\"repos\"] or \"\")" 2>/dev/null)" ]'; then
+  echo "refusing: $host has Orca projects; use a throwaway user, or TEST_DESTRUCTIVE=1 to wipe them" >&2
+  exit 3
+fi
 r 'pkill -u "$(id -u)" -f "[o]rcad.js" ; rm -rf ~/.orca-remote ~/.orca' 2>/dev/null
 mark=$(date -u +%s)
 
