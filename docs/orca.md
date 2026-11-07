@@ -128,7 +128,7 @@ composer. [tested]
 ```bash
 scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
-  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-start]
+  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-design-lead] [--no-start]
 ```
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
@@ -151,8 +151,10 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    them.
 7. Starts the coordinator in the main checkout.
 8. Creates the Orca worktree `design-lead` as a child of the main checkout, closes Orca's startup shell, waits for
-   the setup script, starts the design lead there, then opens a shell after the agent's tab.
-9. Verifies that both agents are live and that the design lead's task is nested.
+   the setup script, starts the design lead there, then opens a shell after the agent's tab. With
+   `--no-design-lead` (a project without a frontend) there is no design lead: the coordinator routes any UI work
+   itself and its persona says so.
+9. Verifies that the agents are live and that the design lead's task is nested.
 
 With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
 

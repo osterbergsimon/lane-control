@@ -49,12 +49,20 @@ def harness_model(spec: str) -> tuple:
     return harness, model
 
 
+DESIGN_ROUTE = ("The project's design lead (`design-lead`, role `design`) owns frontend and visual quality; route\n"
+                "UI work and UI reviews through it.")
+NO_DESIGN_ROUTE = "This project has no design lead: you route any UI work yourself, and it gets the code reviewer only."
+DESIGN_REVIEW = "Frontend\nlanes also get the design lead's review of how it looks and works. "
+
+
 def render_persona(text: str, harness: str, model: str, mode: str, project: str, tiers: str = "",
-                   reviewer: str = "") -> str:
+                   reviewer: str = "", design_lead: bool = True) -> str:
     launch = "events: false" if harness == "opencode" else f'launchOptions: {{ "permission-mode": "{mode}" }}'
     return (text.replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
             .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
-            .replace("{{REVIEWER}}", reviewer))
+            .replace("{{REVIEWER}}", reviewer)
+            .replace("{{DESIGN_ROUTE}}", DESIGN_ROUTE if design_lead else NO_DESIGN_ROUTE)
+            .replace("{{DESIGN_REVIEW}}", DESIGN_REVIEW if design_lead else ""))
 
 
 def orca_cli() -> str:
@@ -294,11 +302,13 @@ def claude_wiring(repo: Path, space: str):
 
 
 def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tiers: Path):
+    """lead None: the project has no design lead."""
     table = str(repo / ".cotal" / "lanes.tsv")
     review_persona = str(repo / ".cotal" / "agents" / "reviewer.md")
-    for name, (h, m) in (("coordinator", coord), ("design-lead", lead), ("reviewer", reviewer)):
+    roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
+    for name, (h, m) in roles:
         text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project, table,
-                              review_persona)
+                              review_persona, design_lead=lead is not None)
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
     say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
     gi = repo / ".gitignore"
@@ -478,8 +488,14 @@ def close_startup_shell(wt: Path):
             jrun([ORCA, "terminal", "close", "--terminal", t["handle"], "--tab", "--json"])
 
 
-def verify(repo: Path, space: str, wt: Path):
+def verify(repo: Path, space: str, wt):
+    """wt None: no design lead to check."""
     agents = live_agents(repo, space)
+    if wt is None:
+        if "coordinator" not in agents:
+            raise Fail("verify: not live: coordinator")
+        say("verify", "ok", "coordinator live (no design lead)")
+        return
     missing = [n for n in ("coordinator", "design-lead") if n not in agents]
     rows = jrun([ORCA, "worktree", "list", "--json"])["result"]["worktrees"]
     lead = [w for w in rows if Path(w["path"]) == wt]
@@ -499,6 +515,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dest", default=str(Path.home() / "code"))
     ap.add_argument("--coordinator", default="claude/opus")
     ap.add_argument("--design-lead", default="claude/opus")
+    ap.add_argument("--no-design-lead", action="store_true",
+                    help="no design lead (projects without a frontend): only the coordinator is started")
     ap.add_argument("--write-orca-yaml", action="store_true",
                     help="write the drafted setup script as orca.yaml in the repo (uncommitted) instead of .cotal/")
     ap.add_argument("--reviewer", default="claude/opus",
@@ -516,7 +534,8 @@ def main(argv=None) -> int:
     if a.permission_mode not in MODES:
         print(f"project-setup: --permission-mode must be one of {', '.join(MODES)}", file=sys.stderr)
         return 2
-    coord, lead = harness_model(a.coordinator), harness_model(a.design_lead)
+    coord = harness_model(a.coordinator)
+    lead = None if a.no_design_lead else harness_model(a.design_lead)
     reviewer = harness_model(a.reviewer)
     tiers = Path(a.tiers).expanduser()
     if a.host:
@@ -532,7 +551,7 @@ def main(argv=None) -> int:
     tier_harnesses = {l.split("\t")[1] for l in tiers.read_text().splitlines()[1:]
                       if l and not l.startswith("#") and len(l.split("\t")) > 1} & set(HARNESSES)
     tier_harnesses.add(reviewer[0])  # started per lane, like a tier's harness
-    needed = {coord[0], lead[0]}
+    needed = {coord[0]} | ({lead[0]} if lead else set())
     base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
     try:
         preflight(needed)
@@ -556,17 +575,20 @@ def main(argv=None) -> int:
         start_stack(repo, space, a.port)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
-        wt, created = design_worktree(repo, repo_id)
-        if created:
-            close_startup_shell(wt)
-            wait_for_setup(wt, "design-lead")
-        spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
-              "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
-        if created:  # a shell for the owner, after the agent's tab
-            jrun([ORCA, "terminal", "create", "--worktree", f"path:{wt}", "--json"])
+        wt = None
+        if lead:
+            wt, created = design_worktree(repo, repo_id)
+            if created:
+                close_startup_shell(wt)
+                wait_for_setup(wt, "design-lead")
+            spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
+                  "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
+            if created:  # a shell for the owner, after the agent's tab
+                jrun([ORCA, "terminal", "create", "--worktree", f"path:{wt}", "--json"])
         verify(repo, space, wt)
         print(f"summary: {project} · space {space} · broker 127.0.0.1:{record(repo).get('port')} · orca repo {repo_id}")
-        print(f"  open Orca: the project {repo.name}, its main checkout (coordinator) and child task design-lead")
+        print(f"  open Orca: the project {repo.name}, its main checkout (coordinator)"
+              + (" and child task design-lead" if lead else ""))
         return 0
     except Fail as e:
         print(f"project-setup: {e}", file=sys.stderr)

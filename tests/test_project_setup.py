@@ -401,6 +401,31 @@ class RunTests(unittest.TestCase):
         self.assertIn("--terminal term_1", calls[i_close])
         self.assertIn("design-lead", calls[i_create])
 
+    def test_no_design_lead_starts_only_the_coordinator(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--no-design-lead")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.e.calls()
+        self.assertTrue(any(c.startswith("cotal spawn coordinator") for c in calls))
+        self.assertFalse(any("design-lead" in c for c in calls), "\n".join(calls))
+        self.assertFalse((repo / ".cotal" / "agents" / "design-lead.md").exists())
+        self.assertIn("verify: ok", r.stdout)
+        self.assertNotIn("design-lead", r.stdout.split("verify:")[1])
+
+    def test_no_design_lead_coordinator_routes_ui_itself(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--no-design-lead", "--no-start").returncode, 0)
+        coord = " ".join((repo / ".cotal" / "agents" / "coordinator.md").read_text().split())
+        self.assertNotIn("route UI work and UI reviews through it", coord)
+        self.assertNotIn("design lead's review", coord)
+        self.assertIn("no design lead", coord)
+        self.assertNotIn("{{", coord)
+        with_lead = self.e.repo("other")
+        self.assertEqual(self.e.run(str(with_lead), "--no-start").returncode, 0)
+        coord = " ".join((with_lead / ".cotal" / "agents" / "coordinator.md").read_text().split())
+        self.assertIn("route UI work and UI reviews through it", coord)
+        self.assertIn("design lead's review", coord)
+
     def test_rerun_leaves_existing_tabs_alone(self):
         repo = self.e.repo()
         self.assertEqual(self.e.run(str(repo)).returncode, 0)
