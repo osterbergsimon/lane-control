@@ -57,7 +57,9 @@ DESIGN_REVIEW = "Frontend\nlanes also get the design lead's review of how it loo
 
 def render_persona(text: str, harness: str, model: str, mode: str, project: str, tiers: str = "",
                    reviewer: str = "", design_lead: bool = True) -> str:
-    launch = "events: false" if harness == "opencode" else f'launchOptions: {{ "permission-mode": "{mode}" }}'
+    # allow-dangerously-skip-permissions puts bypass in Claude's Shift+Tab mode cycle, without starting in it.
+    launch = ("events: false" if harness == "opencode" else
+              f'launchOptions: {{ "permission-mode": "{mode}", "allow-dangerously-skip-permissions": "" }}')
     return (text.replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
             .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
             .replace("{{REVIEWER}}", reviewer)
@@ -469,7 +471,8 @@ def spawn(repo: Path, space: str, name: str, harness: str, model: str, mode: str
         say(f"agent {name}", "exists", str(cwd))
         return
     cmd = ["cotal", "spawn", name, "-d", "--harness", harness, "-m", model, "--cwd", str(cwd)]
-    cmd += ["--no-events"] if harness == "opencode" else ["--opt", f"permission-mode={mode}"]
+    cmd += (["--no-events"] if harness == "opencode" else
+            ["--opt", f"permission-mode={mode}", "--opt", "allow-dangerously-skip-permissions="])
     run(cmd + ["-p", kickoff, "--space", space], cwd=repo, timeout=300)
     say(f"agent {name}", "created", f"{harness}/{model} in {cwd}")
 

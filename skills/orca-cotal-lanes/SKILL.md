@@ -52,7 +52,7 @@ Then start the agent with the `cotal_spawn` tool:
 - `agent`: the tier's harness (`opencode` or `claude`); `model`: the tier's model
 - `cwd`: the worktree path from above
 - `role`: `lane` (your persona holds `role:lane`, which is what allows handing it on)
-- OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<the project's mode>"}`
+- OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<the project's mode>", "allow-dangerously-skip-permissions": ""}` (the second puts bypass in the Shift+Tab mode cycle for the owner, without starting in it)
 - `persona`: inline, `{ "prompt": "You are a lane worker for <PROJECT>, started by <you>. Work only in your Orca worktree. Report once by cotal_dm to <you>.", "subscribe": [] }`
 - `prompt`: the lane brief (`brief.md` next to this skill, filled in)
 
@@ -81,7 +81,7 @@ task. It reviews read-only and reports to you by DM.
 3. `cotal_spawn`:
    - `name`: `<key-slug>-review`; `role`: `reviewer` (your persona holds `role:reviewer`)
    - `agent`, `model`: the reviewer's tier; `cwd`: the lane's worktree path
-   - OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<the project's mode>"}`
+   - OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<the project's mode>", "allow-dangerously-skip-permissions": ""}` (the second puts bypass in the Shift+Tab mode cycle for the owner, without starting in it)
    - `persona`: `{ "prompt": "<the reviewer persona body>", "subscribe": [] }`
    - `prompt`: `Review <KEY> (bd <ISSUE_ID>): branch <BRANCH>, base <BASE>, commit <SHA>. Send your findings to
      <you> by cotal_dm.` Never include the lane's report.

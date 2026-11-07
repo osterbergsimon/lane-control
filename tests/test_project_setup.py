@@ -204,7 +204,8 @@ class PureTests(unittest.TestCase):
         out = self.m.render_persona(text, "claude", "opus", "auto", "Shop")
         self.assertIn("agent: claude", out)
         self.assertIn("model: opus", out)
-        self.assertIn('launchOptions: { "permission-mode": "auto" }', out)
+        # bypass in Claude's Shift+Tab mode cycle, without starting in it
+        self.assertIn('launchOptions: { "permission-mode": "auto", "allow-dangerously-skip-permissions": "" }', out)
         self.assertNotIn("events:", out)
         self.assertNotIn("{{", out)
         self.assertIn("coordinator of Shop", out)
@@ -317,6 +318,7 @@ class RunTests(unittest.TestCase):
         self.assertIn("--cwd " + str(self.e.home / "orca" / "workspaces" / "design-lead"), spawn_dl)
         self.assertIn("--harness claude", spawn_dl)
         self.assertIn("--opt permission-mode=auto", spawn_dl)
+        self.assertIn("--opt allow-dangerously-skip-permissions=", spawn_dl)
         agents = repo / ".cotal" / "agents"
         self.assertIn("model: opus", (agents / "coordinator.md").read_text())
         self.assertFalse((repo / ".agents").exists())  # skills are user-level (lane worktrees lack untracked files)

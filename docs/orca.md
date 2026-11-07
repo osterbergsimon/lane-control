@@ -182,6 +182,8 @@ Never `orca terminal send` or Orca `orchestration` on agents: those type into th
 
 ### Permission modes (Claude)
 - `auto` is the default: Claude screens each tool call, as `--opt permission-mode=auto` on spawn.
+- Every Claude agent also starts with `--allow-dangerously-skip-permissions`, so bypass is in its Shift+Tab mode
+  cycle for the owner to switch to; it never starts in bypass unless the project's mode is `bypassPermissions`.
 - `bypassPermissions` is an option (non-root only, after accepting its warning once).
 - The project's mode is written into the personas, and lanes inherit it (tier table `inherit`).
 

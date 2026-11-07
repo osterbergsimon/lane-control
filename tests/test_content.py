@@ -98,3 +98,9 @@ class NoTypingIntoAgentsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BypassOptionTests(unittest.TestCase):
+    def test_lane_skill_offers_bypass_in_the_mode_cycle(self):
+        text = (ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text()
+        self.assertEqual(text.count('"allow-dangerously-skip-permissions": ""'), 2)
