@@ -111,9 +111,13 @@ def jrun(cmd, cwd=None):
 
 
 def add_orca_cli_to_path():
-    """On an Orca host the CLI lives in ~/.orca/cli/bin, which non-interactive ssh shells do not put on PATH."""
-    d = Path(os.environ.get("HOME", str(Path.home()))) / ".orca" / "cli" / "bin"
-    if d.is_dir() and str(d) not in os.environ.get("PATH", "").split(":"):
+    """Put the Orca CLI's folder first on PATH: on a host ~/.orca/cli/bin (non-interactive ssh shells lack it), on a
+    workstation the desktop shim (where a plain `orca` may be another program, e.g. OrcaSlicer)."""
+    c = orca_cli()
+    if not os.path.isabs(c):
+        return
+    d = os.path.dirname(c)
+    if d not in os.environ.get("PATH", "").split(":"):
         os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
 
 
@@ -313,7 +317,7 @@ def start_stack(repo: Path, space: str, port_flag):
         say("manager", "exists", "mgr (runtime orca)")
         return
     if "mgr" not in svc:
-        refs = {v: v for v in PROXY_VARS if v in os.environ}
+        refs = {v: v for v in PROXY_VARS + ("COTAL_ORCA_BIN",) if v in os.environ}
         definition = {"schemaVersion": 1, "space": space,
                       "launch": {"type": "adapter", "adapter": "manager-service",
                                  "options": {"root": str(repo), "runtime": "orca"}},
@@ -396,6 +400,8 @@ def main(argv=None) -> int:
     global ORCA
     add_orca_cli_to_path()
     ORCA = orca_cli()
+    # Cotal's Orca driver otherwise tries `orca-ide`, then whatever `orca` is on PATH.
+    os.environ.setdefault("COTAL_ORCA_BIN", ORCA)
     tier_harnesses = {l.split("\t")[1] for l in tiers.read_text().splitlines()[1:]
                       if l and not l.startswith("#") and len(l.split("\t")) > 1} & set(HARNESSES)
     needed = {coord[0], lead[0]}

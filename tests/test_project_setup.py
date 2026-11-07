@@ -303,9 +303,30 @@ class RunTests(unittest.TestCase):
         m = load()
         d = self.e.home / ".orca" / "cli" / "bin"
         d.mkdir(parents=True)
-        with mock.patch.dict(m.os.environ, {"PATH": "/usr/bin", "HOME": str(self.e.home)}):
+        (d / "orca").write_text("#!/bin/sh\n")
+        (d / "orca").chmod(0o755)
+        with mock.patch.dict(m.os.environ, {"PATH": "/usr/bin", "HOME": str(self.e.home)}, clear=True):
             m.add_orca_cli_to_path()
             self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
+
+    def test_desktop_orca_cli_dir_added_to_path(self):
+        # A workstation has no ~/.orca/cli/bin; the desktop shim's folder goes first, ahead of OrcaSlicer's `orca`.
+        m = load()
+        d = self.e.home / ".config" / "orca" / "linux-orca-cli-shim"
+        d.mkdir(parents=True)
+        (d / "orca").write_text("#!/bin/sh\n")
+        (d / "orca").chmod(0o755)
+        with mock.patch.dict(m.os.environ, {"PATH": "/usr/bin", "HOME": str(self.e.home)}, clear=True):
+            m.add_orca_cli_to_path()
+            self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
+
+    def test_mgr_definition_points_cotal_at_orca_cli(self):
+        # Cotal's Orca driver runs `orca-ide`/`orca` from PATH unless COTAL_ORCA_BIN names the CLI.
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
+        self.assertEqual(d["envRefs"].get("COTAL_ORCA_BIN"), "COTAL_ORCA_BIN")
 
     # --- review fixes ---------------------------------------------------------------------------------------
     def test_orca_cli_env_wins_over_path_orca(self):
