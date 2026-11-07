@@ -37,6 +37,10 @@ orca worktree create --name <key-slug> --parent-worktree active --setup inherit 
 Take `result.worktree.path` from the JSON. `--setup inherit` runs the repo's `orca.yaml` setup script if it has one.
 For independent top-level work the owner asked for, use `--no-parent` instead.
 
+Orca opens a plain shell in the new worktree. Close it, so the agent's tab comes first: in `orca terminal list --json`,
+take the terminal whose `worktreePath` is the new worktree and whose title is not `Setup` (the setup script's own tab:
+leave it), and run `orca terminal close --terminal <handle> --tab --json`.
+
 Then start the agent with the `cotal_spawn` tool:
 
 - `name`: the lane key slug (same as the worktree name)
@@ -48,7 +52,8 @@ Then start the agent with the `cotal_spawn` tool:
 - `prompt`: the lane brief (`brief.md` next to this skill, filled in)
 
 The agent opens as a `cotal-<name>` tab inside that worktree. Confirm with `cotal_roster` that it joined; if the
-spawn is refused, report the refusal to the owner rather than working around it.
+spawn is refused, report the refusal to the owner rather than working around it. Then give the owner a shell after the
+agent's tab: `orca terminal create --worktree path:<worktree> --json`.
 
 ## 3. Mirror the lane in the GUI
 Keep the task card honest so the owner sees state at a glance:

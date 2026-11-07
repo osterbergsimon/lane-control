@@ -19,6 +19,7 @@ state.setdefault("worktrees", [])
 state.setdefault("services", {})
 state.setdefault("broker", False)
 state.setdefault("agents", [])
+state.setdefault("terminals", [])
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write(tool + " " + " ".join(args) + "\n")
 
@@ -60,8 +61,21 @@ def orca():
         Path(path).mkdir(parents=True, exist_ok=True)
         w = {"repo": repo, "name": name, "path": path, "parent": f"{repo}::{parent_path}"}
         state["worktrees"].append(w)
+        # Orca opens a plain shell in every new worktree.
+        state["terminals"].append({"handle": f"term_{len(state['terminals']) + 1}", "title": f"dev@box: {path}",
+                                   "worktreePath": path})
         out({"ok": True, "result": {"worktree": {"id": f"{repo}::{path}", "path": path,
                                                  "parentWorktreeId": w["parent"]}}})
+    if cmd == "terminal list":
+        out({"ok": True, "result": {"terminals": state["terminals"]}})
+    if cmd == "terminal close":
+        state["terminals"] = [t for t in state["terminals"] if t["handle"] != opt("--terminal")]
+        out({"ok": True, "result": {}})
+    if cmd == "terminal create":
+        t = {"handle": f"term_{len(state['terminals']) + 1}", "title": opt("--title", "shell"),
+             "worktreePath": opt("--worktree").split(":", 1)[1]}
+        state["terminals"].append(t)
+        out({"ok": True, "result": {"terminal": t}})
     out({"ok": False, "error": {"message": f"stub: unhandled orca {args}"}}, 9)
 
 

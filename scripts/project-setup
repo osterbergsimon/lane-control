@@ -346,16 +346,26 @@ def spawn(repo: Path, space: str, name: str, harness: str, model: str, mode: str
     say(f"agent {name}", "created", f"{harness}/{model} in {cwd}")
 
 
-def design_worktree(repo: Path, repo_id: str) -> Path:
+def design_worktree(repo: Path, repo_id: str):
+    """The design lead's child worktree, and whether this run created it."""
     for w in jrun([ORCA, "worktree", "list", "--json"])["result"]["worktrees"]:
         if w["id"].startswith(repo_id + "::") and w.get("displayName") == "design-lead":
             say("worktree design-lead", "exists", w["path"])
-            return Path(w["path"])
+            return Path(w["path"]), False
     res = jrun([ORCA, "worktree", "create", "--repo", f"id:{repo_id}", "--name", "design-lead",
                 "--parent-worktree", f"path:{repo}", "--setup", "inherit", "--json"])["result"]
     path = Path(res["worktree"]["path"])
     say("worktree design-lead", "created", str(path))
-    return path
+    return path, True
+
+
+def close_startup_shell(wt: Path):
+    """Orca opens a plain shell in every new worktree; close it so the agent's tab comes first. The setup script runs
+    in its own "Setup" tab, which stays."""
+    for t in jrun([ORCA, "terminal", "list", "--json"])["result"]["terminals"]:
+        title = t.get("title") or ""
+        if Path(t.get("worktreePath") or "/") == wt and title != "Setup" and not title.startswith("cotal-"):
+            jrun([ORCA, "terminal", "close", "--terminal", t["handle"], "--tab", "--json"])
 
 
 def verify(repo: Path, space: str, wt: Path):
@@ -429,9 +439,13 @@ def main(argv=None) -> int:
         start_stack(repo, space, a.port)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
-        wt = design_worktree(repo, repo_id)
+        wt, created = design_worktree(repo, repo_id)
+        if created:
+            close_startup_shell(wt)
         spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
               "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
+        if created:  # a shell for the owner, after the agent's tab
+            jrun([ORCA, "terminal", "create", "--worktree", f"path:{wt}", "--json"])
         verify(repo, space, wt)
         print(f"summary: {project} · space {space} · broker 127.0.0.1:{record(repo).get('port')} · orca repo {repo_id}")
         print(f"  open Orca: the project {repo.name}, its main checkout (coordinator) and child task design-lead")

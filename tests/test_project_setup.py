@@ -309,6 +309,27 @@ class RunTests(unittest.TestCase):
             m.add_orca_cli_to_path()
             self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
 
+    def test_design_lead_tab_comes_before_the_shell(self):
+        # Orca opens a shell in a new worktree; the agent tab should be first, a fresh shell second.
+        repo = self.e.repo()
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.e.calls()
+        i_close = next(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
+        i_spawn = next(i for i, c in enumerate(calls) if c.startswith("cotal spawn") and "design-lead" in c)
+        i_create = next(i for i, c in enumerate(calls) if c.startswith("orca terminal create"))
+        self.assertLess(i_close, i_spawn)
+        self.assertLess(i_spawn, i_create)
+        self.assertIn("--terminal term_1", calls[i_close])
+        self.assertIn("design-lead", calls[i_create])
+
+    def test_rerun_leaves_existing_tabs_alone(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo)).returncode, 0)
+        self.e.log.write_text("")
+        self.assertEqual(self.e.run(str(repo)).returncode, 0)
+        self.assertFalse(any(c.startswith(("orca terminal close", "orca terminal create")) for c in self.e.calls()))
+
     def test_orca_ide_on_path_preferred_over_desktop_shim(self):
         # A packaged Orca (e.g. NixOS) puts its CLI on PATH as orca-ide; the shim only exists once the app has run.
         m = load()
