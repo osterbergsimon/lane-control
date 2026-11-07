@@ -2,6 +2,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -69,7 +70,15 @@ class Env:
         d.mkdir(parents=True)
         git("init", "-q", "-b", "main", cwd=d)
         git("commit", "-q", "--allow-empty", "-m", "init", cwd=d)
+        self.trust(d)
         return d
+
+    def trust(self, d, accepted=True):
+        """Record Claude's folder-trust answer for d, as Claude Code does in ~/.claude.json."""
+        f = self.home / ".claude.json"
+        cfg = json.loads(f.read_text()) if f.exists() else {}
+        cfg.setdefault("projects", {}).setdefault(str(d), {})["hasTrustDialogAccepted"] = accepted
+        f.write_text(json.dumps(cfg))
 
     def close(self):
         self.tmp.cleanup()
@@ -154,6 +163,7 @@ class RunTests(unittest.TestCase):
         src = self.e.repo("upstream")
         bare = self.e.home / "upstream.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
+        self.e.trust(self.e.home / "code" / "shop")
         r = self.e.run(f"file://{bare}", "--dest", str(self.e.home / "code"), "--name", "Shop")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((self.e.home / "code" / "shop" / ".git").exists())
@@ -170,6 +180,7 @@ class RunTests(unittest.TestCase):
     def test_dir_not_repo_inits(self):
         d = self.e.home / "plain"
         d.mkdir()
+        self.e.trust(d)
         r = self.e.run(str(d))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((d / ".git").exists())
@@ -426,6 +437,22 @@ class RunTests(unittest.TestCase):
         self.assertIn("route UI work and UI reviews through it", coord)
         self.assertIn("design lead's review", coord)
 
+    def test_untrusted_folder_stops_before_claude_starts(self):
+        # Claude Code asks "Do you trust this folder?" on first start there; an agent tab can't answer it.
+        repo = self.e.repo()
+        self.e.trust(repo, accepted=False)
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("trust", r.stderr)
+        self.assertIn(f"cd {repo} && claude", r.stderr)
+        self.assertFalse(any(c.startswith(("cotal spawn", "orca repo add")) for c in self.e.calls()))
+
+    def test_untrusted_folder_is_fine_without_claude_agents(self):
+        repo = self.e.repo()
+        self.e.trust(repo, accepted=False)
+        r = self.e.run(str(repo), "--coordinator", "opencode/opencode/glm-5", "--no-design-lead")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_rerun_leaves_existing_tabs_alone(self):
         repo = self.e.repo()
         self.assertEqual(self.e.run(str(repo)).returncode, 0)
@@ -458,12 +485,15 @@ class RunTests(unittest.TestCase):
             self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
 
     def test_mgr_definition_points_cotal_at_orca_cli(self):
-        # Cotal's Orca driver runs `orca-ide`/`orca` from PATH unless COTAL_ORCA_BIN names the CLI.
+        # Cotal's Orca driver runs `orca-ide`, then `orca`, from PATH. A service can't be given COTAL_* names
+        # (Cotal's schema reserves them), so mgr gets project-setup's PATH, which starts with the Orca CLI's folder.
         repo = self.e.repo()
         r = self.e.run(str(repo), "--name", "Shop")
         self.assertEqual(r.returncode, 0, r.stderr)
         d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
-        self.assertEqual(d["envRefs"].get("COTAL_ORCA_BIN"), "COTAL_ORCA_BIN")
+        self.assertEqual(d["envRefs"].get("PATH"), "PATH")
+        reserved = re.compile(r"^(COTAL_|CLAUDE_CODE_|CLAUDECODE$)")
+        self.assertFalse([k for k in list(d["envRefs"]) + list(d["envRefs"].values()) if reserved.match(k)])
 
     # --- review fixes ---------------------------------------------------------------------------------------
     def test_orca_cli_env_wins_over_path_orca(self):

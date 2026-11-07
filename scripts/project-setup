@@ -439,7 +439,9 @@ def start_stack(repo: Path, space: str, port_flag):
         say("manager", "exists", "mgr (runtime orca)")
         return
     if "mgr" not in svc:
-        refs = {v: v for v in PROXY_VARS + ("COTAL_ORCA_BIN",) if v in os.environ}
+        # PATH (starting with the Orca CLI's folder) lets Cotal's Orca driver find `orca-ide`/`orca`: Cotal's schema
+        # refuses COTAL_* names here, so COTAL_ORCA_BIN can't be passed on.
+        refs = {v: v for v in PROXY_VARS + ("PATH",) if v in os.environ}
         definition = {"schemaVersion": 1, "space": space,
                       "launch": {"type": "adapter", "adapter": "manager-service",
                                  "options": {"root": str(repo), "runtime": "orca"}},
@@ -464,6 +466,17 @@ def spawn(repo: Path, space: str, name: str, harness: str, model: str, mode: str
     cmd += ["--no-events"] if harness == "opencode" else ["--opt", f"permission-mode={mode}"]
     run(cmd + ["-p", kickoff, "--space", space], cwd=repo, timeout=300)
     say(f"agent {name}", "created", f"{harness}/{model} in {cwd}")
+
+
+def claude_trusts(repo: Path) -> bool:
+    """Whether the owner told Claude Code to trust this folder (its first-start "Do you trust this folder?" prompt,
+    recorded per folder in ~/.claude.json; worktrees of the repo share the main checkout's answer)."""
+    f = Path(os.environ.get("HOME", str(Path.home()))) / ".claude.json"
+    try:
+        projects = json.loads(f.read_text()).get("projects", {})
+    except (OSError, ValueError):
+        return False
+    return bool(projects.get(str(repo), {}).get("hasTrustDialogAccepted"))
 
 
 def design_worktree(repo: Path, repo_id: str):
@@ -560,6 +573,11 @@ def main(argv=None) -> int:
             print(f"project-setup: note: tier harness not on PATH: {' '.join(missing_tier)}", file=sys.stderr)
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
+        # An agent tab can't answer Claude's first-start trust prompt, and the launch times out on it. Trusting the
+        # folder is the owner's call, so it is never written for them.
+        if "claude" in needed and not a.no_start and not claude_trusts(repo):
+            raise Fail(f"Claude Code has not been told to trust {repo} yet. Run `cd {repo} && claude` once, answer "
+                       "'Yes, I trust this folder', exit, and run project-setup again.")
         project = a.name or repo.name
         space = slug(project)
         repo_id = orca_repo(repo)

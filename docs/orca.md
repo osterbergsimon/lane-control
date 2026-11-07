@@ -149,7 +149,9 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    manager service `mgr` on the Orca runtime.
    `mgr` carries `envRefs` for the proxy variables, because `cotal up` gives its manager a fixed environment without
    them.
-7. Starts the coordinator in the main checkout.
+7. Starts the coordinator in the main checkout. A Claude agent first needs the owner's answer to Claude Code's
+   "Do you trust this folder?" prompt for the main checkout (lane worktrees share it), which an agent tab can't give:
+   without it project-setup stops and says to run `cd <repo> && claude` once. It never records trust for you.
 8. Creates the Orca worktree `design-lead` as a child of the main checkout, closes Orca's startup shell, waits for
    the setup script, starts the design lead there, then opens a shell after the agent's tab. With
    `--no-design-lead` (a project without a frontend) there is no design lead: the coordinator routes any UI work
