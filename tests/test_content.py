@@ -42,6 +42,20 @@ class PersonaTests(unittest.TestCase):
         self.assertIn("role:lane", keys["capabilities"])
         self.assertIn("orca-cotal-lanes", body)
 
+    def test_reviewer_frontmatter_and_rules(self):
+        keys, body = frontmatter(PERSONAS / "reviewer.md")
+        self.assertEqual(keys["name"], "reviewer")
+        self.assertEqual(keys["role"], "reviewer")
+        self.assertNotIn("spawn", keys.get("capabilities", ""))  # a reviewer starts no agents
+        for needle in ("read-only", "blocker", "major", "minor", "cotal_dm", "never edit", "exercised"):
+            self.assertIn(needle, body.lower())
+        for ph in ("{{HARNESS}}", "{{MODEL}}", "{{LAUNCH}}", "{{PROJECT}}"):
+            self.assertIn(ph, (PERSONAS / "reviewer.md").read_text())
+
+    def test_leads_point_at_the_reviewer(self):
+        for name in ("coordinator.md", "design-lead.md"):
+            self.assertIn("{{REVIEWER}}", (PERSONAS / name).read_text(), name)
+
     def test_personas_carry_placeholders(self):
         for name in ("coordinator.md", "design-lead.md"):
             text = (PERSONAS / name).read_text()

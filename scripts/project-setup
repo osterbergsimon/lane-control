@@ -48,10 +48,12 @@ def harness_model(spec: str) -> tuple:
     return harness, model
 
 
-def render_persona(text: str, harness: str, model: str, mode: str, project: str, tiers: str = "") -> str:
+def render_persona(text: str, harness: str, model: str, mode: str, project: str, tiers: str = "",
+                   reviewer: str = "") -> str:
     launch = "events: false" if harness == "opencode" else f'launchOptions: {{ "permission-mode": "{mode}" }}'
     return (text.replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
-            .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers))
+            .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
+            .replace("{{REVIEWER}}", reviewer))
 
 
 def orca_cli() -> str:
@@ -284,10 +286,12 @@ def claude_wiring(repo: Path, space: str):
     say("claude-wiring", "created", space)
 
 
-def personas_and_tiers(repo: Path, project: str, coord, lead, mode: str, tiers: Path):
+def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tiers: Path):
     table = str(repo / ".cotal" / "lanes.tsv")
-    for name, (h, m) in (("coordinator", coord), ("design-lead", lead)):
-        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project, table)
+    review_persona = str(repo / ".cotal" / "agents" / "reviewer.md")
+    for name, (h, m) in (("coordinator", coord), ("design-lead", lead), ("reviewer", reviewer)):
+        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project, table,
+                              review_persona)
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
     say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
     gi = repo / ".gitignore"
@@ -389,6 +393,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dest", default=str(Path.home() / "code"))
     ap.add_argument("--coordinator", default="claude/opus")
     ap.add_argument("--design-lead", default="claude/opus")
+    ap.add_argument("--reviewer", default="claude/opus",
+                    help="default harness/model of the reviewer persona; leads pick one per lane from the tiers")
     ap.add_argument("--permission-mode", default="auto")
     ap.add_argument("--port", type=int)
     ap.add_argument("--tiers", default=str(HERE / "templates" / "lanes.tsv"))
@@ -403,6 +409,7 @@ def main(argv=None) -> int:
         print(f"project-setup: --permission-mode must be one of {', '.join(MODES)}", file=sys.stderr)
         return 2
     coord, lead = harness_model(a.coordinator), harness_model(a.design_lead)
+    reviewer = harness_model(a.reviewer)
     tiers = Path(a.tiers).expanduser()
     if a.host:
         return on_host(a.host, argv, a.target)
@@ -416,6 +423,7 @@ def main(argv=None) -> int:
     os.environ.setdefault("COTAL_ORCA_BIN", ORCA)
     tier_harnesses = {l.split("\t")[1] for l in tiers.read_text().splitlines()[1:]
                       if l and not l.startswith("#") and len(l.split("\t")) > 1} & set(HARNESSES)
+    tier_harnesses.add(reviewer[0])  # started per lane, like a tier's harness
     needed = {coord[0], lead[0]}
     base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
     try:
@@ -432,7 +440,7 @@ def main(argv=None) -> int:
         cotal_space(repo, space)
         if "claude" in needed | tier_harnesses:
             claude_wiring(repo, space)
-        personas_and_tiers(repo, project, coord, lead, a.permission_mode, tiers)
+        personas_and_tiers(repo, project, coord, lead, reviewer, a.permission_mode, tiers)
         if a.no_start:
             say("start", "skipped", "--no-start")
             return 0

@@ -37,7 +37,8 @@ class Env:
         self.home = Path(self.tmp.name)
         self.bin = self.home / "bin"
         self.bin.mkdir()
-        for name in ("orca", "cotal"):
+        # orca-ide too: packaged installs (NixOS) put the real one in the same dir as git.
+        for name in ("orca", "orca-ide", "cotal"):
             (self.bin / name).symlink_to(STUB)
         for name in ("opencode", "claude"):
             p = self.bin / name
@@ -309,6 +310,17 @@ class RunTests(unittest.TestCase):
             m.add_orca_cli_to_path()
             self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
 
+    def test_reviewer_persona_rendered(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--reviewer", "opencode/opencode/glm-5", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = (repo / ".cotal" / "agents" / "reviewer.md").read_text()
+        self.assertIn("agent: opencode", text)
+        self.assertIn("model: opencode/glm-5", text)
+        self.assertNotIn("{{", text)
+        coord = (repo / ".cotal" / "agents" / "coordinator.md").read_text()
+        self.assertIn(str(repo / ".cotal" / "agents" / "reviewer.md"), coord)
+
     def test_design_lead_tab_comes_before_the_shell(self):
         # Orca opens a shell in a new worktree; the agent tab should be first, a fresh shell second.
         repo = self.e.repo()
@@ -392,9 +404,11 @@ class RunTests(unittest.TestCase):
         oc = "opencode/opencode/x"
         tiers = self.e.home / "tiers.tsv"
         tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x\t-\n")
-        self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--design-lead", oc, "--tiers", str(tiers)).returncode, 0)
+        self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--design-lead", oc, "--reviewer", oc,
+                                    "--tiers", str(tiers)).returncode, 0)
         self.assertFalse(any(c.startswith("cotal setup") for c in self.e.calls()))
-        r = self.e.run(str(repo), "--coordinator", "claude/opus", "--design-lead", oc, "--tiers", str(tiers))
+        r = self.e.run(str(repo), "--coordinator", "claude/opus", "--design-lead", oc, "--reviewer", oc,
+                       "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(any(c.startswith("cotal setup") for c in self.e.calls()))
 

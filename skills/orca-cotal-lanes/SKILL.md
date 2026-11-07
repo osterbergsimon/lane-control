@@ -67,12 +67,29 @@ orca worktree set --worktree path:<worktree> --workspace-status in-review --json
 After starting every independent lane, tell the owner in one line which lanes run, and end your turn. Do not poll:
 the lane's report arrives as a DM and wakes you. Reply to a lane with `cotal_dm` when it needs an answer.
 
-## 5. Check and close
+## 5. Review a lane
+When your persona says a lane gets a reviewer, start one in the lane's own worktree, so its tab sits in the lane's
+task. It reviews read-only and reports to you by DM.
+
+1. Pick its tier and model as your persona says (a different model from the lane's), from the tier table.
+2. Read the reviewer persona (the path your persona names) and take its body: everything after the second `---`.
+3. `cotal_spawn`:
+   - `name`: `<key-slug>-review`; `role`: `reviewer` (your persona holds `role:reviewer`)
+   - `agent`, `model`: the reviewer's tier; `cwd`: the lane's worktree path
+   - OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<the project's mode>"}`
+   - `persona`: `{ "prompt": "<the reviewer persona body>", "subscribe": [] }`
+   - `prompt`: `Review <KEY> (bd <ISSUE_ID>): branch <BRANCH>, base <BASE>, commit <SHA>. Send your findings to
+     <you> by cotal_dm.` Never include the lane's report.
+4. When its findings arrive: send the `blocker` and `major` ones to the lane by `cotal_dm`, word for word. When the
+   lane reports a new commit, DM the reviewer `Round 2: commit <SHA>`. After the last round:
+   `cotal_despawn <key-slug>-review`.
+
+## 6. Check and close
 Before you call a lane good: look at its diff in the worktree, rerun its checks there, look for files outside its
 scope. Merge, then close the lane only when the owner says so for that lane:
 
 ```
-cotal_despawn (or: cotal stop <name>)
+cotal_despawn (or: cotal stop <name>), for the lane and any reviewer still running
 orca worktree rm --worktree path:<worktree> --json
 ```
 
