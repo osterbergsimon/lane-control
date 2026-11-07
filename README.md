@@ -77,10 +77,12 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 | `reliability.md` | numbered failure, fix, reuse log; read before setting up a coordinator |
 | `machine.md` | what is machine-specific; checks for a new box; CI runner patterns |
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
-| `scripts/` | `window-guard.sh`, `machine-watch.sh`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared); for the Orca/Cotal and wsp trials (`docs/orca.md`, `docs/wsp.md`): `cotal-agent`, `orca-cotal-task` (WIP), `wsp-owner-code.mjs`. Each header is its contract |
+| `scripts/` | `window-guard.sh`, `machine-watch.sh`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared); for Orca + Cotal (`docs/orca.md` §5b): `project-setup` (an Orca project with a Cotal coordinator and frontend design lead, here or on an SSH host) and `orca-host-install` (Orca's server on a host without downloads, optional scripted pairing); superseded trial scripts `cotal-agent`, `orca-cotal-task`; for wsp (`docs/wsp.md`): `wsp-owner-code.mjs`. Each header is its contract |
 | `templates/` | AGENTS sections, project and coordinator settings, init script, worker and review briefs, budget ceiling, opencode config |
 | `docs/multi-machine.md` | design (not implemented): projects pinned to machines, one global coordinator over SSH |
 | `docs/orca.md` | trial notes: Orca for SSH remote agents and OpenCode 2, plus Cotal for coordinator-to-lane messaging that never disturbs a half-typed prompt; setup, what was verified, gotchas, Rove verb map, evaluation checklist |
+| `personas/`, `skills/orca-cotal-lanes/`, `templates/lanes.tsv`, `templates/lane-brief.md` | what project-setup installs: Cotal personas (coordinator, design lead), the lane skill (Orca child task + Cotal agent per lane), the tier table (harness and model per tier), the lane brief |
+| `tests/` | `test_content.py`, `test_project_setup.py` (stub orca/cotal), `test-orca-host-install.sh` (against a real host) |
 | `docs/wsp.md` | trial notes: running coordinators and lanes on wsp instead of Rove (setup on an SSH-only box, OpenCode versions, Rove-to-wsp verb map, what has no equivalent); `scripts/wsp-owner-code.mjs` pairs its web UI as owner |
 | `lane-ledger.tsv` | one row per finished task, used to calibrate routing |
 
