@@ -309,6 +309,19 @@ class RunTests(unittest.TestCase):
             m.add_orca_cli_to_path()
             self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
 
+    def test_orca_ide_on_path_preferred_over_desktop_shim(self):
+        # A packaged Orca (e.g. NixOS) puts its CLI on PATH as orca-ide; the shim only exists once the app has run.
+        m = load()
+        shim = self.e.home / ".config" / "orca" / "linux-orca-cli-shim"
+        pkg = self.e.home / "pkg" / "bin"
+        for d in (shim, pkg):
+            d.mkdir(parents=True)
+        for f in (shim / "orca", pkg / "orca-ide"):
+            f.write_text("#!/bin/sh\n")
+            f.chmod(0o755)
+        with mock.patch.dict(m.os.environ, {"PATH": f"{pkg}:/usr/bin", "HOME": str(self.e.home)}, clear=True):
+            self.assertEqual(m.orca_cli(), str(pkg / "orca-ide"))
+
     def test_desktop_orca_cli_dir_added_to_path(self):
         # A workstation has no ~/.orca/cli/bin; the desktop shim's folder goes first, ahead of OrcaSlicer's `orca`.
         m = load()

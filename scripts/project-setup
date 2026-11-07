@@ -56,7 +56,9 @@ def render_persona(text: str, harness: str, model: str, mode: str, project: str,
 
 def orca_cli() -> str:
     home = Path(os.environ.get("HOME", str(Path.home())))
-    for c in (os.environ.get("ORCA_CLI"), home / ".orca" / "cli" / "bin" / "orca",
+    # orca-ide: the CLI's own name on Linux (packaged installs put it on PATH; plain `orca` may be GNOME's
+    # screen reader). The desktop shim is written by the app when it runs.
+    for c in (os.environ.get("ORCA_CLI"), home / ".orca" / "cli" / "bin" / "orca", shutil.which("orca-ide"),
               home / ".config" / "orca" / "linux-orca-cli-shim" / "orca"):
         if c and os.access(str(c), os.X_OK):
             return str(c)

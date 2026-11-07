@@ -11,7 +11,7 @@
 #
 # --no-tunnel: start orcad and print its pairing code, but set up no tunnel and save no environment.
 # Output lines: "installed|exists orcad-<ver>", "started|running orcad <port>", "paired|already-paired <host>".
-# Env: ORCA_CLI (default ~/.config/orca/linux-orca-cli-shim/orca), ORCA_ARTIFACTS (default ~/.config/orca/orcad-artifacts).
+# Env: ORCA_CLI (default orca-ide on PATH, else ~/.config/orca/linux-orca-cli-shim/orca), ORCA_ARTIFACTS (default ~/.config/orca/orcad-artifacts).
 set -eu
 
 die() { echo "orca-host-install: $*" >&2; exit "${2:-1}"; }
@@ -32,7 +32,9 @@ done
 [ -n "$host" ] || die "usage: orca-host-install <ssh-host> [--pair] [--port N]" 2
 
 artifacts=${ORCA_ARTIFACTS:-$HOME/.config/orca/orcad-artifacts}
-orca=${ORCA_CLI:-$HOME/.config/orca/linux-orca-cli-shim/orca}
+pkg_cli=$(command -v orca-ide 2>/dev/null || true)
+if [ -n "$pkg_cli" ]; then default_cli=$pkg_cli; else default_cli=$HOME/.config/orca/linux-orca-cli-shim/orca; fi
+orca=${ORCA_CLI:-$default_cli}
 r() { ssh -o BatchMode=yes "$host" "$@"; }
 
 # --- host facts ---
@@ -47,7 +49,11 @@ case $libc in *musl*) target=linux-$a-musl ;; *) target=linux-$a-glibc ;; esac
 ver=$(ls -t "$artifacts/$target" | head -1)
 slot=$artifacts/$target/$ver
 nodesha=$(tr -d '[:space:]' < "$slot/.runtime-node")
-if [ -z "$appimage_root" ]; then
+# A packaged orca-ide (resources/bin/orca-ide) carries the node runtime two levels up; else the AppImage cache.
+if [ -z "$appimage_root" ] && [ -n "$pkg_cli" ]; then
+  appimage_root=$(dirname "$(dirname "$(readlink -f "$pkg_cli")")")
+fi
+if [ -z "$appimage_root" ] || [ ! -x "$appimage_root/node-runtime/bin/node" ]; then
   appimage_root=$(ls -dt "$HOME"/.cache/appimage-run/*/resources 2>/dev/null | head -1 || true)
 fi
 node=""
