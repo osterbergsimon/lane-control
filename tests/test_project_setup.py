@@ -97,6 +97,69 @@ class PureTests(unittest.TestCase):
     def setUp(self):
         self.m = load()
 
+    def _trust_env(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home, repo = Path(tmp.name), Path(tmp.name) / "app"
+        repo.mkdir()
+        p = mock.patch.dict(os.environ, {"HOME": str(home)})
+        p.start()
+        self.addCleanup(p.stop)
+        return home, repo
+
+    def _tty(self, on):
+        for stream in ("stdin", "stdout"):
+            p = mock.patch.object(getattr(self.m.sys, stream), "isatty", return_value=on)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_trust_prompt_opens_claude_and_continues(self):
+        home, repo = self._trust_env()
+        self._tty(True)
+
+        def claude(cmd, cwd=None, **kw):  # the owner answers "Yes, I trust this folder", then /exit
+            (home / ".claude.json").write_text(json.dumps(
+                {"projects": {str(cwd): {"hasTrustDialogAccepted": True}}}))
+            return subprocess.CompletedProcess(cmd, 0)
+        with mock.patch("builtins.input", return_value="") as ask, \
+                mock.patch.object(self.m.subprocess, "run", side_effect=claude) as run:
+            self.m.ensure_claude_trust(repo)
+        ask.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["claude"])
+        self.assertEqual(run.call_args.kwargs["cwd"], repo)
+
+    def test_trust_prompt_declined_stops(self):
+        _, repo = self._trust_env()
+        self._tty(True)
+        with mock.patch("builtins.input", return_value="n"), \
+                mock.patch.object(self.m.subprocess, "run") as run:
+            with self.assertRaises(self.m.Fail):
+                self.m.ensure_claude_trust(repo)
+        run.assert_not_called()
+
+    def test_trust_still_missing_after_claude_stops(self):
+        _, repo = self._trust_env()
+        self._tty(True)
+        with mock.patch("builtins.input", return_value="y"), \
+                mock.patch.object(self.m.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaises(self.m.Fail):
+                self.m.ensure_claude_trust(repo)
+
+    def test_trust_without_terminal_never_prompts(self):
+        _, repo = self._trust_env()
+        self._tty(False)
+        with mock.patch("builtins.input") as ask:
+            with self.assertRaises(self.m.Fail) as e:
+                self.m.ensure_claude_trust(repo)
+        ask.assert_not_called()
+        self.assertIn(f"cd {repo} && claude", str(e.exception))
+
+    def test_host_mode_keeps_the_terminal_for_prompts(self):
+        with mock.patch.object(self.m.sys.stdin, "isatty", return_value=True):
+            self.assertIn("-t", self.m.reexec_ssh_args())
+        with mock.patch.object(self.m.sys.stdin, "isatty", return_value=False):
+            self.assertNotIn("-t", self.m.reexec_ssh_args())
+
     def test_slug_and_port(self):
         self.assertEqual(self.m.slug("My App.v2"), "my-app-v2")
         self.assertEqual(self.m.slug("  --Weird__Name--  "), "weird-name")

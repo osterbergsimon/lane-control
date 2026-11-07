@@ -167,7 +167,13 @@ def on_host(host: str, argv: list, target: str) -> int:
     def q(x):  # keep a leading ~/ for the remote shell to expand, quote the rest
         return "~/" + shlex.quote(x[2:]) if x.startswith("~/") else shlex.quote(x)
     cmd = f"{remote}/scripts/project-setup " + " ".join(q(x) for x in args)
-    return subprocess.run([*ssh_base(), host, cmd], stdin=subprocess.DEVNULL).returncode
+    tty = sys.stdin.isatty()
+    return subprocess.run([*reexec_ssh_args(), host, cmd], stdin=None if tty else subprocess.DEVNULL).returncode
+
+
+def reexec_ssh_args():
+    """ssh for the re-exec on the host: with a terminal (-t) when we have one, so the host run can ask the owner."""
+    return ssh_base() + (["-t"] if sys.stdin.isatty() else [])
 
 
 # --- steps -------------------------------------------------------------------------------------------------------
@@ -479,6 +485,27 @@ def claude_trusts(repo: Path) -> bool:
     return bool(projects.get(str(repo), {}).get("hasTrustDialogAccepted"))
 
 
+def ensure_claude_trust(repo: Path):
+    """Claude Code asks "Do you trust this folder?" the first time it starts in one, and an agent tab can't answer.
+    Trusting is the owner's call, so it is never recorded for them: in a terminal, offer to open Claude here for
+    them to answer, and go on once they have; otherwise stop and say what to run."""
+    if claude_trusts(repo):
+        say("claude-trust", "exists", str(repo))
+        return
+    how = (f"Run `cd {repo} && claude` once, answer 'Yes, I trust this folder', exit, and run project-setup again.")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise Fail(f"Claude Code has not been told to trust {repo} yet. {how}")
+    print(f"Claude Code asks whether you trust a folder the first time it starts there, and an agent can't answer "
+          f"for you. {repo} has no answer yet.", flush=True)
+    ans = input("Open Claude there now? Answer its question, then type /exit to come back here. [Y/n] ")
+    if ans.strip().lower() not in ("", "y", "yes"):
+        raise Fail(f"stopped: Claude Code doesn't trust {repo} yet. {how}")
+    subprocess.run(["claude"], cwd=repo)
+    if not claude_trusts(repo):
+        raise Fail(f"Claude Code still doesn't trust {repo} (answered no, or closed before answering). {how}")
+    say("claude-trust", "created", str(repo))
+
+
 def design_worktree(repo: Path, repo_id: str):
     """The design lead's child worktree, and whether this run created it."""
     for w in jrun([ORCA, "worktree", "list", "--json"])["result"]["worktrees"]:
@@ -575,9 +602,8 @@ def main(argv=None) -> int:
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
         # An agent tab can't answer Claude's first-start trust prompt, and the launch times out on it. Trusting the
         # folder is the owner's call, so it is never written for them.
-        if "claude" in needed and not a.no_start and not claude_trusts(repo):
-            raise Fail(f"Claude Code has not been told to trust {repo} yet. Run `cd {repo} && claude` once, answer "
-                       "'Yes, I trust this folder', exit, and run project-setup again.")
+        if "claude" in needed and not a.no_start:
+            ensure_claude_trust(repo)
         project = a.name or repo.name
         space = slug(project)
         repo_id = orca_repo(repo)
