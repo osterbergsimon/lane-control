@@ -116,7 +116,7 @@ esac
 if [ "$state" = current ]; then
   echo "running orcad $port"
 else
-  r "set -e; cd $rslot; rm -f .orcad-readiness
+  r "set -e; cd $rslot; rm -f .orcad-readiness-$port
      [ -w \"\${TMPDIR:-/tmp}\" ] || { mkdir -p ~/tmp; export TMPDIR=\$HOME/tmp; }
      if systemctl --user show-environment >/dev/null 2>&1; then
        mkdir -p ~/.config/systemd/user
@@ -126,7 +126,7 @@ Description=Orca server (orcad $ver)
 [Service]
 WorkingDirectory=\$PWD
 Environment=ORCA_VERSION=$ver ORCA_USER_DATA=\$HOME/.orca
-ExecStart=/bin/sh -c 'exec \$HOME/.orca-remote/runtimes/node-$nodesha/bin/node --max-semi-space-size=8 \$PWD/orcad.js --json --bind 127.0.0.1 --port $port > .orcad-readiness 2>> orcad.log'
+ExecStart=/bin/sh -c 'exec \$HOME/.orca-remote/runtimes/node-$nodesha/bin/node --max-semi-space-size=8 \$PWD/orcad.js --json --bind 127.0.0.1 --port $port > .orcad-readiness-$port 2>> orcad.log'
 Restart=on-failure
 [Install]
 WantedBy=default.target
@@ -134,21 +134,31 @@ UNIT
        systemctl --user daemon-reload; systemctl --user enable --now orcad.service
      else
        ORCA_VERSION=$ver ORCA_USER_DATA=\$HOME/.orca setsid nohup $rnode/bin/node --max-semi-space-size=8 $rslot/orcad.js \
-         --json --bind 127.0.0.1 --port $port > .orcad-readiness 2>> orcad.log < /dev/null &
+         --json --bind 127.0.0.1 --port $port > .orcad-readiness-$port 2>> orcad.log < /dev/null &
      fi"
   echo "started orcad $port"
 fi
-ready=""
-i=0
-while [ $i -lt 60 ]; do
-  ready=$(r "head -1 $rslot/.orcad-readiness 2>/dev/null" || true)
-  case $ready in *orca_server_ready*) break ;; esac
-  i=$((i + 1)); sleep 1
-done
-case $ready in *orca_server_ready*) ;; *) die "orcad did not report ready in 60s; see ~/.orca-remote/orcad-$ver/orcad.log on $host" ;; esac
-url=$(printf '%s' "$ready" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pairing"]["url"] or "")')
-[ -n "$url" ] || die "orcad reported no pairing url"
-if [ "$tunnel" = 0 ]; then echo "pairing-code $url"; exit 0; fi
+# The pairing code is in orcad's first stdout line, kept per port. Only read when it is needed: an orcad that was
+# already running may have no code left to give, and an already-paired desktop does not need one.
+pairing_url() {
+  ready=""; i=0
+  while [ $i -lt 60 ]; do
+    ready=$(r "head -1 $rslot/.orcad-readiness-$port 2>/dev/null" || true)
+    case $ready in *orca_server_ready*) break ;; esac
+    i=$((i + 1)); sleep 1
+  done
+  case $ready in
+    *orca_server_ready*) ;;
+    *) if [ "$state" = current ]; then
+         die "orcad on $host:$port runs but its pairing code is gone; stop it (pkill -u <user> -f 'orcad[.]js .*--port $port\$' on $host) and rerun"
+       fi
+       die "orcad did not report ready in 60s; see ~/.orca-remote/orcad-$ver/orcad.log on $host" ;;
+  esac
+  url=$(printf '%s' "$ready" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pairing"]["url"] or "")')
+  [ -n "$url" ] || die "orcad reported no pairing url"
+  printf '%s\n' "$url"
+}
+if [ "$tunnel" = 0 ]; then url=$(pairing_url) || exit 1; echo "pairing-code $url"; exit 0; fi
 
 # --- local tunnel (same port both ends, so the pairing endpoint is valid as is) ---
 name=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
@@ -186,6 +196,7 @@ fi
 if "$orca" status --environment "$name" --json 2>/dev/null | grep -q '"reachable": true'; then
   echo "already-paired $name"
 else
+  url=$(pairing_url) || exit 1
   outp=$("$orca" environment add --name "$name" --pairing-code "$url" --json 2>&1) || {
     case $outp in *lready*paired*) echo "already-paired $name"; exit 0 ;; esac
     die "environment add failed: $outp"; }
