@@ -17,6 +17,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import zlib
 from pathlib import Path
 
@@ -309,6 +310,105 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
         say("gitignore", "updated", ".cotal/")
 
 
+SETUP_MARKER = "orca-setup-done"
+LOCKFILES = (  # (lockfile, command run in its folder); first match per folder wins for the JS managers
+    ("uv.lock", "uv sync --frozen --quiet"),
+    ("poetry.lock", "poetry install --no-interaction --quiet"),
+    ("pnpm-lock.yaml", "pnpm install --frozen-lockfile"),
+    ("yarn.lock", "yarn install --frozen-lockfile"),
+    ("bun.lock", "bun install --frozen-lockfile"),
+    ("package-lock.json", "npm ci --no-audit --no-fund --loglevel=error"),
+    ("Cargo.lock", "cargo fetch --locked"),
+    ("go.sum", "go mod download"),
+)
+JS = {"pnpm-lock.yaml", "yarn.lock", "bun.lock", "package-lock.json"}
+
+
+def setup_steps(repo: Path) -> list:
+    """Shell lines that make a fresh worktree of `repo` ready for its checks: dependencies from the lockfiles in the
+    repo root and folders up to two levels down, and the beads link when the main checkout's .beads is a symlink."""
+    steps = []
+    dirs = [repo] + sorted(d for d in repo.glob("*") if d.is_dir()) + sorted(d for d in repo.glob("*/*") if d.is_dir())
+    for d in dirs:
+        rel = d.relative_to(repo)
+        if any(p.startswith(".") or p in ("node_modules", "vendor", "target", "dist", "build") for p in rel.parts):
+            continue
+        js_done = False
+        for lock, cmd in LOCKFILES:
+            if not (d / lock).is_file() or (lock in JS and js_done):
+                continue
+            js_done = js_done or lock in JS
+            if lock == "uv.lock" and "[tool.uv.workspace]" in ((d / "pyproject.toml").read_text()
+                                                             if (d / "pyproject.toml").is_file() else ""):
+                cmd = cmd.replace("uv sync", "uv sync --all-packages")
+            tool = cmd.split()[0]
+            line = cmd if str(rel) == "." else f"(cd {shlex.quote(str(rel))} && {cmd})"
+            steps.append(f'{line} || echo "setup: {tool} in {rel} failed" >&2')
+    beads = repo / ".beads"
+    if beads.is_symlink():
+        steps.insert(0, f"[ -e .beads ] || ln -s {shlex.quote(os.readlink(beads))} .beads")
+    return steps
+
+
+def setup_script(repo: Path, write: bool):
+    """The repo's orca.yaml setup script. Orca reads it from the new worktree, so only a committed one counts: a
+    missing one is drafted for the owner to review and commit (never committed here)."""
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "orca.yaml"], cwd=repo,
+                             capture_output=True).returncode == 0
+    if tracked:
+        say("setup-script", "exists", "orca.yaml")
+        return
+    steps = setup_steps(repo)
+    if not steps:
+        say("setup-script", "none", "no lockfiles found")
+        return
+    body = "\n".join("    " + l for l in steps + [f'touch "$(git rev-parse --git-dir)/{SETUP_MARKER}"'])
+    text = ("# Orca runs scripts.setup in every new worktree of this repo (a lane's checkout). Written by lane-control\n"
+            "# project-setup from the lockfiles; edit freely. Keep the last line: agents wait for it before starting.\n"
+            f"scripts:\n  setup: |\n{body}\n")
+    if write and not (repo / "orca.yaml").exists():
+        (repo / "orca.yaml").write_text(text)
+        say("setup-script", "written", "orca.yaml (review it, then commit it: lanes only get it once committed)")
+    else:
+        f = repo / ".cotal" / "orca.yaml.proposed"
+        if f.is_file() and f.read_text() == text:
+            say("setup-script", "exists", f"{f} (not committed as orca.yaml yet)")
+            return
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        say("setup-script", "proposed", f"{f} (review it and commit it as orca.yaml)")
+
+
+def git_dir(wt: Path):
+    g = wt / ".git"
+    if g.is_dir():
+        return g
+    if g.is_file():
+        line = g.read_text().strip()
+        if line.startswith("gitdir:"):
+            p = Path(line.split(":", 1)[1].strip())
+            return p if p.is_absolute() else (wt / p).resolve()
+    return None
+
+
+def wait_for_setup(wt: Path, label: str, timeout: float = 600, step: float = 5):
+    """Wait until a new worktree's setup script wrote its marker, so the agent never runs checks on missing
+    dependencies. Only for a setup script that writes the marker; never fatal."""
+    yaml = wt / "orca.yaml"
+    if not (yaml.is_file() and SETUP_MARKER in yaml.read_text()):
+        return
+    gd = git_dir(wt)
+    if gd is None:
+        return
+    end = time.time() + timeout
+    while time.time() < end:
+        if (gd / SETUP_MARKER).exists():
+            say(f"setup {label}", "done", str(wt))
+            return
+        time.sleep(step)
+    say(f"setup {label}", "timeout", f"no {SETUP_MARKER} after {int(timeout)}s; see the worktree's Setup tab")
+
+
 def services(repo: Path, space: str):
     inv = jrun(["cotal", "svc", "--json", "-s", space], cwd=repo)["result"]["services"]
     return {s["name"]: s["state"] for s in inv}
@@ -399,6 +499,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dest", default=str(Path.home() / "code"))
     ap.add_argument("--coordinator", default="claude/opus")
     ap.add_argument("--design-lead", default="claude/opus")
+    ap.add_argument("--write-orca-yaml", action="store_true",
+                    help="write the drafted setup script as orca.yaml in the repo (uncommitted) instead of .cotal/")
     ap.add_argument("--reviewer", default="claude/opus",
                     help="default harness/model of the reviewer persona; leads pick one per lane from the tiers")
     ap.add_argument("--permission-mode", default="auto")
@@ -447,6 +549,7 @@ def main(argv=None) -> int:
         if "claude" in needed | tier_harnesses:
             claude_wiring(repo, space)
         personas_and_tiers(repo, project, coord, lead, reviewer, a.permission_mode, tiers)
+        setup_script(repo, a.write_orca_yaml)
         if a.no_start:
             say("start", "skipped", "--no-start")
             return 0
@@ -456,6 +559,7 @@ def main(argv=None) -> int:
         wt, created = design_worktree(repo, repo_id)
         if created:
             close_startup_shell(wt)
+            wait_for_setup(wt, "design-lead")
         spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
               "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
         if created:  # a shell for the owner, after the agent's tab

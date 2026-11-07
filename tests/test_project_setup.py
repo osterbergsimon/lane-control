@@ -25,8 +25,8 @@ def load():
 
 
 def git(*a, cwd):
-    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
-                   capture_output=True)
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
+                          capture_output=True, text=True).stdout.strip()
 
 
 class Env:
@@ -258,7 +258,7 @@ class RunTests(unittest.TestCase):
             self.assertFalse(any(verb in c for c in new), f"rerun called {verb}: {new}")
         for line in r.stdout.splitlines():
             if ":" in line and not line.startswith(("verify", "summary", "  ")):
-                self.assertRegex(line, r": (exists|skipped|updated)\b", line)
+                self.assertRegex(line, r": (exists|skipped|updated|none)\b", line)
 
     def test_gitignore_gets_cotal_once(self):
         repo = self.e.repo()
@@ -322,6 +322,59 @@ class RunTests(unittest.TestCase):
         with mock.patch.dict(m.os.environ, {"PATH": "/usr/bin", "HOME": str(self.e.home)}, clear=True):
             m.add_orca_cli_to_path()
             self.assertTrue(m.os.environ["PATH"].startswith(str(d) + ":"))
+
+    def _deps_repo(self):
+        repo = self.e.repo()
+        (repo / "uv.lock").write_text("")
+        (repo / "pyproject.toml").write_text("[project]\nname='a'\n")
+        (repo / "frontend").mkdir()
+        (repo / "frontend" / "package-lock.json").write_text("{}")
+        return repo
+
+    def test_setup_script_proposed_from_lockfiles(self):
+        repo = self._deps_repo()
+        r = self.e.run(str(repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("setup-script: proposed", r.stdout)
+        text = (repo / ".cotal" / "orca.yaml.proposed").read_text()
+        self.assertIn("uv sync", text)
+        self.assertIn("(cd frontend && npm ci", text)
+        self.assertIn("orca-setup-done", text.splitlines()[-1])
+        self.assertFalse((repo / "orca.yaml").exists())  # never in the repo without being asked
+
+    def test_committed_setup_script_is_kept(self):
+        repo = self._deps_repo()
+        (repo / "orca.yaml").write_text("scripts:\n  setup: |\n    make deps\n")
+        git("add", "orca.yaml", cwd=repo)
+        git("commit", "-q", "-m", "orca", cwd=repo)
+        r = self.e.run(str(repo), "--no-start")
+        self.assertIn("setup-script: exists", r.stdout)
+        self.assertFalse((repo / ".cotal" / "orca.yaml.proposed").exists())
+
+    def test_write_orca_yaml_writes_but_never_commits(self):
+        repo = self._deps_repo()
+        head = git("rev-parse", "HEAD", cwd=repo)
+        r = self.e.run(str(repo), "--no-start", "--write-orca-yaml")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("uv sync", (repo / "orca.yaml").read_text())
+        self.assertEqual(git("rev-parse", "HEAD", cwd=repo), head)
+        self.assertIn("setup-script: written", r.stdout)
+
+    def test_no_deps_no_proposal(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--no-start")
+        self.assertIn("setup-script: none", r.stdout)
+
+    def test_design_lead_waits_for_setup(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_tab=1)
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("setup design-lead: done", r.stdout)
+        self.assertLess(r.stdout.index("setup design-lead: done"), r.stdout.index("agent design-lead"))
+        # the Setup tab stays
+        calls = self.e.calls()
+        self.assertFalse(any("terminal close" in c and "term_1 " in c + " " for c in calls))
 
     def test_reviewer_persona_rendered(self):
         repo = self.e.repo()

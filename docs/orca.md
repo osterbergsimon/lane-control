@@ -23,8 +23,10 @@ started whom, messages that wait for the agent's turn, roles). Use Orca alone if
 when a coordinator should run lanes and talk to them while you type.
 
 ## 2. Install Orca on the workstation
-- Linux builds: AppImage, x86_64/aarch64 RPM, AUR `stably-orca-bin`. On NixOS run the AppImage with `appimage-run`.
-  Verify it against the sha512 in the release's `latest-linux.yml`. [tested]
+- Linux builds: AppImage, x86_64/aarch64 RPM (Fedora, Rocky), AUR `stably-orca-bin`. On NixOS, package the AppImage
+  with `appimageTools.wrapType2` (an example overlay: the owner's dotfiles `overlays/orca-ide`): the app as `orca-app`
+  with a menu entry, the CLI as `orca-ide` (Orca's own Linux name for it; plain `orca` there is often GNOME's screen
+  reader). Verify downloads against the sha512 in the release's `latest-linux.yml`. [tested]
 - **Telemetry is on by default** (anonymous, PostHog Cloud US). Start it with `ORCA_TELEMETRY_DISABLED=1` (or
   `DO_NOT_TRACK=1`) or turn off Settings, Privacy, "Share anonymous usage data". No account is needed. [docs]
   ```bash
@@ -119,12 +121,14 @@ composer. [tested]
   - If orcad's port is taken (another user's Orca), the script refuses; pick another with `--port`.
   - After the desktop updates Orca, a re-run installs the new server and replaces the old running one.
   - `--pair --no-tunnel` starts orcad and prints its pairing code, without a tunnel or a saved environment.
+  - A trial or throwaway host stays out of `~/.ssh/config`: set `LANE_SSH_CONFIG=<its ssh config>` and both scripts
+    (and the tunnel unit) use `ssh -F` with it.
 
 ### Project: one command
 ```bash
 scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
-  [--tiers file.tsv] [--port N] [--no-start]
+  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-start]
 ```
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
@@ -133,14 +137,21 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    `~/.config/opencode/skills/`): Orca's `orca-cli` and lane-control's `orca-cotal-lanes`. They are user-level
    because a lane worktree carries only committed files.
 4. Creates the Cotal space (`cotal space create`; plus `cotal setup -H claude` for the Claude plugin and wake channel).
-5. Renders the personas from `personas/` and the tier table `templates/lanes.tsv` into `.cotal/`, and gitignores
-   `.cotal/`. Each persona names the tier table by absolute path and the project's Claude permission mode.
+5. Renders the personas from `personas/` (coordinator, design lead, reviewer) and the tier table
+   `templates/lanes.tsv` into `.cotal/`, and gitignores `.cotal/`. Each persona names the tier table and the reviewer
+   persona by absolute path, and the project's Claude permission mode.
+5a. Setup script: Orca runs `orca.yaml` `scripts.setup` in each new worktree (a "Setup" tab), but reads it from the
+   worktree, so only a committed one counts. Without one, project-setup drafts it from the lockfiles (uv, poetry,
+   npm/pnpm/yarn/bun, cargo, go, in the root and two levels down; the beads link when `.beads` is a symlink) into
+   `.cotal/orca.yaml.proposed`, or into `orca.yaml` with `--write-orca-yaml`, for the owner to review and commit. It
+   never commits. The draft ends by writing `orca-setup-done` in the worktree's git dir; agents start only after it.
 6. Starts the broker (`cotal up --no-manager`, on a per-project port recorded in `.cotal/lane-control.json`) and a
    manager service `mgr` on the Orca runtime.
    `mgr` carries `envRefs` for the proxy variables, because `cotal up` gives its manager a fixed environment without
    them.
 7. Starts the coordinator in the main checkout.
-8. Creates the Orca worktree `design-lead` as a child of the main checkout and starts the design lead there.
+8. Creates the Orca worktree `design-lead` as a child of the main checkout, closes Orca's startup shell, waits for
+   the setup script, starts the design lead there, then opens a shell after the agent's tab.
 9. Verifies that both agents are live and that the design lead's task is nested.
 
 With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
@@ -149,11 +160,14 @@ With `--host`, it copies itself to `~/.local/share/lane-control/` on the host an
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
 1. Pick the tier per `model-routing.md`, then look up the harness and model in `.cotal/lanes.tsv`.
 2. Run `orca worktree create --name <key> --parent-worktree active --json`, so the new task nests under the caller in
-   the GUI.
+   the GUI. Close the startup shell (not the Setup tab) and wait for `orca-setup-done` when the setup script writes it.
 3. Call `cotal_spawn` with `agent`, `model`, `cwd` = that worktree, role `lane`, an inline `persona`, and the lane
    brief as `prompt`. For OpenCode add `events: false`; for Claude, `launchOptions: {"permission-mode": …}`.
 4. The lane reports by `cotal_dm`, and the DM wakes the parent as its own turn.
 5. Task cards show state via `orca worktree set --comment/--workspace-status`.
+6. From review tier B up, a reviewer (`personas/reviewer.md`) runs as `<key>-review` in the lane's worktree, on a
+   different model from the lane's: read-only, given the issue and commit but not the lane's report, findings as
+   blocker/major/minor by DM. Blocker and major are fixed, at most two rounds, then the owner decides.
 
 Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
 

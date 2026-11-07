@@ -41,6 +41,11 @@ Orca opens a plain shell in the new worktree. Close it, so the agent's tab comes
 take the terminal whose `worktreePath` is the new worktree and whose title is not `Setup` (the setup script's own tab:
 leave it), and run `orca terminal close --terminal <handle> --tab --json`.
 
+If the worktree's `orca.yaml` ends by writing `orca-setup-done`, wait for that before you start the agent, so it never
+runs checks on missing dependencies:
+`until [ -e "$(git -C <worktree> rev-parse --git-dir)/orca-setup-done" ]; do sleep 5; done` (at most 10 minutes; if
+it never appears, read the Setup tab with `orca terminal read --terminal <handle>` and tell the owner).
+
 Then start the agent with the `cotal_spawn` tool:
 
 - `name`: the lane key slug (same as the worktree name)
