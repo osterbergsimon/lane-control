@@ -11,7 +11,7 @@
 #
 # --no-tunnel: start orcad and print its pairing code, but set up no tunnel and save no environment.
 # Output lines: "installed|exists orcad-<ver>", "started|running orcad <port>", "paired|already-paired <host>".
-# Env: ORCA_CLI (default orca-ide on PATH, else ~/.config/orca/linux-orca-cli-shim/orca), ORCA_ARTIFACTS (default ~/.config/orca/orcad-artifacts).
+# Env: LANE_SSH_CONFIG (a separate ssh config, passed as ssh -F), ORCA_CLI (default orca-ide on PATH, else ~/.config/orca/linux-orca-cli-shim/orca), ORCA_ARTIFACTS (default ~/.config/orca/orcad-artifacts).
 set -eu
 
 die() { echo "orca-host-install: $*" >&2; exit "${2:-1}"; }
@@ -35,7 +35,14 @@ artifacts=${ORCA_ARTIFACTS:-$HOME/.config/orca/orcad-artifacts}
 pkg_cli=$(command -v orca-ide 2>/dev/null || true)
 if [ -n "$pkg_cli" ]; then default_cli=$pkg_cli; else default_cli=$HOME/.config/orca/linux-orca-cli-shim/orca; fi
 orca=${ORCA_CLI:-$default_cli}
-r() { ssh -o BatchMode=yes "$host" "$@"; }
+# LANE_SSH_CONFIG: a separate ssh config for trial or throwaway hosts (passed as ssh -F), so they stay out of ~/.ssh/config.
+sshf=""
+if [ -n "${LANE_SSH_CONFIG:-}" ]; then
+  sshcfg=$(cd "$(dirname "$LANE_SSH_CONFIG")" && pwd)/$(basename "$LANE_SSH_CONFIG")
+  [ -f "$sshcfg" ] || die "LANE_SSH_CONFIG $LANE_SSH_CONFIG not found" 2
+  sshf="-F $sshcfg"
+fi
+r() { ssh $sshf -o BatchMode=yes "$host" "$@"; }
 
 # --- host facts ---
 facts=$(r 'id -u; uname -m; (ldd --version 2>&1 || true) | head -1') || die "cannot ssh to $host"
@@ -153,7 +160,7 @@ cat > "$unitfile" <<UNIT
 [Unit]
 Description=Orca tunnel to $host:$port
 [Service]
-ExecStart=/usr/bin/env ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:$port:127.0.0.1:$port $host
+ExecStart=/usr/bin/env ssh $sshf -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:$port:127.0.0.1:$port $host
 Restart=always
 RestartSec=5
 [Install]

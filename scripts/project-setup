@@ -125,6 +125,12 @@ def add_orca_cli_to_path():
         os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
 
 
+def ssh_base() -> list:
+    """`ssh`, plus `-F <file>` when LANE_SSH_CONFIG names a separate ssh config (trial or throwaway hosts)."""
+    cfg = os.environ.get("LANE_SSH_CONFIG")
+    return ["ssh", "-F", os.path.expanduser(cfg)] if cfg else ["ssh"]
+
+
 def on_host(host: str, argv: list, target: str) -> int:
     """Copy what project-setup needs to the host and run it there with the same arguments minus --host."""
     if not re.match(r"^(https?|ssh|git|file)://|^[\w.-]+@[\w.-]+:|^/|^~", target):
@@ -133,7 +139,7 @@ def on_host(host: str, argv: list, target: str) -> int:
     remote = "~/.local/share/lane-control"
     pack = subprocess.Popen(["tar", "-C", str(HERE), "-cf", "-", "scripts/project-setup", "personas", "skills",
                              "templates"], stdout=subprocess.PIPE)
-    copy = subprocess.run(["ssh", host, f"mkdir -p {remote} && tar -C {remote} -xf -"], stdin=pack.stdout)
+    copy = subprocess.run([*ssh_base(), host, f"mkdir -p {remote} && tar -C {remote} -xf -"], stdin=pack.stdout)
     pack.stdout.close()
     if pack.wait() != 0 or copy.returncode != 0:
         print(f"project-setup: copying lane-control to {host} failed", file=sys.stderr)
@@ -152,7 +158,7 @@ def on_host(host: str, argv: list, target: str) -> int:
     def q(x):  # keep a leading ~/ for the remote shell to expand, quote the rest
         return "~/" + shlex.quote(x[2:]) if x.startswith("~/") else shlex.quote(x)
     cmd = f"{remote}/scripts/project-setup " + " ".join(q(x) for x in args)
-    return subprocess.run(["ssh", host, cmd], stdin=subprocess.DEVNULL).returncode
+    return subprocess.run([*ssh_base(), host, cmd], stdin=subprocess.DEVNULL).returncode
 
 
 # --- steps -------------------------------------------------------------------------------------------------------

@@ -294,6 +294,19 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("--host", calls[1])
         self.assertFalse(any(c.startswith(("orca ", "cotal ")) for c in self.e.calls()))
 
+    def test_host_mode_uses_lane_ssh_config(self):
+        # A trial or throwaway host lives in its own ssh config, not in the owner's ~/.ssh/config.
+        self._ssh_stub()
+        cfg = self.e.home / "trial_ssh_config"
+        cfg.write_text("Host box\n")
+        self.e.env["LANE_SSH_CONFIG"] = str(cfg)
+        r = self.e.run("https://example.com/acme/shop.git", "--host", "dev@box")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = [c for c in self.e.calls() if c.startswith("ssh ")]
+        self.assertEqual(len(calls), 2, calls)
+        for c in calls:
+            self.assertTrue(c.startswith(f"ssh -F {cfg} dev@box "), c)
+
     def test_host_mode_refuses_relative_dir(self):
         self._ssh_stub()
         r = self.e.run("some/dir", "--host", "dev@box")
