@@ -485,14 +485,45 @@ def claude_trusts(repo: Path) -> bool:
     return bool(projects.get(str(repo), {}).get("hasTrustDialogAccepted"))
 
 
-def ensure_claude_trust(repo: Path):
+def record_claude_trust(repo: Path):
+    """Record "Yes, I trust this folder" for repo in ~/.claude.json, as Claude Code itself does (it has no switch for
+    it). Running Claude sessions rewrite that file, so write it atomically, keep everything else, and check it held."""
+    f = Path(os.environ.get("HOME", str(Path.home()))) / ".claude.json"
+    for _ in range(3):
+        try:
+            text = f.read_text() if f.exists() else "{}"
+            cfg = json.loads(text)
+        except (OSError, ValueError) as e:
+            raise Fail(f"can't read {f} to record folder trust ({e}); left it untouched")
+        if not isinstance(cfg, dict):
+            raise Fail(f"{f} is not a JSON object; left it untouched")
+        cfg.setdefault("projects", {}).setdefault(str(repo), {})["hasTrustDialogAccepted"] = True
+        mode = f.stat().st_mode & 0o777 if f.exists() else 0o600
+        tmp = f.with_name(f".claude.json.lane-control-{os.getpid()}")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w") as out:
+            json.dump(cfg, out, indent=2)
+        os.replace(tmp, f)
+        time.sleep(0.2)  # let a Claude session that wrote over it show up before checking
+        if claude_trusts(repo):
+            return
+    raise Fail(f"recorded trust for {repo} in {f}, but a running Claude session kept overwriting it; try again")
+
+
+def ensure_claude_trust(repo: Path, record: bool = False):
     """Claude Code asks "Do you trust this folder?" the first time it starts in one, and an agent tab can't answer.
-    Trusting is the owner's call, so it is never recorded for them: in a terminal, offer to open Claude here for
-    them to answer, and go on once they have; otherwise stop and say what to run."""
+    With record (--trust-folder, the owner's explicit choice) it is recorded quietly. Otherwise it is never recorded
+    for them: in a terminal, offer to open Claude here for them to answer, and go on once they have; without one,
+    stop and say what to run."""
     if claude_trusts(repo):
         say("claude-trust", "exists", str(repo))
         return
-    how = (f"Run `cd {repo} && claude` once, answer 'Yes, I trust this folder', exit, and run project-setup again.")
+    if record:
+        record_claude_trust(repo)
+        say("claude-trust", "created", f"{repo} (--trust-folder)")
+        return
+    how = (f"Run `cd {repo} && claude` once, answer 'Yes, I trust this folder', exit, and run project-setup again "
+           "(or rerun with --trust-folder to answer yes without asking).")
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise Fail(f"Claude Code has not been told to trust {repo} yet. {how}")
     print(f"Claude Code asks whether you trust a folder the first time it starts there, and an agent can't answer "
@@ -555,6 +586,9 @@ def main(argv=None) -> int:
     ap.add_argument("--dest", default=str(Path.home() / "code"))
     ap.add_argument("--coordinator", default="claude/opus")
     ap.add_argument("--design-lead", default="claude/opus")
+    ap.add_argument("--trust-folder", action="store_true",
+                    help="answer Claude Code's 'Do you trust this folder?' with yes for the repo, without asking "
+                         "(for unattended runs)")
     ap.add_argument("--no-design-lead", action="store_true",
                     help="no design lead (projects without a frontend): only the coordinator is started")
     ap.add_argument("--write-orca-yaml", action="store_true",
@@ -603,7 +637,7 @@ def main(argv=None) -> int:
         # An agent tab can't answer Claude's first-start trust prompt, and the launch times out on it. Trusting the
         # folder is the owner's call, so it is never written for them.
         if "claude" in needed and not a.no_start:
-            ensure_claude_trust(repo)
+            ensure_claude_trust(repo, record=a.trust_folder)
         project = a.name or repo.name
         space = slug(project)
         repo_id = orca_repo(repo)

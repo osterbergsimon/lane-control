@@ -154,6 +154,37 @@ class PureTests(unittest.TestCase):
         ask.assert_not_called()
         self.assertIn(f"cd {repo} && claude", str(e.exception))
 
+    def test_trust_folder_switch_records_trust_quietly(self):
+        home, repo = self._trust_env()
+        self._tty(True)
+        cfg = {"numStartups": 7, "projects": {"/other": {"hasTrustDialogAccepted": True, "x": 1}}}
+        (home / ".claude.json").write_text(json.dumps(cfg))
+        (home / ".claude.json").chmod(0o600)
+        with mock.patch("builtins.input") as ask, mock.patch.object(self.m.subprocess, "run") as run:
+            self.m.ensure_claude_trust(repo, record=True)
+        ask.assert_not_called()
+        run.assert_not_called()
+        out = json.loads((home / ".claude.json").read_text())
+        self.assertTrue(out["projects"][str(repo)]["hasTrustDialogAccepted"])
+        self.assertEqual(out["projects"]["/other"], {"hasTrustDialogAccepted": True, "x": 1})
+        self.assertEqual(out["numStartups"], 7)
+        self.assertEqual((home / ".claude.json").stat().st_mode & 0o777, 0o600)
+
+    def test_trust_folder_keeps_existing_project_settings(self):
+        home, repo = self._trust_env()
+        (home / ".claude.json").write_text(json.dumps({"projects": {str(repo): {"allowedTools": ["Bash"]}}}))
+        self.m.ensure_claude_trust(repo, record=True)
+        entry = json.loads((home / ".claude.json").read_text())["projects"][str(repo)]
+        self.assertEqual(entry, {"allowedTools": ["Bash"], "hasTrustDialogAccepted": True})
+
+    def test_trust_folder_refuses_unreadable_config(self):
+        # Never replace a config we could not parse: it holds the owner's login state and settings.
+        home, repo = self._trust_env()
+        (home / ".claude.json").write_text("{not json")
+        with self.assertRaises(self.m.Fail):
+            self.m.ensure_claude_trust(repo, record=True)
+        self.assertEqual((home / ".claude.json").read_text(), "{not json")
+
     def test_host_mode_keeps_the_terminal_for_prompts(self):
         with mock.patch.object(self.m.sys.stdin, "isatty", return_value=True):
             self.assertIn("-t", self.m.reexec_ssh_args())
@@ -509,6 +540,15 @@ class RunTests(unittest.TestCase):
         self.assertIn("trust", r.stderr)
         self.assertIn(f"cd {repo} && claude", r.stderr)
         self.assertFalse(any(c.startswith(("cotal spawn", "orca repo add")) for c in self.e.calls()))
+
+    def test_trust_folder_flag_runs_without_asking(self):
+        repo = self.e.repo()
+        self.e.trust(repo, accepted=False)
+        r = self.e.run(str(repo), "--trust-folder")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("claude-trust: created", r.stdout)
+        self.assertTrue(json.loads((self.e.home / ".claude.json").read_text())
+                        ["projects"][str(repo)]["hasTrustDialogAccepted"])
 
     def test_untrusted_folder_is_fine_without_claude_agents(self):
         repo = self.e.repo()

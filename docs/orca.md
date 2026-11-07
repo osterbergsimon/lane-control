@@ -128,7 +128,7 @@ composer. [tested]
 ```bash
 scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
-  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-design-lead] [--no-start]
+  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-design-lead] [--trust-folder] [--no-start]
 ```
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
@@ -152,8 +152,11 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
 7. Starts the coordinator in the main checkout. A Claude agent first needs the owner's answer to Claude Code's
    "Do you trust this folder?" prompt for the main checkout (lane worktrees share it), which an agent tab can't give.
    In a terminal, project-setup offers to open Claude there for you to answer, then goes on (also with `--host`: the
-   ssh session gets a terminal). Without a terminal it stops and says to run `cd <repo> && claude` once. It never
-   records trust for you.
+   ssh session gets a terminal). Without a terminal it stops and says to run `cd <repo> && claude` once.
+   `--trust-folder` answers yes for you instead, without asking, for unattended runs. Claude Code has no switch for
+   this, so it writes `hasTrustDialogAccepted` for the folder into `~/.claude.json` the way Claude does: atomically,
+   keeping everything else, refusing a file it can't parse, and checking afterwards that a running Claude session
+   didn't overwrite it.
 8. Creates the Orca worktree `design-lead` as a child of the main checkout, closes Orca's startup shell, waits for
    the setup script, starts the design lead there, then opens a shell after the agent's tab. With
    `--no-design-lead` (a project without a frontend) there is no design lead: the coordinator routes any UI work
