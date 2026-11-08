@@ -318,41 +318,38 @@ def claude_wiring(repo: Path, space: str):
     say("claude-wiring", "created", space)
 
 
-def paid_opencode_tiers(tiers: Path) -> list:
-    return [(r[0], r[2]) for r in (l.split("\t") for l in tiers.read_text().splitlines()[1:] if not l.startswith("#"))
-            if len(r) > 2 and r[1] == "opencode" and r[2].startswith(("opencode/", "opencode-go/"))
-            and not r[2].endswith("-free")]
+def opencode_key_pins(tiers: Path, roles) -> list:
+    """(who, model) for every OpenCode pin not named as free. A few free models, like big-pickle, have no such name."""
+    rows = (l.split("\t") for l in tiers.read_text().splitlines()[1:] if not l.startswith("#"))
+    pins = [(f"tier {r[0]}", r[1], r[2]) for r in rows if len(r) > 2] + [(n, h, m) for n, (h, m) in roles]
+    return [(who, m) for who, h, m in pins
+            if h == "opencode" and m.startswith(("opencode/", "opencode-go/")) and not m.endswith("-free")]
 
 
-def readd_mgr_steps(space: str) -> str:
-    return (f"cotal svc stop mgr -s {space} --yes, then cotal svc remove mgr -s {space} --yes, "
-            "then rerun project-setup from a shell with the key set.")
-
-
-def opencode_key_check(space: str, tiers: Path):
-    """Each OpenCode agent has its own empty database, so a paid model needs the key by name (docs/orca.md)."""
-    paid = paid_opencode_tiers(tiers)
-    if not paid:
+def opencode_key_check(repo: Path, space: str, tiers: Path, roles):
+    """After the manager step, so its definition is current. Each OpenCode agent has its own empty database, so a paid
+    model needs the key in the manager's environment (docs/orca.md)."""
+    pins = opencode_key_pins(tiers, roles)
+    if not pins:
         return
+    f = repo / ".cotal" / "mgr-service.json"
+    readd = (f"cotal svc stop mgr -s {space} --yes, then cotal svc remove mgr -s {space} --yes, "
+             "then rerun project-setup from a shell with the key set.")
     lines = []
-    if "OPENCODE_API_KEY" not in os.environ:
-        lines += [f"warning: tier {t} pins {m} but OPENCODE_API_KEY is not set: those lanes will exit on launch." for t, m in paid]
+    if f.exists() and "OPENCODE_API_KEY" in json.loads(f.read_text()).get("envRefs", {}):
+        pass  # the manager holds it, whatever this shell has
+    elif not os.environ.get("OPENCODE_API_KEY"):
+        lines += [f"warning: {who} pins {m} and OPENCODE_API_KEY is not set: a paid model is not listed without it, "
+                  "and its agents exit on launch." for who, m in pins]
         lines += ["  `opencode auth login` does not reach an agent's own database. Once per machine:",
                   "  1. Create an API key in the OpenCode console and export OPENCODE_API_KEY in your shell setup.",
-                  f"  2. If mgr already exists, at a natural stop: {readd_mgr_steps(space)}"]
+                  f"  2. If mgr already exists, at a natural stop: {readd}"]
+    elif f.exists():
+        lines += [f"warning: mgr was added without OPENCODE_API_KEY: a paid model like {pins[0][1]} is not listed without "
+                  "it, and its agents exit on launch.", f"  At a natural stop: {readd}"]
     lines.append("note: this check only sees whether the key is set. It cannot tell a wrong key from a spent quota: "
                  "either shows only on the agent's first model call.")
     print("\n".join(lines), file=sys.stderr, flush=True)
-
-
-def stale_mgr_key_check(repo: Path, space: str, tiers: Path):
-    """After start_stack: only a mgr kept from before the key still has a definition without it."""
-    paid = paid_opencode_tiers(tiers)
-    f = repo / ".cotal" / "mgr-service.json"
-    if paid and "OPENCODE_API_KEY" in os.environ and f.exists() \
-            and "OPENCODE_API_KEY" not in json.loads(f.read_text()).get("envRefs", {}):
-        print(f"warning: mgr was added without OPENCODE_API_KEY, so lanes on {paid[0][1]} will exit on launch.\n"
-              f"  At a natural stop: {readd_mgr_steps(space)}", file=sys.stderr, flush=True)
 
 
 def with_cotal_ignored(text: str) -> str:
@@ -383,7 +380,6 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
                               review_persona, design_lead=lead is not None)
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
     say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
-    opencode_key_check(slug(project), tiers)
     say("gitignore", ignore_cotal(repo), ".cotal/")
 
 
@@ -513,7 +509,9 @@ def start_stack(repo: Path, space: str, port_flag):
         # PATH (starting with the Orca CLI's folder) lets Cotal's Orca driver find `orca-ide`/`orca`: Cotal's schema
         # refuses COTAL_* names here, so COTAL_ORCA_BIN can't be passed on.
         # OPENCODE_API_KEY: passed by name; Cotal forwards it from the manager to each OpenCode agent.
-        refs = {v: v for v in PROXY_VARS + ("PATH", "OPENCODE_API_KEY") if v in os.environ}
+        refs = {v: v for v in PROXY_VARS + ("PATH",) if v in os.environ}
+        if os.environ.get("OPENCODE_API_KEY"):
+            refs["OPENCODE_API_KEY"] = "OPENCODE_API_KEY"
         definition = {"schemaVersion": 1, "space": space,
                       "launch": {"type": "adapter", "adapter": "manager-service",
                                  "options": {"root": str(repo), "runtime": "orca"}},
@@ -1109,11 +1107,13 @@ def main(argv=None) -> int:
             claude_wiring(repo, space)
         personas_and_tiers(repo, project, coord, lead, reviewer, a.permission_mode, tiers)
         setup_script(repo, a.write_orca_yaml)
+        roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
         if a.no_start:
+            opencode_key_check(repo, space, tiers, roles)
             say("start", "skipped", "--no-start")
             return 0
         start_stack(repo, space, a.port)
-        stale_mgr_key_check(repo, space, tiers)
+        opencode_key_check(repo, space, tiers, roles)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = None

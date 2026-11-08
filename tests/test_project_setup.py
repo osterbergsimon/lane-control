@@ -998,6 +998,46 @@ class RunTests(unittest.TestCase):
         self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
         self.assertRegex(r.stderr, r"cannot tell .*quota")
 
+    def test_manager_holding_the_key_is_not_warned_about(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        del self.e.env["OPENCODE_API_KEY"]
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("warning:", r.stderr)
+        self.assertRegex(r.stderr, r"cannot tell .*quota")
+
+    def test_empty_key_counts_as_unset(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = ""
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("OPENCODE_API_KEY is not set", r.stderr)
+        d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
+        self.assertNotIn("OPENCODE_API_KEY", d["envRefs"])
+
+    def test_paid_opencode_coordinator_without_key_warns(self):
+        repo = self.e.repo()
+        tiers = self.e.home / "free-lanes.tsv"
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x-free\t-\n")
+        r = self.e.run(str(repo), "--name", "Shop", "--tiers", str(tiers),
+                       "--coordinator", "opencode/opencode/deepseek-v4.1-flash")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stderr, r"coordinator.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
+
+    def test_key_check_runs_with_no_start(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("OPENCODE_API_KEY is not set", r.stderr)
+
+    def test_warning_does_not_claim_every_pin_is_paid(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertNotIn("those lanes will exit on launch", r.stderr)
+        self.assertRegex(r.stderr, r"a paid model")
+
     def test_following_the_key_steps_clears_the_warning(self):
         repo = self.e.repo()
         self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
