@@ -61,8 +61,9 @@ so the agent's tab comes first (Orca's CLI cannot reorder tabs):
 
 1. Close the plain shell. In `$ORCA terminal list --json`, look at the terminals whose `worktreePath` is the new
    worktree. The titles are not reliable, so a terminal is the Setup tab if its `paneTitle` is "Setup", or its title or
-   preview contains `setup-runner.sh`. Close only a terminal that is none of these and whose preview shows a
-   bare prompt, with `$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave it open.
+   preview contains `setup-runner.sh`. Close only the plain shell: no `agentIdentity`, a title that does not start with
+   `cotal-`, and a preview of one line at most (the prompt, however it looks; more lines mean output or a command),
+   with `$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave it open.
 2. If the worktree's `orca.yaml` ends by writing `orca-setup-done`, wait for it, so the agent never runs checks on
    missing dependencies:
    `until [ -e "$(git -C <worktree> rev-parse --git-dir)/orca-setup-done" ]; do sleep 5; done` (at most 10 minutes).

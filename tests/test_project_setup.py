@@ -501,6 +501,20 @@ class RunTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])
 
+    def test_startup_shell_closed_whatever_its_prompt_looks_like(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_tab=1, shell_preview="app on \ue0a0 main \u276f")
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])
+
+    def test_shell_with_output_is_left_open(self):
+        repo = self.e.repo()
+        self.e.set_state(shell_preview="make test\nrunning...\n\u276f")
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._closed(), [])
+
     def test_running_setup_tab_is_kept_when_the_marker_never_appears(self):
         repo = self.e.repo()
         self.e.set_state(setup_tab="runner", setup_never_done=1)

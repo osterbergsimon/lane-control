@@ -72,8 +72,10 @@ def orca():
             if not state.get("setup_never_done"):
                 Path(path, ".git", "orca-setup-done").write_text("")
         # Orca opens a plain shell in every new worktree.
-        state["terminals"].append({"handle": f"term_{len(state['terminals']) + 1}", "title": f"dev@box: {path}",
-                                   "worktreePath": path})
+        shell = {"handle": f"term_{len(state['terminals']) + 1}", "title": f"dev@box: {path}", "worktreePath": path}
+        if state.get("shell_preview") is not None:
+            shell["preview"] = state["shell_preview"]
+        state["terminals"].append(shell)
         out({"ok": True, "result": {"worktree": {"id": f"{repo}::{path}", "path": path,
                                                  "parentWorktreeId": w["parent"]}}})
     if cmd == "terminal list":

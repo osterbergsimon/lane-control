@@ -569,17 +569,17 @@ def worktree_terminals(wt: Path) -> list:
     return [t for t in rows if Path(t.get("worktreePath") or "/") == wt]
 
 
-def bare_prompt(t: dict) -> bool:
-    """Nothing typed or running: no preview, or its last line ends in a shell prompt character."""
-    lines = [l.strip() for l in (t.get("preview") or "").splitlines() if l.strip()]
-    return not lines or lines[-1][-1] in "$#%>"
+def fresh_shell(t: dict) -> bool:
+    """A shell nobody has used: no agent in it and a preview of at most one line, the prompt, whatever it looks like.
+    Output or a run command shows more lines; if the preview cannot prove it, leave the tab open."""
+    return not t.get("agentIdentity") and len([l for l in (t.get("preview") or "").splitlines() if l.strip()]) <= 1
 
 
 def close_startup_shell(wt: Path):
     """Orca opens a plain shell in every new worktree; close it so the agent's tab comes first. Never the Setup tab
-    (the setup script may still run in it), an agent's tab, or a terminal that is not at a bare prompt."""
+    (the setup script may still run in it), an agent's tab, or a terminal that is not a fresh shell."""
     for t in worktree_terminals(wt):
-        if is_setup_tab(t) or (t.get("title") or "").startswith("cotal-") or not bare_prompt(t):
+        if is_setup_tab(t) or (t.get("title") or "").startswith("cotal-") or not fresh_shell(t):
             continue
         jrun([ORCA, "terminal", "close", "--terminal", t["handle"], "--tab", "--json"])
 
