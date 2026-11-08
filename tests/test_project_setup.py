@@ -289,8 +289,9 @@ class OnboardingTests(unittest.TestCase):
         """main() as if the owner sat at a terminal and answered `answer`; returns (status, stdout, input mock)."""
         m = load()
         out = Tty()
+        answers = {"side_effect": answer} if isinstance(answer, list) else {"return_value": answer}
         with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
-                mock.patch("builtins.input", return_value=answer) as ask, contextlib.redirect_stdout(out), \
+                mock.patch("builtins.input", **answers) as ask, contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(io.StringIO()):
             status = m.main([str(self.repo), "--opencode", "hosted", *args])
         return status, out.getvalue(), ask
@@ -351,6 +352,165 @@ class OnboardingTests(unittest.TestCase):
         status = git("status", "--porcelain", cwd=self.repo)
         self.assertIn("?? wip.txt", status)
         self.assertIn("A  staged.txt", status)
+
+    # --- one run: orca.yaml and the push, asked after the file-list commit -------------------------------------
+    def with_origin(self, reject_push=False):
+        """A local bare origin that holds the repo's main, with origin/HEAD set."""
+        bare = self.e.home / "origin.git"
+        git("init", "-q", "--bare", "-b", "main", str(bare), cwd=self.e.home)
+        git("remote", "add", "origin", str(bare), cwd=self.repo)
+        git("push", "-q", "origin", "main", cwd=self.repo)
+        git("fetch", "-q", "origin", cwd=self.repo)
+        git("remote", "set-head", "origin", "main", cwd=self.repo)
+        if reject_push:
+            hook = bare / "hooks" / "pre-receive"
+            hook.write_text("#!/bin/sh\necho refused >&2\nexit 1\n")
+            hook.chmod(0o755)
+        return bare
+
+    def with_lockfile(self):
+        (self.repo / "uv.lock").write_text("")
+        (self.repo / "pyproject.toml").write_text("[project]\nname='a'\n")
+
+    def origin_main(self, bare):
+        return git("rev-parse", "main", cwd=bare)
+
+    def started(self):
+        return any(c.startswith("cotal spawn coordinator") for c in self.e.calls())
+
+    def test_one_run_commits_orca_yaml_pushes_and_starts_the_agents(self):
+        bare = self.with_origin()
+        self.with_lockfile()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual(ask.call_count, 2)
+        self.assertEqual(self.committed_paths(), ["orca.yaml"])  # by explicit path, alone
+        self.assertEqual(sorted(git("show", "--name-only", "--format=", "HEAD~1", cwd=self.repo).splitlines()),
+                         sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))
+        self.assertIn("uv sync", out)  # its text was shown before the question
+        self.assertIn("No orca.yaml", out)
+        self.assertTrue(self.started())
+
+    def test_the_orca_yaml_is_not_in_the_file_list(self):
+        self.with_origin()
+        self.with_lockfile()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        _, out, _ = self.in_terminal(["y", "n"])
+        listed = out.split("Files added or changed", 1)[1].split("commit: created", 1)[0]
+        self.assertNotIn("orca.yaml", listed)
+
+    def test_no_to_the_second_question_commits_and_pushes_nothing_more_and_still_starts(self):
+        bare = self.with_origin()
+        self.with_lockfile()
+        old = self.origin_main(bare)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "n"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual(ask.call_count, 2)
+        self.assertEqual(self.origin_main(bare), old)
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
+        self.assertIn("will not get", out)
+        self.assertTrue(self.started())
+
+    def test_no_to_the_file_list_asks_nothing_more_and_starts_nothing(self):
+        bare = self.with_origin()
+        self.with_lockfile()
+        old = self.origin_main(bare)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, _, ask = self.in_terminal(["n", "y"])
+        self.assertEqual(status, 3)
+        ask.assert_called_once()
+        self.assertEqual(self.origin_main(bare), old)
+        self.assertEqual(self.head_count(), 1)
+        self.assertFalse((self.repo / "orca.yaml").exists())
+        self.assertFalse(self.started())
+
+    def test_a_differing_untracked_orca_yaml_is_left_alone_and_the_push_is_still_asked(self):
+        bare = self.with_origin()
+        self.with_lockfile()
+        (self.repo / "orca.yaml").write_text("scripts:\n  setup: |\n    make deps\n")
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual((self.repo / "orca.yaml").read_text(), "scripts:\n  setup: |\n    make deps\n")
+        self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
+        self.assertIn("differs", out)
+        self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))  # the onboarding commit
+        self.assertTrue(self.started())
+
+    def test_an_identical_untracked_orca_yaml_from_a_declined_run_is_offered_again(self):
+        self.with_origin()
+        self.with_lockfile()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.in_terminal(["y", "n"], "--write-orca-yaml")
+        self.assertTrue((self.repo / "orca.yaml").exists())
+        self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
+        status, out, ask = self.in_terminal(["y"])  # the section is current: only the orca.yaml question
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.committed_paths(), ["orca.yaml"])
+
+    def test_a_tracked_orca_yaml_only_asks_about_the_push(self):
+        bare = self.with_origin()
+        self.with_lockfile()
+        (self.repo / "orca.yaml").write_text("scripts:\n  setup: |\n    make deps\n")
+        git("add", "orca.yaml", cwd=self.repo)
+        git("commit", "-q", "-m", "orca", cwd=self.repo)
+        git("push", "-q", "origin", "main", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual(ask.call_count, 2)
+        self.assertNotIn("No orca.yaml", out)
+        self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))
+
+    def test_another_branch_is_not_pushed_and_nothing_is_asked(self):
+        bare = self.with_origin()
+        self.with_lockfile()
+        old = self.origin_main(bare)
+        git("checkout", "-q", "-b", "feature", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "y"])
+        self.assertEqual(status, 0, out)
+        ask.assert_called_once()
+        self.assertEqual(self.origin_main(bare), old)
+        self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
+        self.assertIn("feature", out)
+        self.assertIn("will not get", out)
+        self.assertTrue(self.started())
+
+    def test_a_failed_push_still_starts_and_warns(self):
+        bare = self.with_origin(reject_push=True)
+        self.with_lockfile()
+        old = self.origin_main(bare)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.origin_main(bare), old)
+        self.assertIn("push failed", out)
+        self.assertIn("will not get", out)
+        self.assertTrue(self.started())
+
+    def test_no_origin_asks_nothing_about_a_push_and_says_why(self):
+        self.with_lockfile()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "y"])
+        self.assertEqual(status, 0, out)
+        ask.assert_called_once()
+        self.assertIn("no origin", out)
+        self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
+        self.assertTrue(self.started())
+
+    def test_no_start_still_opts_out_of_starting(self):
+        self.with_origin()
+        self.with_lockfile()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, _ = self.in_terminal(["y", "y"], "--no-start")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.committed_paths(), ["orca.yaml"])
+        self.assertFalse(self.started())
 
     # --- the list --------------------------------------------------------------------------------------------
     def test_list_comes_from_git_with_marks_and_suggestions(self):

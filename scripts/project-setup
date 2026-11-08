@@ -975,22 +975,33 @@ def setup_steps(repo: Path) -> list:
     return steps
 
 
-def setup_script(repo: Path, write: bool):
-    """The repo's orca.yaml setup script. Orca reads it from the new worktree, so only a committed one counts: a
-    missing one is drafted for the owner to review and commit (never committed here)."""
-    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "orca.yaml"], cwd=repo,
-                             capture_output=True).returncode == 0
-    if tracked:
-        say("setup-script", "exists", "orca.yaml")
-        return
+def orca_yaml_tracked(repo: Path) -> bool:
+    return subprocess.run(["git", "ls-files", "--error-unmatch", "orca.yaml"], cwd=repo,
+                          capture_output=True).returncode == 0
+
+
+def draft_text(repo: Path):
+    """The orca.yaml drafted from the lockfiles; None when there are none."""
     steps = setup_steps(repo)
     if not steps:
-        say("setup-script", "none", "no lockfiles found")
-        return
+        return None
     body = "\n".join("    " + l for l in steps + [f'touch "$(git rev-parse --git-dir)/{SETUP_MARKER}"'])
-    text = ("# Orca runs scripts.setup in every new worktree of this repo (a lane's checkout). Written by lane-control\n"
+    return ("# Orca runs scripts.setup in every new worktree of this repo (a lane's checkout). Written by lane-control\n"
             "# project-setup from the lockfiles; edit freely. Keep the last line: agents wait for it before starting.\n"
             f"scripts:\n  setup: |\n{body}\n")
+
+
+def setup_script(repo: Path, write: bool):
+    """The repo's orca.yaml setup script. Orca reads it from the new worktree, so only a committed one counts: a
+    missing one is drafted for the owner to review and commit (an onboarding run offers that commit itself, see
+    publish_onboarding)."""
+    if orca_yaml_tracked(repo):
+        say("setup-script", "exists", "orca.yaml")
+        return
+    text = draft_text(repo)
+    if text is None:
+        say("setup-script", "none", "no lockfiles found")
+        return
     if write and not (repo / "orca.yaml").exists():
         (repo / "orca.yaml").write_text(text)
         say("setup-script", "written", "orca.yaml (review it, then commit it: lanes only get it once committed)")
@@ -1579,12 +1590,12 @@ def has_terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def owner_says_yes() -> bool:
+def owner_says_yes(question: str = "Commit these files and run the Orca setup? [y/N] ", step: str = "commit") -> bool:
     if not has_terminal():
-        say("commit", "skipped", "no terminal to ask the owner in")
+        say(step, "skipped", "no terminal to ask the owner in")
         return False
     try:
-        return input("Commit these files and run the Orca setup? [y/N] ").strip().lower() in ("y", "yes")
+        return input(question).strip().lower() in ("y", "yes")
     except EOFError:
         return False
 
@@ -1594,6 +1605,79 @@ def commit_adapted(repo: Path, paths: list, message: str = "Add lane-control fil
     run(["git", "add", "--", *paths], cwd=repo)
     run(["git", "commit", "-q", "-m", message, "--only", "--", *paths], cwd=repo)
     say("commit", "created", f"{len(paths)} file(s)")
+
+
+def default_branch(repo: Path):
+    """The branch origin's HEAD names (what Orca branches a new worktree from), else asked of origin; None if unknown."""
+    r = run(["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd=repo, check=False)
+    if r.returncode == 0 and r.stdout.strip().startswith("origin/"):
+        return r.stdout.strip()[len("origin/"):]
+    try:
+        r = run(["git", "ls-remote", "--symref", "origin", "HEAD"], cwd=repo, check=False, timeout=30)
+    except Fail:
+        return None
+    m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD", r.stdout, re.M)
+    return m.group(1) if m else None
+
+
+def unpushed(repo: Path, branch: str) -> bool:
+    ref = f"refs/remotes/origin/{branch}"
+    if run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode != 0:
+        return True
+    return run(["git", "rev-list", "--count", f"{ref}..HEAD"], cwd=repo, check=False).stdout.strip() != "0"
+
+
+def publish_onboarding(repo: Path) -> None:
+    """After the owner's commit of the adapted files: Orca makes a lane's worktree from origin/<branch>, so the files
+    reach lanes only once they are pushed, and orca.yaml (its setup script) only once it is committed and pushed. Asks
+    the owner once more for that. No answer, a no, or a failed push never stops the run; it says what lanes will miss."""
+    miss = "lanes will not get the onboarding files (and orca.yaml) until they are committed and pushed to origin"
+    yaml = repo / "orca.yaml"
+    text = None
+    if not orca_yaml_tracked(repo):
+        draft = draft_text(repo)
+        if yaml.exists() or yaml.is_symlink():
+            if draft is not None and yaml.is_file() and yaml.read_text(errors="replace") == draft:
+                text = draft  # an identical one from a declined run
+            else:
+                say("setup-script", "kept", "orca.yaml is already here and differs from the draft: not overwritten, "
+                    "not committed")
+        else:
+            text = draft
+    if run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode != 0:
+        say("publish", "skipped", f"no origin remote, nothing to push; {miss}" if text is None else
+            "no origin remote, nothing to push; orca.yaml was not committed")
+        return
+    branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo, check=False).stdout.strip()
+    lanes = default_branch(repo)
+    if not branch or not lanes or branch != lanes:
+        say("publish", "skipped", f"on {branch or 'no branch'}, but lanes branch from origin/{lanes or '<default>'}: "
+            f"nothing is pushed; {miss}")
+        return
+    if text is None and not unpushed(repo, branch):
+        return
+    if text is not None:
+        print(f"\nNo orca.yaml was found. This one was generated from the lockfiles (it runs as a script in every "
+              f"worktree):\n\n{text}\nIt has to be committed and pushed to give lanes a setup script: Orca creates "
+              f"worktrees from origin/{branch}. The push also carries the onboarding commit.\n", flush=True)
+        question = f"Commit orca.yaml and push {branch} to origin? [y/N] "
+    else:
+        print(f"\nThe onboarding commit is not pushed. Orca creates worktrees from origin/{branch}, so lanes get "
+              "nothing of it until it is.\n", flush=True)
+        question = f"Push {branch} to origin? [y/N] "
+    if not owner_says_yes(question, "publish"):
+        say("publish", "declined", f"nothing more committed or pushed; {miss}")
+        return
+    try:
+        if text is not None:
+            if not yaml.exists():
+                yaml.write_text(text)
+            commit_adapted(repo, ["orca.yaml"], "Add the Orca setup script")
+        run(["git", "push", "origin", branch], cwd=repo, timeout=120)  # never forced, nothing else set
+    except Fail as e:
+        say("publish", "warning", f"push failed or commit failed ({e}); {miss}")
+        return
+    say("publish", "pushed", f"{branch} to origin")
 
 
 def onboarded(repo: Path) -> bool:
@@ -1991,6 +2075,8 @@ def main(argv=None) -> int:
         project = cfg["name"] or repo.name
         if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
             return STOPPED
+        if not a.skip_adapt:  # also on a re-run: a declined or failed push is offered again
+            publish_onboarding(repo)
         space = slug(project)
         repo_id = orca_repo(repo)
         skill = skills()

@@ -128,7 +128,7 @@ composer. [tested]
 ```bash
 scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
-  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-design-lead] [--trust-folder] [--no-start] \
+  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml (only with --skip-adapt)] [--no-design-lead] [--trust-folder] [--no-start (opt-out of starting)] \
   [--private GLOB]...
 ```
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
@@ -143,10 +143,20 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    Each persona names the tier table and the reviewer persona by absolute path, and the project's Claude permission
    mode.
 5a. Setup script: Orca runs `orca.yaml` `scripts.setup` in each new worktree (a "Setup" tab), but reads it from the
-   worktree, so only a committed one counts. Without one, project-setup drafts it from the lockfiles (uv, poetry,
-   npm/pnpm/yarn/bun, cargo, go, in the root and two levels down; the beads link when `.beads` is a symlink) into
-   `.cotal/orca.yaml.proposed`, or into `orca.yaml` with `--write-orca-yaml`, for the owner to review and commit. It
-   never commits. The draft ends by writing `orca-setup-done` in the worktree's git dir; agents start only after it.
+   worktree, and creates the worktree from `origin/<branch>` (read from Orca's code, not confirmed by creating a
+   worktree), so the script and the onboarding commit reach lanes only once committed and pushed. Without an
+   `orca.yaml`, project-setup drafts one from the lockfiles (uv, poetry, npm/pnpm/yarn/bun, cargo, go, in the root and
+   two levels down; the beads link when `.beads` is a symlink). During onboarding, after the owner's yes to the file
+   list, it asks a second question: no orca.yaml was found, here is the generated text, it must be committed and
+   pushed. A yes commits `orca.yaml` by explicit path and pushes the checked-out branch (never forced, nothing else
+   set); that push also carries the onboarding commit. With a tracked orca.yaml, or no lockfiles, it asks about the
+   push alone when the onboarding commit is unpushed. An untracked `orca.yaml` that differs from the draft is never
+   overwritten or committed. The push is asked only on the branch origin's HEAD names; on another branch, or with no
+   origin, nothing is asked and the run says lanes will not get the files. A no, no terminal or a failed push commits
+   and pushes nothing more, and the agents still start, with that warning. Only a no to the file list stops the run.
+   A run without onboarding (`--skip-adapt`) drafts into `.cotal/orca.yaml.proposed`, or into `orca.yaml` with
+   `--write-orca-yaml`, and never commits. The draft ends by writing `orca-setup-done` in the worktree's git dir;
+   agents start only after it.
 6. Starts the broker (`cotal up --no-manager`, on a per-project port recorded in the settings store) and a
    manager service `mgr` on the Orca runtime.
    `mgr` carries `envRefs` for the proxy variables, because `cotal up` gives its manager a fixed environment without
