@@ -173,7 +173,8 @@ personas in `.cotal/agents/`, each keeping the harness, model and permission mod
 skill. The project's own `.cotal/lanes.tsv` is never replaced (it says when it differs from the defaults; new default
 rows are for the owner to copy over). It starts no adapting or reviewing agent, broker, coordinator or worktree, and
 commits nothing. Running agents keep the old persona and skill until restarted, so the last line (`restart: needed
-...`) names the ones to stop and start again. Changing an agent's harness or model is not a refresh.
+...`) names the ones to stop and start again. A reviewer persona from before it existed is created (from `--reviewer`). All personas are checked before any is
+written. Changing an agent's harness or model is not a refresh.
 
 With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
 

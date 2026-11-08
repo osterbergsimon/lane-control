@@ -356,36 +356,49 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
     say("gitignore", ignore_cotal(repo), ".cotal/")
 
 
-def refresh(repo: Path, project: str, mode: str, tiers: Path) -> int:
+def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -> int:
     """Refresh mode: an onboarded project picks up lane-control's current personas and skill. Each persona keeps the
-    harness, model and permission mode it was set up with, the project's own .cotal/lanes.tsv is never replaced, and
-    nothing is adapted, launched or committed. Running agents keep their old persona: they are listed to restart."""
+    harness, model and permission mode it was set up with (a missing reviewer persona, from before it existed, is made
+    from `reviewer` and the mode of the others), the project's own .cotal/lanes.tsv is never replaced, and nothing is
+    adapted, launched or committed. Running agents keep their old persona: they are listed to restart."""
     agents = repo / ".cotal" / "agents"
     if not (agents / "coordinator.md").is_file():
         raise Fail(f"{repo} has no .cotal/agents/coordinator.md: it was not set up; run project-setup without --refresh")
-    old = {f.stem: f.read_text() for f in agents.glob("*.md")}
+    old = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "design-lead", "reviewer")
+           if (agents / f"{n}.md").is_file()}
     named = re.search(r"^description: (.+?) coordinator;", old["coordinator"], re.M)
     project = project or (named.group(1) if named else repo.name)
-    found = re.search(r'"permission-mode": "(\w+)"', "".join(old.values()))
-    mode = found.group(1) if found else mode
+
+    def recorded(text: str):
+        """The mode a persona was rendered with: its launch line (Claude), else its body line (opencode)."""
+        m = (re.search(r'"permission-mode": "(\w+)"', text) or re.search(r"permission mode is `(\w+)`", text))
+        return m.group(1) if m else None
+    modes = {n: recorded(t) for n, t in old.items()}
+    others = next((v for v in modes.values() if v), mode)  # a persona with no record: what the others carry
     table = repo / ".cotal" / "lanes.tsv"
+    design_lead = "design-lead" in old
+    texts = {}
+    for name in ["coordinator"] + (["design-lead"] if design_lead else []) + ["reviewer"]:
+        if name in old:
+            h = re.search(r"^agent: (\S+)$", old[name], re.M)
+            m = re.search(r"^model: (\S+)$", old[name], re.M)
+            if not (h and m):
+                raise Fail(f"{agents / (name + '.md')} has no agent/model lines to keep; nothing was changed")
+            harness, model = h.group(1), m.group(1)
+        else:
+            harness, model = reviewer
+        texts[name] = (harness, model, render_persona((HERE / "personas" / f"{name}.md").read_text(), harness, model,
+                                                      modes.get(name) or others, project, str(table),
+                                                      str(agents / "reviewer.md"), design_lead=design_lead))
     if table.exists():
         same = table.read_text() == tiers.read_text()
         say("tiers", "exists", ".cotal/lanes.tsv kept" + ("" if same else " (differs from the defaults: the project's own)"))
     else:
         say("tiers", write_if_changed(table, tiers.read_text()), ".cotal/lanes.tsv (was missing)")
-    design_lead = (agents / "design-lead.md").is_file()
     changed = []
-    for name in ["coordinator"] + (["design-lead"] if design_lead else []) + ["reviewer"]:
-        have = old.get(name, "")
-        h = re.search(r"^agent: (\S+)$", have, re.M)
-        m = re.search(r"^model: (\S+)$", have, re.M)
-        if not (h and m):
-            raise Fail(f"{agents / (name + '.md')} has no agent/model lines to keep; run without --refresh")
-        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h.group(1), m.group(1), mode, project,
-                              str(table), str(agents / "reviewer.md"), design_lead=design_lead)
+    for name, (harness, model, text) in texts.items():
         state = write_if_changed(agents / f"{name}.md", text)
-        say(f"persona {name}", state, f"{h.group(1)}/{m.group(1)}")
+        say(f"persona {name}", state, f"{harness}/{model}")
         if state != "exists":
             changed.append(name)
     skill = skills()
@@ -402,7 +415,10 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path) -> int:
         say("restart", "unknown", "no live agent list (broker not running?); restart these if running: "
             + ", ".join(sorted(needs)))
         return 0
-    todo = [(n, why) for n, why in sorted(needs.items()) if n in live]
+    def running(n):  # reviewers run per lane as <key>-review, role reviewer
+        return [a for a, v in live.items() if a == n or (n == "reviewer" and (a.endswith("-review")
+                                                                             or v.get("role") == "reviewer"))]
+    todo = [(", ".join(running(n)), why) for n, why in sorted(needs.items()) if running(n)]
     if todo:
         say("restart", "needed", "; ".join(f"{n} ({why})" for n, why in todo)
             + ". They keep the old text until restarted (stop, then start again)")
@@ -1111,7 +1127,7 @@ def main(argv=None) -> int:
             if top is None or top.returncode != 0:
                 raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
             say("repo", "exists", top.stdout.strip())
-            return refresh(Path(top.stdout.strip()), a.name or "", a.permission_mode, tiers)
+            return refresh(Path(top.stdout.strip()), a.name or "", a.permission_mode, tiers, reviewer)
         except Fail as e:
             print(f"project-setup: {e}", file=sys.stderr)
             return 1

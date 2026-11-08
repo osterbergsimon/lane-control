@@ -1504,6 +1504,51 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.persona().read_text(), "stale\n")
 
+    def test_opencode_personas_keep_their_recorded_mode(self):
+        self.setup_project("--coordinator", "opencode/m", "--design-lead", "opencode/m", "--reviewer", "opencode/m",
+                           "--permission-mode", "default")
+        self.persona().write_text(self.persona().read_text() + "stale\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for n in ("coordinator", "design-lead"):
+            self.assertIn("permission mode is `default`", self.persona(n).read_text())
+
+    def test_each_persona_keeps_its_own_mode(self):
+        self.setup_project()
+        rv = self.persona("reviewer")
+        rv.write_text(rv.read_text().replace('"permission-mode": "auto"', '"permission-mode": "default"'))
+        (self.repo / ".cotal" / "agents" / "zz-extra.md").write_text('"permission-mode": "bypassPermissions"\n')
+        self.refresh()
+        self.assertIn('"permission-mode": "default"', rv.read_text())
+        self.assertIn('"permission-mode": "auto"', self.persona().read_text())
+
+    def test_missing_reviewer_is_made_and_the_tier_table_kept(self):
+        self.setup_project()
+        self.persona("reviewer").unlink()
+        table = self.repo / ".cotal" / "lanes.tsv"
+        table.write_text(table.read_text() + "# own row\n")
+        own = table.read_text()
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("persona reviewer: created", r.stdout)
+        self.assertEqual(table.read_text(), own)
+
+    def test_bad_persona_changes_nothing(self):
+        self.setup_project()
+        self.persona().write_text(self.persona().read_text() + "stale\n")
+        self.persona("reviewer").write_text("broken\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("stale", self.persona().read_text())
+        self.assertNotIn("run without --refresh", r.stderr)
+
+    def test_running_reviewer_seat_is_named(self):
+        self.setup_project()
+        self.persona("reviewer").write_text(self.persona("reviewer").read_text() + "stale\n")
+        self.e.set_state(agents=[{"name": "lane-3-review", "cwd": "/x"}])
+        r = self.refresh()
+        self.assertIn("restart: needed lane-3-review (persona changed)", r.stdout)
+
     def test_not_a_repository_is_refused_and_nothing_cloned(self):
         r = self.e.run(str(self.e.home / "nowhere"), "--refresh", adapt=True)
         self.assertEqual(r.returncode, 1)
