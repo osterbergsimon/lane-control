@@ -92,12 +92,12 @@ class SkillTests(unittest.TestCase):
 class TierTableTests(unittest.TestCase):
     def test_default_tiers(self):
         rows = [l.split("\t") for l in TIERS.read_text().splitlines() if l and not l.startswith("#")]
-        self.assertEqual(rows[0], ["tier", "harness", "model", "permission"])
+        self.assertEqual(rows[0], ["tier", "harness", "model", "permission", "sandbox"])
         table = {r[0]: r[1:] for r in rows[1:]}
-        self.assertEqual(table["swift"], ["opencode", "opencode/deepseek-v4.1-flash", "-"])
-        self.assertEqual(table["standard"], ["claude", "sonnet", "inherit"])
-        self.assertEqual(table["deep"], ["claude", "opus", "inherit"])
-        self.assertEqual(table["top"], ["none", "-", "-"])
+        self.assertEqual(table["swift"], ["opencode", "opencode/deepseek-v4.1-flash", "-", "required"])
+        self.assertEqual(table["standard"], ["claude", "sonnet", "inherit", "none"])
+        self.assertEqual(table["deep"], ["claude", "opus", "inherit", "none"])
+        self.assertEqual(table["top"], ["none", "-", "-", "none"])
 
 
 class NoTypingIntoAgentsTests(unittest.TestCase):
@@ -313,6 +313,13 @@ class LaneSkillCliTests(unittest.TestCase):
         self.assertNotIn("opencode/deepseek", self.text)
         for word in ("`none`", "`inherit`"):
             self.assertIn(word, self.text)
+
+    def test_every_tier_goes_through_the_sandbox_refusal_before_a_spawn(self):
+        self.assertIn("~/.agents/bin/lane-tier", self.text)
+        self.assertLess(self.text.index("lane-tier"), self.text.index("## 2. Open the lane"))
+        self.assertIn("never start a refused tier", self.flat)
+        review = self.text[self.text.index("## 5. Review a lane"):]
+        self.assertIn("lane-tier", review)
 
 
 class BeadsSteeringTests(unittest.TestCase):

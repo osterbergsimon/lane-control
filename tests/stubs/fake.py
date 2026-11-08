@@ -130,11 +130,11 @@ def cotal():
             state["services"][args[2]] = "running"
             out({"outcome": "ok"})
     if args[:1] == ["ps"]:
-        items = [{"name": a["name"], "status": "running", "cwd": a["cwd"], "mesh": "idle"} for a in state["agents"]]
+        items = [{"name": a["name"], "status": "running", "cwd": a["cwd"], "mesh": "idle", "role": a.get("role")} for a in state["agents"]]
         out({"outcome": "ok", "result": {"kind": "seats", "items": items}})
     if args[:1] == ["spawn"]:
         name = args[1]
-        state["agents"].append({"name": name, "cwd": opt("--cwd")})
+        state["agents"].append({"name": name, "cwd": opt("--cwd"), "role": opt("--role")})
         # The agent's own tab, as the worst case: nothing marks it as an agent yet (identity lags, no cotal- title).
         state.setdefault("terminals", []).append({"handle": f"agent_{name}", "title": f"{name}",
                                                    "worktreePath": opt("--cwd"), "preview": "starting"})

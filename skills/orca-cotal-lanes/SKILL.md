@@ -28,9 +28,12 @@ Never type into an agent's terminal: never use `orca terminal send` on an agent,
 ## 1. Pick the tier, then harness and model
 Tier by the paths the task touches (lane-control model-routing: highest tier wins, in doubt one tier up; swift only
 for prose docs, scripts without private data and CI). Then look the tier up in the tier table file your persona names (the project's `.cotal/lanes.tsv`, by absolute
-path, because lane worktrees do not carry it). Each row gives the harness, model and permission for a tier.
+path, because lane worktrees do not carry it): run `~/.agents/bin/lane-tier <table> <tier>`, which prints the tier's harness, model, permission and sandbox.
 
-A tier whose harness is `none` is skipped: go one tier up. `inherit` means the project's Claude permission mode, which
+A tier whose harness is `none` is skipped: `lane-tier` exits 3, go one tier up. Exit 4 means the tier is `sandbox required`
+and a Cotal agent cannot run inside the sandbox yet: never start a refused tier with `cotal_spawn` and never edit the
+table to get past it; route the work one tier up, or to Rove if the project has it, and tell the owner in your next
+line. Any other non-zero exit: hold the lane and tell the owner what it printed. `inherit` means the project's Claude permission mode, which
 your persona names; pass that value.
 
 ## 2. Open the lane
@@ -98,7 +101,7 @@ the lane's report arrives as a DM and wakes you. Reply to a lane with `cotal_dm`
 When your persona says a lane gets a reviewer, start one in the lane's own worktree, so its tab sits in the lane's
 task. It reviews read-only and reports to you by DM.
 
-1. Pick its tier and model as your persona says (a different model from the lane's), from the tier table.
+1. Pick its tier and model as your persona says (a different model from the lane's), from the tier table, with `lane-tier` as in section 1 (a refused tier is never used).
 2. Read the reviewer persona (the path your persona names) and take its body: everything after the second `---`.
 3. `cotal_spawn`:
    - `name`: `<key-slug>-review`; `role`: `reviewer` (your persona holds `role:reviewer`)

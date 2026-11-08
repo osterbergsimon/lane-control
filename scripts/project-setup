@@ -3,7 +3,7 @@
 
   project-setup <git-url|dir> [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
-                [--port N] [--tiers FILE] [--no-start]
+                [--port N] [--tiers FILE | --opencode hosted|own|none [--opencode-model M]] [--no-start]
                 [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL] [--readapt | --skip-adapt | --refresh]
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
@@ -18,6 +18,9 @@ without a terminal, they stay uncommitted, no Orca step runs and it exits 3. Not
 in .cotal/agents/ (keeping each one's harness, model and permission mode), reinstalls the skill, leaves the project's
 .cotal/lanes.tsv alone and says which running agents keep the old text until restarted. No adapting or reviewing
 agent, no broker, no Orca worktree, no commit.
+
+The tier table is decided once per project: with a terminal project-setup asks how OpenCode lanes run; without one,
+--opencode or a full --tiers say it, and given neither it is hosted (sandbox required). A re-run keeps .cotal/lanes.tsv.
 """
 import argparse
 import hashlib
@@ -38,7 +41,7 @@ MODES = ("auto", "bypassPermissions", "default")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
-LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room")  # the library first: a new tool never sees an old one
+LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # the library first: a new tool never sees an old one
 HOST_FILES = ("scripts/project-setup", *(f"scripts/{t}" for t in LANE_TOOLS),
               "personas", "skills", "templates", "model-routing.md")  # what --host copies
 
@@ -296,7 +299,7 @@ def lane_tools(home: Path):
         tmp.chmod(mode)
         os.replace(tmp, dst)
         changed = True
-    say("lane-tools", "created" if fresh else ("updated" if changed else "exists"), f"lane-heavy, lane-room in {bin_dir}")
+    say("lane-tools", "created" if fresh else ("updated" if changed else "exists"), f"lane-heavy, lane-room, lane-tier in {bin_dir}")
 
 
 def skills():
@@ -423,8 +426,146 @@ def ignore_cotal(repo: Path) -> str:
     return "updated"
 
 
-def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tiers: Path):
-    """lead None: the project has no design lead."""
+HOSTED_OPENCODE = ("opencode/", "opencode-go/")  # served by OpenCode, region unknown: never `sandbox none` by this script
+MODEL_NAME = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:/-]+")
+MODELS_SHOWN = 40
+
+
+def check_tier_table(text: str) -> list:
+    """(tier, harness, sandbox) per row, by scripts/lane-tier so the table has one reader. A bad table is a Fail."""
+    try:
+        r = subprocess.run(["bash", str(HERE / "scripts" / "lane-tier"), "--check", "/dev/stdin"], input=text,
+                           capture_output=True, text=True)
+    except OSError as e:
+        raise Fail(f"cannot check the tier table: {e}")
+    if r.returncode != 0:
+        raise Fail(r.stderr.strip())
+    return [tuple(l.split()) for l in r.stdout.splitlines() if l.strip()]
+
+
+def sandbox_note(tier_text: str):
+    refused = [t for t, h, s in check_tier_table(tier_text) if s == "required" and h != "none"]
+    if refused:
+        print(f"note: {', '.join(refused)} has sandbox required: Orca + Cotal refuses it until Cotal has a per-seat "
+              "launch wrapper, so that work goes one tier up or to Rove (docs/orca.md).", file=sys.stderr, flush=True)
+
+
+def tiers_for_answer(text: str, answer: str, model: str = "") -> str:
+    """The default table with the owner's answer applied. hosted: unchanged. own: OpenCode tiers on `model`, no
+    sandbox. none: OpenCode tiers skipped, so their work goes one tier up."""
+    if answer == "hosted":
+        return text
+    out, col = [], None
+    for line in text.splitlines():
+        cells = line.split("\t")
+        if not line.strip() or line.startswith("#"):
+            pass
+        elif col is None:
+            col = {n: i for i, n in enumerate(cells)}
+        elif cells[col["harness"]] == "opencode":
+            if answer == "own":
+                cells[col["model"]], cells[col["sandbox"]] = model, "none"
+            else:
+                cells[col["harness"]], cells[col["model"]], cells[col["sandbox"]] = "none", "-", "none"
+        out.append("\t".join(cells))
+    return "\n".join(out) + "\n"
+
+
+def usable_own_model(name: str) -> bool:
+    return bool(MODEL_NAME.fullmatch(name)) and not name.startswith(HOSTED_OPENCODE)
+
+
+def listed_own_models() -> list:
+    """Names from `opencode models`, without OpenCode's own hosted ones. Never opencode.jsonc: it can hold keys, and
+    spawned agents load that config anyway."""
+    try:
+        r = subprocess.run(["opencode", "models"], capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return sorted({l.strip() for l in r.stdout.splitlines() if usable_own_model(l.strip())})
+
+
+def ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def ask_own_model() -> str:
+    """A model name the owner picked or typed, or "" if none was given."""
+    names = listed_own_models()
+    for i, n in enumerate(names[:MODELS_SHOWN], 1):
+        print(f"  {i} {n}")
+    if len(names) > MODELS_SHOWN:
+        print(f"  ... and {len(names) - MODELS_SHOWN} more: type the name")
+    for _ in range(3):
+        got = ask("Model for OpenCode lanes (number from the list, or provider/model): ")
+        if got.isdigit() and 1 <= int(got) <= min(len(names), MODELS_SHOWN):
+            return names[int(got) - 1]
+        if usable_own_model(got):
+            return got
+        print("  Expected a number from the list or provider/model, and not a hosted opencode/ or opencode-go/ model.")
+    return ""
+
+
+def ask_opencode() -> tuple:
+    """(answer, model). Anything unclear ends on hosted, the answer that cannot run a model bare."""
+    print("How should OpenCode lanes run? 1 hosted models (sandbox required), "
+          "2 own models, offline or internal gateway (no sandbox), 3 no OpenCode lanes (Claude only).")
+    for _ in range(3):
+        got = ask("[1/2/3, default 1] ") or "1"
+        if got == "1":
+            return "hosted", ""
+        if got == "3":
+            return "none", ""
+        if got == "2":
+            model = ask_own_model()
+            if model:
+                return "own", model
+            print("  No model chosen: OpenCode lanes stay hosted (sandbox required).")
+            return "hosted", ""
+    print("  No answer: OpenCode lanes stay hosted (sandbox required).")
+    return "hosted", ""
+
+
+def choose_tiers(repo: Path, a, default_table: Path) -> str:
+    """The project's tier table, decided once. An explicit --tiers or --opencode wins; otherwise a table the project
+    already has is kept and nothing is asked."""
+    table = repo / ".cotal" / "lanes.tsv"
+    try:
+        default_text = default_table.read_text()
+        if a.tiers:
+            check_tier_table(default_text)
+            record(repo, opencode="tiers")
+            return default_text
+        if not a.opencode and table.exists():
+            return table.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
+    if a.opencode:
+        answer, model = a.opencode, a.opencode_model or ""
+        if answer == "own" and not model:
+            model = ask_own_model()
+            if not model:
+                raise Fail("--opencode own needs a model, and none was chosen")
+    else:
+        was = record(repo)
+        if was.get("opencode") in ("hosted", "own", "none"):
+            answer, model = was["opencode"], was.get("opencode_model", "")
+        elif has_terminal():
+            answer, model = ask_opencode()
+        else:
+            answer, model = "hosted", ""
+            say("opencode", "default", "hosted (sandbox required): no terminal to ask in; set --opencode or --tiers")
+    record(repo, opencode=answer, opencode_model=model)
+    say("opencode", "chosen", answer + (f" {model}" if model else ""))
+    return tiers_for_answer(default_text, answer, model)
+
+
+def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tier_text: str):
+    """lead None: the project has no design lead. tier_text: the project's table, from choose_tiers."""
     table = str(repo / ".cotal" / "lanes.tsv")
     review_persona = str(repo / ".cotal" / "agents" / "reviewer.md")
     roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
@@ -432,7 +573,8 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
         text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project, table,
                               review_persona, design_lead=lead is not None)
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
-    say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
+    say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tier_text), ".cotal/lanes.tsv")
+    sandbox_note(tier_text)
     say("gitignore", ignore_cotal(repo), ".cotal/")
 
 
@@ -444,8 +586,11 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     agents = repo / ".cotal" / "agents"
     if not (agents / "coordinator.md").is_file():
         raise Fail(f"{repo} has no .cotal/agents/coordinator.md: it was not set up; run project-setup without --refresh")
-    old = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "design-lead", "reviewer")
-           if (agents / f"{n}.md").is_file()}
+    try:
+        old = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "design-lead", "reviewer")
+               if (agents / f"{n}.md").is_file()}
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"cannot read a persona in {agents}: {getattr(e, 'filename', None) or e}")
     named = re.search(r"^description: (.+?) coordinator;", old["coordinator"], re.M)
     project = project or (named.group(1) if named else repo.name)
 
@@ -455,6 +600,9 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         return m.group(1) if m else None
     modes = {n: recorded(t) for n, t in old.items()}
     others = next((v for v in modes.values() if v), mode)  # a persona with no record: what the others carry
+    if not any(modes.values()):
+        say("permission-mode", "unknown", f"no persona records it, so they are rendered with `{mode}`; if the project "
+            f"ran another, correct it in {agents}")
     table = repo / ".cotal" / "lanes.tsv"
     design_lead = "design-lead" in old
     texts = {}
@@ -471,7 +619,9 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
                                                       modes.get(name) or others, project, str(table),
                                                       str(agents / "reviewer.md"), design_lead=design_lead))
     try:
-        default_text = tiers.read_text()
+        was = record(repo)
+        default_text = tiers_for_answer(tiers.read_text(), was.get("opencode", "hosted"), was.get("opencode_model", "")) \
+            if was.get("opencode") in ("own", "none") else tiers.read_text()
         own_text = table.read_text() if table.exists() else None
     except (OSError, UnicodeDecodeError) as e:
         raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
@@ -486,6 +636,11 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         key = lambda rs: ", ".join(sorted(r.split("\t")[0] for r in rs)) or "none"
         say("tiers", "exists", f".cotal/lanes.tsv kept, differs from the defaults: only in the project: {key(mine)}; "
             f"only in the defaults: {key(theirs)}")
+    if own_text is not None:
+        try:
+            sandbox_note(own_text)
+        except Fail as e:
+            print(f"warning: {e}: lane-tier refuses every tier until it is fixed", file=sys.stderr, flush=True)
     changed = []
     for name, (harness, model, text) in texts.items():
         state = write_if_changed(agents / f"{name}.md", text)
@@ -507,8 +662,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             + ", ".join(sorted(needs)))
         return 0
     def running(n):  # reviewers run per lane as <key>-review, role reviewer
-        return [a for a, v in live.items() if a == n or (n == "reviewer" and (a.endswith("-review")
-                                                                             or v.get("role") == "reviewer"))]
+        return [a for a, v in live.items() if a == n or (n == "reviewer" and v.get("role") == "reviewer")]
     todo = [(", ".join(running(n)), why) for n, why in sorted(needs.items()) if running(n)]
     if todo:
         say("restart", "needed", "; ".join(f"{n} ({why})" for n, why in todo)
@@ -1158,7 +1312,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="project-setup", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(allow_abbrev=False, prog="project-setup", description=__doc__.split("\n\n")[0])
     ap.add_argument("target")
     ap.add_argument("--host")
     ap.add_argument("--name")
@@ -1176,7 +1330,12 @@ def main(argv=None) -> int:
                     help="default harness/model of the reviewer persona; leads pick one per lane from the tiers")
     ap.add_argument("--permission-mode", default="auto")
     ap.add_argument("--port", type=int)
-    ap.add_argument("--tiers", default=str(HERE / "templates" / "lanes.tsv"))
+    table = ap.add_mutually_exclusive_group()
+    table.add_argument("--tiers", help="a full tier table to use as it is")
+    table.add_argument("--opencode", choices=("hosted", "own", "none"),
+                       help="how OpenCode lanes run, answered without a terminal: hosted (sandbox required), own "
+                            "(own models or gateway, no sandbox; needs --opencode-model) or none (Claude only)")
+    ap.add_argument("--opencode-model", help="with --opencode own: the provider/model for OpenCode tiers")
     ap.add_argument("--no-start", action="store_true")
     ap.add_argument("--adapter", default="claude/opus",
                     help="harness/model of the agent that adapts the project's files")
@@ -1209,9 +1368,20 @@ def main(argv=None) -> int:
         print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are {adapter[1]}",
               file=sys.stderr)
         return 2
-    tiers = Path(a.tiers).expanduser()
+    if a.opencode_model and a.opencode != "own":
+        print("project-setup: --opencode-model only goes with --opencode own", file=sys.stderr)
+        return 2
+    if a.opencode_model and not usable_own_model(a.opencode_model):
+        print("project-setup: --opencode-model must be provider/model, and not a hosted opencode/ or opencode-go/ "
+              "model: those need the sandbox", file=sys.stderr)
+        return 2
+    if a.opencode == "own" and not a.opencode_model and not has_terminal():
+        print("project-setup: --opencode own without a terminal needs --opencode-model", file=sys.stderr)
+        return 2
+    tiers = Path(a.tiers or HERE / "templates" / "lanes.tsv").expanduser()
     if a.refresh:
-        ignored = [f for f in ("--coordinator", "--design-lead", "--no-design-lead", "--permission-mode")
+        ignored = [f for f in ("--coordinator", "--design-lead", "--no-design-lead", "--permission-mode", "--opencode",
+                               "--opencode-model")
                    if any(x == f or x.startswith(f + "=") for x in argv)]
         if ignored:
             print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
@@ -1241,19 +1411,19 @@ def main(argv=None) -> int:
     ORCA = orca_cli()
     # Cotal's Orca driver otherwise tries `orca-ide`, then whatever `orca` is on PATH.
     os.environ.setdefault("COTAL_ORCA_BIN", ORCA)
-    tier_harnesses = {l.split("\t")[1] for l in tiers.read_text().splitlines()[1:]
-                      if l and not l.startswith("#") and len(l.split("\t")) > 1} & set(HARNESSES)
-    tier_harnesses.add(reviewer[0])  # started per lane, like a tier's harness
     needed = {coord[0]} | ({lead[0]} if lead else set())
     base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
     try:
         preflight(needed)
-        missing_tier = sorted(h for h in tier_harnesses if not shutil.which(h))
-        if missing_tier:
-            print(f"project-setup: note: tier harness not on PATH: {' '.join(missing_tier)}", file=sys.stderr)
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
         beads_note(repo)
+        tier_text = choose_tiers(repo, a, tiers)
+        tier_harnesses = {h for _, h, _ in check_tier_table(tier_text)} & set(HARNESSES)
+        tier_harnesses.add(reviewer[0])  # started per lane, like a tier's harness
+        missing_tier = sorted(h for h in tier_harnesses if not shutil.which(h))
+        if missing_tier:
+            print(f"project-setup: note: tier harness not on PATH: {' '.join(missing_tier)}", file=sys.stderr)
         # An agent tab can't answer Claude's first-start trust prompt, and the launch times out on it. Trusting the
         # folder is the owner's call, so it is never written for them.
         if "claude" in needed and not a.no_start:
@@ -1267,15 +1437,16 @@ def main(argv=None) -> int:
         cotal_space(repo, space)
         if "claude" in needed | tier_harnesses:
             claude_wiring(repo, space)
-        personas_and_tiers(repo, project, coord, lead, reviewer, a.permission_mode, tiers)
+        personas_and_tiers(repo, project, coord, lead, reviewer, a.permission_mode, tier_text)
+        project_table = repo / ".cotal" / "lanes.tsv"
         setup_script(repo, a.write_orca_yaml)
         roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
         if a.no_start:
-            opencode_key_check(repo, space, tiers, roles)
+            opencode_key_check(repo, space, project_table, roles)
             say("start", "skipped", "--no-start")
             return 0
         mgr_started = start_stack(repo, space, a.port)
-        opencode_key_check(repo, space, tiers, roles, mgr_started)
+        opencode_key_check(repo, space, project_table, roles, mgr_started)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = None

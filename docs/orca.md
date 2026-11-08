@@ -182,7 +182,7 @@ written. Changing an agent's harness or model is not a refresh: `--coordinator`,
 
 ### Lanes
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
-1. Pick the tier per `model-routing.md`, then look up the harness and model in `.cotal/lanes.tsv`.
+1. Pick the tier per `model-routing.md`, then run `~/.agents/bin/lane-tier .cotal/lanes.tsv <tier>` for its harness and model. It refuses a `sandbox required` tier (below).
 2. Run `orca worktree create --name <key> --parent-worktree active --json`, so the new task nests under the caller in
    the GUI. Wait for `orca-setup-done` when the setup script writes it, start the agent (step 3), and only then close
    the startup shell and the Setup tab (it stays if the marker never appears), so the agent's tab is first.
@@ -195,6 +195,33 @@ The coordinator (or the design lead, for its own frontend lanes) follows the `or
    blocker/major/minor by DM. Blocker and major are fixed, at most two rounds, then the owner decides.
 
 Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
+
+### The sandbox per tier
+`.cotal/lanes.tsv` has a `sandbox` column, `required` or `none` (rule: `model-routing.md`, "Sandbox per tier"). A table
+with no column, or a row with an empty cell, is `required` for OpenCode tiers and `none` for the rest.
+
+**A `required` tier cannot launch under Orca + Cotal yet.** `lane-tier` refuses it (exit 4) and the skill never spawns
+it, so it can never run bare. Run that work as a Rove task through `scripts/opencode-sandbox.sh`, or use a `none` tier.
+The refusal is a check the coordinator runs; Cotal does not enforce it. Cotal's `modelPolicy` cannot replace it today,
+because a role under a policy refuses `launchOptions`, which Claude lanes need.
+
+Why a Cotal agent cannot run inside the sandbox on Cotal 0.145.1 (Rove can, because `--command` makes the script the
+whole engine):
+- No per-seat wrapper. The only hook is `COTAL_OPENCODE_BIN` or the `opencode` on the manager's PATH at boot, for every
+  OpenCode agent of that manager.
+- Cotal runs `opencode serve` and a separate TUI from a launcher outside, over loopback, and the plugin inside the
+  server needs the broker on host loopback. The sandbox has no host loopback in either direction.
+- `--clearenv` and the sandbox's own `OPENCODE_CONFIG_CONTENT` remove the Cotal plugin's config and connection
+  variables, and the plugin, launch material, control socket and per-agent database are not bound in.
+- The sandbox takes its model from `.opencode/opencode.json`, `opencode-go/` models only, with its own key file; Cotal
+  passes the model at spawn and `OPENCODE_API_KEY`.
+
+`project-setup` asks once per project, when it has a terminal: 1 hosted models (sandbox required), 2 own models, offline
+or internal gateway (no sandbox), 3 no OpenCode lanes (Claude only). Option 2 lists names from `opencode models`, without
+OpenCode's own hosted ones, or takes one typed, and never reads `opencode.jsonc`; option 3 sets the OpenCode tiers'
+harness to `none`, so their work goes one tier up. Without a terminal, say it with `--opencode hosted|own|none`
+(`own` also needs `--opencode-model <provider/model>`) or a full `--tiers`; given neither, it is hosted. A re-run does not
+ask again and keeps the table, and `--refresh` keeps both the table and the answer.
 
 ### Launching OpenCode lanes
 - Cotal gives every OpenCode agent its own empty database (section 7), so the owner's `opencode auth login` does not

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# lane-tier: look one tier up in a project's tier table before opening a lane, and refuse the tiers that cannot run here.
+#
+#   lane-tier <table> <tier>     prints harness=<h> model=<m> permission=<p> sandbox=<s>
+#   lane-tier --check <table>    prints "<tier> <harness> <sandbox>" per row; nothing else is decided
+#
+# Exit: 0 the tier may be started; 2 usage, a bad table or an unknown tier; 3 the tier's harness is none (skip it, one
+# tier up); 4 refused: the tier needs the sandbox.
+#
+# The `sandbox` column is `required` or `none`. Global-region models are not trusted with the owner's machine, so a
+# hosted OpenCode model is `required` (its serving region is unknown); an internal or offline gateway may be `none`
+# (model-routing.md). A table with no column, or a row with an empty cell: `required` for an OpenCode tier, `none` for
+# the rest.
+#
+# A `required` tier always refuses here, because this tool serves the Orca + Cotal flow and a Cotal seat cannot run
+# inside scripts/opencode-sandbox.sh: Cotal has no per-seat launch wrapper yet. Rove runs that script as the whole
+# engine, so Rove lanes do not come through this check. The check is what the orca-cotal-lanes skill runs before
+# cotal_spawn; Cotal itself does not enforce it.
+set -u
+
+die() { echo "lane-tier: $*" >&2; exit 2; }
+
+check=""
+if [ "${1:-}" = "--check" ]; then
+  check=1
+  [ $# -eq 2 ] || die "usage: lane-tier --check <table>"
+  table=$2 tier=""
+else
+  [ $# -eq 2 ] || die "usage: lane-tier <table> <tier>"
+  table=$1 tier=$2
+fi
+[ -r "$table" ] || die "cannot read the tier table $table"
+
+# Columns are found by name, so a project's table may order them its own way.
+out=$(awk -F'\t' -v want="$tier" -v check="$check" '
+  { sub(/\r$/, "") }
+  /^#/ || /^[ \t]*$/ { next }
+  !seen {
+    seen = 1
+    for (i = 1; i <= NF; i++) col[$i] = i
+    if (!col["tier"] || !col["harness"] || !col["model"] || !col["permission"]) {
+      print "the header needs tier, harness, model and permission columns"; bad = 1; exit
+    }
+    next
+  }
+  {
+    h = $col["harness"]
+    s = col["sandbox"] ? $col["sandbox"] : ""
+    if (s == "") s = (h == "opencode") ? "required" : "none"
+    if (s != "required" && s != "none") {
+      print "tier " $col["tier"] ": sandbox must be required or none, not " s; bad = 1; exit
+    }
+    if (check) print $col["tier"], h, s
+    else if ($col["tier"] == want) {
+      print h "\037" $col["model"] "\037" $col["permission"] "\037" s; found = 1; exit   # not a tab: read would merge empty cells
+    }
+  }
+  END {
+    if (bad) exit 2
+    if (!seen) { print "the table has no header"; exit 2 }
+    if (!check && !found) { print "no tier " want " in the table"; exit 2 }
+  }
+' "$table")
+rc=$?
+[ "$rc" -eq 0 ] || die "$table: $out"
+if [ -n "$check" ]; then
+  printf '%s\n' "$out"
+  exit 0
+fi
+
+IFS=$'\037' read -r harness model permission sandbox <<<"$out"
+if [ "$harness" = none ]; then
+  echo "lane-tier: tier $tier has harness none: skip it and go one tier up" >&2
+  exit 3
+fi
+if [ "$sandbox" = required ]; then
+  cat >&2 <<MSG
+lane-tier: refused: tier $tier needs the sandbox (sandbox required), and an Orca + Cotal lane cannot run inside it:
+Cotal has no per-seat launch wrapper yet. Do not start this tier with cotal_spawn, so that it never runs bare.
+Run it as a Rove task through scripts/opencode-sandbox.sh, or use a tier with sandbox none in $table.
+MSG
+  exit 4
+fi
+printf 'harness=%s model=%s permission=%s sandbox=%s\n' "$harness" "$model" "$permission" "$sandbox"
