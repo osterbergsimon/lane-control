@@ -1193,7 +1193,7 @@ def repo_private_names(repo: Path, prefix: str, depth: int = 0) -> list:
     if nested and depth >= NESTED_DEPTH:
         raise Fail(f"repos nested more than {NESTED_DEPTH} deep: their private files cannot all be denied")
     for sub in nested:
-        if (repo / sub).is_dir():
+        if (repo / sub / ".git").exists():  # an unpopulated submodule is an empty folder: nothing in it to deny
             out += repo_private_names(repo / sub, f"{prefix}{sub}/", depth + 1)
     return out
 
@@ -1243,13 +1243,15 @@ def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
     p = run(agent_cmd(who[1], prompt, write, tuple(private_rules(repo))), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL, check=False)
     if p.returncode != 0:
         said = (p.stderr.strip() + "\n" + p.stdout.strip()).strip().splitlines()
+        shown = (p.stderr.strip() or p.stdout.strip()).splitlines()
         # the adapter may have left half-written files; a plain re-run would review them as if they were complete
         left = (f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or remove {ADAPTED}/"
                 if write else "")
         if any("max turns" in l.lower() for l in said):
             raise Fail(f"the {'adapting agent' if write else 'reviewer'} used all {MAX_TURNS[write]} turns and was "
                        f"stopped before it finished. Nothing was committed and no Orca step ran.{left}")
-        raise Fail(f"claude -p --model failed: {said[-1] if said else p.returncode}. Nothing was committed.{left}")
+        raise Fail(f"claude -p --model failed: {shown[-1] if shown else p.returncode}. "
+                   f"Nothing was committed.{left}")
     return p.stdout
 
 

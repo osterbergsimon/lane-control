@@ -854,6 +854,27 @@ class OnboardingTests(unittest.TestCase):
                      "Read(/**/.git)"):
             self.assertIn(want, rules)
 
+    def test_plain_clone_with_an_unpopulated_submodule_still_gets_rules(self):
+        r = self.private_repo()
+        sub = self.e.home / "subsrc2"
+        sub.mkdir()
+        git("init", "-q", "-b", "main", cwd=sub)
+        (sub / "a.txt").write_text("a\n")
+        git("add", ".", cwd=sub)
+        git("commit", "-q", "-m", "s", cwd=sub)
+        git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "lib", cwd=r)
+        git("commit", "-q", "-m", "sm", cwd=r)
+        clone = self.e.home / "clone"
+        git("clone", "-q", str(r), str(clone), cwd=self.e.home)
+        self.assertEqual(list((clone / "lib").iterdir()), [])
+        self.assertIn("Read(/.git/**)", load().private_rules(clone))
+
+    def test_failure_message_shows_the_agents_last_line(self):
+        self.e.script_agents(sonnet=[{"say": "stdout noise", "exit": 1}])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("stdout noise", r.stderr)
+
     def test_private_flag_adds_tracked_files(self):
         r = self.private_repo()
         mod = load()
