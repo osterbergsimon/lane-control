@@ -1000,6 +1000,30 @@ class RunTests(unittest.TestCase):
         self.assertEqual(d["envRefs"].get("HTTPS_PROXY"), "HTTPS_PROXY")
         self.assertNotIn("http_proxy", d["envRefs"])  # only names set in the caller's env
 
+    def test_a_refused_tier_is_not_warned_about(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("swift has sandbox required", r.stderr)
+        self.assertNotIn("OPENCODE_API_KEY", r.stderr)
+        self.assertNotIn("warning:", r.stderr)
+
+    def test_hosted_opencode_pins_on_setups_own_agents_are_refused(self):
+        repo = self.e.repo()
+        for args in (["--coordinator", "opencode/opencode/deepseek-v4.1-flash"],
+                     ["--design-lead", "opencode/opencode-go/x"], ["--reviewer", "opencode/opencode/x-free"]):
+            r = self.e.run(str(repo), *args)
+            self.assertEqual(r.returncode, 2, args)
+            self.assertIn("runs only inside the sandbox", r.stderr)
+        self.assertFalse((repo / ".cotal" / "agents").exists())
+        self.assertNotIn("spawn", "\n".join(self.e.calls()))
+
+    def test_own_model_says_it_writes_no_sandbox(self):
+        r = self.e.run(str(self.e.repo()), "--opencode", "own", "--opencode-model", "gateway/m1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("writes no sandbox", r.stdout)
+        self.assertIn("gateway you run", r.stdout)
+
     def test_mgr_passes_opencode_key_by_name_only(self):
         repo = self.e.repo()
         self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
@@ -1011,86 +1035,13 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("sentinel-key-value", r.stdout + r.stderr)
         self.assertNotIn("OPENCODE_API_KEY is not set", r.stderr)
 
-    def test_paid_opencode_tier_without_key_warns(self):
-        repo = self.e.repo()
-        r = self.e.run(str(repo), "--name", "Shop")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertRegex(r.stderr, r"swift.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
-        self.assertIn("export OPENCODE_API_KEY", r.stderr)
-        self.assertIn("cotal svc stop mgr -s shop --yes", r.stderr)
-        self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
-        self.assertRegex(r.stderr, r"cannot tell .*quota")
-
-    def test_manager_holding_the_key_is_not_warned_about(self):
-        repo = self.e.repo()
-        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
-        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
-        del self.e.env["OPENCODE_API_KEY"]
-        r = self.e.run(str(repo), "--name", "Shop")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("warning:", r.stderr)
-        self.assertRegex(r.stderr, r"cannot tell .*quota")
-
-    def _keyed_mgr_in_state(self, state_of_mgr):
-        repo = self.e.repo()
-        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
-        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
-        state = json.loads(self.e.state.read_text())
-        state["services"]["mgr"] = state_of_mgr
-        self.e.state.write_text(json.dumps(state))
-        return repo
-
-    def test_empty_key_restarting_a_stopped_keyed_mgr_warns(self):
-        repo = self._keyed_mgr_in_state("stopped")
-        self.e.env["OPENCODE_API_KEY"] = ""  # Cotal's check is `=== undefined`: `svc start` passes with this
-        r = self.e.run(str(repo), "--name", "Shop")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertRegex(r.stderr, r"swift.*OPENCODE_API_KEY is not set")
-
-    def test_key_restarting_a_stopped_keyed_mgr_is_quiet(self):
-        repo = self._keyed_mgr_in_state("stopped")
-        r = self.e.run(str(repo), "--name", "Shop")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("warning:", r.stderr)
-
-    def test_empty_key_with_a_running_keyed_mgr_is_quiet(self):
-        repo = self._keyed_mgr_in_state("running")
-        self.e.env["OPENCODE_API_KEY"] = ""  # the manager already holds its value; this shell passes nothing to it
-        r = self.e.run(str(repo), "--name", "Shop")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("warning:", r.stderr)
-
-    def test_empty_key_counts_as_unset(self):
+    def test_empty_key_is_not_passed_to_mgr(self):
         repo = self.e.repo()
         self.e.env["OPENCODE_API_KEY"] = ""
-        r = self.e.run(str(repo), "--name", "Shop")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("OPENCODE_API_KEY is not set", r.stderr)
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
         d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
         self.assertNotIn("OPENCODE_API_KEY", d["envRefs"])
-
-    def test_paid_opencode_coordinator_without_key_warns(self):
-        repo = self.e.repo()
-        tiers = self.e.home / "free-lanes.tsv"
-        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x-free\t-\n")
-        r = self.e.run(str(repo), "--name", "Shop", "--tiers", str(tiers),
-                       "--coordinator", "opencode/opencode/deepseek-v4.1-flash")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertRegex(r.stderr, r"coordinator.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
-
-    def test_key_check_runs_with_no_start(self):
-        repo = self.e.repo()
-        r = self.e.run(str(repo), "--name", "Shop", "--no-start")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("OPENCODE_API_KEY is not set", r.stderr)
-
-    def test_warning_does_not_claim_every_pin_is_paid(self):
-        repo = self.e.repo()
-        r = self.e.run(str(repo), "--name", "Shop")
-        self.assertNotIn("those lanes will exit on launch", r.stderr)
-        self.assertRegex(r.stderr, r"a paid model")
-
-    def test_following_the_key_steps_clears_the_warning(self):
+    def test_following_the_key_steps_records_the_key_on_mgr(self):
         repo = self.e.repo()
         self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
         state = json.loads(self.e.state.read_text())  # the owner ran `cotal svc remove mgr`; the file stays behind
@@ -1099,20 +1050,29 @@ class RunTests(unittest.TestCase):
         self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
         r = self.e.run(str(repo), "--name", "Shop")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("mgr was added without", r.stderr)
         d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
         self.assertEqual(d["envRefs"].get("OPENCODE_API_KEY"), "OPENCODE_API_KEY")
 
-    def test_key_set_but_mgr_added_without_it_warns(self):
+    def _key_check_calls(self, *args):
+        m = load()
         repo = self.e.repo()
-        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
-        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
-        r = self.e.run(str(repo), "--name", "Shop")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("mgr was added without OPENCODE_API_KEY", r.stderr)
-        self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
-        self.assertNotIn("sentinel-key-value", r.stdout + r.stderr)
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch.object(m, "opencode_key_check") as check, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            first = m.main([str(repo), "--skip-adapt", "--name", "Shop", *args])
+            first_args = check.call_args
+            second = m.main([str(repo), "--skip-adapt", "--name", "Shop", *args])
+        self.assertEqual((first, second), (0, 0))
+        return repo, first_args, check.call_args
 
+    def test_setup_calls_the_key_check_with_the_projects_table_and_whether_it_started_mgr(self):
+        repo, first, again = self._key_check_calls()
+        self.assertEqual(first.args[2], repo / ".cotal" / "lanes.tsv")
+        self.assertIs(first.args[3], True)
+        self.assertIs(again.args[3], False)
+
+    def test_key_check_also_runs_with_no_start(self):
+        repo, first, _ = self._key_check_calls("--no-start")
+        self.assertEqual(first.args[2], repo / ".cotal" / "lanes.tsv")
     def test_free_opencode_tier_without_key_is_quiet(self):
         repo = self.e.repo()
         tiers = self.e.home / "free-lanes.tsv"
@@ -1123,7 +1083,7 @@ class RunTests(unittest.TestCase):
 
     def test_opencode_coordinator(self):
         repo = self.e.repo()
-        r = self.e.run(str(repo), "--coordinator", "opencode/opencode/deepseek-v4.1-flash")
+        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/deepseek-v4.1-flash")
         self.assertEqual(r.returncode, 0, r.stderr)
         sp = [c for c in self.e.calls() if c.startswith("cotal spawn coordinator")][0]
         self.assertIn("--harness opencode", sp)
@@ -1360,11 +1320,11 @@ class RunTests(unittest.TestCase):
 
     def test_reviewer_persona_rendered(self):
         repo = self.e.repo()
-        r = self.e.run(str(repo), "--reviewer", "opencode/opencode/glm-5", "--no-start")
+        r = self.e.run(str(repo), "--reviewer", "opencode/gateway/glm-5", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
         text = (repo / ".cotal" / "agents" / "reviewer.md").read_text()
         self.assertIn("agent: opencode", text)
-        self.assertIn("model: opencode/glm-5", text)
+        self.assertIn("model: gateway/glm-5", text)
         self.assertNotIn("{{", text)
         coord = (repo / ".cotal" / "agents" / "coordinator.md").read_text()
         self.assertIn(str(repo / ".cotal" / "agents" / "reviewer.md"), coord)
@@ -1431,7 +1391,7 @@ class RunTests(unittest.TestCase):
     def test_untrusted_folder_is_fine_without_claude_agents(self):
         repo = self.e.repo()
         self.e.trust(repo, accepted=False)
-        r = self.e.run(str(repo), "--coordinator", "opencode/opencode/glm-5", "--no-design-lead")
+        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/glm-5", "--no-design-lead")
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_rerun_leaves_existing_tabs_alone(self):
@@ -1503,7 +1463,7 @@ class RunTests(unittest.TestCase):
 
     def test_claude_setup_when_project_later_uses_claude(self):
         repo = self.e.repo()
-        oc = "opencode/opencode/x"
+        oc = "opencode/gateway/x"
         tiers = self.e.home / "tiers.tsv"
         tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x\t-\n")
         self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--design-lead", oc, "--reviewer", oc,
@@ -1579,7 +1539,7 @@ class RunTests(unittest.TestCase):
 
     def test_personas_carry_mode_and_tier_path(self):
         repo = self.e.repo()
-        oc = "opencode/opencode/x"
+        oc = "opencode/gateway/x"
         self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--permission-mode", "bypassPermissions").returncode, 0)
         text = (repo / ".cotal" / "agents" / "coordinator.md").read_text()
         self.assertIn("`bypassPermissions`", text)
@@ -1793,6 +1753,22 @@ class RefreshTests(unittest.TestCase):
         f.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\tgw/m\t-\ndeep\tclaude\topus\tinherit\n")
         return f
 
+    def test_refresh_warns_about_a_persona_already_on_a_hosted_model(self):
+        self.setup_project()
+        text = self.persona().read_text()
+        text = re.sub(r"^agent: \S+$", "agent: opencode", text, flags=re.M)
+        self.persona().write_text(re.sub(r"^model: \S+$", "model: opencode/old", text, flags=re.M))
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("persona coordinator pins opencode/old", r.stderr)
+
+    def test_refresh_with_a_table_it_cannot_answer_on_is_a_clean_failure(self):
+        self.setup_project("--opencode", "none")
+        r = self.refresh("--tiers", str(self._old_table()))
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("no sandbox column", r.stderr)
+
     def test_non_utf8_persona_is_a_clean_failure_and_writes_nothing(self):
         self.setup_project()
         self.persona().write_bytes(self.persona().read_bytes() + b"\xff")
@@ -1893,6 +1869,17 @@ class LaneTierTests(unittest.TestCase):
     def test_an_empty_model_cell_cannot_shift_required_away(self):
         self.assertEqual(self.tier(f"{self.HEAD}\tsandbox\nswift\topencode\t\t-\trequired\n", "swift").returncode, 4)
 
+    def test_a_hosted_model_marked_none_is_a_bad_table(self):
+        for model in ("opencode/deepseek-v4.1-flash", "opencode-go/kimi"):
+            r = self.tier(f"{self.HEAD}\tsandbox\nswift\topencode\t{model}\t-\tnone\n", "swift")
+            self.assertEqual(r.returncode, 2, model)
+            self.assertIn("hosted OpenCode model", r.stderr)
+
+    def test_an_empty_harness_is_a_bad_table(self):
+        r = self.tier(f"{self.HEAD}\tsandbox\nswift\t\tgw/m\t-\tnone\n", "swift")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("empty tier or harness", r.stderr)
+
     def test_harness_none_is_skipped(self):
         self.assertEqual(self.tier(f"{self.HEAD}\tsandbox\ntop\tnone\t-\t-\tnone\n", "top").returncode, 3)
 
@@ -1913,7 +1900,77 @@ class LaneTierTests(unittest.TestCase):
         r = subprocess.run([str(TIER_TOOL), "--check", str(TIER_TOOL.parent.parent / "templates" / "lanes.tsv")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.splitlines()[0], "swift opencode required")
+        self.assertEqual(r.stdout.splitlines()[0], "swift opencode required opencode/deepseek-v4.1-flash")
+
+
+class OpencodeKeyCheckTests(unittest.TestCase):
+    """The key check called directly: dormant until SBX-2, because setup refuses every table that would reach it."""
+    HOSTED = [("swift", "opencode", "none", "opencode/deepseek-v4.1-flash")]
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.repo = Path(d.name)
+        (self.repo / ".cotal").mkdir()
+        (self.repo / "lanes.tsv").write_text("mocked by check_tier_table\n")
+        self.m = load()
+
+    def check(self, rows=None, key=None, refs=None, mgr_started=False):
+        """key None: unset in the shell. refs: the mgr definition's envRefs; None: no definition."""
+        if refs is not None:
+            (self.repo / ".cotal" / "mgr-service.json").write_text(json.dumps({"envRefs": refs}))
+        env = {k: v for k, v in os.environ.items() if k != "OPENCODE_API_KEY"}
+        if key is not None:
+            env["OPENCODE_API_KEY"] = key
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stderr(err), \
+                mock.patch.object(self.m, "check_tier_table", return_value=self.HOSTED if rows is None else rows):
+            self.m.opencode_key_check(self.repo, "shop", self.repo / "lanes.tsv", mgr_started)
+        return err.getvalue()
+
+    REF = {"OPENCODE_API_KEY": "OPENCODE_API_KEY"}
+
+    def test_paid_tier_without_key_warns_with_the_steps(self):
+        err = self.check()
+        self.assertRegex(err, r"swift.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
+        self.assertIn("export OPENCODE_API_KEY", err)
+        self.assertIn("cotal svc remove mgr -s shop --yes", err)
+        self.assertRegex(err, r"cannot tell .*quota")
+
+    def test_a_required_tier_is_skipped(self):
+        self.assertEqual(self.check([("swift", "opencode", "required", "opencode/deepseek-v4.1-flash")]), "")
+
+    def test_free_and_own_models_need_no_key(self):
+        self.assertEqual(self.check([("swift", "opencode", "none", "opencode/x-free"),
+                                     ("a", "opencode", "none", "gateway/m1")]), "")
+
+    def test_the_warning_does_not_claim_every_pin_is_paid(self):
+        err = self.check()
+        self.assertNotIn("those lanes will exit on launch", err)
+        self.assertRegex(err, r"a paid model")
+
+    def test_a_manager_holding_the_key_is_not_warned_about(self):
+        err = self.check(refs=self.REF)
+        self.assertNotIn("warning:", err)
+        self.assertRegex(err, r"cannot tell .*quota")
+
+    def test_empty_key_counts_as_unset(self):
+        self.assertIn("OPENCODE_API_KEY is not set", self.check(key="", refs={}))
+
+    def test_empty_key_restarting_a_stopped_keyed_mgr_warns(self):
+        self.assertRegex(self.check(key="", refs=self.REF, mgr_started=True), r"swift.*OPENCODE_API_KEY is not set")
+
+    def test_key_restarting_a_stopped_keyed_mgr_is_quiet(self):
+        self.assertNotIn("warning:", self.check(key="placeholder", refs=self.REF, mgr_started=True))
+
+    def test_empty_key_with_a_running_keyed_mgr_is_quiet(self):
+        self.assertNotIn("warning:", self.check(key="", refs=self.REF, mgr_started=False))
+
+    def test_key_set_but_mgr_added_without_it_warns_and_never_prints_it(self):
+        err = self.check(key="placeholder", refs={})
+        self.assertIn("mgr was added without OPENCODE_API_KEY", err)
+        self.assertIn("cotal svc remove mgr -s shop --yes", err)
+        self.assertNotIn("placeholder", err)
 
 
 class OpencodeChoiceTests(unittest.TestCase):
@@ -1998,6 +2055,10 @@ class OpencodeChoiceTests(unittest.TestCase):
         self.assertIn("gateway/m1", out)
         self.assertNotIn("opencode/deepseek", out.split("lanes run")[1].split("opencode: chosen")[0])
 
+    def test_terminal_answer_2_says_it_writes_no_sandbox(self):
+        _, out, _ = self.in_terminal(["2", "local/typed"])
+        self.assertIn("writes no sandbox", out)
+
     def test_terminal_answer_2_takes_a_typed_name(self):
         status, _, _ = self.in_terminal(["2", "local/typed"])
         self.assertEqual(status, 0)
@@ -2024,6 +2085,28 @@ class OpencodeChoiceTests(unittest.TestCase):
         ask.assert_not_called()
         self.assertEqual(self.table.read_text(), edited)
 
+    def test_opencode_flag_refuses_to_replace_an_edited_table(self):
+        self.assertEqual(self.e.run(str(self.repo), "--opencode", "hosted").returncode, 0)
+        edited = self.table.read_text() + "custom\tclaude\tsonnet\tinherit\tnone\n"
+        self.table.write_text(edited)
+        r = self.e.run(str(self.repo), "--opencode", "none")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("edits of its own", r.stderr)
+        self.assertEqual(self.table.read_text(), edited)
+
+    def test_opencode_flag_can_change_an_unedited_answer(self):
+        self.assertEqual(self.e.run(str(self.repo), "--opencode", "hosted").returncode, 0)
+        self.assertEqual(self.e.run(str(self.repo), "--opencode", "none").returncode, 0)
+        self.assertEqual(self.row(), "swift\tnone\t-\t-\tnone")
+
+    def test_models_are_listed_from_the_project(self):
+        (self.repo / "marker").write_text("x")
+        p = self.e.bin / "opencode"
+        p.write_text("#!/bin/sh\n[ -f marker ] && echo project/only\nexit 0\n")
+        _, out, _ = self.in_terminal(["2", "1"])
+        self.assertIn("project/only", out)
+        self.assertEqual(self.row(), "swift\topencode\tproject/only\t-\tnone")
+
     def test_a_recorded_answer_is_used_if_the_table_is_gone(self):
         self.assertEqual(self.e.run(str(self.repo), "--opencode", "none").returncode, 0)
         self.table.unlink()
@@ -2041,10 +2124,10 @@ class OpencodeChoiceTests(unittest.TestCase):
         ask.assert_not_called()
         self.assertEqual(self.table.read_text(), own)
 
-    def test_key_check_reads_the_projects_table(self):
+    def test_an_own_model_gets_no_key_warning(self):
         r = self.e.run(str(self.repo), "--opencode", "own", "--opencode-model", "gateway/m1")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("OPENCODE_API_KEY is not set", r.stderr)
+        self.assertNotIn("OPENCODE_API_KEY", r.stderr)
 
 
 if __name__ == "__main__":

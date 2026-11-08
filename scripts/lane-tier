@@ -2,7 +2,7 @@
 # lane-tier: look one tier up in a project's tier table before opening a lane, and refuse the tiers that cannot run here.
 #
 #   lane-tier <table> <tier>     prints harness=<h> model=<m> permission=<p> sandbox=<s>
-#   lane-tier --check <table>    prints "<tier> <harness> <sandbox>" per row; nothing else is decided
+#   lane-tier --check <table>    prints "<tier> <harness> <sandbox> <model>" per row (- for no model); nothing else is decided
 #
 # Exit: 0 the tier may be started; 2 usage, a bad table or an unknown tier; 3 the tier's harness is none (skip it, one
 # tier up); 4 refused: the tier needs the sandbox.
@@ -12,8 +12,8 @@
 # (model-routing.md). A table with no column, or a row with an empty cell: `required` for an OpenCode tier, `none` for
 # the rest.
 #
-# A `required` tier always refuses here, because this tool serves the Orca + Cotal flow and a Cotal seat cannot run
-# inside scripts/opencode-sandbox.sh: Cotal has no per-seat launch wrapper yet. Rove runs that script as the whole
+# A `required` tier refuses here until the per-seat launch wrapper lands (SBX-2, lc-5xf), because this tool serves the
+# Orca + Cotal flow and a Cotal seat cannot run inside scripts/opencode-sandbox.sh yet. Rove runs that script as the whole
 # engine, so Rove lanes do not come through this check. The check is what the orca-cotal-lanes skill runs before
 # cotal_spawn; Cotal itself does not enforce it.
 set -u
@@ -45,12 +45,16 @@ out=$(awk -F'\t' -v want="$tier" -v check="$check" '
   }
   {
     h = $col["harness"]
+    if ($col["tier"] == "" || h == "") { print "a row has an empty tier or harness cell"; bad = 1; exit }
     s = col["sandbox"] ? $col["sandbox"] : ""
     if (s == "") s = (h == "opencode") ? "required" : "none"
     if (s != "required" && s != "none") {
       print "tier " $col["tier"] ": sandbox must be required or none, not " s; bad = 1; exit
     }
-    if (check) print $col["tier"], h, s
+    if (s == "none" && h == "opencode" && $col["model"] ~ /^opencode(-go)?\//) {
+      print "tier " $col["tier"] ": " $col["model"] " is a hosted OpenCode model and cannot be sandbox none"; bad = 1; exit
+    }
+    if (check) print $col["tier"], h, s, ($col["model"] == "" ? "-" : $col["model"])
     else if ($col["tier"] == want) {
       print h "\037" $col["model"] "\037" $col["permission"] "\037" s; found = 1; exit   # not a tab: read would merge empty cells
     }

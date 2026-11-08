@@ -200,8 +200,9 @@ Never `orca terminal send` or Orca `orchestration` on agents: those type into th
 `.cotal/lanes.tsv` has a `sandbox` column, `required` or `none` (rule: `model-routing.md`, "Sandbox per tier"). A table
 with no column, or a row with an empty cell, is `required` for OpenCode tiers and `none` for the rest.
 
-**A `required` tier cannot launch under Orca + Cotal yet.** `lane-tier` refuses it (exit 4) and the skill never spawns
-it, so it can never run bare. Run that work as a Rove task through `scripts/opencode-sandbox.sh`, or use a `none` tier.
+**A `required` tier cannot launch under Orca + Cotal until the per-seat launch wrapper lands (SBX-2, lc-5xf).**
+`lane-tier` refuses it (exit 4) and the skill never spawns it, so it can never run bare. A hosted OpenCode model marked
+`none` is refused as a bad table. Run that work as a Rove task through `scripts/opencode-sandbox.sh`, or use a `none` tier.
 The refusal is a check the coordinator runs; Cotal does not enforce it. Cotal's `modelPolicy` cannot replace it today,
 because a role under a policy refuses `launchOptions`, which Claude lanes need.
 
@@ -218,10 +219,15 @@ whole engine):
 
 `project-setup` asks once per project, when it has a terminal: 1 hosted models (sandbox required), 2 own models, offline
 or internal gateway (no sandbox), 3 no OpenCode lanes (Claude only). Option 2 lists names from `opencode models`, without
-OpenCode's own hosted ones, or takes one typed, and never reads `opencode.jsonc`; option 3 sets the OpenCode tiers'
+OpenCode's own hosted ones, or takes one typed, and never reads `opencode.jsonc`. It writes no sandbox, so choose it
+only for a gateway you run yourself: nothing checks that a listed or typed model really is one. Option 3 sets the OpenCode tiers'
 harness to `none`, so their work goes one tier up. Without a terminal, say it with `--opencode hosted|own|none`
 (`own` also needs `--opencode-model <provider/model>`) or a full `--tiers`; given neither, it is hosted. A re-run does not
-ask again and keeps the table, and `--refresh` keeps both the table and the answer.
+ask again and keeps the table, and `--refresh` keeps both the table and the answer. An explicit `--opencode` on a re-run
+replaces the table only if the project has not edited it; otherwise it is refused and the table stays.
+
+The same rule covers the agents setup starts itself: `--coordinator`, `--design-lead` and `--reviewer` refuse an
+`opencode/` or `opencode-go/` model, and `--refresh` warns about a persona that already pins one.
 
 ### Launching OpenCode lanes
 - Cotal gives every OpenCode agent its own empty database (section 7), so the owner's `opencode auth login` does not
@@ -231,9 +237,11 @@ ask again and keeps the table, and `--refresh` keeps both the table and the answ
   only `<name> exited on launch`. [tested]
 - `opencode models` prints the whole catalog whatever the credentials, so it does not prove a lane can use a model.
 - For a paid model, export `OPENCODE_API_KEY` before `project-setup`: it records the name (never the value) in the
-  `mgr` service, and Cotal forwards the key to each OpenCode agent. Setup warns, with these steps, when an OpenCode pin
-  not named as free has no key and the manager does not hold one, or `mgr` was added without it. The warning can also name a free model without
+  `mgr` service, and Cotal forwards the key to each OpenCode agent. Setup warns, with these steps, when an OpenCode tier
+  that can launch pins a model not named as free and has no key and the manager does not hold one, or `mgr` was added without it. The warning can also name a free model without
   `-free` in its name.
+- Until `required` tiers can launch (SBX-2, lc-5xf) no tier reaches that warning: an `opencode/` or `opencode-go/` model
+  is always `required`, and a `required` tier needs no key because it is refused first.
 - A `mgr` service that already exists keeps its old variable list. At a natural stop, run
   `cotal svc stop mgr -s <space> --yes` and `cotal svc remove mgr -s <space> --yes`, then rerun `project-setup` with the
   key exported. Afterwards `cotal svc start` refuses in a shell that does not set the key, but passes on an empty

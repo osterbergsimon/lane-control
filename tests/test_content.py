@@ -322,6 +322,14 @@ class LaneSkillCliTests(unittest.TestCase):
         self.assertIn("lane-tier", review)
 
 
+class PersonaTierRefusalTests(unittest.TestCase):
+    def test_both_leads_look_a_tier_up_through_the_refusal(self):
+        for name in ("coordinator.md", "design-lead.md"):
+            text = " ".join((ROOT / "personas" / name).read_text().split())
+            self.assertIn("~/.agents/bin/lane-tier", text, name)
+            self.assertIn("never start a refused tier", text, name)
+
+
 class BeadsSteeringTests(unittest.TestCase):
     """The beads rules from issues.md reach agents in onboarded projects, which never see issues.md."""
     RULES = (
