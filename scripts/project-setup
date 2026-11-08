@@ -241,6 +241,12 @@ def migrate(repo: Path) -> None:
     fill = {}
     if "coordinator" in models and "models" not in st:
         fill.update(models=models, design_lead=lead)
+        try:
+            named = re.search(r"^description: (.+?) coordinator;", (cotal / "agents" / "coordinator.md").read_text(), re.M)
+        except (OSError, UnicodeDecodeError):
+            named = None
+        if named and "name" not in st:  # a project set up with --name keeps its space and its persona text
+            fill["name"] = named.group(1)
         if mode and "permission_mode" not in st:
             fill["permission_mode"] = mode
         said.append("models, design lead and permission mode read from the personas in .cotal/agents/")
@@ -776,18 +782,41 @@ def choose_tiers(repo: Path, a, default_table: Path) -> str:
     return tiers_for_answer(default_text, answer, model)
 
 
-def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tier_text: str):
+def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tier_text: str) -> list:
     """lead None: the project has no design lead. tier_text: the project's table, from choose_tiers."""
     table = str(store_table(repo))
     review_persona = str(repo / ".cotal" / "agents" / "reviewer.md")
     roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
+    changed = []  # personas that existed and now read differently: a running agent keeps the old text
     for name, (h, m) in roles:
         text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project, table,
                               review_persona, design_lead=lead is not None)
-        say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
+        state = write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text)
+        say(f"persona {name}", state, f"{h}/{m}")
+        if state == "updated" and not (h == "opencode" and m.startswith(HOSTED_OPENCODE)):
+            changed.append(name)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
     sandbox_note(tier_text)
     say("gitignore", ignore_cotal(repo), ".cotal/")
+    return changed
+
+
+def restart_notice(repo: Path, project: str, needs: dict) -> None:
+    """Says which running agents keep an old persona or skill until restarted. needs: {role: why}."""
+    try:
+        live = live_agents(repo, slug(project))
+    except Fail:
+        say("restart", "unknown", "no live agent list (broker not running?); restart these if running: "
+            + ", ".join(sorted(needs)))
+        return
+    def running(n):  # reviewers run per lane as <key>-review, role reviewer
+        return [a for a, v in live.items() if a == n or (n == "reviewer" and v.get("role") == "reviewer")]
+    todo = [(", ".join(running(n)), why) for n, why in sorted(needs.items()) if running(n)]
+    if todo:
+        say("restart", "needed", "; ".join(f"{n} ({why})" for n, why in todo)
+            + ". They keep the old text until restarted (stop, then start again)")
+    else:
+        say("restart", "none", "no changed role is running")
 
 
 def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -> int:
@@ -806,13 +835,14 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     named = re.search(r"^description: (.+?) coordinator;", old["coordinator"], re.M)
     project = project or settings(repo).get("name") or (named.group(1) if named else repo.name)
 
-    modes = {n: persona_mode(t) for n, t in old.items()}
-    others = next((v for v in modes.values() if v), mode)  # a persona with no record: what the others carry
+    stored = settings(repo)
+    forced = stored.get("permission_mode") if stored.get("permission_mode") in MODES else None  # the store wins
+    modes = {n: forced or persona_mode(t) for n, t in old.items()}
+    others = forced or next((v for v in modes.values() if v), mode)  # a persona with no record: what the others carry
     if not any(modes.values()):
         say("permission-mode", "unknown", f"no persona records it, so they are rendered with `{mode}`; if the project "
             f"ran another, correct it in {agents}")
     table = store_table(repo)
-    stored = settings(repo)
     design_lead = stored.get("design_lead", "design-lead" in old)
     texts = {}
     no_restart = set()
@@ -875,20 +905,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     if not needs:
         say("restart", "none", "nothing changed")
         return 0
-    try:
-        live = live_agents(repo, slug(project))
-    except Fail:
-        say("restart", "unknown", "no live agent list (broker not running?); restart these if running: "
-            + ", ".join(sorted(needs)))
-        return 0
-    def running(n):  # reviewers run per lane as <key>-review, role reviewer
-        return [a for a, v in live.items() if a == n or (n == "reviewer" and v.get("role") == "reviewer")]
-    todo = [(", ".join(running(n)), why) for n, why in sorted(needs.items()) if running(n)]
-    if todo:
-        say("restart", "needed", "; ".join(f"{n} ({why})" for n, why in todo)
-            + ". They keep the old text until restarted (stop, then start again)")
-    else:
-        say("restart", "none", "no changed role is running")
+    restart_notice(repo, project, needs)
     return 0
 
 
@@ -1875,13 +1892,17 @@ def main(argv=None) -> int:
             return STOPPED
         space = slug(project)
         repo_id = orca_repo(repo)
-        skills()
+        skill = skills()
         cotal_space(repo, space)
         if "claude" in needed | tier_harnesses:
             claude_wiring(repo, space)
         if own_models:  # outside every lane's reach: opencode-seat starts only models named here or `none` in the table
             settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
-        personas_and_tiers(repo, project, coord, lead, reviewer, mode, tier_text)
+        changed = personas_and_tiers(repo, project, coord, lead, reviewer, mode, tier_text)
+        needs = {n: "persona changed" for n in changed}
+        if skill == "updated":
+            for n in ("coordinator", "design-lead") if lead else ("coordinator",):
+                needs.setdefault(n, "skill changed")
         project_table = store_table(repo)
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
@@ -1889,6 +1910,8 @@ def main(argv=None) -> int:
             say("start", "skipped", "--no-start")
             return 0
         mgr_started = start_stack(repo, space, a.port)
+        if needs:  # before the spawns below, so only agents that were already running are named
+            restart_notice(repo, project, needs)
         opencode_key_check(project_table)
         if not mgr_started:
             seat_wrapper_note(project_table)

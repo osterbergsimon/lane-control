@@ -2564,6 +2564,42 @@ class SettingsStoreTests(unittest.TestCase):
                             capture_output=True, text=True).stdout
         self.assertEqual(sh, key)
 
+    def test_a_normal_run_that_changes_a_running_persona_says_restart(self):
+        self.run_setup("--name", "Shop")
+        self.legacy()
+        p = self.repo / ".cotal" / "agents" / "coordinator.md"
+        p.write_text(p.read_text().replace(str(self.store / "lanes.tsv"), str(self.repo / ".cotal" / "lanes.tsv")))
+        r = self.run_setup()
+        self.assertIn("persona coordinator: updated", r.stdout)
+        self.assertRegex(r.stdout, r"restart: needed coordinator \(persona changed\)")
+
+    def test_a_first_run_names_no_restart(self):
+        self.assertNotIn("restart:", self.run_setup().stdout)
+
+    def test_lane_tier_on_the_old_path_says_it_moved(self):
+        self.run_setup()
+        r = subprocess.run([str(TIER_TOOL), str(self.repo / ".cotal" / "lanes.tsv"), "standard"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("moved to the project's settings store", r.stderr)
+
+    def test_the_project_name_survives_the_move(self):
+        self.run_setup("--name", "Shop")
+        self.legacy()
+        self.e.log.write_text("")
+        self.run_setup()
+        self.assertEqual(self.e.settings(self.repo)["name"], "Shop")
+        self.assertNotIn("space create app", " ".join(self.e.calls()))
+        self.assertIn("Shop coordinator;", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+
+    def test_refresh_takes_the_permission_mode_from_the_store(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        (self.store / "settings.json").write_text(json.dumps({**st, "permission_mode": "bypassPermissions"}))
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for n in ("coordinator", "design-lead", "reviewer"):
+            self.assertIn('"permission-mode": "bypassPermissions"', (self.repo / ".cotal" / "agents" / f"{n}.md").read_text())
+
     def test_show_is_exclusive_with_refresh(self):
         self.assertEqual(self.e.run(str(self.repo), "--show", "--refresh", adapt=True).returncode, 2)
 

@@ -31,7 +31,10 @@ else
   [ $# -eq 2 ] || die "usage: lane-tier <table> <tier>"
   table=$1 tier=$2
 fi
-[ -r "$table" ] || die "cannot read the tier table $table"
+if [ ! -r "$table" ]; then
+  case $table in */.cotal/lanes.tsv) die "cannot read the tier table $table: it moved to the project's settings store (~/.config/lane-control/projects/); restart this agent so its persona names the new path" ;; esac
+  die "cannot read the tier table $table"
+fi
 
 # Columns are found by name, so a project's table may order them its own way.
 out=$(awk -F'\t' -v want="$tier" -v check="$check" '
