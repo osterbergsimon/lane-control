@@ -56,16 +56,19 @@ $ORCA worktree set --worktree path:<worktree> --display-name "<KEY> <short title
 `--setup inherit` runs the repo's `orca.yaml` setup script if it has one.
 For independent top-level work the owner asked for, use `--no-parent` instead.
 
-Orca opens a plain shell in the new worktree. Close it, so the agent's tab comes first. In `$ORCA terminal list
---json`, look at the terminals whose `worktreePath` is the new worktree. The titles are not reliable, so a terminal is
-the Setup tab (leave it) if its `paneTitle` is "Setup", or its title or preview contains `setup-runner.sh`. Close
-only a terminal that is none of these and whose preview shows a bare prompt, with
-`$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave it open.
+Orca opens a plain shell in the new worktree, and the repo's setup script runs in its own Setup tab. Do these in order,
+so the agent's tab comes first (Orca's CLI cannot reorder tabs):
 
-If the worktree's `orca.yaml` ends by writing `orca-setup-done`, wait for that before you start the agent, so it never
-runs checks on missing dependencies:
-`until [ -e "$(git -C <worktree> rev-parse --git-dir)/orca-setup-done" ]; do sleep 5; done` (at most 10 minutes; if
-it never appears, read the Setup tab with `$ORCA terminal read --terminal <handle>` and tell the owner).
+1. Close the plain shell. In `$ORCA terminal list --json`, look at the terminals whose `worktreePath` is the new
+   worktree. The titles are not reliable, so a terminal is the Setup tab if its `paneTitle` is "Setup", or its title or
+   preview contains `setup-runner.sh`. Close only a terminal that is none of these and whose preview shows a
+   bare prompt, with `$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave it open.
+2. If the worktree's `orca.yaml` ends by writing `orca-setup-done`, wait for it, so the agent never runs checks on
+   missing dependencies:
+   `until [ -e "$(git -C <worktree> rev-parse --git-dir)/orca-setup-done" ]; do sleep 5; done` (at most 10 minutes).
+3. Once the marker exists, close the Setup tab the same way. If it never appears, keep the Setup tab open, read it
+   with `$ORCA terminal read --terminal <handle>` and tell the owner. With no marker in `orca.yaml` nothing says the
+   script finished, so keep the Setup tab.
 
 Then start the agent with the `cotal_spawn` tool:
 

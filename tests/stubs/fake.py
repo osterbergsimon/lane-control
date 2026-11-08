@@ -63,11 +63,14 @@ def orca():
         state["worktrees"].append(w)
         if state.get("setup_tab"):
             # A repo setup script: Orca runs it in a "Setup" tab; our scripts end by writing the marker.
-            state["terminals"].append({"handle": f"term_{len(state['terminals']) + 1}", "title": "Setup",
-                                       "worktreePath": path})
+            tab = {"handle": f"term_{len(state['terminals']) + 1}", "title": "Setup", "worktreePath": path}
+            if state.get("setup_tab") == "runner":  # real Orca, before paneTitle is set
+                tab = dict(tab, title="bash /x/orca/setup-runner.sh")
+            state["terminals"].append(tab)
             Path(path, ".git").mkdir(exist_ok=True)
             Path(path, "orca.yaml").write_text("scripts:\n  setup: |\n    touch \"$(git rev-parse --git-dir)/orca-setup-done\"\n")
-            Path(path, ".git", "orca-setup-done").write_text("")
+            if not state.get("setup_never_done"):
+                Path(path, ".git", "orca-setup-done").write_text("")
         # Orca opens a plain shell in every new worktree.
         state["terminals"].append({"handle": f"term_{len(state['terminals']) + 1}", "title": f"dev@box: {path}",
                                    "worktreePath": path})

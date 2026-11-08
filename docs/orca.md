@@ -158,7 +158,7 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    keeping everything else, refusing a file it can't parse, and checking afterwards that a running Claude session
    didn't overwrite it.
 8. Creates the Orca worktree `design-lead` as a child of the main checkout, closes Orca's startup shell, waits for
-   the setup script, starts the design lead there, then opens a shell after the agent's tab. With
+   the setup script and then closes its Setup tab (kept if the script never finishes), starts the design lead there, then opens a shell after the agent's tab. With
    `--no-design-lead` (a project without a frontend) there is no design lead: the coordinator routes any UI work
    itself and its persona says so.
 9. Verifies that the agents are live and that the design lead's task is nested.
@@ -169,7 +169,8 @@ With `--host`, it copies itself to `~/.local/share/lane-control/` on the host an
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
 1. Pick the tier per `model-routing.md`, then look up the harness and model in `.cotal/lanes.tsv`.
 2. Run `orca worktree create --name <key> --parent-worktree active --json`, so the new task nests under the caller in
-   the GUI. Close the startup shell (not the Setup tab) and wait for `orca-setup-done` when the setup script writes it.
+   the GUI. Close the startup shell, wait for `orca-setup-done` when the setup script writes it, then close the Setup tab (it
+   stays if the marker never appears, so the failure can be read), so the agent's tab is first.
 3. Call `cotal_spawn` with `agent`, `model`, `cwd` = that worktree, role `lane`, an inline `persona`, and the lane
    brief as `prompt`. For OpenCode add `events: false`; for Claude, `launchOptions: {"permission-mode": …}`.
 4. The lane reports by `cotal_dm`, and the DM wakes the parent as its own turn.

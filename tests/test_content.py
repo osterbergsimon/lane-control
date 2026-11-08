@@ -134,3 +134,12 @@ class LaneSkillCliTests(unittest.TestCase):
     def test_resolver_does_not_rely_on_a_shell_variable(self):
         self.assertIn("new shell", self.text)
         self.assertNotIn("ORCA=${", self.text)
+
+    def test_closes_the_setup_tab_only_after_the_marker(self):
+        t = self.text
+        i_shell, i_wait, i_close, i_spawn = (t.index(x) for x in (
+            "1. Close the plain shell", "2. If the worktree's", "3. Once the marker exists, close the Setup tab",
+            "Then start the agent"))
+        self.assertTrue(i_shell < i_wait < i_close < i_spawn)
+        for needle in ("If it never appears, keep the Setup tab open", "With no marker in `orca.yaml`"):
+            self.assertIn(needle, t)

@@ -411,20 +411,24 @@ def git_dir(wt: Path):
 
 def wait_for_setup(wt: Path, label: str, timeout: float = 600, step: float = 5):
     """Wait until a new worktree's setup script wrote its marker, so the agent never runs checks on missing
-    dependencies. Only for a setup script that writes the marker; never fatal."""
+    dependencies. Only for a setup script that writes the marker; never fatal. True once the marker exists, False on
+    a timeout, None when there is no marker to wait for."""
+    timeout = float(os.environ.get("LANE_SETUP_TIMEOUT") or timeout)  # tests shorten it
+    step = min(step, timeout)
     yaml = wt / "orca.yaml"
     if not (yaml.is_file() and SETUP_MARKER in yaml.read_text()):
-        return
+        return None
     gd = git_dir(wt)
     if gd is None:
-        return
+        return None
     end = time.time() + timeout
     while time.time() < end:
         if (gd / SETUP_MARKER).exists():
             say(f"setup {label}", "done", str(wt))
-            return
+            return True
         time.sleep(step)
     say(f"setup {label}", "timeout", f"no {SETUP_MARKER} after {int(timeout)}s; see the worktree's Setup tab")
+    return False
 
 
 def services(repo: Path, space: str):
@@ -553,12 +557,37 @@ def design_worktree(repo: Path, repo_id: str):
     return path, True
 
 
+def is_setup_tab(t: dict) -> bool:
+    """The title is not reliable: the Setup tab's paneTitle is "Setup", or (before that is set) its title or preview
+    names setup-runner.sh."""
+    return (t.get("paneTitle") == "Setup" or "setup-runner.sh" in (t.get("title") or "")
+            or "setup-runner.sh" in (t.get("preview") or ""))
+
+
+def worktree_terminals(wt: Path) -> list:
+    rows = jrun([ORCA, "terminal", "list", "--json"])["result"]["terminals"]
+    return [t for t in rows if Path(t.get("worktreePath") or "/") == wt]
+
+
+def bare_prompt(t: dict) -> bool:
+    """Nothing typed or running: no preview, or its last line ends in a shell prompt character."""
+    lines = [l.strip() for l in (t.get("preview") or "").splitlines() if l.strip()]
+    return not lines or lines[-1][-1] in "$#%>"
+
+
 def close_startup_shell(wt: Path):
-    """Orca opens a plain shell in every new worktree; close it so the agent's tab comes first. The setup script runs
-    in its own "Setup" tab, which stays."""
-    for t in jrun([ORCA, "terminal", "list", "--json"])["result"]["terminals"]:
-        title = t.get("title") or ""
-        if Path(t.get("worktreePath") or "/") == wt and title != "Setup" and not title.startswith("cotal-"):
+    """Orca opens a plain shell in every new worktree; close it so the agent's tab comes first. Never the Setup tab
+    (the setup script may still run in it), an agent's tab, or a terminal that is not at a bare prompt."""
+    for t in worktree_terminals(wt):
+        if is_setup_tab(t) or (t.get("title") or "").startswith("cotal-") or not bare_prompt(t):
+            continue
+        jrun([ORCA, "terminal", "close", "--terminal", t["handle"], "--tab", "--json"])
+
+
+def close_setup_tab(wt: Path):
+    """The setup script finished (its marker exists): close its Setup tab so the agent's tab comes first."""
+    for t in worktree_terminals(wt):
+        if is_setup_tab(t):
             jrun([ORCA, "terminal", "close", "--terminal", t["handle"], "--tab", "--json"])
 
 
@@ -661,7 +690,8 @@ def main(argv=None) -> int:
             wt, created = design_worktree(repo, repo_id)
             if created:
                 close_startup_shell(wt)
-                wait_for_setup(wt, "design-lead")
+                if wait_for_setup(wt, "design-lead"):  # a Setup tab that never finished stays, to read
+                    close_setup_tab(wt)
             spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
                   "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
             if created:  # a shell for the owner, after the agent's tab
