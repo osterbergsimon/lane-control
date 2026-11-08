@@ -4,7 +4,7 @@
   project-setup <git-url|dir> [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE] [--no-start]
-                [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL] [--readapt | --skip-adapt]
+                [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL] [--readapt | --skip-adapt | --refresh]
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
@@ -13,6 +13,11 @@ re-run reports `exists` for each.
 Before the Orca steps, a headless adapting agent writes the project's files into .lane-control/ and a reviewer on
 another model checks them. They are committed, by explicit path, only on the owner's yes in a terminal; on no, or
 without a terminal, they stay uncommitted, no Orca step runs and it exits 3. Nothing else is ever committed.
+
+--refresh is for a project set up earlier, after lane-control's personas or skill changed: it re-renders the personas
+in .cotal/agents/ (keeping each one's harness, model and permission mode), reinstalls the skill, leaves the project's
+.cotal/lanes.tsv alone and says which running agents keep the old text until restarted. No adapting or reviewing
+agent, no broker, no Orca worktree, no commit.
 """
 import argparse
 import hashlib
@@ -278,7 +283,9 @@ def skills():
                 agent_dir.mkdir(parents=True, exist_ok=True)
                 link.symlink_to(root / name)
                 changed = True
-    say("skills", "created" if fresh else ("updated" if changed else "exists"), f"orca-cli, orca-cotal-lanes in {root}")
+    state = "created" if fresh else ("updated" if changed else "exists")
+    say("skills", state, f"orca-cli, orca-cotal-lanes in {root}")
+    return state
 
 
 def write_if_changed(path: Path, text: str) -> str:
@@ -347,6 +354,61 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
     say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
     say("gitignore", ignore_cotal(repo), ".cotal/")
+
+
+def refresh(repo: Path, project: str, mode: str, tiers: Path) -> int:
+    """Refresh mode: an onboarded project picks up lane-control's current personas and skill. Each persona keeps the
+    harness, model and permission mode it was set up with, the project's own .cotal/lanes.tsv is never replaced, and
+    nothing is adapted, launched or committed. Running agents keep their old persona: they are listed to restart."""
+    agents = repo / ".cotal" / "agents"
+    if not (agents / "coordinator.md").is_file():
+        raise Fail(f"{repo} has no .cotal/agents/coordinator.md: it was not set up; run project-setup without --refresh")
+    old = {f.stem: f.read_text() for f in agents.glob("*.md")}
+    named = re.search(r"^description: (.+?) coordinator;", old["coordinator"], re.M)
+    project = project or (named.group(1) if named else repo.name)
+    found = re.search(r'"permission-mode": "(\w+)"', "".join(old.values()))
+    mode = found.group(1) if found else mode
+    table = repo / ".cotal" / "lanes.tsv"
+    if table.exists():
+        same = table.read_text() == tiers.read_text()
+        say("tiers", "exists", ".cotal/lanes.tsv kept" + ("" if same else " (differs from the defaults: the project's own)"))
+    else:
+        say("tiers", write_if_changed(table, tiers.read_text()), ".cotal/lanes.tsv (was missing)")
+    design_lead = (agents / "design-lead.md").is_file()
+    changed = []
+    for name in ["coordinator"] + (["design-lead"] if design_lead else []) + ["reviewer"]:
+        have = old.get(name, "")
+        h = re.search(r"^agent: (\S+)$", have, re.M)
+        m = re.search(r"^model: (\S+)$", have, re.M)
+        if not (h and m):
+            raise Fail(f"{agents / (name + '.md')} has no agent/model lines to keep; run without --refresh")
+        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h.group(1), m.group(1), mode, project,
+                              str(table), str(agents / "reviewer.md"), design_lead=design_lead)
+        state = write_if_changed(agents / f"{name}.md", text)
+        say(f"persona {name}", state, f"{h.group(1)}/{m.group(1)}")
+        if state != "exists":
+            changed.append(name)
+    skill = skills()
+    needs = {n: "persona changed" for n in changed}
+    if skill != "exists":
+        for n in ("coordinator", "design-lead"):
+            needs.setdefault(n, "skill changed")
+    if not needs:
+        say("restart", "none", "nothing changed")
+        return 0
+    try:
+        live = live_agents(repo, slug(project))
+    except Fail:
+        say("restart", "unknown", "no live agent list (broker not running?); restart these if running: "
+            + ", ".join(sorted(needs)))
+        return 0
+    todo = [(n, why) for n, why in sorted(needs.items()) if n in live]
+    if todo:
+        say("restart", "needed", "; ".join(f"{n} ({why})" for n, why in todo)
+            + ". They keep the old text until restarted (stop, then start again)")
+    else:
+        say("restart", "none", "no changed role is running")
+    return 0
 
 
 SETUP_MARKER = "orca-setup-done"
@@ -1010,6 +1072,9 @@ def main(argv=None) -> int:
                     help="harness/model that reviews the adapted files; must be a different model from --adapter")
     again = ap.add_mutually_exclusive_group()
     again.add_argument("--readapt", action="store_true", help="adapt the project again although it was done before")
+    again.add_argument("--refresh", action="store_true",
+                       help="onboarded project: re-render the personas in .cotal/, reinstall the skill, say which "
+                            "running agents need a restart; keeps .cotal/lanes.tsv, starts and commits nothing")
     again.add_argument("--skip-adapt", action="store_true", help="only the Orca setup: no adapting agent, no commit")
     argv = sys.argv[1:] if argv is None else argv
     a = ap.parse_args(argv)
@@ -1024,21 +1089,35 @@ def main(argv=None) -> int:
     lead = None if a.no_design_lead else harness_model(a.design_lead)
     reviewer = harness_model(a.reviewer)
     adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
-    if not a.skip_adapt and {adapter[0], adapt_reviewer[0]} != {"claude"}:
+    if not a.skip_adapt and not a.refresh and {adapter[0], adapt_reviewer[0]} != {"claude"}:
         print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
               "project, and a third-party lane may not read private data", file=sys.stderr)
         return 2
-    if not a.skip_adapt and adapter[1] == adapt_reviewer[1]:
+    if not a.skip_adapt and not a.refresh and adapter[1] == adapt_reviewer[1]:
         print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are {adapter[1]}",
               file=sys.stderr)
         return 2
     tiers = Path(a.tiers).expanduser()
     if a.host:
         return on_host(a.host, argv, a.target)
+    global ORCA
+    if a.refresh:
+        add_orca_cli_to_path()
+        ORCA = orca_cli()
+        try:
+            host_hygiene()
+            d = Path(a.target).expanduser().resolve()
+            top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
+            if top is None or top.returncode != 0:
+                raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
+            say("repo", "exists", top.stdout.strip())
+            return refresh(Path(top.stdout.strip()), a.name or "", a.permission_mode, tiers)
+        except Fail as e:
+            print(f"project-setup: {e}", file=sys.stderr)
+            return 1
     if not tiers.is_file():
         print(f"project-setup: tier table {tiers} not found", file=sys.stderr)
         return 2
-    global ORCA
     add_orca_cli_to_path()
     ORCA = orca_cli()
     # Cotal's Orca driver otherwise tries `orca-ide`, then whatever `orca` is on PATH.
