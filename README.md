@@ -1,12 +1,12 @@
 # lane-control
 
-A coordinator platform on top of [Rove](https://github.com/Sma1lboy/rove) (the agent task runner): scripts, templates and written doctrine for keeping several software projects moving with coding agents, unattended, within a budget. You decide only what matters; the rest is queued, launched, reviewed and merged by agents that verify each other's claims.
+A coordinator platform on top of an agent task runner, [Rove](https://github.com/Sma1lboy/rove) or [Orca](https://github.com/stablyai/orca) with [Cotal](https://github.com/Cotal-AI/Cotal): scripts, templates and written doctrine for keeping several software projects moving with coding agents, unattended, within a budget. You decide only what matters; the rest is queued, launched, reviewed and merged by agents that verify each other's claims.
 
 ## What it is
-Three layers of agents, all Rove tasks:
+Three layers of agents, each a task of the runner you use:
 - **Machine coordinator** (optional, one per machine): judgment only. Splits the budget across projects, watches memory and load, runs night mode, approves rare top-tier requests, writes the owner's one report.
-- **Project coordinator** (one per repo): the repo's main task. Queues work in beads (`bd`), writes briefs, launches worker lanes, reruns the gates, reviews, merges, raises owner decisions as Rove gates.
-- **Worker lanes**: Rove child tasks, one issue, one branch, one PR each, on a **tier**.
+- **Project coordinator** (one per repo): the repo's main task. Queues work in beads (`bd`), writes briefs, launches worker lanes, reruns the gates, reviews, merges, raises owner decisions to you (as Rove gates on Rove).
+- **Worker lanes**: child tasks of the coordinator (Rove child tasks, or Orca child tasks with one Cotal agent each), one issue, one branch, one PR each, on a **tier**.
 
 Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so cheap third-party or local models (through opencode) and Claude models mix freely. Any tier may be "none".
 
@@ -15,13 +15,31 @@ Why: the real constraint is a budget (say a weekly plan limit), not attention. W
 What it is not: not a CI system, not a substitute for human review on risky changes, not a hosted service, and not tied to one project or vendor. It assumes a single owner who trusts the agents with their repos.
 
 ## Requirements
-(Rove is the supported runner. Alternatives, from trials: [Orca](https://github.com/stablyai/orca), optionally with [Cotal](https://github.com/Cotal-AI/Cotal) for messaging, in `docs/orca.md`; [wsp](https://github.com/wsp-labs/wsp) in `docs/wsp.md`. The doctrine carries over, the scripts do not.)
+Two supported runners: Rove, and Orca + Cotal (`docs/orca.md`). [wsp](https://github.com/wsp-labs/wsp) is trial notes only (`docs/wsp.md`). The doctrine is the same on each; the scripts are per runner.
+
+Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, and Claude Code (or whichever engines your tiers use), logged in.
+
+**Rove:**
 - Rove, daemon running, with its skill installed for each engine you use (`rove skill install --global --agent <engine>`)
-- Claude Code (or whichever engines your tiers use), logged in
-- beads (`bd`), `gh` (authenticated), `jq`, `git`, bash
-- Optional, for sandboxed third-party lanes: `opencode`, bubblewrap, pasta, systemd user scopes. The sandbox is tested on NixOS only (it fetches `bubblewrap`, `passt` and `curl` through `nix`).
+
+**Orca + Cotal** (what `scripts/project-setup` needs; details and versions in `docs/orca.md` §5b):
+- Orca (the desktop app on your workstation, with Orca's server on a remote host if the agents run there) and Cotal (`cotal-ai`, with its Orca extension: `cotal ext add @cotal-ai/orca`)
+- the agent harnesses you use (`@anthropic-ai/claude-code`, `@opencode/cli`), signed in once as the user the agents run as
+- a normal user, never root; a git identity configured in the repo
+
+Optional for either runner:
+- for sandboxed third-party lanes: `opencode`, bubblewrap, pasta, systemd user scopes. The sandbox is tested on NixOS only (it fetches `bubblewrap`, `passt` and `curl` through `nix`).
 
 ## Quickstart
+### Orca + Cotal
+One run of `project-setup` per project; the rest is in `docs/orca.md` §5b.
+```bash
+git clone https://github.com/osterbergsimon/lane-control ~/code/lane-control
+~/code/lane-control/scripts/project-setup <git-url | /abs/dir>
+```
+It does each step only if it is not done yet. For a repo it has not onboarded, an agent adapts the lane files to the project (`.lane-control/`, a section in `AGENTS.md`) and a second agent reviews them. It then lists the files and asks you once; on yes it commits them, by explicit path. A second question follows: if the repo has no `orca.yaml` it shows the setup script it drafted from the lockfiles and offers to commit it and push, because Orca makes lane worktrees from `origin/<branch>`. Whatever you answer there, the coordinator (and the design lead) start after, with no flag; only a no to the file list stops the run. Interrupting is safe: an unfinished adapter run is run again, and a re-run asks only what is still open. `--no-start` skips starting the agents. Run `scripts/project-setup --help` and see `docs/orca.md` for host setup, `--host`, models and permission modes.
+
+### Rove
 About half an hour for one project. Everything marked **planned** is manual today.
 
 1. **Clone and configure.**
