@@ -104,3 +104,24 @@ class BypassOptionTests(unittest.TestCase):
     def test_lane_skill_offers_bypass_in_the_mode_cycle(self):
         text = (ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text()
         self.assertEqual(text.count('"allow-dangerously-skip-permissions": ""'), 2)
+
+
+class LaneSkillCliTests(unittest.TestCase):
+    def setUp(self):
+        self.text = SKILL.read_text()
+
+    def test_names_the_task_after_creating_it(self):
+        self.assertIn('worktree set --worktree path:<worktree> --display-name "<KEY> <short title>" --json', self.text)
+
+    def test_uses_the_real_orca_cli_in_project_setup_order(self):
+        t = self.text
+        order = [t.index(x) for x in ("$ORCA_CLI", "~/.orca/cli/bin/orca", "orca-ide", "linux-orca-cli-shim")]
+        self.assertEqual(order, sorted(order))
+        for line in t.splitlines():
+            if line.lstrip().startswith("orca "):
+                self.fail(f"bare orca command: {line}")
+
+    def test_finds_the_setup_tab_without_trusting_the_title(self):
+        t = self.text
+        for needle in ('`paneTitle` is "Setup"', "setup-runner.sh", "bare prompt", "If unsure, leave it open"):
+            self.assertIn(needle, t)

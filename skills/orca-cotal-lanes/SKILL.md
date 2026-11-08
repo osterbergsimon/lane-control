@@ -9,6 +9,15 @@ A lane is one Orca worktree (a child task in the Orca GUI, nested under whoever 
 running in it. You talk to a lane only by Cotal DM; it reports back by DM, and the DM wakes you as its own turn. The
 `orca-cli` skill has the full Orca CLI reference.
 
+Plain `orca` on PATH can be another program (on Linux GNOME's screen reader; it may also be OrcaSlicer). Get the real
+CLI first and use `$ORCA` for every `orca` command below, taking the first that exists and is executable: `$ORCA_CLI`,
+`~/.orca/cli/bin/orca`, `orca-ide` on PATH, `~/.config/orca/linux-orca-cli-shim/orca` (the same order as
+`scripts/project-setup`):
+
+```
+ORCA=${ORCA_CLI:-}; [ -x "$ORCA" ] || ORCA=$HOME/.orca/cli/bin/orca; [ -x "$ORCA" ] || ORCA=$(command -v orca-ide); [ -x "$ORCA" ] || ORCA=$HOME/.config/orca/linux-orca-cli-shim/orca
+```
+
 Never type into an agent's terminal: never use `orca terminal send` on an agent, and do not use Orca's
 `orchestration` skill (task-create, dispatch --inject, check --wait). Those type into the composer; Cotal DMs do not.
 
@@ -31,20 +40,29 @@ your persona names; pass that value.
 From your own worktree (its cwd makes the new task your child):
 
 ```
-orca worktree create --name <key-slug> --parent-worktree active --setup inherit --json
+$ORCA worktree create --name <key-slug> --parent-worktree active --setup inherit --json
 ```
 
-Take `result.worktree.path` from the JSON. `--setup inherit` runs the repo's `orca.yaml` setup script if it has one.
+Take `result.worktree.path` from the JSON. Right away give the task a readable name, because the slug alone is not
+enough in the Orca GUI:
+
+```
+$ORCA worktree set --worktree path:<worktree> --display-name "<KEY> <short title>" --json
+```
+
+`--setup inherit` runs the repo's `orca.yaml` setup script if it has one.
 For independent top-level work the owner asked for, use `--no-parent` instead.
 
-Orca opens a plain shell in the new worktree. Close it, so the agent's tab comes first: in `orca terminal list --json`,
-take the terminal whose `worktreePath` is the new worktree and whose title is not `Setup` (the setup script's own tab:
-leave it), and run `orca terminal close --terminal <handle> --tab --json`.
+Orca opens a plain shell in the new worktree. Close it, so the agent's tab comes first. In `$ORCA terminal list
+--json`, look at the terminals whose `worktreePath` is the new worktree. The titles are not reliable, so a terminal is
+the Setup tab (leave it) if its `paneTitle` is "Setup", or its title or preview contains `setup-runner.sh`. Close
+only a terminal that is none of these and whose preview shows a bare prompt, with
+`$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave it open.
 
 If the worktree's `orca.yaml` ends by writing `orca-setup-done`, wait for that before you start the agent, so it never
 runs checks on missing dependencies:
 `until [ -e "$(git -C <worktree> rev-parse --git-dir)/orca-setup-done" ]; do sleep 5; done` (at most 10 minutes; if
-it never appears, read the Setup tab with `orca terminal read --terminal <handle>` and tell the owner).
+it never appears, read the Setup tab with `$ORCA terminal read --terminal <handle>` and tell the owner).
 
 Then start the agent with the `cotal_spawn` tool:
 
@@ -58,14 +76,14 @@ Then start the agent with the `cotal_spawn` tool:
 
 The agent opens as a `cotal-<name>` tab inside that worktree. Confirm with `cotal_roster` that it joined; if the
 spawn is refused, report the refusal to the owner rather than working around it. Then give the owner a shell after the
-agent's tab: `orca terminal create --worktree path:<worktree> --json`.
+agent's tab: `$ORCA terminal create --worktree path:<worktree> --json`.
 
 ## 3. Mirror the lane in the GUI
 Keep the task card honest so the owner sees state at a glance:
 
 ```
-orca worktree set --worktree path:<worktree> --comment "<KEY> <tier> <harness>/<model>: <one line>" --json
-orca worktree set --worktree path:<worktree> --workspace-status in-review --json    # when it reports succeeded
+$ORCA worktree set --worktree path:<worktree> --comment "<KEY> <tier> <harness>/<model>: <one line>" --json
+$ORCA worktree set --worktree path:<worktree> --workspace-status in-review --json    # when it reports succeeded
 ```
 
 ## 4. Wait
@@ -95,7 +113,7 @@ scope. Merge, then close the lane only when the owner says so for that lane:
 
 ```
 cotal_despawn (or: cotal stop <name>), for the lane and any reviewer still running
-orca worktree rm --worktree path:<worktree> --json
+$ORCA worktree rm --worktree path:<worktree> --json
 ```
 
 Never remove a worktree with uncommitted changes without asking.
