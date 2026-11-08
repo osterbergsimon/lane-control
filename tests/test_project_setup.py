@@ -361,6 +361,20 @@ class RunTests(unittest.TestCase):
         r = self.e.run(str(repo), "--name", "Shop")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertRegex(r.stderr, r"swift.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
+        self.assertIn("export OPENCODE_API_KEY", r.stderr)
+        self.assertIn("cotal svc stop mgr -s shop --yes", r.stderr)
+        self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
+        self.assertRegex(r.stderr, r"cannot tell .*quota")
+
+    def test_key_set_but_mgr_added_without_it_warns(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("mgr was added without OPENCODE_API_KEY", r.stderr)
+        self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
+        self.assertNotIn("sentinel-key-value", r.stdout + r.stderr)
 
     def test_free_opencode_tier_without_key_is_quiet(self):
         repo = self.e.repo()

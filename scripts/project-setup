@@ -309,6 +309,30 @@ def claude_wiring(repo: Path, space: str):
     say("claude-wiring", "created", space)
 
 
+def opencode_key_check(repo: Path, space: str, tiers: Path):
+    """Each OpenCode agent has its own empty database, so a paid model needs the key by name (docs/orca.md)."""
+    paid = [(r[0], r[2]) for r in (l.split("\t") for l in tiers.read_text().splitlines()[1:] if not l.startswith("#"))
+            if len(r) > 2 and r[1] == "opencode" and r[2].startswith(("opencode/", "opencode-go/"))
+            and not r[2].endswith("-free")]
+    if not paid:
+        return
+    readd = (f"cotal svc stop mgr -s {space} --yes, then cotal svc remove mgr -s {space} --yes, "
+             "then rerun project-setup from a shell with the key set.")
+    f = repo / ".cotal" / "mgr-service.json"
+    lines = []
+    if "OPENCODE_API_KEY" not in os.environ:
+        lines += [f"warning: tier {t} pins {m} but OPENCODE_API_KEY is not set: those lanes will exit on launch." for t, m in paid]
+        lines += ["  `opencode auth login` does not reach an agent's own database. Once per machine:",
+                  "  1. Create an API key in the OpenCode console and export OPENCODE_API_KEY in your shell setup.",
+                  f"  2. If mgr already exists, at a natural stop: {readd}"]
+    elif f.exists() and "OPENCODE_API_KEY" not in json.loads(f.read_text()).get("envRefs", {}):
+        lines += [f"warning: mgr was added without OPENCODE_API_KEY, so lanes on {paid[0][1]} will exit on launch.",
+                  f"  At a natural stop: {readd}"]
+    lines.append("note: this check only sees whether the key is set. It cannot tell a wrong key from a spent quota: "
+                 "either shows only on the agent's first model call.")
+    print("\n".join(lines), file=sys.stderr, flush=True)
+
+
 def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tiers: Path):
     """lead None: the project has no design lead."""
     table = str(repo / ".cotal" / "lanes.tsv")
@@ -319,13 +343,7 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
                               review_persona, design_lead=lead is not None)
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
     say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
-    if "OPENCODE_API_KEY" not in os.environ:
-        # Each OpenCode agent has its own empty database, so `opencode auth login` does not reach it (docs/orca.md).
-        for row in (line.split("\t") for line in tiers.read_text().splitlines()[1:]):
-            if len(row) > 2 and row[1] == "opencode" and row[2].startswith(("opencode/", "opencode-go/")) \
-                    and not row[2].endswith("-free"):
-                print(f"warning: tier {row[0]} pins {row[2]} but OPENCODE_API_KEY is not set: those lanes will exit on launch",
-                      file=sys.stderr, flush=True)
+    opencode_key_check(repo, slug(project), tiers)
     gi = repo / ".gitignore"
     lines = gi.read_text().splitlines() if gi.exists() else []
     if ".cotal/" in lines or ".cotal" in lines:
