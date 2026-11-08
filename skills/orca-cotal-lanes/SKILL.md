@@ -115,7 +115,8 @@ task. It reviews read-only and reports to you by DM.
 Before you call a lane good: look at its diff in the worktree, rerun its checks there, look for files outside its
 scope. Merge only when the owner says so.
 
-Close a lane once its PR is merged, without asking, if its worktree is clean (`git status` empty), pushed, and its
+Close a lane once its PR is merged, without asking, if its worktree is clean (`git status --ignored` shows nothing but known build output; any other ignored
+file, such as a local `.env` or notes, goes to the owner first), pushed, and its
 branch is an ancestor of the branch its PR merged into: run `git fetch origin`, then
 `git merge-base --is-ancestor <branch> origin/<base>` (`<base>` is main, or the design lead's branch for a design
 lane). The lane's issue is already
@@ -129,4 +130,5 @@ $ORCA worktree rm --worktree path:<worktree> --json
 
 Never automatic, ask the owner instead: a lane whose work did not merge, uncommitted changes, `--force`, and any
 check above that fails. Closing a lane never deletes its branch: merged branches stay unless the owner says to
-delete them. A reviewer is stopped after its last round (section 5), not left to idle.
+delete them. If `worktree rm` prints a warning about an older host's branch policy, check the branch and tell
+the owner. A reviewer is stopped after its last round (section 5), not left to idle.

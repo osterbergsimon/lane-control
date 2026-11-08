@@ -392,12 +392,14 @@ class CleanupSteeringTests(unittest.TestCase):
                 self.assertIn(needle, t, f"{name}: {needle}")
         self.assertIn("without the owner's word for that lane, never close a lane whose work did not merge",
                       self.flat(PERSONAS / "coordinator.md"))
+        self.assertIn("without the owner's word for that lane, never close a lane whose work did not merge",
+                      self.flat(PERSONAS / "design-lead.md"))
         self.assertNotIn("close a lane, stop an agent", self.flat(PERSONAS / "coordinator.md"))
 
     def test_skill_gives_the_checks_and_the_order(self):
         t = self.flat(SKILL)
         sec = t[t.index("## 6. check and close"):]
-        for needle in ("without asking", "is-ancestor", "git fetch origin", "origin/<base>", "set nothing else", "already closed at merge",
+        for needle in ("without asking", "is-ancestor", "git status --ignored", "known build output", "any other ignored file", "older host", "tell the owner", "uncommitted changes", "is clean", "git fetch origin", "origin/<base>", "set nothing else", "already closed at merge",
                        "a lane whose work did not merge", "`--force`", "never deletes its branch",
                        "merged branches stay unless the owner says to delete them", "after its last round"):
             self.assertIn(needle, sec, needle)
@@ -406,7 +408,7 @@ class CleanupSteeringTests(unittest.TestCase):
 
     def test_issues_doctrine_names_the_close_rule(self):
         t = self.flat(ROOT / "issues.md")
-        for needle in ("close the lane after the merge", "without `--force`", "branches are kept unless the owner says"):
+        for needle in ("close the lane after the merge", "whoever opened the lane", "without `--force`", "branches are kept unless the owner says"):
             self.assertIn(needle, t)
 
 
