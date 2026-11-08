@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# lane-heavy: run a build or full test suite under the machine-wide limit on heavy work.
+#
+#   lane-heavy <command> [args...]        A pipeline or redirect needs: lane-heavy sh -c '...'
+#
+# - Only LANE_HEAVY_SLOTS jobs run at once for this user, across every project and lane on the machine. The rest wait,
+#   and say so once on stderr. Waiters poll, so the order is not strictly first come, first served.
+# - The job runs at low CPU and IO priority, and with a memory limit of LANE_HEAVY_MEM_GB (no swap) in a systemd user
+#   scope when the host has a working one. Without one it runs with no memory limit and says so; it never fails for that.
+# - The exit code is the command's. A nested lane-heavy (a project's wrapper calling it again) runs inside the slot
+#   it already holds. Output from the gate goes to stderr only; stdin and stdout are the command's.
+# - Out of memory: when the scope was OOM-killed it prints `OUT OF MEMORY` and keeps the exit code (often 137 or 143,
+#   which otherwise look like a hang or a crash; reliability.md section 17). When only the kernel's machine-wide OOM
+#   counter moved during a failed job, it prints `POSSIBLE OUT OF MEMORY`.
+# - A slot is a kernel lock held by this process alone, so it frees itself however lane-heavy ends. The command does
+#   not inherit it: a daemon the build leaves behind (compiler server, build daemon) cannot hold a slot for ever.
+#   TERM, INT and HUP stop the whole job, every step of it. If lane-heavy itself is SIGKILLed while the job lives on,
+#   the slot frees early. The job runs in its own session (setsid, where the host has it), so it has no terminal.
+# - If the limit cannot work at all (no flock, no writable state directory) it runs the command anyway and says so.
+#
+# Limits: lane-limits.sh and limits.example.sh. Exit: the command's; 127 not found or not executable; 2 usage.
+set -u
+self=$(readlink -f "$0")
+# shellcheck source=lane-limits.sh
+. "${self%/*}/lane-limits.sh"
+
+say() { echo "lane-heavy: $*" >&2; }
+
+case ${1:-} in
+  -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self"; exit 0 ;;
+  --) shift ;;
+esac
+[ $# -gt 0 ] || { say "usage: lane-heavy <command> [args...]"; exit 2; }
+
+# Already inside a slot: taking a second one could wait for ever on the one this job holds.
+[ -z "${LANE_HEAVY_HOLDS_SLOT:-}" ] || exec "$@"
+
+type -P -- "$1" >/dev/null || { say "$1: command not found or not executable"; exit 127; }
+
+exec {slot_fd}</dev/null   # replaced by a real slot; a valid fd keeps the job's "close the slot" redirect harmless
+
+take_slot() {
+  local i fd
+  for ((i = 0; i < LANE_HEAVY_SLOTS; i++)); do
+    { exec {fd}<>"$LANE_STATE_DIR/heavy.$i"; } 2>/dev/null || continue   # on exec itself, 2> would stick to the gate
+    if flock -n "$fd"; then slot_fd=$fd; return 0; fi
+    exec {fd}>&-
+  done
+  return 1
+}
+
+# A slot in a directory someone else controls is no slot (the /tmp fallback is shared with other users).
+state_dir_usable() {
+  mkdir -p -- "$LANE_STATE_DIR" 2>/dev/null && [ ! -L "$LANE_STATE_DIR" ] && [ -O "$LANE_STATE_DIR" ] &&
+    chmod 700 -- "$LANE_STATE_DIR" 2>/dev/null
+}
+
+if ! command -v flock >/dev/null; then
+  say "no flock on this host: running without the machine-wide limit"
+elif ! state_dir_usable; then
+  say "cannot use $LANE_STATE_DIR: running without the machine-wide limit"
+elif ! take_slot; then
+  say "all $LANE_HEAVY_SLOTS heavy-work slot(s) on this machine are busy: waiting for a turn"
+  until take_slot; do sleep "$LANE_HEAVY_POLL_SECS"; done
+fi
+
+# Best-effort at the lowest level rather than the idle class: idle can starve a job outright, which looks like a hang.
+job=("$@")
+if command -v ionice >/dev/null; then job=(ionice -t -c 2 -n 7 "${job[@]}"); fi
+if command -v nice >/dev/null; then job=(nice -n 19 "${job[@]}"); fi
+
+unit=lane-heavy-$$-$RANDOM$RANDOM
+scope_args=(--user --scope --quiet)
+# nice only ranks processes inside one cgroup, so the scope needs low weights of its own.
+scope_props=(-p "MemoryMax=${LANE_HEAVY_MEM_GB}G" -p MemorySwapMax=0 -p CPUWeight=20 -p IOWeight=20)
+
+# systemd-run accepts MemoryMax and silently ignores it when the memory controller is not delegated to the user, so
+# ask the kernel what the scope really got.
+scope_works() {
+  local max
+  command -v systemd-run >/dev/null && command -v systemctl >/dev/null || return 1
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR=/run/user/$(id -u)
+  max=$(systemd-run "${scope_args[@]}" --unit="$unit-probe" "${scope_props[@]}" -- \
+    sh -c 'cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"' 2>/dev/null </dev/null {slot_fd}>&-)
+  case $max in
+    '' | *[!0-9]*)
+      systemctl --user reset-failed "$unit-probe.scope" >/dev/null 2>&1
+      return 1 ;;
+  esac
+}
+
+scoped=
+if [ "$LANE_HEAVY_MEM_GB" -eq 0 ]; then
+  say "no memory limit: LANE_HEAVY_MEM_GB is 0"
+elif scope_works; then
+  scoped=1
+  job=(systemd-run "${scope_args[@]}" --unit="$unit" "${scope_props[@]}" -- "${job[@]}")
+else
+  say "no memory limit: this host has no working systemd user scope; running without one"
+fi
+# Its own process group, whose id is the job's pid (setsid does not fork here), so a signal reaches every step of `sh -c`.
+if command -v setsid >/dev/null; then job=(setsid "${job[@]}"); fi
+
+oom_kills() { awk '$1 == "oom_kill" { print $2 }' "$LANE_PROC_DIR/vmstat" 2>/dev/null; }
+oom_before=$(oom_kills)
+
+# Background (not foreground) so a signal reaches the traps below at once. A background job would get /dev/null for
+# stdin and an ignored SIGINT from bash: the explicit <&0 keeps stdin, and every signal is forwarded as TERM.
+{ : <&0; } 2>/dev/null || exec </dev/null
+LANE_HEAVY_HOLDS_SLOT=1 "${job[@]}" <&0 {slot_fd}>&- &
+child=$!
+
+interrupted=
+stop_job() {
+  interrupted=1
+  if [ -n "$scoped" ] && systemctl --user kill --signal=TERM "$unit.scope" >/dev/null 2>&1; then return; fi
+  kill -TERM -- "-$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null
+}
+trap stop_job TERM INT HUP
+
+# 2>/dev/null: bash would add its own "Killed" line about the job.
+wait "$child" 2>/dev/null; rc=$?
+while [ -n "$interrupted" ]; do interrupted=; wait "$child" 2>/dev/null; rc=$?; done
+trap - TERM INT HUP
+
+# Why the scope ended; on a failed job give systemd a moment, since it records the OOM after the job has exited.
+scope_result() {
+  local tries=0 key value state result
+  while :; do
+    state= result=
+    while IFS='=' read -r key value; do
+      case $key in ActiveState) state=$value ;; Result) result=$value ;; esac
+    done < <(systemctl --user show -p ActiveState -p Result "$unit.scope" 2>/dev/null)
+    case $result in '' | success) ;; *) echo "$result"; return ;; esac
+    [ "$rc" -ne 0 ] || return 0
+    case $state in active | activating | deactivating) ;; *) return 0 ;; esac
+    tries=$((tries + 1)); [ "$tries" -le 10 ] || return 0
+    sleep 0.2
+  done
+}
+
+result=
+if [ -n "$scoped" ]; then
+  result=$(scope_result)
+  [ -z "$result" ] || systemctl --user reset-failed "$unit.scope" >/dev/null 2>&1
+fi
+
+if [ "$result" = oom-kill ]; then
+  say "OUT OF MEMORY: the job hit its ${LANE_HEAVY_MEM_GB}G limit and was killed; exit $rc is that kill, not a test failure or a hang. Use fewer threads, or raise LANE_HEAVY_MEM_GB."
+elif [ "$rc" -ne 0 ]; then
+  oom_after=$(oom_kills)
+  if [ "${oom_after:-0}" -gt "${oom_before:-0}" ]; then
+    say "POSSIBLE OUT OF MEMORY: exit $rc, and the kernel killed $((oom_after - oom_before)) process(es) for memory on this machine during this job."
+  fi
+fi
+exit "$rc"
