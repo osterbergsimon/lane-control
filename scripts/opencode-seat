@@ -49,7 +49,10 @@ esac
 # settings store (~/.config/lane-control/projects/<folder>/), outside every lane's reach: a tier row with sandbox none, or
 # a model project-setup was given with --own-model. A project not moved to the store yet still has them in its .cotal.
 root=${COTAL_OPENCODE_HOME:-}
-store=${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/lane-control/projects/$(basename "$root")
+# keyed like project-setup: <folder name>-<first 10 hex of sha256 of the checkout's real path>
+rroot=$(realpath "$root" 2>/dev/null || printf '%s' "$root")
+hash=$(printf '%s' "$rroot" | sha256sum | cut -c1-10)
+store=${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/lane-control/projects/$(basename "$rroot")-$hash
 tiers=$store/lanes.tsv settings=$store/settings.json
 if [ ! -r "$tiers" ] && [ ! -r "$settings" ]; then tiers=$root/.cotal/lanes.tsv settings=$root/.cotal/lane-control.json; fi
 own=

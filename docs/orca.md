@@ -178,8 +178,10 @@ that is not `.env*` needs `--private` or an ignore line. A name with `( ) * ? [ 
 rule: setup stops and names it.
 
 ### The settings store: per-project choices, outside the repo
-Everything project-setup decides for a project lives in `~/.config/lane-control/projects/<main checkout's folder
-name>/` (under `$XDG_CONFIG_HOME` when set), not in `.cotal/`, which Cotal owns, and not in the repo:
+Everything project-setup decides for a project lives in `~/.config/lane-control/projects/<folder>-<hash>/` (under
+`$XDG_CONFIG_HOME` when set). The key is the main checkout's folder name plus the first 10 hex of the sha256 of its real
+path, so `~/code/x` and `~/work/x` have separate settings, tables, ports and sandbox-ports. project-setup, `opencode-seat`
+and the sandbox derive it the same way, not in `.cotal/`, which Cotal owns, and not in the repo:
 
 - `settings.json`: `root` (the checkout, which `lane-tier` uses to find the project's manager), `name`, `models` (harness/model
   per role: coordinator, design-lead, reviewer), `design_lead` (on or off), `permission_mode`, `private` (the `--private`
@@ -204,7 +206,8 @@ store, and fills in what the store lacks from the personas.
 `project-setup` run on it, also `--refresh`, moves them once and prints `settings: moved ...`: the record's keys go into
 `settings.json`, the table is copied byte for byte (an edited table is kept as it is) and the old files are removed; models,
 design lead and permission mode, which the old record never held, are read from the rendered personas. If the store already
-has a different table, it wins and the old file stays, with a warning. Until a project is moved, `opencode-seat` still reads
+has a different table, it wins and the old file stays, with a warning. A store folder keyed on the folder name alone (the
+first version, which held `sandbox-ports`) is renamed to the new key, unless its `root` names another checkout. Until a project is moved, `opencode-seat` still reads
 the old files, so a machine tool updated first does not break a project not yet moved. `--show` moves nothing and says
 what is not moved yet.
 
@@ -283,7 +286,9 @@ those are forwarded to the lane's loopback, the same way as the broker. It is cl
 address ranges, and a malformed entry stops the launch. List only test or dev containers, never anything holding real
 data. It applies to every sandbox lane of the project, Rove ones too.
 
-Limits: static-auth meshes with one broker on host loopback only; a user-auth mesh or remote broker is refused. Marking
+The host's global addresses are refused from the list read at launch: an address the host gains later (a rotating public IPv6,
+a DHCP change on a public IPv4) is not refused for a long-lived seat. Limits: static-auth meshes with one broker on host
+loopback only; a user-auth mesh, a remote broker or a space that requires the event plane is refused. Marking
 a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`) `none` or
 `--own-model`.
 

@@ -24,7 +24,7 @@ The tier table is decided once per project: with a terminal project-setup asks h
 --opencode or a full --tiers say it, and given neither it is hosted (sandbox required). A re-run keeps the project's table.
 
 Per-project settings live outside the repo and outside .cotal/ (which Cotal owns), in
-~/.config/lane-control/projects/<folder name>/: settings.json (models per role, design lead on or off, permission mode,
+~/.config/lane-control/projects/<folder name>-<short hash of its path>/: settings.json (models per role, design lead on or off, permission mode,
 --private globs, OpenCode answer, own models, broker port), lanes.tsv (the tier table) and sandbox-ports. Flags update
 the store and a run without them reuses it; --show prints it. A project set up before the store existed is moved there
 once, automatically, and the run says what moved. Only the rendered personas stay in .cotal/agents/. No secret goes in.
@@ -127,9 +127,19 @@ def config_home() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path(os.environ.get("HOME", str(Path.home()))) / ".config")
 
 
+def store_key(repo: Path) -> str:
+    """<folder name>-<first 10 hex of sha256 of the checkout's real path>: readable, and two checkouts with the same folder
+    name do not share a store. The sandbox and opencode-seat derive the same key from the main checkout's path."""
+    return f"{repo.name}-{hashlib.sha256(str(repo.resolve()).encode()).hexdigest()[:10]}"
+
+
 def store_dir(repo: Path) -> Path:
-    """The project's settings store, outside the repo and outside .cotal/ (which Cotal owns). Keyed by the main
-    checkout's folder name, like the sandbox's ports file (scripts/opencode-sandbox.sh)."""
+    """The project's settings store, outside the repo and outside .cotal/ (which Cotal owns)."""
+    return config_home() / "lane-control" / "projects" / store_key(repo)
+
+
+def keyed_by_name_only(repo: Path) -> Path:
+    """The store folder of the first version, keyed by the folder name alone."""
     return config_home() / "lane-control" / "projects" / repo.name
 
 
@@ -193,6 +203,15 @@ def migrate(repo: Path) -> None:
     store already has wins and the old one stays where it is, named. Pins the personas carry fill in what the old record
     never held (models, mode, design lead), so a re-run without flags keeps them."""
     cotal, said = repo / ".cotal", []
+    first = keyed_by_name_only(repo)
+    if first.is_dir() and not store_dir(repo).exists():
+        try:
+            other = json.loads((first / "settings.json").read_text()).get("root")
+        except (OSError, ValueError, AttributeError):
+            other = None
+        if other in (None, str(repo)) and first != store_dir(repo):  # a folder of another checkout of that name is not ours
+            os.rename(first, store_dir(repo))
+            said.append(f"{first} -> {store_dir(repo)} (the store is keyed on the checkout's path now)")
     old_rec, old_tab, new_tab = cotal / "lane-control.json", cotal / "lanes.tsv", store_table(repo)
     st = settings(repo)
     if old_rec.is_file():
@@ -1365,7 +1384,7 @@ def repo_private_names(repo: Path, prefix: str, depth: int = 0) -> list:
     for sub in nested:
         if (repo / sub / ".git").exists():
             out += repo_private_names(repo / sub, f"{prefix}{sub}/", depth + 1)
-        elif any((repo / sub).iterdir()):  # files in a gitlink without its .git: git does not list them, so deny them all
+        elif (repo / sub).is_dir() and any((repo / sub).iterdir()):  # files in a gitlink without its .git: git does not list them, so deny them all
             out.append(f"{prefix}{sub}/")
     return out
 
@@ -1666,6 +1685,8 @@ def show(repo: Path) -> int:
     except OSError:
         print(f"sandbox-ports: {ports} (none)")
     old = [f".cotal/{n}" for n in ("lane-control.json", "lanes.tsv") if (repo / ".cotal" / n).is_file()]
+    if keyed_by_name_only(repo).is_dir() and not d.exists():
+        old.append(str(keyed_by_name_only(repo)))
     if old:
         print(f"not moved yet: {', '.join(old)} (project-setup moves them on its next run, also with --refresh)")
     print("rendered personas: " + str(repo / ".cotal" / "agents") + " (Cotal reads them there)")

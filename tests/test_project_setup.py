@@ -35,6 +35,12 @@ def git(*a, cwd):
                           capture_output=True, text=True).stdout.strip()
 
 
+def store_key(repo):
+    """<folder>-<10 hex of sha256 of the real path>, as scripts/project-setup keys the store."""
+    import hashlib
+    return f"{Path(repo).name}-{hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()[:10]}"
+
+
 class Env:
     """Temp HOME with stub orca/cotal and fake harness binaries first on PATH."""
 
@@ -79,7 +85,7 @@ class Env:
 
     def store(self, repo):
         """The project's settings store: outside the repo, under the temp HOME."""
-        return self.home / ".config" / "lane-control" / "projects" / Path(repo).name
+        return self.home / ".config" / "lane-control" / "projects" / store_key(repo)
 
     def settings(self, repo):
         return json.loads((self.store(repo) / "settings.json").read_text())
@@ -250,6 +256,16 @@ class PureTests(unittest.TestCase):
                          ("opencode", "opencode/deepseek-v4.1-flash"))
         with self.assertRaises(SystemExit):
             self.m.harness_model("vim/opus")
+
+
+class GitlinkTests(unittest.TestCase):
+    def test_a_gitlink_whose_folder_is_missing_is_skipped_not_a_crash(self):
+        e = Env()
+        self.addCleanup(e.close)
+        repo = e.repo()
+        git("update-index", "--add", "--cacheinfo", "160000,1234567890123456789012345678901234567890,sub", cwd=repo)
+        m = load()
+        self.assertEqual([n for n in m.repo_private_names(repo, "") if n.startswith("sub")], [])
 
 
 class Tty(io.StringIO):
@@ -2411,7 +2427,7 @@ class SettingsStoreTests(unittest.TestCase):
     def test_xdg_config_home_moves_the_store(self):
         xdg = self.e.home / "xdg"
         self.run_setup(env_extra={"XDG_CONFIG_HOME": str(xdg)})
-        self.assertTrue((xdg / "lane-control" / "projects" / self.repo.name / "settings.json").is_file())
+        self.assertTrue((xdg / "lane-control" / "projects" / store_key(self.repo) / "settings.json").is_file())
         self.assertFalse(self.store.exists())
 
     def test_a_project_set_up_before_the_store_is_moved_once_and_says_what(self):
@@ -2509,6 +2525,45 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_two_checkouts_with_the_same_folder_name_get_separate_stores(self):
+        other = self.e.home / "work" / "app"
+        other.mkdir(parents=True)
+        git("init", "-q", "-b", "main", cwd=other)
+        git("commit", "-q", "--allow-empty", "-m", "init", cwd=other)
+        self.e.trust(other)
+        self.run_setup("--private", "a*.png")
+        r = self.e.run(str(other), "--private", "b*.png", "--port", "14555", "--name", "app2", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(self.e.store(self.repo), self.e.store(other))
+        self.assertEqual(self.e.settings(self.repo)["private"], ["a*.png"])
+        self.assertEqual(self.e.settings(other)["private"], ["b*.png"])
+        self.assertTrue(self.e.store(self.repo).name.startswith("app-"))
+
+    def test_a_store_keyed_on_the_folder_name_alone_moves_to_the_path_key(self):
+        first = self.e.home / ".config" / "lane-control" / "projects" / "app"
+        first.mkdir(parents=True)
+        (first / "sandbox-ports").write_text("5432\n")
+        r = self.run_setup()
+        self.assertIn("settings: moved", r.stdout)
+        self.assertFalse(first.exists())
+        self.assertEqual((self.store / "sandbox-ports").read_text(), "5432\n")
+        self.assertTrue((self.store / "settings.json").is_file())
+
+    def test_a_name_only_store_of_another_checkout_stays_where_it_is(self):
+        first = self.e.home / ".config" / "lane-control" / "projects" / "app"
+        first.mkdir(parents=True)
+        (first / "settings.json").write_text(json.dumps({"root": "/somewhere/else/app"}))
+        self.run_setup()
+        self.assertTrue((first / "settings.json").exists())
+        self.assertFalse((self.store / "sandbox-ports").exists())
+
+    def test_the_sandbox_and_the_seat_derive_the_same_key(self):
+        key = store_key(self.repo)
+        sh = subprocess.run(["sh", "-c", f'printf "%s-%s" "$(basename {shlex.quote(str(self.repo.resolve()))})" '
+                             f'"$(printf %s {shlex.quote(str(self.repo.resolve()))} | sha256sum | cut -c1-10)"'],
+                            capture_output=True, text=True).stdout
+        self.assertEqual(sh, key)
+
     def test_show_is_exclusive_with_refresh(self):
         self.assertEqual(self.e.run(str(self.repo), "--show", "--refresh", adapt=True).returncode, 2)
 
@@ -2570,7 +2625,7 @@ class SeatWrapperTests(unittest.TestCase):
         self.assertRegex(self.ran(), r"^opencode serve .* seat= ")
 
     def store(self):
-        d = self.d / "cfg" / ".config" / "lane-control" / "projects" / self.home.name
+        d = self.d / "cfg" / ".config" / "lane-control" / "projects" / store_key(self.home)
         d.mkdir(parents=True, exist_ok=True)
         return d
 
