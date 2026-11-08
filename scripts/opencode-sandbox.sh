@@ -17,6 +17,11 @@
 #   OPENCODE_SANDBOX_MODE_FILE=<file>           # the day/night switch file to show the lane read-only, for a project's own
 #                                               # resource-cap script (default: MODE_FILE of the playbook config; empty = none)
 #   PLAYBOOK_CONFIG=<file>                      # the playbook config (default ~/.config/rove/playbook.conf.sh), read only for MODE_FILE
+#   OPENCODE_SANDBOX_SEAT=1                     # run as a Cotal seat's `opencode serve` (set only by scripts/opencode-seat, never by a
+#                                               # lane or by hand; see "A Cotal seat" below)
+#   OPENCODE_SANDBOX_PROOF_FREE=1               # a throwaway proof of seat mode on a free model only (scripts/test-opencode-sandbox.sh
+#                                               # and the temp-mesh proof): Cotal does not pass it to a seat, a lane cannot set it, and
+#                                               # it is refused unless this is a seat on an opencode/*-free model
 #
 # Launch as a Rove task:
 #   rove api add --repo <repo> --prompt-file <brief> --command "<lane-control>/scripts/opencode-sandbox.sh --auto --prompt"
@@ -25,6 +30,8 @@
 # Instance paths are not hardcoded here: private paths the test checks are SANDBOX_TEST_* in the playbook config.
 #
 # Changes (newest first):
+#   2026-11-08  seat mode: a Cotal OpenCode seat runs here, started by scripts/opencode-seat. The model comes from Cotal's
+#               config and may also be opencode/; the branch is the worktree's at first launch, remembered in the lane
 #   2026-11-08  the machine-wide heavy-work gate works inside: lane-heavy, lane-room, the machine's slot files and
 #               its resolved limits are bound (nothing is bound, and it says so, when project-setup has not installed them)
 #   2026-10-31  moved to lane-control; the day/night file comes from the playbook config (MODE_FILE) or
@@ -61,10 +68,27 @@
 #   absent      everything else: the rest of $HOME (private data, other worktrees, the main checkout,
 #               ~/.rove, ~/.config/gh, ~/.ssh, other projects' caches, beads), /run (user bus, rove.sock,
 #               Claude sockets, docker.sock, nix daemon), the shared repo's refs, config and hooks
-#   network     own namespace through pasta: the internet only; host loopback ports (rove, sccache,
-#               dev servers), abstract sockets (X11) and the host through the gateway are unreachable
+#   network     own namespace through pasta: the internet only. Host loopback ports (rove, sccache, dev servers), abstract
+#               sockets (X11), every private, link-local and multicast address (the LAN, the router, container bridges), and
+#               every global address of this host are refused by an nftables rule set in the namespace before bwrap, which
+#               the lane has no capability to change. DNS goes to a fixed address that pasta forwards to the host's resolver.
+#               Host ports the project lists, and only those, are forwarded to the lane's loopback, as the broker is: one
+#               port per line in ~/.config/lane-control/projects/<main checkout's folder name>/sandbox-ports. Ports only, closed
+#               by default; list only test or dev containers, never anything holding real data.
 #   processes   own pid namespace (no /proc of other processes), own session, dies with its parent,
 #               one systemd scope (MemoryMax, no swap) around all of it
+# A Cotal seat (OPENCODE_SANDBOX_SEAT=1) is the same sandbox with exactly this added, because the model must work under
+# its coordinator (live DMs, review rounds); the owner decided this (lc-5xf):
+#   network     one TCP port outward, the Cotal broker on host loopback, and one inward, this seat's `opencode serve` port
+#               (bound on host loopback only, for the seat's TUI, which runs outside as a client of this server). Every
+#               other host loopback port stays unreachable. The broker enforces this seat's grants; the model can use the
+#               mesh only as its own Cotal identity and can do on it whatever that identity may do.
+#   read-only   the Cotal plugin directory; this seat's mesh credential and launch material (copies in the lane, this seat's
+#               only, never the other seats'; removed when the seat ends); its persona file. The model can read them.
+#   read-write  the seat's database, in the lane (Cotal's per-agent directory in the project stays out)
+#   absent      unlike a Rove lane, the owner's global OpenCode config (opencode.jsonc, its MCP servers) and the Rove plugin
+#   env         the Cotal connection variables, OPENCODE_DB, the server password, Cotal's config merged under the provider
+#               and key fixed here. A user-auth mesh and a broker that is not on host loopback are refused.
 # The lane leaves the sandbox only through a relay run by this launcher, with fixed meanings:
 #   git push      pushes the lane branch (from the Rove task, never main) to origin, no force; with
 #                 OPENCODE_SANDBOX_PR_BRANCH to that existing branch instead, fast-forward only
@@ -101,9 +125,17 @@ nixpkg() { # the first output path; read whole (a pipe into head -n 1 can break 
 bwrap=$(nixpkg bubblewrap)/bin/bwrap
 pasta=$(nixpkg passt)/bin/pasta
 curl=$(nixpkg curl)/bin/curl
-[ -x "$bwrap" ] && [ -x "$pasta" ] && [ -x "$curl" ] || die "no bwrap/pasta/curl from nixpkgs"
-for t in git gh rove jq opencode systemd-run setsid; do command -v "$t" >/dev/null || die "$t not on PATH"; done
-git=$(readlink -f "$(command -v git)") gh=$(command -v gh) rove=$(command -v rove) jq=$(command -v jq)
+nft=$(nixpkg nftables)/bin/nft
+ipcmd=$(nixpkg iproute2)/bin/ip
+[ -x "$bwrap" ] && [ -x "$pasta" ] && [ -x "$curl" ] && [ -x "$nft" ] && [ -x "$ipcmd" ] || die "no bwrap/pasta/curl/nft/ip from nixpkgs"
+seat=${OPENCODE_SANDBOX_SEAT:-}
+case "$seat" in ""|1) ;; *) die "OPENCODE_SANDBOX_SEAT must be 1 or unset" ;; esac
+free=${OPENCODE_SANDBOX_PROOF_FREE:-}
+case "$free" in ""|1) ;; *) die "OPENCODE_SANDBOX_PROOF_FREE must be 1 or unset" ;; esac
+[ -z "$free" ] || [ -n "$seat" ] || die "OPENCODE_SANDBOX_PROOF_FREE is only for a seat's proof"
+need=(git gh jq opencode systemd-run setsid); [ -n "$seat" ] || need+=(rove) # a Cotal seat has no Rove task
+for t in "${need[@]}"; do command -v "$t" >/dev/null || die "$t not on PATH"; done
+git=$(readlink -f "$(command -v git)") gh=$(command -v gh) rove=$(command -v rove || true) jq=$(command -v jq)
 
 work=$(realpath "$PWD")
 case "$work" in "$HOME"/*) ;; *) die "$work is not under \$HOME" ;; esac
@@ -128,9 +160,17 @@ if [ -n "$task" ]; then
 else
   lane=$HOME/.cache/opencode-lanes/wt-$(printf '%s' "$work" | sha256sum | cut -c1-16)
 fi
+# A Cotal seat has no Rove task: its branch is the worktree's HEAD at the first launch, before any model ran, and stays
+# that branch afterwards. The lane can rewrite HEAD inside, so later launches read the record, not HEAD.
+seatbr=$lane/seat-branch
+if [ -n "$seat" ] && [ -z "$branch" ]; then
+  if [ -r "$seatbr" ]; then branch=$(cat -- "$seatbr")
+  else branch=$("$git" -C "$work" symbolic-ref --short HEAD) || die "$work has no branch checked out"; fi
+fi
 [ -n "$branch" ] || die "no lane branch (Rove task or OPENCODE_SANDBOX_BRANCH)"
 "$git" check-ref-format --branch "$branch" >/dev/null || die "bad branch $branch"
 case "$branch" in main|master|HEAD|gh-pages|release*) die "refusing lane branch $branch" ;; esac
+if [ -n "$seat" ] && [ ! -e "$seatbr" ]; then mkdir -p -- "$lane"; printf '%s\n' "$branch" >"$seatbr"; fi
 # optional: an existing PR branch the lane continues; set by the coordinator in the launch command (the lane
 # cannot set it: it is read here, outside). Same guards as the lane branch, and it must exist on origin
 # (so a typo cannot create a stray branch). $phead is the branch the PR, its CI and `gh pr create` are about.
@@ -164,29 +204,39 @@ auth=${OPENCODE_SANDBOX_AUTH:-$HOME/.config/opencode-sandbox/auth.json}
 [ -f "$auth" ] || die "no lane key $auth: create it with a key for lanes only ({\"opencode-go\":{\"type\":\"api\",\"key\":\"...\"}}); the user's opencode keys are never used"
 case "$(realpath "$auth")" in "$HOME"/.local/share/opencode/*) die "refusing the user's opencode key $auth as a lane key" ;; esac
 
+# the model pin. A Cotal seat: the model Cotal was asked for at spawn (in its inline config), one of OpenCode's two hosted
+# providers, and required. Otherwise the worktree's project config, opencode-go only (not the user's global config).
+prov=opencode-go
+if [ -n "$seat" ]; then
+  pin=$(printf '%s' "${OPENCODE_CONFIG_CONTENT:-}" | "$jq" -r '.model // empty' 2>/dev/null) || pin=""
+  [[ $pin =~ ^(opencode|opencode-go)/[A-Za-z0-9._-]+$ ]] || die "seat model '$pin': only opencode/ and opencode-go/ models run in the sandbox"
+  [ -z "$free" ] || [[ $pin =~ ^opencode/[A-Za-z0-9._-]+-free$ ]] || die "OPENCODE_SANDBOX_PROOF_FREE needs an opencode/*-free model, not $pin"
+  prov=${pin%%/*}
+else
+  pin=$("$jq" -r '.model | if type == "string" then . elif type == "object" then "\(.providerID)/\(.model)" else empty end' \
+    "$work/.opencode/opencode.json" 2>/dev/null || true)
+  case $pin in
+    '') echo "opencode-sandbox: warning: no model pinned in $work/.opencode/opencode.json" >&2 ;;
+    opencode-go/*) [[ $pin =~ ^opencode-go/[A-Za-z0-9._-]+(#[A-Za-z0-9._-]+)?$ ]] || die "bad model pin $pin" ;;
+    *) die "model pin $pin in $work/.opencode/opencode.json: only opencode-go models work with the lane key" ;;
+  esac
+fi
+
 # opencode 2.x keeps credentials in its SQLite DB; auth.json is only imported when an old DB is migrated,
 # never into a fresh lane DB. So the lane key reaches opencode as the opencode-go provider's apiKey, from a
 # file of its own (the bare key, rewritten at every launch so a rotated key applies).
-lanekey=$("$jq" -er '.["opencode-go"] | select(.type == "api") | .key | strings | select(length > 0)' "$auth" 2>/dev/null) \
+lanekey=$("$jq" -er --arg p "$prov" '(.[$p] // .["opencode-go"] // .opencode) | select(.type == "api") | .key | strings | select(length > 0)' "$auth" 2>/dev/null) \
   || die "$auth has no opencode-go api key ({\"opencode-go\":{\"type\":\"api\",\"key\":\"...\"}})"
+keyurl=https://opencode.ai/zen/go/v1/models; [ "$prov" = opencode ] && keyurl=https://opencode.ai/zen/v1/models
 if [ "${OPENCODE_SANDBOX_CHECK_KEY:-1}" != 0 ]; then # a rejected key fails here, not as a device-login prompt or a fallback model
   code=$(printf 'header = "Authorization: Bearer %s"\n' "$lanekey" \
-    | "$curl" -sS -m 15 -o /dev/null -w '%{http_code}' -K - https://opencode.ai/zen/go/v1/models 2>/dev/null || true)
+    | "$curl" -sS -m 15 -o /dev/null -w '%{http_code}' -K - "$keyurl" 2>/dev/null || true)
   case $code in
     401|403) die "the provider rejected the lane key $auth (HTTP $code): replace it" ;;
     200) ;;
     *) echo "opencode-sandbox: warning: lane key not verified (provider answered ${code:-nothing})" >&2 ;;
   esac
 fi
-
-# the model pin: the worktree's project config, the only place the model is chosen (not the user's global config)
-pin=$("$jq" -r '.model | if type == "string" then . elif type == "object" then "\(.providerID)/\(.model)" else empty end' \
-  "$work/.opencode/opencode.json" 2>/dev/null || true)
-case $pin in
-  '') echo "opencode-sandbox: warning: no model pinned in $work/.opencode/opencode.json" >&2 ;;
-  opencode-go/*) [[ $pin =~ ^opencode-go/[A-Za-z0-9._-]+(#[A-Za-z0-9._-]+)?$ ]] || die "bad model pin $pin" ;;
-  *) die "model pin $pin in $work/.opencode/opencode.json: only opencode-go models work with the lane key" ;;
-esac
 
 mkdir -p "$lane"/{oc/data/opencode,oc/state/opencode,oc/cache,cargo,sccache,relay/spool,relay/taken,empty,bin}
 chmod 700 "$lane"
@@ -197,6 +247,61 @@ if [ -n "$pin" ]; then
     >"$lane/oc/state/opencode/model.json"
 else
   rm -f -- "$lane/oc/state/opencode/model.json"
+fi
+
+# --- a Cotal seat: what its connector needs inside, this seat's only (see the header) ---
+seatdir="" bport="" sport=""
+if [ -n "$seat" ]; then
+  name=${COTAL_NAME:-}
+  [[ $name =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "bad or missing COTAL_NAME"
+  prev="" sport=""
+  for a in "$@"; do [ "$prev" = --port ] && sport=$a; prev=$a; done
+  [[ $sport =~ ^[0-9]{1,5}$ ]] || die "seat mode needs serve --port <n>, got: $*"
+  mat=${COTAL_LAUNCH_MATERIAL:-}
+  [ -r "$mat" ] || die "no COTAL_LAUNCH_MATERIAL (a Cotal seat is started by the manager)"
+  [ "$("$jq" -r 'has("userAuth") and (.userAuth != null)' "$mat")" = false ] \
+    || die "a user-auth mesh is not supported in the sandbox yet (static-auth meshes only)"
+  servers=$("$jq" -r '.servers | strings' "$mat" 2>/dev/null) || servers=""
+  [[ $servers =~ ^nats://127\.0\.0\.1:([0-9]{1,5})$ ]] \
+    || die "broker '$servers' is not one nats:// address on host loopback: the sandbox opens only that"
+  bport=${BASH_REMATCH[1]}
+  creds=$("$jq" -er '.creds | strings | select(length > 0)' "$mat" 2>/dev/null) || die "no credential path in the launch material"
+  [ -r "$creds" ] || die "cannot read the seat's credential"
+  # one directory per launch: the watchdog of a seat that just ended must not take the files of its restart
+  seatdir=$lane/seat/$name/$$
+  mkdir -p -- "$seatdir" "$lane/oc/db/$name"
+  chmod 700 -- "$lane/seat" "$lane/seat/$name" "$seatdir"
+  for d in "$lane/seat/$name"/*; do   # left by a launcher and watchdog that were both killed
+    [ -d "$d" ] && [ "$d" != "$seatdir" ] && ! kill -0 "${d##*/}" 2>/dev/null && rm -rf -- "$d"
+  done
+  (umask 077
+   cp -- "$creds" "$seatdir/creds.new" && chmod 600 -- "$seatdir/creds.new" && mv -f -- "$seatdir/creds.new" "$seatdir/creds"
+   "$jq" -c '.creds = "/run/sandbox/seat/creds"' "$mat" >"$seatdir/material.json"
+   [ -z "${COTAL_AGENT_FILE:-}" ] || cp -- "$COTAL_AGENT_FILE" "$seatdir/agent-file") || die "cannot set up the seat's files"
+  seat_plugin() { # one ro bind per plugin dir of Cotal's config: an absolute directory holding index.js
+    local d; d=$(printf '%s' "$OPENCODE_CONFIG_CONTENT" | "$jq" -r '.plugin[]? | strings')
+    [ -n "$d" ] || die "Cotal's config has no plugin"
+    while IFS= read -r p; do
+      case $p in /*) ;; *) die "plugin $p is not an absolute path" ;; esac
+      [ -f "$p/index.js" ] || die "no plugin at $p"
+      printf '%s\n' "$p"
+    done <<<"$d"
+  }
+  seat_plugins=$(seat_plugin) || exit 2
+fi
+
+# the project's allowed host ports: read here, outside; a lane cannot reach the file or set the path
+ports_file=${XDG_CONFIG_HOME:-$HOME/.config}/lane-control/projects/$(basename "$(dirname "$common")")/sandbox-ports
+extra_ports=""
+if [ -e "$ports_file" ]; then
+  [ -f "$ports_file" ] && [ -r "$ports_file" ] || die "$ports_file is not a readable file"
+  while IFS= read -r l || [ -n "$l" ]; do
+    l=${l%%#*}; l=${l#"${l%%[![:space:]]*}"}; l=${l%"${l##*[![:space:]]}"}
+    [ -n "$l" ] || continue
+    [[ $l =~ ^[1-9][0-9]{0,4}$ ]] && [ "$l" -le 65535 ] || die "$ports_file: '$l' is not a port number (one port per line, 1-65535; ports only, never a range or address)"
+    case ",$extra_ports," in *",$l,"*) ;; *) extra_ports=${extra_ports:+$extra_ports,}$l ;; esac
+  done <"$ports_file"
+  [ -z "$extra_ports" ] || echo "opencode-sandbox: forwarding host ports from $ports_file: $extra_ports" >&2
 fi
 
 # --- lane-private git dir: the shared repo's refs, config and hooks stay out of reach ---
@@ -452,7 +557,7 @@ relay() { # $1 = the launcher's pid
 args=(--tmpfs / --dev /dev --proc /proc --tmpfs /tmp --perms 0700 --dir "$HOME"
       --ro-bind /nix/store /nix/store
       --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
-      --die-with-parent)
+      --cap-drop ALL --die-with-parent)
 # --new-session (setsid) blocks TIOCSTI input injection into the terminal, but it also detaches the
 # TUI from its tty (no SIGWINCH: garbled in Rove's terminal). Keep it only where TIOCSTI still works.
 [ "$(cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || echo 1)" = 0 ] || args+=(--new-session)
@@ -464,18 +569,25 @@ for p in /etc/static /etc/ssl /etc/passwd /etc/group /etc/hosts /etc/nsswitch.co
 done
 resolv=$(readlink -f /etc/resolv.conf)
 ! grep -qE '^nameserver +(127\.|::1)' "$resolv" || die "/etc/resolv.conf names a loopback resolver (unreachable from the lane)"
-ro "$resolv" /etc/resolv.conf
+dnsaddr=198.51.100.53  # a documentation address: only pasta answers it, by forwarding DNS to the host's resolver
+printf 'nameserver %s\n' "$dnsaddr" >"$lane/resolv.conf"
+ro "$lane/resolv.conf" /etc/resolv.conf
 [ ! -L "$HOME/.nix-profile" ] || args+=(--symlink "$(readlink -f "$HOME/.nix-profile")" "$HOME/.nix-profile")
 
 # opencode: its binary, the global config file and the Rove badge plugin only (read-only; the rest
 # of ~/.config/opencode, e.g. service.json with a password, stays out); state per lane
 oc=$(readlink -f "$(command -v opencode)")
 ro "$(dirname "$(dirname "$oc")")"
-for f in opencode.jsonc opencode.json plugins/rove-agent-state.js; do
+# A Cotal seat gets none of it: its config comes inline, and the owner's MCP servers are not something the agent needs.
+[ -n "$seat" ] || for f in opencode.jsonc opencode.json plugins/rove-agent-state.js; do
   [ ! -f "$HOME/.config/opencode/$f" ] || ro "$HOME/.config/opencode/$f"
 done
 [ ! -d "$HOME/.config/git" ] || ro "$HOME/.config/git"
 rw "$lane/oc"; rw "$lane/cargo"; rw "$lane/sccache"
+if [ -n "$seat" ]; then
+  ro "$seatdir" /run/sandbox/seat
+  while IFS= read -r p; do ro "$p"; done <<<"$seat_plugins"
+fi
 # the lane's key: the model can read it, so it is a key of its own, revocable alone; never the user's
 # opencode keys (no fallback)
 ro "$lane/lane-key" /run/sandbox/lane-key
@@ -512,6 +624,19 @@ setenv CARGO_HOME "$lane/cargo"; setenv SCCACHE_DIR "$lane/sccache"
 setenv SSL_CERT_FILE /etc/ssl/certs/ca-certificates.crt; setenv NIX_SSL_CERT_FILE /etc/ssl/certs/ca-certificates.crt
 setenv OPENCODE_SANDBOX 1; setenv OPENCODE_SANDBOX_DEVENV "$devenv"
 [ -z "$task" ] || setenv ROVE_TASK_ID "$task"
+if [ -n "$seat" ]; then
+  # the connector's variables by name: no other COTAL_* setting (feedback keys, the operator's) comes in
+  for v in COTAL_NAME COTAL_ROLE COTAL_SPACE COTAL_ID COTAL_KIND COTAL_LIFECYCLE_UID COTAL_ACCEPTED_TOKEN COTAL_SUBSCRIBE \
+           COTAL_ALLOW_SUBSCRIBE COTAL_ALLOW_PUBLISH COTAL_CAPABILITIES COTAL_QUIET COTAL_MUTED COTAL_MODEL COTAL_VARIANT \
+           COTAL_MANAGER_INSTANCE COTAL_BACKFILL_FLOOR COTAL_ENVIRONMENT COTAL_OPENCODE_PROMPT \
+           COTAL_OPENCODE_SERVER_URL COTAL_OPENCODE_LINE COTAL_CONTROL_SOCKET \
+           OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD; do
+    [ -z "${!v:-}" ] || setenv "$v" "${!v}"
+  done
+  setenv COTAL_LAUNCH_MATERIAL /run/sandbox/seat/material.json
+  [ -z "${COTAL_AGENT_FILE:-}" ] || setenv COTAL_AGENT_FILE /run/sandbox/seat/agent-file
+  setenv OPENCODE_DB "$lane/oc/db/$name/opencode.db"
+fi
 : "${NIX_LD:=/run/current-system/sw/share/nix-ld/lib/ld.so}" "${NIX_LD_LIBRARY_PATH:=/run/current-system/sw/share/nix-ld/lib}"
 for v in TERM COLORTERM LANG LC_ALL LC_CTYPE LOCALE_ARCHIVE TZDIR TERMINFO TERMINFO_DIRS NIX_LD NIX_LD_LIBRARY_PATH; do
   [ -z "${!v:-}" ] || setenv "$v" "${!v}"
@@ -555,14 +680,25 @@ fi
 
 # the provider and the model are fixed here, from the lane key and the worktree's pin, over every other
 # config (the inline config wins): one provider (opencode-go), no free models, the pin as the model
-cfg=$("$jq" -nc --arg pin "${pin%%#*}" '{
-    enabled_providers: ["opencode-go"],
-    provider: {"opencode-go": {options: {apiKey: "{file:/run/sandbox/lane-key}"}}}}
+# A Cotal seat: Cotal's config (its plugin, agent and permission) underneath, the provider and key on top of it.
+base=null; [ -z "$seat" ] || base=$OPENCODE_CONFIG_CONTENT
+cfg=$("$jq" -nc --arg pin "${pin%%#*}" --arg prov "$prov" --argjson base "$base" '
+  ($base // {}) * {
+    enabled_providers: [$prov],
+    provider: {($prov): {options: {apiKey: "{file:/run/sandbox/lane-key}"}}}}
   + (if $pin == "" then {} else {model: $pin} end)')
-setenv OPENCODE_CONFIG_CONTENT "$cfg"; setenv OPENCODE_DISABLE_FREE_MODELS 1
+setenv OPENCODE_CONFIG_CONTENT "$cfg"
+[ -n "$free" ] || setenv OPENCODE_DISABLE_FREE_MODELS 1
 
 if [ -n "${OPENCODE_SANDBOX_CMD:-}" ]; then
   cmd=(/run/current-system/sw/bin/bash -c "$OPENCODE_SANDBOX_CMD")
+elif [ -n "$seat" ]; then
+  # Cotal's own server, as it asked. It refuses a model the server does not list before the seat joins the mesh.
+  # Inside it listens on every address of its own network namespace: pasta delivers the one inward port to the namespace's
+  # interface, not its loopback, and the namespace has no other way in. The host side stays 127.0.0.1 only.
+  sv=() prev=""
+  for a in "$@"; do if [ "$prev" = --hostname ]; then sv+=(0.0.0.0); else sv+=("$a"); fi; prev=$a; done
+  cmd=("$oc" "${sv[@]}")
 else
   # 2.x clients start or find a detached background service; here the server is private to the lane and
   # ends with the client (the user's service on a host loopback port is unreachable anyway)
@@ -576,22 +712,44 @@ else
     exec "$oc" "$@"' _ "$oc" "$pin" "${sa[@]}" "$@")
 fi
 
+seat_sync() { # $1 = the launcher's pid; a credential re-signed outside reaches the copy inside
+  while kill -0 "$1" 2>/dev/null; do
+    sleep 30
+    cmp -s -- "$creds" "$seatdir/creds" && continue
+    (umask 077; cp -- "$creds" "$seatdir/creds.new" 2>/dev/null && chmod 600 -- "$seatdir/creds.new" && mv -f -- "$seatdir/creds.new" "$seatdir/creds") || true
+  done
+}
+
 # no core dumps, soft and hard (a lane cannot raise it): a crash-looping tool inside would otherwise make the
 # host's systemd-coredump compress and store a dump each time and eat the machine; inherited through
 # systemd-run, pasta and bwrap by everything in the sandbox
 ulimit -c 0
 relay $$ &
 relay_pid=$!
-trap 'kill "$relay_pid" 2>/dev/null || true' EXIT
+sync_pid=""
+if [ -n "$seat" ]; then seat_sync $$ & sync_pid=$!; fi
+trap 'kill "$relay_pid" $sync_pid 2>/dev/null || true' EXIT
 rc=0
 # When the lane's terminal closes (tab closed, Rove restarted), this launcher dies of SIGHUP but pasta
 # ignores it, so the scope used to live on with no terminal (idle, ~0.5 GB each). A watchdog in its own
 # session stops the named scope as soon as this launcher is gone.
 unit="opencode-sandbox-$$-$(date +%s)"
-setsid -f bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 5; done; systemctl --user stop "$2.scope" 2>/dev/null' \
-  _ "$$" "$unit" </dev/null >/dev/null 2>&1
+setsid -f bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 5; done; systemctl --user stop "$2.scope" 2>/dev/null
+  [ -z "$3" ] || rm -rf -- "$3"' \
+  _ "$$" "$unit" "$seatdir" </dev/null >/dev/null 2>&1
+net=(-t none -T "${extra_ports:-none}")
+[ -z "$seat" ] || net=(-t "127.0.0.1/$sport" -T "$bport${extra_ports:+,$extra_ports}")
+# outbound rules for the namespace; bwrap then runs without any capability, so the lane cannot change them
+{ printf 'table inet lane_out {\nchain out {\ntype filter hook output priority 0; policy accept;\n'
+  echo 'oifname "lo" accept'
+  echo 'ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } reject'
+  echo 'ip6 daddr { ::/128, fc00::/7, fe80::/10, ff00::/8 } reject'
+  "$ipcmd" -o -4 addr show scope global | awk '{ sub(/\/.*/, "", $4); print "ip daddr " $4 " reject" }'
+  "$ipcmd" -o -6 addr show scope global | awk '{ sub(/\/.*/, "", $4); print "ip6 daddr " $4 " reject" }'
+  printf '}\n}\n'; } >"$lane/net.nft"
 systemd-run --user --scope -q --expand-environment=no --unit="$unit" \
   -p MemoryMax="${OPENCODE_SANDBOX_MEM:-4G}" -p MemorySwapMax=0 -- \
-  "$pasta" --config-net -q -T none -U none -t none -u none --no-map-gw -- \
-  "$bwrap" "${args[@]}" -- "${cmd[@]}" || rc=$?
+  "$pasta" --config-net -q "${net[@]}" -U none -u none --no-map-gw --dns-forward "$dnsaddr" -- \
+  /bin/sh -c '"$1" -f "$2" || { echo "opencode-sandbox: could not set the network rules; not starting" >&2; exit 99; }
+    shift 2; exec "$@"' sh "$nft" "$lane/net.nft" "$bwrap" "${args[@]}" -- "${cmd[@]}" || rc=$?
 exit "$rc"

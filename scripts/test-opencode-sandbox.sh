@@ -173,6 +173,9 @@ c "real gh api fails"            must_fail "" $(printf '%q' "$realgh") api user
 c "real git push has no creds"   must_fail "" env GIT_TERMINAL_PROMPT=0 $(printf '%q' "$realgit") push --dry-run $(printf '%q' "$url") HEAD:refs/heads/sbx-never
 [ ! -x /run/current-system/sw/bin/rove ] || c "system rove fails" must_fail "" /run/current-system/sw/bin/rove api add --repo . --title sbx
 for port in $ports; do c "host loopback :\$port refused" must_fail "" bash -c "exec 3<>/dev/tcp/127.0.0.1/\$port"; done
+c "LAN gateway :53 and :80 refused" bash -c 'gw=\$(ip route | sed -n "s/^default via \\([^ ]*\\).*/\\1/p" | head -n 1); [ -n "\$gw" ] && ! (exec 3<>/dev/tcp/\$gw/53) 2>/dev/null && ! (exec 3<>/dev/tcp/\$gw/80) 2>/dev/null'
+c "no capabilities inside"       bash -c 'grep -qE "^CapEff:[[:space:]]*0+$" /proc/self/status'
+c "network config cannot change" must_fail "" ip link add sbxprobe type dummy
 c "gateway :7878 refused"        must_fail "" bash -c 'gw=\$(ip route | sed -n "s/^default via \\([^ ]*\\).*/\\1/p" | head -n 1); [ -n "\$gw" ] && exec 3<>/dev/tcp/\$gw/7878'
 [ -z $(printf '%q' "$x11") ] || c "X11 abstract socket refused" must_fail "Connection refused" python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect("\0"+sys.argv[1][1:])' $(printf '%q' "$x11")
 c "own pid namespace"            bash -c '[ "\$(ls -d /proc/[0-9]* | wc -l)" -lt 15 ] && ! grep -qxE "claude|bun|dbus-broker|systemd|opencode.exe|sccache" /proc/[0-9]*/comm'
@@ -312,9 +315,108 @@ else
   # relay's refresh of the shared repo's branch is then a no-op, the checkout is not moved)
   rm -rf -- "${lanedir:?}"
   r=$(env -u ROVE_TASK_ID -u OPENCODE_SANDBOX_PR_BRANCH "${prenv[@]:1}" OPENCODE_SANDBOX_PR_BRANCH= OPENCODE_SANDBOX_CMD='git push 2>&1; echo "rc=$?"' "$S" 2>&1)
-    o "unset: push goes to the lane branch" '[[ $r == *"pushed $branch"* && $r != *" to "* && $r == *rc=0* ]] && [ "$(bref "$branch")" = "$tip" ]'
+    o "unset: push goes to the lane branch" '[[ $r == *"pushed $branch"* && $r != *"pushed $branch to "* && $r == *rc=0* ]] && [ "$(bref "$branch")" = "$tip" ]'
   o "unset: PR branch untouched" '[ "$(git --git-dir="$bare" rev-parse "refs/heads/$prn^")" = "$tip" ]'
 fi
+# --- seat mode (OPENCODE_SANDBOX_SEAT=1): a Cotal seat. Stubbed mesh pieces, a dummy credential; the real broker is not used. ---
+seatd=$stubdir/seat; mkdir -p "$seatd/plugin" "$seatd/mat"; chmod 700 "$seatd/mat"
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
+bport=$(free_port); sport=$(free_port)
+python3 -c 'import socket,sys
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(8)
+while True: c,_=s.accept(); c.send(b"broker\n"); c.close()' "$bport" & broker_pid=$!
+trap 'kill "$broker_pid" 2>/dev/null; cleanup' EXIT
+# a listener on every host address: what a seat must not reach through a bridge, the LAN or the host's own addresses
+lanport=$(free_port)
+python3 -c 'import socket,sys
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("0.0.0.0",int(sys.argv[1]))); s.listen(8)
+while True: c,_=s.accept(); c.close()' "$lanport" & lan_pid=$!
+trap 'kill "$broker_pid" "$lan_pid" 2>/dev/null; cleanup' EXIT
+host_addrs=$(ip -o -4 addr show scope global | awk '{ sub(/\/.*/, "", $4); print $4 }' | tr '\n' ' ')
+echo 'export default {}' >"$seatd/plugin/index.js"
+printf 'sbx-test-not-creds\n' >"$seatd/seat.creds"; chmod 600 "$seatd/seat.creds"
+printf 'other-seat\n' >"$seatd/other.creds"; chmod 600 "$seatd/other.creds"
+material() { jq -n --arg c "$seatd/seat.creds" --arg s "$1" '{creds:$c, servers:$s, controlToken:"sbx-control"}' >"$seatd/mat/material.json"; chmod 600 "$seatd/mat/material.json"; }
+material "nats://127.0.0.1:$bport"
+scfg=$(jq -nc --arg p "$seatd/plugin" '{model:"opencode/sbx-test-model", plugin:[$p], permission:"allow"}')
+seatrun=(env -u ROVE_TASK_ID -u OPENCODE_SANDBOX_BRANCH OPENCODE_SANDBOX_SEAT=1 "OPENCODE_CONFIG_CONTENT=$scfg" COTAL_NAME=sbx-seat COTAL_SPACE=sbx
+  "COTAL_LAUNCH_MATERIAL=$seatd/mat/material.json" COTAL_LIFECYCLE_UID=sbxuid COTAL_EVENTS=1 COTAL_FEEDBACK_KEY=sbx-must-not-arrive
+  OPENCODE_API_KEY=sbx-must-not-arrive OPENCODE_DB=/nonexistent/agent/opencode.db OPENCODE_SERVER_USERNAME=opencode OPENCODE_SERVER_PASSWORD=sbx-pw)
+serve=(serve --hostname 127.0.0.1 --port "$sport")
+rm -rf -- "${lanedir:?}"
+seat_inside=$(cat <<EOF
+fails=0
+c() { local name=\$1; shift; local out; out=\$("\$@" 2>&1) && echo "ok   seat: \$name" || { echo "FAIL seat: \$name: \$(printf '%s' "\$out" | tr '\n' ' ' | head -c 300)"; fails=1; }; }
+must_fail() { local out; if out=\$("\$@" 2>&1); then echo "succeeded: \$out"; return 1; fi; }
+c "broker port reachable"        bash -c 'exec 3<>/dev/tcp/127.0.0.1/$bport'
+for port in $ports; do [ \$port = $bport ] || c "other host port \$port refused" must_fail bash -c "exec 3<>/dev/tcp/127.0.0.1/\$port"; done
+for a in $host_addrs; do c "host address \$a:$lanport refused" must_fail bash -c "exec 3<>/dev/tcp/\$a/$lanport"; done
+c "plugin readable"              test -r $(printf '%q' "$seatd/plugin/index.js")
+c "plugin read-only"             must_fail bash -c 'echo x >> $(printf '%q' "$seatd/plugin/index.js")'
+c "this seat's credential"       bash -c '[ "\$(cat /run/sandbox/seat/creds)" = sbx-test-not-creds ]'
+c "credential read-only"         must_fail bash -c 'echo x >> /run/sandbox/seat/creds'
+c "material points inside"       bash -c '[ "\$(jq -r .creds "\$COTAL_LAUNCH_MATERIAL")" = /run/sandbox/seat/creds ] && [ "\$(stat -c %a "\$COTAL_LAUNCH_MATERIAL")" = 600 ]'
+c "the real creds dir is absent" bash -c '[ ! -e $(printf '%q' "$seatd/seat.creds") ] && [ ! -e $(printf '%q' "$seatd/other.creds") ]'
+c "event plane not armed"        bash -c '[ -z "\${COTAL_EVENTS:-}" ]'
+c "connection variables"         bash -c '[ "\$COTAL_NAME" = sbx-seat ] && [ "\$COTAL_LIFECYCLE_UID" = sbxuid ] && [ "\$OPENCODE_SERVER_PASSWORD" = sbx-pw ]'
+c "no other secrets"             bash -c '[ -z "\${COTAL_FEEDBACK_KEY:-}\${OPENCODE_API_KEY:-}" ]'
+c "free models disabled"         bash -c '[ "\$OPENCODE_DISABLE_FREE_MODELS" = 1 ]'
+c "no global OpenCode config, MCP servers or Rove plugin" bash -c '[ ! -e "\$HOME/.config/opencode/opencode.jsonc" ] && [ ! -e "\$HOME/.config/opencode/opencode.json" ] && [ ! -e "\$HOME/.config/opencode/plugins/rove-agent-state.js" ]'
+c "database in the lane"         bash -c 'case \$OPENCODE_DB in */oc/db/sbx-seat/opencode.db) mkdir -p "\$(dirname "\$OPENCODE_DB")" && touch "\$OPENCODE_DB" ;; *) false ;; esac'
+c "config: plugin and allow kept" bash -c 'jq -e ".plugin == [\"$seatd/plugin\"] and .permission == \"allow\"" <<<"\$OPENCODE_CONFIG_CONTENT" >/dev/null'
+c "config: provider and key fixed" bash -c 'jq -e ".model == \"opencode/sbx-test-model\" and .enabled_providers == [\"opencode\"] and .provider.opencode.options.apiKey == \"{file:/run/sandbox/lane-key}\"" <<<"\$OPENCODE_CONFIG_CONTENT" >/dev/null'
+python3 -m http.server --bind 0.0.0.0 $sport >/dev/null 2>&1 & srv=\$!
+for _ in \$(seq 50); do bash -c 'exec 3<>/dev/tcp/127.0.0.1/$sport' 2>/dev/null && break; sleep 0.1; done
+touch /run/sandbox/relay/seat-ready
+for _ in \$(seq 300); do [ -e /run/sandbox/relay/seat-go ] && break; sleep 0.2; done
+kill \$srv 2>/dev/null
+exit \$fails
+EOF
+)
+out_file=$stubdir/seat.out
+( "${seatrun[@]}" OPENCODE_SANDBOX_CMD="$seat_inside" "$S" "${serve[@]}" >"$out_file" 2>&1 ) & seat_pid=$!
+spool=$lanedir/relay/spool
+for _ in $(seq 600); do [ -e "$spool/seat-ready" ] && break; sleep 0.2; done
+o "seat: server port reachable from host loopback" '[ "$(curl -sS -m 5 -o /dev/null --noproxy "*" -w "%{http_code}" "http://127.0.0.1:$sport/")" = 200 ]'
+touch "$spool/seat-go"; seat_rc=0; wait "$seat_pid" || seat_rc=$?
+grep -E '^(ok|FAIL) ' "$out_file"; [ "$seat_rc" = 0 ] && [ -z "$(grep '^FAIL' "$out_file")" ] || { fail=1; [ -s "$out_file" ] && grep -q '^ok' "$out_file" || tail -n 5 "$out_file"; }
+o "seat: the branch is recorded outside the sandbox" '[ "$(cat "$lanedir/seat-branch")" = "$branch" ]'
+for _ in $(seq 40); do [ -z "$(find "$lanedir/seat/sbx-seat" -type f 2>/dev/null)" ] && break; sleep 0.5; done
+o "seat: the credential copy is gone after the seat" '[ -z "$(find "$lanedir/seat/sbx-seat" -type f 2>/dev/null)" ]'
+# a restart under the same name: the old seat's watchdog must not take the new seat's files
+"${seatrun[@]}" OPENCODE_SANDBOX_CMD='sleep 60' "$S" serve --hostname 127.0.0.1 --port "$(free_port)" >/dev/null 2>&1 &
+old=$!; for _ in $(seq 60); do [ -n "$(find "$lanedir/seat/sbx-seat" -name creds 2>/dev/null)" ] && break; sleep 0.5; done
+kill -TERM "$old" 2>/dev/null; wait "$old" 2>/dev/null
+r=$("${seatrun[@]}" OPENCODE_SANDBOX_CMD='sleep 9; [ -r /run/sandbox/seat/material.json ] && [ -r /run/sandbox/seat/creds ] && echo still-there' "$S" serve --hostname 127.0.0.1 --port "$(free_port)" 2>&1)
+o "seat: a restart keeps its files when the old seat's watchdog runs" '[[ $r == *still-there* ]]'
+material "nats://203.0.113.9:$bport"
+o0 "seat: a broker off loopback is refused" "not one nats:// address on host loopback" "${seatrun[@]}" OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
+jq '. + {userAuth:{owner:"x"}}' "$seatd/mat/material.json" >"$seatd/mat/m2"; mv "$seatd/mat/m2" "$seatd/mat/material.json"; chmod 600 "$seatd/mat/material.json"
+o0 "seat: a user-auth mesh is refused" "user-auth mesh" "${seatrun[@]}" OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
+material "nats://127.0.0.1:$bport"
+o0 "seat: a model off OpenCode's providers is refused" "run in the sandbox" "${seatrun[@]}" 'OPENCODE_CONFIG_CONTENT={"model":"deepseek/x","plugin":[]}' OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
+o0 "seat: a serve without --port is refused" "seat mode needs serve" "${seatrun[@]}" OPENCODE_SANDBOX_CMD=true "$S" serve
+# the project's allowed host ports: one listed port reachable, an unlisted one refused, a malformed entry stops the launch
+allowed=$(free_port)
+python3 -c 'import socket,sys
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(8)
+while True: c,_=s.accept(); c.close()' "$allowed" & allowed_pid=$!
+trap 'kill "$broker_pid" "$lan_pid" "$allowed_pid" 2>/dev/null; cleanup' EXIT
+pdir=$stubdir/xdg/lane-control/projects/$(basename "$(dirname "$common")"); mkdir -p "$pdir"
+printf '# dev container\n%s\n' "$allowed" >"$pdir/sandbox-ports"
+r=$("${seatrun[@]}" XDG_CONFIG_HOME="$stubdir/xdg" OPENCODE_SANDBOX_CMD="bash -c 'exec 3<>/dev/tcp/127.0.0.1/$allowed' && echo allowed-open; bash -c 'exec 3<>/dev/tcp/127.0.0.1/$lanport' 2>/dev/null || echo unlisted-refused" "$S" serve --hostname 127.0.0.1 --port "$(free_port)" 2>&1)
+o "ports: a listed port is reachable" '[[ $r == *allowed-open* ]]'
+o "ports: an unlisted port is refused" '[[ $r == *unlisted-refused* ]]'
+for bad in 80a 0 70000 8000-8010 10.0.0.0/8 "80 81"; do
+  printf '%s\n' "$bad" >"$pdir/sandbox-ports"
+  o0 "ports: malformed '$bad' refused" "is not a port number" "${seatrun[@]}" XDG_CONFIG_HOME="$stubdir/xdg" OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
+done
+# the proof-only free switch: a seat on an opencode/*-free model only, and only with the switch
+o0 "free switch: refused outside a seat" "only for a seat" env -u ROVE_TASK_ID OPENCODE_SANDBOX_PROOF_FREE=1 OPENCODE_SANDBOX_BRANCH="$branch" OPENCODE_SANDBOX_CMD=true "$S"
+o0 "free switch: refused on a paid model" "needs an opencode/*-free model" "${seatrun[@]}" OPENCODE_SANDBOX_PROOF_FREE=1 OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
+r=$("${seatrun[@]}" "OPENCODE_CONFIG_CONTENT=$(jq -nc --arg p "$seatd/plugin" '{model:"opencode/sbx-test-free", plugin:[$p]}')" OPENCODE_SANDBOX_PROOF_FREE=1 OPENCODE_SANDBOX_CMD='[ -z "${OPENCODE_DISABLE_FREE_MODELS:-}" ] && echo free-enabled' "$S" "${serve[@]}" 2>&1)
+o "free switch: free models on, for a -free seat only" '[[ $r == *free-enabled* ]]'
+kill "$broker_pid" "$lan_pid" "$allowed_pid" 2>/dev/null
 if [ "${SBX_TEST_PUSH:-}" = 1 ]; then
   main_before=$(git ls-remote origin refs/heads/main | cut -c1-40)
   pout=$(env -u ROVE_TASK_ID OPENCODE_SANDBOX_BRANCH="$branch" OPENCODE_SANDBOX_CMD='git -c user.name=t -c user.email=t@t commit -q --allow-empty -m sbx-push && git push origin HEAD:main' "$S" 2>&1)

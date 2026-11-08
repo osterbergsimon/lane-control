@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# opencode-seat: Cotal's `opencode` for this machine. The manager runs it instead of the real binary, as the first
+# `opencode` on the manager's PATH (project-setup links it there as ~/.agents/bin/cotal-opencode/opencode) or as
+# COTAL_OPENCODE_BIN. It keeps a hosted model off the owner's machine: a seat on one runs inside scripts/opencode-sandbox.sh.
+#
+#   opencode-seat serve --hostname H --port P       Cotal starts a seat's server: decides where it runs (below)
+#   opencode-seat --server URL --session ID         the seat's TUI, a client of that server: runs here, the real binary
+#   opencode-seat --version | attach ... | models   what the connector asks without a model: the real binary
+#
+# For `serve` the model is the one Cotal was asked for (its inline config):
+#   opencode/... or opencode-go/...                 hosted, the region unknown: the sandbox (model-routing.md)
+#   any other, marked yours for the project         a tier row with sandbox none, or project-setup --own-model: runs here, unwrapped
+#   any other                                       counts as required, and the sandbox cannot run it: refused
+#   no model at all                                 refused: the default could be a hosted one
+# Anything else is refused, so a new way of starting opencode fails loud instead of running a model bare.
+set -u
+die() { echo "opencode-seat: $*" >&2; exit 2; }
+self=$(realpath "${BASH_SOURCE[0]}") || die "cannot find itself"
+here=$(dirname "$self")
+
+# The real opencode is the first on PATH that is not this script. This script's own PATH entry is dropped, so nothing
+# started from here finds it again as `opencode`.
+real="" clean=""
+IFS=: read -ra dirs <<<"${PATH:-}"
+for d in "${dirs[@]}"; do
+  [ -n "$d" ] || continue
+  if [ -e "$d/opencode" ] && [ "$(realpath "$d/opencode" 2>/dev/null)" = "$self" ]; then continue; fi
+  clean=${clean:+$clean:}$d
+  [ -n "$real" ] || { [ -x "$d/opencode" ] && [ ! -d "$d/opencode" ] && real=$d/opencode; }
+done
+[ -n "$real" ] || die "no real opencode on PATH"
+export PATH=$clean
+
+case "${1:-}" in
+  --version|-v|models|attach|--server|--server=*) exec "$real" "$@" ;;
+  serve) ;;
+  *) die "refusing 'opencode $*': only serve, a TUI on --server, attach, models and --version go through here" ;;
+esac
+
+model=$(printf '%s' "${OPENCODE_CONFIG_CONTENT:-}" | jq -r '.model // empty' 2>/dev/null) || model=""
+[ -n "$model" ] || die "no model pinned for this seat (spawn with an explicit model): it could fall back to a hosted one"
+# Cotal runs the seat on its agent's model, and launchOptions can change that one: only the checked model may be named.
+printf '%s' "$OPENCODE_CONFIG_CONTENT" | jq -e --arg m "$model" '[(.agent // {}) | .. | objects | select(has("model")) | .model] | all(. == $m)' >/dev/null 2>&1 \
+  || die "an agent in this seat's config names another model than $model: not starting it"
+case $model in
+  opencode/*|opencode-go/*) OPENCODE_SANDBOX_SEAT=1 exec "$here/opencode-sandbox.sh" "$@" ;;
+esac
+# Anything else counts as required unless the manager's project says it is yours. Both places are in the project's
+# .cotal, outside every lane's reach: a tier row with sandbox none, or a model project-setup was given with --own-model.
+root=${COTAL_OPENCODE_HOME:-}/.cotal
+own=
+if [ -r "$root/lanes.tsv" ]; then
+  rows=$("$here/lane-tier" --check "$root/lanes.tsv") || die "$root/lanes.tsv is a bad tier table: not starting $model"
+  while read -r _ harness sandbox rowmodel; do
+    [ "$harness" = opencode ] && [ "$rowmodel" = "$model" ] || continue
+    [ "$sandbox" != required ] \
+      || die "$model is sandbox required in $root/lanes.tsv, and the sandbox runs only opencode/ and opencode-go/ models: not starting it"
+    own=1
+  done <<<"$rows"
+fi
+[ -n "$own" ] || { [ -r "$root/lane-control.json" ] && jq -e --arg m "$model" '(.own_models // []) | index($m)' "$root/lane-control.json" >/dev/null 2>&1 && own=1; }
+[ -n "$own" ] || die "$model is not marked as yours for this project (a tier row with sandbox none, or project-setup --own-model): it counts as sandbox required, and the sandbox runs only opencode/ and opencode-go/ models"
+exec "$real" "$@"
