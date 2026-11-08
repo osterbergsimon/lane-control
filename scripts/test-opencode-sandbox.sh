@@ -348,6 +348,7 @@ c "material points inside"       bash -c '[ "\$(jq -r .creds "\$COTAL_LAUNCH_MAT
 c "the real creds dir is absent" bash -c '[ ! -e $(printf '%q' "$seatd/seat.creds") ] && [ ! -e $(printf '%q' "$seatd/other.creds") ]'
 c "connection variables"         bash -c '[ "\$COTAL_NAME" = sbx-seat ] && [ "\$COTAL_LIFECYCLE_UID" = sbxuid ] && [ "\$OPENCODE_SERVER_PASSWORD" = sbx-pw ]'
 c "no other secrets"             bash -c '[ -z "\${COTAL_FEEDBACK_KEY:-}\${OPENCODE_API_KEY:-}" ]'
+c "free models disabled"         bash -c '[ "\$OPENCODE_DISABLE_FREE_MODELS" = 1 ]'
 c "database in the lane"         bash -c 'case \$OPENCODE_DB in */oc/db/sbx-seat/opencode.db) mkdir -p "\$(dirname "\$OPENCODE_DB")" && touch "\$OPENCODE_DB" ;; *) false ;; esac'
 c "config: plugin and allow kept" bash -c 'jq -e ".plugin == [\"$seatd/plugin\"] and .permission == \"allow\"" <<<"\$OPENCODE_CONFIG_CONTENT" >/dev/null'
 c "config: provider and key fixed" bash -c 'jq -e ".model == \"opencode/sbx-test-model\" and .enabled_providers == [\"opencode\"] and .provider.opencode.options.apiKey == \"{file:/run/sandbox/lane-key}\"" <<<"\$OPENCODE_CONFIG_CONTENT" >/dev/null'
@@ -376,6 +377,11 @@ o0 "seat: a user-auth mesh is refused" "user-auth mesh" "${seatrun[@]}" OPENCODE
 material "nats://127.0.0.1:$bport"
 o0 "seat: a model off OpenCode's providers is refused" "run in the sandbox" "${seatrun[@]}" 'OPENCODE_CONFIG_CONTENT={"model":"deepseek/x","plugin":[]}' OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
 o0 "seat: a serve without --port is refused" "seat mode needs serve" "${seatrun[@]}" OPENCODE_SANDBOX_CMD=true "$S" serve
+# the proof-only free switch: a seat on an opencode/*-free model only, and only with the switch
+o0 "free switch: refused outside a seat" "only for a seat" env -u ROVE_TASK_ID OPENCODE_SANDBOX_PROOF_FREE=1 OPENCODE_SANDBOX_BRANCH="$branch" OPENCODE_SANDBOX_CMD=true "$S"
+o0 "free switch: refused on a paid model" "needs an opencode/*-free model" "${seatrun[@]}" OPENCODE_SANDBOX_PROOF_FREE=1 OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
+r=$("${seatrun[@]}" "OPENCODE_CONFIG_CONTENT=$(jq -nc --arg p "$seatd/plugin" '{model:"opencode/sbx-test-free", plugin:[$p]}')" OPENCODE_SANDBOX_PROOF_FREE=1 OPENCODE_SANDBOX_CMD='[ -z "${OPENCODE_DISABLE_FREE_MODELS:-}" ] && echo free-enabled' "$S" "${serve[@]}" 2>&1)
+o "free switch: free models on, for a -free seat only" '[[ $r == *free-enabled* ]]'
 kill "$broker_pid" 2>/dev/null
 if [ "${SBX_TEST_PUSH:-}" = 1 ]; then
   main_before=$(git ls-remote origin refs/heads/main | cut -c1-40)

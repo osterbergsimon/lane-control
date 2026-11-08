@@ -416,15 +416,17 @@ def opencode_key_check(tiers: Path):
         return
     f = sandbox_key_file()
     problem = sandbox_key_problem(f)
+    quota = ("note: this check only sees that the key file is usable. A wrong key stops the launch; a used-up quota lets "
+             "the lane join and then shows as a silent first turn (`usage limit` in the lane's opencode.log).")
     if problem is None:
+        print(quota, file=sys.stderr, flush=True)
         return
     lines = [f"warning: {who} pins {m}, and the sandbox has no usable key in {f} ({problem}): a lane on it stops at launch."
              for who, m in pins]
     lines += ["  `opencode auth login` does not reach the sandbox; it uses a key file of its own. Once per machine:",
               "  1. Create an API key for lanes only in the OpenCode console.",
               f'  2. Save it to {f} as {{"opencode-go":{{"type":"api","key":"<the key>"}}}}, with chmod 600.',
-              "note: this check only sees that the key file is usable; a launch asks the provider, and a wrong key or a "
-              "spent quota shows there."]
+              quota]
     print("\n".join(lines), file=sys.stderr, flush=True)
 
 

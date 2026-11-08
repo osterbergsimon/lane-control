@@ -1990,11 +1990,14 @@ class OpencodeKeyCheckTests(unittest.TestCase):
         self.assertIn('{"opencode-go":{"type":"api","key":"<the key>"}}', err)
         self.assertIn("opencode auth login` does not reach the sandbox", err)
 
-    def test_a_usable_key_is_quiet(self):
-        self.assertEqual(self.check(key_file='{"opencode-go":{"type":"api","key":"sentinel"}}'), "")
+    def test_a_usable_key_only_notes_what_a_spent_quota_looks_like(self):
+        err = self.check(key_file='{"opencode-go":{"type":"api","key":"sentinel"}}')
+        self.assertNotIn("warning:", err)
+        self.assertIn("silent first turn", err)
+        self.assertNotIn("sentinel", err)
 
     def test_a_key_under_either_provider_name_is_usable(self):
-        self.assertEqual(self.check(key_file='{"opencode":{"type":"api","key":"sentinel"}}'), "")
+        self.assertNotIn("warning:", self.check(key_file='{"opencode":{"type":"api","key":"sentinel"}}'))
 
     def test_a_broken_or_keyless_file_warns_and_never_prints_the_contents(self):
         for text in ("not json", '{"opencode-go":{"type":"oauth","key":"sentinel-secret"}}', '{"opencode-go":{"type":"api","key":""}}', "[]"):

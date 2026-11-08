@@ -19,6 +19,9 @@
 #   PLAYBOOK_CONFIG=<file>                      # the playbook config (default ~/.config/rove/playbook.conf.sh), read only for MODE_FILE
 #   OPENCODE_SANDBOX_SEAT=1                     # run as a Cotal seat's `opencode serve` (set only by scripts/opencode-seat, never by a
 #                                               # lane or by hand; see "A Cotal seat" below)
+#   OPENCODE_SANDBOX_PROOF_FREE=1               # a throwaway proof of seat mode on a free model only (scripts/test-opencode-sandbox.sh
+#                                               # and the temp-mesh proof): Cotal does not pass it to a seat, a lane cannot set it, and
+#                                               # it is refused unless this is a seat on an opencode/*-free model
 #
 # Launch as a Rove task:
 #   rove api add --repo <repo> --prompt-file <brief> --command "<lane-control>/scripts/opencode-sandbox.sh --auto --prompt"
@@ -119,6 +122,9 @@ curl=$(nixpkg curl)/bin/curl
 [ -x "$bwrap" ] && [ -x "$pasta" ] && [ -x "$curl" ] || die "no bwrap/pasta/curl from nixpkgs"
 seat=${OPENCODE_SANDBOX_SEAT:-}
 case "$seat" in ""|1) ;; *) die "OPENCODE_SANDBOX_SEAT must be 1 or unset" ;; esac
+free=${OPENCODE_SANDBOX_PROOF_FREE:-}
+case "$free" in ""|1) ;; *) die "OPENCODE_SANDBOX_PROOF_FREE must be 1 or unset" ;; esac
+[ -z "$free" ] || [ -n "$seat" ] || die "OPENCODE_SANDBOX_PROOF_FREE is only for a seat's proof"
 need=(git gh jq opencode systemd-run setsid); [ -n "$seat" ] || need+=(rove) # a Cotal seat has no Rove task
 for t in "${need[@]}"; do command -v "$t" >/dev/null || die "$t not on PATH"; done
 git=$(readlink -f "$(command -v git)") gh=$(command -v gh) rove=$(command -v rove || true) jq=$(command -v jq)
@@ -196,6 +202,7 @@ prov=opencode-go
 if [ -n "$seat" ]; then
   pin=$(printf '%s' "${OPENCODE_CONFIG_CONTENT:-}" | "$jq" -r '.model // empty' 2>/dev/null) || pin=""
   [[ $pin =~ ^(opencode|opencode-go)/[A-Za-z0-9._-]+$ ]] || die "seat model '$pin': only opencode/ and opencode-go/ models run in the sandbox"
+  [ -z "$free" ] || [[ $pin =~ ^opencode/[A-Za-z0-9._-]+-free$ ]] || die "OPENCODE_SANDBOX_PROOF_FREE needs an opencode/*-free model, not $pin"
   prov=${pin%%/*}
 else
   pin=$("$jq" -r '.model | if type == "string" then . elif type == "object" then "\(.providerID)/\(.model)" else empty end' \
@@ -651,7 +658,8 @@ cfg=$("$jq" -nc --arg pin "${pin%%#*}" --arg prov "$prov" --argjson base "$base"
     enabled_providers: [$prov],
     provider: {($prov): {options: {apiKey: "{file:/run/sandbox/lane-key}"}}}}
   + (if $pin == "" then {} else {model: $pin} end)')
-setenv OPENCODE_CONFIG_CONTENT "$cfg"; setenv OPENCODE_DISABLE_FREE_MODELS 1
+setenv OPENCODE_CONFIG_CONTENT "$cfg"
+[ -n "$free" ] || setenv OPENCODE_DISABLE_FREE_MODELS 1
 
 if [ -n "${OPENCODE_SANDBOX_CMD:-}" ]; then
   cmd=(/run/current-system/sw/bin/bash -c "$OPENCODE_SANDBOX_CMD")

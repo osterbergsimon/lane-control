@@ -225,9 +225,10 @@ branch is the worktree's branch at its first launch, and the model is the one Co
 lives in the lane, so a resumed sandboxed seat keeps it only if the same worktree stays.
 
 What has been proven (Cotal 0.145.1, on a throwaway mesh with the wrapper first on the manager's PATH): a hosted seat
-launched through the wrapper, its `opencode serve` ran only under bubblewrap, on the pinned model's provider and the key
-file, and it joined the mesh from inside the sandbox [tested]. Not yet observed: a DM reaching the model, and the model
-acting on it over the mesh. A stored DM is not delivery. Treat the first `required` lane as a test until that is seen.
+launched through the wrapper, its `opencode serve` ran only under bubblewrap with the provider and key fixed, it joined
+the mesh from inside the sandbox, and a DM reached its OpenCode session there (its text is in the seat's database)
+[tested]. Not yet observed: the model acting on a DM, because the run's model calls failed on a used-up quota. Treat the
+first `required` lane as a test until that is seen.
 
 Limits: static-auth meshes with one broker on host loopback only; a user-auth mesh or remote broker is refused. Marking
 a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`) `none` or
@@ -252,8 +253,9 @@ earlier on a gateway model needs `--own-model` or a `sandbox none` row before th
   (`{"opencode-go":{"type":"api","key":"..."}}`, also used for `opencode/` models), so the owner's `opencode auth login`
   does not reach it. Create it once per machine with a key for lanes only, `chmod 600`. `project-setup` warns, with these
   steps, when a `required` tier has no usable file, and a seat stops at launch if the provider rejects the key.
-- Setup only sees whether the file is usable. A wrong key or a spent quota shows at the launch or on the first model
-  call.
+- Setup only sees whether the file is usable. A wrong key stops the launch. A used-up quota does not: the lane joins and
+  shows as a silent first turn, with `usage limit exceeded` in the lane's `oc/data/opencode/log/opencode.log`
+  (`~/.cache/opencode-lanes/wt-<hash>/`). [tested]
 - `OPENCODE_API_KEY` in `mgr`'s environment is forwarded to OpenCode agents outside the sandbox, which only a gateway
   of your own could use; a sandboxed seat never gets it.
 - A pinned model the server does not list stops the agent before it joins. The connector prints
