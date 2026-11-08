@@ -1611,8 +1611,8 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
             findings = out.strip()
         else:
             notes.append("A review gave no verdict, so it cleared nothing: " + (clip(out.strip(), 2000) or "(empty)"))
-            if not findings:
-                return None, notes
+            if not findings:  # no review has happened: the safety checks never ran, so nothing may go on
+                return out.strip() + "\n(the reviewer gave no verdict; run again)", notes
         fixes += 1
         say("adapt", "fixing", f"round {fixes} of {MAX_FIX_ROUNDS}")
         found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(findings, FINDINGS_LIMIT)}"

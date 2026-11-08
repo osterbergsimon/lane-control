@@ -956,13 +956,21 @@ class OnboardingTests(unittest.TestCase):
             with self.subTest(reply=reply):
                 self.assertIsNone(load().verdict(reply))
 
-    def test_a_first_review_without_a_verdict_is_listed_not_a_stop(self):
+    def test_a_first_review_without_a_verdict_stops_with_nothing_committed(self):
         self.e.script_agents(sonnet=[WRITE], opus=[{"say": "All good, I think."}])
-        status, out, ask = self.in_terminal("n")
+        status, out, ask = self.in_terminal("y")
         self.assertEqual(status, 3)
-        ask.assert_called_once()  # the owner is asked, with the gap listed
-        self.assertIn("gave no verdict", out)
+        ask.assert_not_called()
+        self.assertIn("run again", out)
         self.assertEqual(self.models(), ["sonnet", "opus"])
+        self.assertEqual(self.head_count(), 1)
+
+    def test_a_later_check_without_a_verdict_is_listed_and_the_last_fix_still_runs(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[FIX, {"say": "hm"}])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet"])
+        self.assertIn("gave no verdict", out)
 
     def test_verdict_tolerates_bold(self):
         self.assertEqual(load().verdict("x\n**VERDICT: PASS**\n"), "PASS")
