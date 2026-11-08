@@ -525,7 +525,7 @@ done
 tools=$HOME/.agents/bin
 slots=
 if [ -x "$tools/lane-heavy" ] && [ -x "$tools/lane-room" ] && [ -r "$tools/lane-limits.sh" ]; then
-  # A subshell without -e: the owner's limits file is theirs to get wrong, and lane-limits.sh copes with that.
+  # A subshell without -e: the owner's limits file is theirs to get wrong, and even an `exit` in it must not end the launch.
   slots=$(set +eu
     . "$tools/lane-limits.sh" >/dev/null
     mkdir -p -- "$LANE_STATE_DIR" 2>/dev/null && [ ! -L "$LANE_STATE_DIR" ] && [ -O "$LANE_STATE_DIR" ] &&
@@ -538,7 +538,7 @@ if [ -x "$tools/lane-heavy" ] && [ -x "$tools/lane-room" ] && [ -r "$tools/lane-
              LANE_ROOM_MAX_AGENTS; do
       printf '%s=%s\n' "$v" "${!v}"
     done >"$lane/limits.sh"
-    printf '%s %s' "$LANE_HEAVY_SLOTS" "$LANE_STATE_DIR")
+    printf '%s %s' "$LANE_HEAVY_SLOTS" "$LANE_STATE_DIR") || slots=
 fi
 if [ -n "$slots" ]; then
   slot_count=${slots%% *} slots=${slots#* }

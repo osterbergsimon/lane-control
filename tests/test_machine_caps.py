@@ -535,6 +535,13 @@ class SandboxGateTests(Machine):
         self.assertIn(f"rw {self.env['LANE_STATE_DIR']}/heavy.1", r.stdout.splitlines())
         self.assertIn("LANE_HEAVY_SLOTS=2\n", (lane / "limits.sh").read_text())
 
+    def test_an_exit_in_the_owners_limits_does_not_stop_the_launch(self):
+        self.install()
+        self.limits.write_text("exit 3\n")
+        r, _ = self.run_block()   # run_block checks the exit code: the launch goes on past the block
+        self.assertEqual(r.stdout, "")
+        self.assertIn("no machine-wide heavy-work gate", r.stderr)
+
     def test_without_the_tools_it_binds_nothing_and_says_so(self):
         r, _ = self.run_block()
         self.assertEqual(r.stdout, "")
