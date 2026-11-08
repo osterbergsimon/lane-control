@@ -1254,7 +1254,7 @@ FINDINGS_LIMIT = 30000  # bytes of reviewer findings in a prompt
 STOPPED = 3  # exit status: the owner's answer is needed, and no Orca step ran
 READ_TOOLS = ("Read", "Glob", "Grep")
 TEMPLATES = HERE / "templates" / "adapt"
-PROMPTS = ("prompt.md", "review-prompt.md")  # the two prompts; every other file there is a template to adapt
+PROMPTS = ("prompt.md", "review-prompt.md", "check-prompt.md")  # the prompts; every other file there is a template to adapt
 ADAPT_RULES = f"""
 Rules for this run:
 - Write only inside {ADAPTED}/. Never edit AGENTS.md or anything else in the project.
@@ -1556,14 +1556,17 @@ def fill(name: str, project: str, design_lead: bool, findings: str = "") -> str:
             .replace("{{TEMPLATES}}", inlined).replace("{{REVIEW_FINDINGS}}", findings).rstrip() + "\n")
 
 
-def review_prompt(repo: Path, project: str, design_lead: bool) -> str:
-    """Built from git and the project alone, so the reviewer never reads the adapting agent's account of its work."""
+def review_prompt(repo: Path, project: str, design_lead: bool, earlier: str = "") -> str:
+    """Built from git and the project alone, so the reviewer never reads the adapting agent's account of its work.
+    The first review is the full audit; with `earlier` (the findings the last fix answered) it only checks those."""
     changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
     files = "\n".join(f"- {p} ({m})" for p, m in changes)
     tracked = [p for p, m in changes if m != "added"]
     diff = run(["git", "diff", "HEAD", "--", *tracked], cwd=repo, check=False).stdout if tracked else ""
     diff = clip(diff, DIFF_LIMIT)
-    return (fill("review-prompt.md", project, design_lead) + f"\nUncommitted files to review:\n{files}\n"
+    head = (fill("check-prompt.md", project, design_lead, clip(earlier, FINDINGS_LIMIT)) if earlier
+            else fill("review-prompt.md", project, design_lead))
+    return (head + f"\nUncommitted files to review:\n{files}\n"
             + (f"\nDiff of the files already tracked:\n{diff}" if diff else "") + REVIEW_RULES)
 
 
@@ -1574,25 +1577,61 @@ def verdict(text: str):
     return m.group(1) if m else None
 
 
+SAFETY_FINDING = re.compile(r"(?im)^[\s*\-`_]*(?:blocker|major|minor)\b[\s*`_]*\[safety\]")
+
+
+def has_safety(findings: str) -> bool:
+    """True when a finding carries the reviewer's [safety] mark (private data, weakened doctrine, smuggled
+    instructions)."""
+    return bool(SAFETY_FINDING.search(findings))
+
+
 def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple, before: dict, design_lead: bool):
-    """Review, with at most MAX_FIX_ROUNDS rounds of fixes. None when it passed, else what is still unresolved."""
+    """The first review is the full audit; every later one only checks the earlier findings. At most MAX_FIX_ROUNDS
+    fix rounds, and the findings of the last review always get theirs. Returns (stop, notes): stop is None unless a
+    safety finding is still open (or unverified) after one more check, else the reviewer's words; notes are lines for
+    the owner beside the file list: what the last fix was asked to do and was not re-checked, or still open."""
+    notes = []
+
+    def review(earlier: str = "") -> str:
+        say("review", "running", "/".join(reviewer) + (" (checks the fixes only)" if earlier else ""))
+        out = run_agent(repo, reviewer, review_prompt(repo, project, design_lead, earlier), write=False)
+        check_scope(repo, before)
+        return out
+
+    out = review()
+    findings = ""
     fixes = 0
     while True:
-        say("review", "running", "/".join(reviewer))
-        out = run_agent(repo, reviewer, review_prompt(repo, project, design_lead), write=False)
-        check_scope(repo, before)
         result = verdict(out)
         if result == "PASS":
             say("review", "passed", f"after {fixes} round(s) of fixes")
-            return None
-        if result is None:
-            return out.strip() + "\n(the reviewer gave no verdict)"
-        if fixes == MAX_FIX_ROUNDS:
-            return out.strip()
+            return None, notes
+        if result == "FIX":
+            findings = out.strip()
+        else:
+            notes.append("A review gave no verdict, so it cleared nothing: " + (clip(out.strip(), 2000) or "(empty)"))
+            if not findings:
+                return None, notes
         fixes += 1
         say("adapt", "fixing", f"round {fixes} of {MAX_FIX_ROUNDS}")
-        found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(out.strip(), FINDINGS_LIMIT)}"
+        found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(findings, FINDINGS_LIMIT)}"
         adapt(repo, adapter, fill("prompt.md", project, design_lead, found) + ADAPT_RULES, before)
+        if fixes == MAX_FIX_ROUNDS:
+            break
+        out = review(findings)
+    if has_safety(findings):  # a safety finding never passes unverified: one more check, then it is open or gone
+        out = review(findings)
+        result = verdict(out)
+        if result == "PASS":
+            say("review", "passed", f"after {fixes} round(s) of fixes")
+            return None, notes
+        if result is None or has_safety(out):
+            return out.strip() + ("\n(the reviewer gave no verdict)" if result is None else ""), notes
+        notes.append("Still open after the last fix and its check (not safety findings):\n" + out.strip())
+        return None, notes
+    notes.append("Fixed, not re-checked (the last fix was asked to do this; no review followed it):\n" + findings)
+    return None, notes
 
 
 def show_suggestions(repo: Path):
@@ -1603,11 +1642,13 @@ def show_suggestions(repo: Path):
             print(f"  {line}")
 
 
-def show_changes(repo: Path, changes: list):
+def show_changes(repo: Path, changes: list, notes: list = ()):
     print("\nFiles added or changed (from git):")
     for p, mark in changes:
         print(f"  {mark}: {p}")
     show_suggestions(repo)
+    for note in notes:
+        print(f"\n{note}")
     print(flush=True)
 
 
@@ -1831,13 +1872,14 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
             return refresh_section(repo)
         raise Fail(f"the adapting agent wrote nothing under {ADAPTED}/ (is it gitignored?)")
     write_section(repo)
-    unresolved = review_with_fixes(repo, project, adapter, reviewer, before, design_lead)
+    unresolved, notes = review_with_fixes(repo, project, adapter, reviewer, before, design_lead)
     if unresolved is not None:
-        print(f"\nThe review did not pass (at most {MAX_FIX_ROUNDS} rounds of fixes). It said:\n{unresolved}\n")
+        print(f"\nA safety finding is still open after the last fix and one more check (at most {MAX_FIX_ROUNDS} "
+              f"rounds of fixes). It said:\n{unresolved}\n")
         say("adapt", "stopped", f"nothing committed, no Orca setup. Owner: fix {ADAPTED}/ and run again, or remove it")
         return False
     changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
-    show_changes(repo, changes)
+    show_changes(repo, changes, notes)
     if not owner_says_yes():
         say("adapt", "stopped", "files left uncommitted, no Orca setup. Run again in a terminal to answer")
         return False

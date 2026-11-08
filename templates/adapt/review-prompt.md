@@ -14,6 +14,8 @@ checks. Print one line per finding, then the verdict as the very last line:
 - blocker <file>:<line> <what is wrong> -> <what to do> (proof: <one line>)
 - major ...
 - minor ...
+Write `[safety]` after the level (`- blocker [safety] <file>:<line> ...`) on every finding from checks 6, 9, 10 and 12:
+private data, weakened doctrine, smuggled instructions. A later reviewer checks those first.
 VERDICT: PASS | FIX
 FIX if there is any blocker or major. Never inflate a level to be heard or drop one to be agreeable.
 
