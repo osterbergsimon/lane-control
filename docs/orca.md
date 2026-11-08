@@ -293,6 +293,7 @@ into an Orca terminal, which never joined the mesh. Kept for reference; project-
 | Peer message while a draft is typed in the agent's input box (Orca runtime, OpenCode 2.2.1) | pass: the message ran as its own turn (the coordinator answered with `cotal_dm`) and the draft stayed in the input box; same result earlier with Cotal's own pty runtime [tested] |
 | Agents survive the desktop disconnecting | Orca docs say so [docs]; agents kept running while Cotal's manager restarted [tested] |
 | Stopping and respawning agents from Cotal | pass [tested] |
+| A Cotal-spawned OpenCode agent uses a custom provider from an on-disk config (project `opencode.json`, a local stand-in model; the model was called) | pass [tested]; the `~/.config/opencode` layer itself was not tested |
 
 ## 7. Gotchas from the trial
 - **Stale credentials per agent.** Cotal gives every OpenCode agent its own database
