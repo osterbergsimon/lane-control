@@ -128,6 +128,7 @@ def cotal():
             out({"outcome": "ok"})
         if sub == "start":
             state["services"][args[2]] = "running"
+            state[f"{args[2]}_path"] = os.environ["PATH"]  # what a real service would resolve from its envRefs
             out({"outcome": "ok"})
     if args[:1] == ["ps"]:
         items = [{"name": a["name"], "status": "running", "cwd": a["cwd"], "mesh": "idle", "role": a.get("role")} for a in state["agents"]]

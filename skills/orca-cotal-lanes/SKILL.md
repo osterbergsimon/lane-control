@@ -31,9 +31,10 @@ for prose docs, scripts without private data and CI). Then look the tier up in t
 path, because lane worktrees do not carry it): run `~/.agents/bin/lane-tier <table> <tier>`, which prints the tier's harness, model, permission and sandbox.
 
 A tier whose harness is `none` is skipped: `lane-tier` exits 3, go one tier up. Exit 4 means the tier is `sandbox required`
-and a Cotal agent cannot run inside the sandbox yet: never start a refused tier with `cotal_spawn` and never edit the
-table to get past it; route the work one tier up, or to Rove if the project has it, and tell the owner in your next
-line. Any other non-zero exit: hold the lane and tell the owner what it printed. `inherit` means the project's Claude permission mode, which
+and cannot run sandboxed right now (it says why: most often the running manager does not use the launch wrapper yet, and
+the owner must restart it at a natural stop): never start a refused tier with `cotal_spawn` and never edit the table to
+get past it; route the work one tier up, or to Rove if the project has it, and tell the owner in your next line. A
+`sandbox required` tier that lane-tier allows runs in the sandbox by itself: spawn it like any OpenCode lane. Any other non-zero exit: hold the lane and tell the owner what it printed. `inherit` means the project's Claude permission mode, which
 your persona names; pass that value.
 
 ## 2. Open the lane

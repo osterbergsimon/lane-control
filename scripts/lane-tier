@@ -12,10 +12,12 @@
 # (model-routing.md). A table with no column, or a row with an empty cell: `required` for an OpenCode tier, `none` for
 # the rest.
 #
-# A `required` tier refuses here until the per-seat launch wrapper lands (SBX-2, lc-5xf), because this tool serves the
-# Orca + Cotal flow and a Cotal seat cannot run inside scripts/opencode-sandbox.sh yet. Rove runs that script as the whole
-# engine, so Rove lanes do not come through this check. The check is what the orca-cotal-lanes skill runs before
-# cotal_spawn; Cotal itself does not enforce it.
+# A `required` tier runs only inside scripts/opencode-sandbox.sh. Under Orca + Cotal that is scripts/opencode-seat, which
+# the manager must run as its `opencode`: this check refuses a required tier (exit 4) unless it finds that for the
+# running manager of the table's project, so a tier never starts bare before the manager has been restarted with it. It
+# also refuses a required tier whose model the sandbox cannot run (only opencode/ and opencode-go/). Rove runs the
+# sandbox as the whole engine, so Rove lanes do not come through this check. The check is what the orca-cotal-lanes
+# skill runs before cotal_spawn; Cotal itself does not enforce it, and opencode-seat is the backstop at the launch.
 set -u
 
 die() { echo "lane-tier: $*" >&2; exit 2; }
@@ -46,6 +48,9 @@ out=$(awk -F'\t' -v want="$tier" -v check="$check" '
   {
     h = $col["harness"]
     if ($col["tier"] == "" || h == "") { print "a row has an empty tier or harness cell"; bad = 1; exit }
+    if ($col["tier"] ~ /[ \t]/ || h ~ /[ \t]/ || $col["model"] ~ /[ \t]/ || $col["permission"] ~ /[ \t]/) {
+      print "tier " $col["tier"] ": a cell contains a space"; bad = 1; exit
+    }
     s = col["sandbox"] ? $col["sandbox"] : ""
     if (s == "") s = (h == "opencode") ? "required" : "none"
     if (s != "required" && s != "none") {
@@ -77,12 +82,54 @@ if [ "$harness" = none ]; then
   echo "lane-tier: tier $tier has harness none: skip it and go one tier up" >&2
   exit 3
 fi
-if [ "$sandbox" = required ]; then
+refuse() {
   cat >&2 <<MSG
-lane-tier: refused: tier $tier needs the sandbox (sandbox required), and an Orca + Cotal lane cannot run inside it:
-Cotal has no per-seat launch wrapper yet. Do not start this tier with cotal_spawn, so that it never runs bare.
+lane-tier: refused: tier $tier needs the sandbox (sandbox required): $1
+Do not start this tier with cotal_spawn, so that it never runs bare.
 Run it as a Rove task through scripts/opencode-sandbox.sh, or use a tier with sandbox none in $table.
 MSG
   exit 4
+}
+# COTAL_OPENCODE_BIN (empty when unset), then the PATH of the running manager of $1, one per line; nothing when none runs.
+manager_env() {
+  local c a=() want=$1 i
+  for c in /proc/[0-9]*/cmdline; do
+    a=(); mapfile -d "" -t a 2>/dev/null <"$c" || continue
+    for ((i = 0; i < ${#a[@]}; i++)); do
+      [ "${a[$i]}" = __service-manager ] || continue
+      for ((i = 0; i + 1 < ${#a[@]}; i++)); do
+        if [ "${a[$i]}" = --root ] && [ "${a[$((i + 1))]}" = "$want" ]; then
+          local e=() v path="" bin=""
+          mapfile -d "" -t e 2>/dev/null <"${c%cmdline}environ" || return 1
+          for v in "${e[@]}"; do case $v in PATH=*) path=${v#PATH=} ;; COTAL_OPENCODE_BIN=*) bin=${v#*=} ;; esac; done
+          printf '%s\n%s\n' "$bin" "$path"
+          return 0
+        fi
+      done
+      break
+    done
+  done
+  return 1
+}
+if [ "$sandbox" = required ]; then
+  [ "$harness" = opencode ] || refuse "the sandbox runs OpenCode only, and this tier's harness is $harness"
+  case $model in opencode/*|opencode-go/*) ;;
+    *) refuse "the sandbox runs only opencode/ and opencode-go/ models, not ${model:-an empty model cell}" ;;
+  esac
+  seat=$(dirname "$(realpath "$0")")/opencode-seat
+  [ -x "$seat" ] || refuse "the launch wrapper $seat is not installed (run project-setup)"
+  case $(realpath "$table") in */.cotal/lanes.tsv) root=$(dirname "$(dirname "$(realpath "$table")")") ;;
+    *) refuse "$table is not a project's .cotal/lanes.tsv, so its manager cannot be found" ;; esac
+  menv=$(manager_env "$root") || refuse "no Cotal manager is running for $root"
+  mbin=${menv%%$'\n'*} mpath=${menv#*$'\n'}
+  # Same order as Cotal: COTAL_OPENCODE_BIN wins, else the first opencode on the manager's PATH.
+  found=
+  if [ -n "$mbin" ]; then found=$(realpath "$mbin" 2>/dev/null)
+  else
+    IFS=: read -ra dirs <<<"$mpath"
+    for d in "${dirs[@]}"; do [ -x "$d/opencode" ] && { found=$(realpath "$d/opencode" 2>/dev/null); break; }; done
+  fi
+  [ "$found" = "$(realpath "$seat")" ] \
+    || refuse "the running manager uses ${found:-no opencode} as opencode, not the launch wrapper, so this would run bare. Restart the manager with project-setup (docs/orca.md)"
 fi
 printf 'harness=%s model=%s permission=%s sandbox=%s\n' "$harness" "$model" "$permission" "$sandbox"

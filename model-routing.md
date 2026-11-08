@@ -109,7 +109,7 @@ A script, brief or message enforces a limit only if the owner decided it (dated 
 
 ## Sandbox per tier
 Global-region models (for example ones served from China) are not trusted with the owner's machine, so they run only inside `scripts/opencode-sandbox.sh` (header = full contract; `scripts/test-opencode-sandbox.sh` = proof). Every hosted OpenCode model counts as one, because where it is served is unknown. An internal or offline gateway may run without the sandbox: the tier table's `sandbox` column says which (`required` or `none`), and a table with no column means `required` for OpenCode tiers and `none` for Claude tiers.
-A `required` tier never runs as a bare engine command. Under Rove it launches through the script. Under Orca + Cotal it is refused (`scripts/lane-tier`), because a Cotal seat cannot run inside the sandbox yet: use Rove or a `none` tier (`docs/orca.md`).
+A `required` tier never runs as a bare engine command. Under Rove it launches through the script. Under Orca + Cotal it runs in the same sandbox through the launch wrapper (`scripts/opencode-seat`), and `scripts/lane-tier` refuses it until the running manager uses that wrapper (`docs/orca.md`). The model may use the Cotal mesh, because it must work under its coordinator; the sandbox opens only what the agent needs for that (header of `scripts/opencode-sandbox.sh`).
 
 ## Sandboxed swift lanes (conventions)
 - **Launch form:** `rove api add --repo <repo> --prompt-file <brief> --command "<lane-control>/scripts/opencode-sandbox.sh --auto --prompt"`. Rove appends the brief as the last argument, so it must follow `--prompt`. Always launch with the brief: an `add` without `--prompt` (or `--start`) creates no engine tab.

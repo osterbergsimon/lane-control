@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1000,13 +1001,30 @@ class RunTests(unittest.TestCase):
         self.assertEqual(d["envRefs"].get("HTTPS_PROXY"), "HTTPS_PROXY")
         self.assertNotIn("http_proxy", d["envRefs"])  # only names set in the caller's env
 
-    def test_a_refused_tier_is_not_warned_about(self):
+    def test_a_required_tier_without_a_sandbox_key_says_how_to_log_in(self):
         repo = self.e.repo()
         r = self.e.run(str(repo), "--name", "Shop")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("swift has sandbox required", r.stderr)
+        self.assertRegex(r.stderr, r"tier swift pins opencode/deepseek-v4\.1-flash.*no usable key")
+        self.assertIn("Once per machine", r.stderr)
         self.assertNotIn("OPENCODE_API_KEY", r.stderr)
-        self.assertNotIn("warning:", r.stderr)
+
+    def test_an_own_model_on_a_setup_flag_gets_the_notice(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--coordinator", "opencode/deepseek/deepseek-chat", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--coordinator opencode/deepseek/deepseek-chat", r.stdout)
+        self.assertIn("writes no sandbox", r.stdout)
+
+    def test_the_manager_starts_with_the_launch_wrapper_first_on_path(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        path = json.loads(self.e.state.read_text())["mgr_path"].split(":")
+        self.assertEqual(path[0], str(self.e.home / ".agents" / "bin" / "cotal-opencode"))
+        link = self.e.home / ".agents" / "bin" / "cotal-opencode" / "opencode"
+        self.assertEqual(os.readlink(link), "../opencode-seat")
+        self.assertEqual(link.resolve().read_bytes(), (ROOT / "scripts" / "opencode-seat").read_bytes())
 
     def test_hosted_opencode_pins_on_setups_own_agents_are_refused(self):
         repo = self.e.repo()
@@ -1064,15 +1082,14 @@ class RunTests(unittest.TestCase):
         self.assertEqual((first, second), (0, 0))
         return repo, first_args, check.call_args
 
-    def test_setup_calls_the_key_check_with_the_projects_table_and_whether_it_started_mgr(self):
+    def test_setup_calls_the_key_check_with_the_projects_table(self):
         repo, first, again = self._key_check_calls()
-        self.assertEqual(first.args[2], repo / ".cotal" / "lanes.tsv")
-        self.assertIs(first.args[3], True)
-        self.assertIs(again.args[3], False)
+        self.assertEqual(first.args[0], repo / ".cotal" / "lanes.tsv")
+        self.assertEqual(again.args[0], repo / ".cotal" / "lanes.tsv")
 
     def test_key_check_also_runs_with_no_start(self):
         repo, first, _ = self._key_check_calls("--no-start")
-        self.assertEqual(first.args[2], repo / ".cotal" / "lanes.tsv")
+        self.assertEqual(first.args[0], repo / ".cotal" / "lanes.tsv")
     def test_free_opencode_tier_without_key_is_quiet(self):
         repo = self.e.repo()
         tiers = self.e.home / "free-lanes.tsv"
@@ -1163,7 +1180,8 @@ class RunTests(unittest.TestCase):
             self.assertEqual(running.read(), "#!/bin/sh\necho old\n")
         self.assertEqual(tool.read_bytes(), (ROOT / "scripts" / "lane-heavy").read_bytes())
         self.assertTrue(os.access(tool, os.X_OK))
-        self.assertEqual(sorted(p.name for p in self._tools().iterdir()), ["lane-heavy", "lane-limits.sh", "lane-room", "lane-tier"])
+        self.assertEqual(sorted(p.name for p in self._tools().iterdir()),
+                         ["cotal-opencode", "lane-heavy", "lane-limits.sh", "lane-room", "lane-tier", "opencode-sandbox.sh", "opencode-seat"])
 
     def test_host_mode_copies_and_reexecs(self):
         self._ssh_stub()
@@ -1631,6 +1649,18 @@ class RefreshTests(unittest.TestCase):
         r = self.refresh()
         self.assertIn("restart: none no changed role is running", r.stdout)
 
+    def test_an_agent_pinned_to_a_hosted_model_is_not_listed_for_restart(self):
+        self.setup_project()
+        text = self.persona().read_text()
+        self.persona().write_text(re.sub(r"^agent: .*$", "agent: opencode", re.sub(r"^model: .*$", "model: opencode/old", text, flags=re.M), flags=re.M) + "stale\n")
+        state = json.loads(self.e.state.read_text())
+        state["agents"] = [{"name": "coordinator", "status": "running", "role": "coordinator"}]
+        self.e.state.write_text(json.dumps(state))
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Do not restart it on that model", r.stderr)
+        self.assertNotIn("restart: needed", r.stdout)
+
     def test_changed_skill_names_coordinator_and_design_lead(self):
         self.setup_project()
         (self.e.home / ".agents" / "skills" / "orca-cotal-lanes" / "SKILL.md").write_text("old\n")
@@ -1851,6 +1881,16 @@ class LaneTierTests(unittest.TestCase):
         for word in ("Rove", "sandbox none", "cotal_spawn"):
             self.assertIn(word, r.stderr)
 
+    def test_a_tier_cell_with_a_space_is_a_bad_table(self):
+        r = self.tier(f"{self.HEAD}\tsandbox\nmy tier\tclaude\tsonnet\tinherit\tnone\n", "my tier")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("contains a space", r.stderr)
+
+    def test_a_required_tier_on_another_harness_or_provider_is_refused(self):
+        for row in ("swift\tclaude\topencode/x\t-\trequired", "swift\topencode\tdeepseek/x\t-\trequired"):
+            r = self.tier(f"{self.HEAD}\tsandbox\n{row}\n", "swift")
+            self.assertEqual(r.returncode, 4, r.stderr)
+
     def test_none_tier_prints_its_row(self):
         r = self.tier(f"{self.HEAD}\tsandbox\nswift\topencode\tgw/m\t-\tnone\n", "swift")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1905,7 +1945,7 @@ class LaneTierTests(unittest.TestCase):
 
 class OpencodeKeyCheckTests(unittest.TestCase):
     """The key check called directly: dormant until SBX-2, because setup refuses every table that would reach it."""
-    HOSTED = [("swift", "opencode", "none", "opencode/deepseek-v4.1-flash")]
+    HOSTED = [("swift", "opencode", "required", "opencode/deepseek-v4.1-flash")]
 
     def setUp(self):
         d = tempfile.TemporaryDirectory()
@@ -1915,62 +1955,185 @@ class OpencodeKeyCheckTests(unittest.TestCase):
         (self.repo / "lanes.tsv").write_text("mocked by check_tier_table\n")
         self.m = load()
 
-    def check(self, rows=None, key=None, refs=None, mgr_started=False):
-        """key None: unset in the shell. refs: the mgr definition's envRefs; None: no definition."""
-        if refs is not None:
-            (self.repo / ".cotal" / "mgr-service.json").write_text(json.dumps({"envRefs": refs}))
-        env = {k: v for k, v in os.environ.items() if k != "OPENCODE_API_KEY"}
-        if key is not None:
-            env["OPENCODE_API_KEY"] = key
+    def check(self, rows=None, key_file=None):
+        """key_file: the file's text; None: no file at all."""
+        f = self.repo / "sandbox-auth.json"
+        f.unlink(missing_ok=True)
+        if key_file is not None:
+            f.write_text(key_file)
         err = io.StringIO()
-        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stderr(err), \
+        with mock.patch.dict(os.environ, {"OPENCODE_SANDBOX_AUTH": str(f)}), contextlib.redirect_stderr(err), \
                 mock.patch.object(self.m, "check_tier_table", return_value=self.HOSTED if rows is None else rows):
-            self.m.opencode_key_check(self.repo, "shop", self.repo / "lanes.tsv", mgr_started)
+            self.m.opencode_key_check(self.repo / "lanes.tsv")
         return err.getvalue()
 
-    REF = {"OPENCODE_API_KEY": "OPENCODE_API_KEY"}
-
-    def test_paid_tier_without_key_warns_with_the_steps(self):
+    def test_no_key_file_warns_with_the_steps_to_log_in(self):
         err = self.check()
-        self.assertRegex(err, r"swift.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
-        self.assertIn("export OPENCODE_API_KEY", err)
-        self.assertIn("cotal svc remove mgr -s shop --yes", err)
-        self.assertRegex(err, r"cannot tell .*quota")
+        self.assertRegex(err, r"tier swift pins opencode/deepseek-v4\.1-flash.*no usable key .*does not exist")
+        self.assertIn("Once per machine", err)
+        self.assertIn('{"opencode-go":{"type":"api","key":"<the key>"}}', err)
+        self.assertIn("opencode auth login` does not reach the sandbox", err)
 
-    def test_a_required_tier_is_skipped(self):
-        self.assertEqual(self.check([("swift", "opencode", "required", "opencode/deepseek-v4.1-flash")]), "")
+    def test_a_usable_key_is_quiet(self):
+        self.assertEqual(self.check(key_file='{"opencode-go":{"type":"api","key":"sentinel"}}'), "")
 
-    def test_free_and_own_models_need_no_key(self):
-        self.assertEqual(self.check([("swift", "opencode", "none", "opencode/x-free"),
-                                     ("a", "opencode", "none", "gateway/m1")]), "")
+    def test_a_key_under_either_provider_name_is_usable(self):
+        self.assertEqual(self.check(key_file='{"opencode":{"type":"api","key":"sentinel"}}'), "")
 
-    def test_the_warning_does_not_claim_every_pin_is_paid(self):
-        err = self.check()
-        self.assertNotIn("those lanes will exit on launch", err)
-        self.assertRegex(err, r"a paid model")
+    def test_a_broken_or_keyless_file_warns_and_never_prints_the_contents(self):
+        for text in ("not json", '{"opencode-go":{"type":"oauth","key":"sentinel-secret"}}', '{"opencode-go":{"type":"api","key":""}}', "[]"):
+            err = self.check(key_file=text)
+            self.assertIn("warning:", err)
+            self.assertNotIn("sentinel-secret", err)
 
-    def test_a_manager_holding_the_key_is_not_warned_about(self):
-        err = self.check(refs=self.REF)
-        self.assertNotIn("warning:", err)
-        self.assertRegex(err, r"cannot tell .*quota")
+    def test_tiers_without_a_hosted_model_need_no_key(self):
+        self.assertEqual(self.check([("a", "opencode", "none", "gateway/m1"), ("b", "claude", "none", "sonnet"),
+                                     ("c", "none", "required", "-")]), "")
 
-    def test_empty_key_counts_as_unset(self):
-        self.assertIn("OPENCODE_API_KEY is not set", self.check(key="", refs={}))
 
-    def test_empty_key_restarting_a_stopped_keyed_mgr_warns(self):
-        self.assertRegex(self.check(key="", refs=self.REF, mgr_started=True), r"swift.*OPENCODE_API_KEY is not set")
+class ManagerGateTests(unittest.TestCase):
+    """lane-tier allows a required tier only when the running manager of the project starts opencode-seat."""
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.root = Path(d.name).resolve()
+        self.table = self.root / ".cotal" / "lanes.tsv"
+        self.table.parent.mkdir()
+        self.table.write_text("tier\tharness\tmodel\tpermission\tsandbox\nswift\topencode\topencode/x\t-\trequired\n")
 
-    def test_key_restarting_a_stopped_keyed_mgr_is_quiet(self):
-        self.assertNotIn("warning:", self.check(key="placeholder", refs=self.REF, mgr_started=True))
+    def manager(self, opencode_target):
+        """A fake manager process of this root whose PATH starts with a directory holding `opencode`."""
+        d = self.root / "bin"
+        d.mkdir(exist_ok=True)
+        (d / "opencode").unlink(missing_ok=True)
+        (d / "opencode").symlink_to(opencode_target)
+        p = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)", "__service-manager", "--root", str(self.root)],
+                             env={"PATH": f"{d}:{os.environ['PATH']}"})
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        for _ in range(100):  # wait for the exec: until then /proc shows the forked test runner
+            if b"__service-manager" in Path(f"/proc/{p.pid}/cmdline").read_bytes():
+                break
+            time.sleep(0.02)
 
-    def test_empty_key_with_a_running_keyed_mgr_is_quiet(self):
-        self.assertNotIn("warning:", self.check(key="", refs=self.REF, mgr_started=False))
+    def tier(self):
+        return subprocess.run([str(TIER_TOOL), str(self.table), "swift"], capture_output=True, text=True)
 
-    def test_key_set_but_mgr_added_without_it_warns_and_never_prints_it(self):
-        err = self.check(key="placeholder", refs={})
-        self.assertIn("mgr was added without OPENCODE_API_KEY", err)
-        self.assertIn("cotal svc remove mgr -s shop --yes", err)
-        self.assertNotIn("placeholder", err)
+    def test_refused_when_no_manager_runs(self):
+        r = self.tier()
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("no Cotal manager is running", r.stderr)
+
+    def test_refused_when_the_manager_has_the_real_opencode(self):
+        real = self.root / "real-opencode"
+        real.write_text("#!/bin/sh\n")
+        real.chmod(0o755)
+        self.manager(real)
+        r = self.tier()
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("would run bare", r.stderr)
+
+    def test_allowed_when_the_manager_runs_the_wrapper(self):
+        self.manager(ROOT / "scripts" / "opencode-seat")
+        r = self.tier()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "harness=opencode model=opencode/x permission=- sandbox=required\n")
+
+    def test_refused_when_the_manager_is_another_projects(self):
+        self.manager(ROOT / "scripts" / "opencode-seat")
+        other = self.root / "other" / ".cotal"
+        other.mkdir(parents=True)
+        (other / "lanes.tsv").write_text(self.table.read_text())
+        r = subprocess.run([str(TIER_TOOL), str(other / "lanes.tsv"), "swift"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("no Cotal manager is running", r.stderr)
+
+
+class SeatWrapperTests(unittest.TestCase):
+    """scripts/opencode-seat decides where a Cotal seat's opencode runs. The sandbox and real binary are stubs."""
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.d = Path(d.name).resolve()
+        tools = self.d / "tools"
+        tools.mkdir()
+        shutil.copy2(ROOT / "scripts" / "opencode-seat", tools / "opencode-seat")
+        shutil.copy2(ROOT / "scripts" / "lane-tier", tools / "lane-tier")
+        self.log = self.d / "log"
+        stub = f'#!/bin/sh\nprintf "%s %s seat=%s path=%s\\n" "$(basename "$0")" "$*" "${{OPENCODE_SANDBOX_SEAT:-}}" "$PATH" >>{self.log}\n'
+        (tools / "opencode-sandbox.sh").write_text(stub)
+        (tools / "opencode-sandbox.sh").chmod(0o755)
+        real = self.d / "real"
+        real.mkdir()
+        (real / "opencode").write_text(stub)
+        (real / "opencode").chmod(0o755)
+        self.shim = self.d / "shim"
+        self.shim.mkdir()
+        (self.shim / "opencode").symlink_to(tools / "opencode-seat")
+        self.home = self.d / "home"
+        (self.home / ".cotal").mkdir(parents=True)
+
+    def seat(self, *args, model=None, config=None):
+        env = {"PATH": f"{self.shim}:{self.d / 'real'}:{os.environ['PATH']}", "COTAL_OPENCODE_HOME": str(self.home)}
+        if model is not None:
+            config = json.dumps({"model": model})
+        if config is not None:
+            env["OPENCODE_CONFIG_CONTENT"] = config
+        return subprocess.run([str(self.shim / "opencode"), *args], env=env, capture_output=True, text=True)
+
+    def ran(self):
+        return self.log.read_text() if self.log.exists() else ""
+
+    SERVE = ("serve", "--hostname", "127.0.0.1", "--port", "4096")
+
+    def test_a_hosted_model_goes_into_the_sandbox_in_seat_mode(self):
+        for model in ("opencode/deepseek-v4.1-flash", "opencode-go/kimi-k2.7"):
+            self.log.unlink(missing_ok=True)
+            r = self.seat(*self.SERVE, model=model)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertRegex(self.ran(), r"^opencode-sandbox\.sh serve --hostname 127\.0\.0\.1 --port 4096 seat=1 ")
+            self.assertNotIn("\nopencode ", self.ran())
+
+    def test_the_sandbox_never_finds_the_wrapper_as_opencode(self):
+        self.seat(*self.SERVE, model="opencode/x")
+        self.assertNotIn(str(self.shim), self.ran())
+
+    def test_an_own_model_runs_the_real_binary_unwrapped(self):
+        r = self.seat(*self.SERVE, model="gateway/m1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.ran(), r"^opencode serve .* seat= ")
+
+    def test_no_or_broken_config_is_refused_and_nothing_runs(self):
+        for config in (None, "not json", "{}"):
+            r = self.seat(*self.SERVE, config=config)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("no model pinned", r.stderr)
+            self.assertEqual(self.ran(), "")
+
+    def test_a_required_row_on_an_other_provider_is_refused(self):
+        (self.home / ".cotal" / "lanes.tsv").write_text("tier\tharness\tmodel\tpermission\tsandbox\nswift\topencode\tgateway/m1\t-\trequired\n")
+        r = self.seat(*self.SERVE, model="gateway/m1")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("sandbox required", r.stderr)
+        self.assertEqual(self.ran(), "")
+
+    def test_a_none_row_runs_unwrapped(self):
+        (self.home / ".cotal" / "lanes.tsv").write_text("tier\tharness\tmodel\tpermission\tsandbox\nswift\topencode\tgateway/m1\t-\tnone\n")
+        self.assertEqual(self.seat(*self.SERVE, model="gateway/m1").returncode, 0)
+        self.assertRegex(self.ran(), r"^opencode serve")
+
+    def test_what_the_connector_asks_without_a_model_is_the_real_binary(self):
+        for args in (("--version",), ("models", "--pure", "--verbose"), ("--server", "http://127.0.0.1:1", "--session", "s"), ("attach", "u")):
+            self.log.unlink(missing_ok=True)
+            self.assertEqual(self.seat(*args).returncode, 0)
+            self.assertRegex(self.ran(), r"^opencode ")
+
+    def test_anything_else_is_refused(self):
+        for args in (("run", "hi"), ()):
+            r = self.seat(*args, model="opencode/x")
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("refusing", r.stderr)
+            self.assertEqual(self.ran(), "")
 
 
 class OpencodeChoiceTests(unittest.TestCase):
@@ -2097,9 +2260,28 @@ class OpencodeChoiceTests(unittest.TestCase):
     def test_opencode_flag_takes_an_unedited_table_from_before_the_sandbox_column(self):
         self.assertEqual(self.e.run(str(self.repo), "--opencode", "hosted").returncode, 0)
         rows = [l.split("\t")[:-1] for l in self.table.read_text().splitlines() if l and not l.startswith("#")]
-        self.table.write_text("# an older comment\n" + "\n".join("\t".join(r) for r in rows) + "\n")
+        self.table.write_text("\n".join("\t".join(r) for r in rows) + "\n")
         self.assertEqual(self.e.run(str(self.repo), "--opencode", "none").returncode, 0)
         self.assertEqual(self.row(), "swift\tnone\t-\t-\tnone")
+
+    def test_opencode_flag_takes_a_table_with_a_comment_an_older_template_shipped(self):
+        self.assertEqual(self.e.run(str(self.repo), "--opencode", "hosted").returncode, 0)
+        old = "# sandbox: required = never runs bare (a hosted OpenCode model; refused under Orca + Cotal, see docs/orca.md); none = may run without it.\n"
+        self.table.write_text(old + self.table.read_text())
+        self.assertEqual(self.e.run(str(self.repo), "--opencode", "none").returncode, 0)
+        self.assertEqual(self.row(), "swift\tnone\t-\t-\tnone")
+
+    def test_opencode_flag_keeps_a_table_with_the_owners_own_comment(self):
+        for strip_column in (False, True):
+            self.assertEqual(self.e.run(str(self.repo), "--opencode", "hosted").returncode, 0)
+            lines = [l.split("\t")[:-1] if strip_column and not l.startswith("#") else l.split("\t") for l in self.table.read_text().splitlines() if l]
+            edited = "# owner: keep swift on flash until March\n" + "\n".join("\t".join(l) for l in lines) + "\n"
+            self.table.write_text(edited)
+            r = self.e.run(str(self.repo), "--opencode", "none")
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn("differs from the current defaults", r.stderr)
+            self.assertEqual(self.table.read_text(), edited)
+            self.table.unlink()
 
     def test_opencode_flag_still_refuses_an_edited_table_without_the_column(self):
         self.assertEqual(self.e.run(str(self.repo), "--opencode", "hosted").returncode, 0)

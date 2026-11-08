@@ -314,6 +314,10 @@ class LaneSkillCliTests(unittest.TestCase):
         for word in ("`none`", "`inherit`"):
             self.assertIn(word, self.text)
 
+    def test_the_skill_says_a_refused_tier_waits_for_the_launch_wrapper(self):
+        self.assertIn("launch wrapper", self.text)
+        self.assertNotIn("cannot run inside the sandbox yet", self.text)
+
     def test_every_tier_goes_through_the_sandbox_refusal_before_a_spawn(self):
         self.assertIn("~/.agents/bin/lane-tier", self.text)
         self.assertLess(self.text.index("lane-tier"), self.text.index("## 2. Open the lane"))

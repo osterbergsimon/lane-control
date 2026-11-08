@@ -41,7 +41,9 @@ MODES = ("auto", "bypassPermissions", "default")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
-LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # the library first: a new tool never sees an old one
+LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "opencode-sandbox.sh",
+              "opencode-seat")  # the library first: a new tool never sees an old one
+SEAT_DIR = "cotal-opencode"  # ~/.agents/bin/<this>/opencode -> ../opencode-seat, first on the manager's PATH
 HOST_FILES = ("scripts/project-setup", *(f"scripts/{t}" for t in LANE_TOOLS),
               "personas", "skills", "templates", "model-routing.md")  # what --host copies
 
@@ -299,7 +301,15 @@ def lane_tools(home: Path):
         tmp.chmod(mode)
         os.replace(tmp, dst)
         changed = True
-    say("lane-tools", "created" if fresh else ("updated" if changed else "exists"), f"lane-heavy, lane-room, lane-tier in {bin_dir}")
+    link, target = bin_dir / SEAT_DIR / "opencode", "../opencode-seat"
+    if not (link.is_symlink() and os.readlink(link) == target):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        tmp = link.parent / f".opencode.{os.getpid()}.tmp"
+        tmp.symlink_to(target)
+        os.replace(tmp, link)
+        changed = True
+    say("lane-tools", "created" if fresh else ("updated" if changed else "exists"),
+        f"lane-heavy, lane-room, lane-tier, opencode-seat in {bin_dir}")
 
 
 def skills():
@@ -372,40 +382,64 @@ def claude_wiring(repo: Path, space: str):
 
 
 def opencode_key_pins(tiers: Path) -> list:
-    """(who, model) for every OpenCode tier that can launch on a pin not named as free: a `required` tier is refused
-    before it needs a key. A few free models, like big-pickle, have no such name. Roles cannot pin these (main), and
-    lane-tier refuses them as `none`, so today no table reaches a warning: dormant until required tiers can launch (SBX-2)."""
+    """(who, model) for every tier that runs a hosted model in the sandbox: those use the sandbox's own key file."""
     return [(f"tier {t}", m) for t, h, s, m in check_tier_table(tiers.read_text())
-            if h == "opencode" and s != "required" and m.startswith(HOSTED_OPENCODE) and not m.endswith("-free")]
+            if h == "opencode" and s == "required" and m.startswith(HOSTED_OPENCODE)]
 
 
-def opencode_key_check(repo: Path, space: str, tiers: Path, mgr_started: bool = False):
-    """After the manager step, so its definition is current. Each OpenCode agent has its own empty database, so a paid
-    model needs the key in the manager's environment (docs/orca.md). `mgr_started`: this run started the manager from
-    this shell, where an empty value passes Cotal's check (`=== undefined`), so the definition's ref alone proves
-    nothing."""
+def sandbox_key_file() -> Path:
+    return Path(os.environ.get("OPENCODE_SANDBOX_AUTH") or Path.home() / ".config" / "opencode-sandbox" / "auth.json")
+
+
+def sandbox_key_problem(f: Path):
+    """Why the sandbox has no usable key, or None. Reads the file's shape only; the key itself is never printed."""
+    try:
+        d = json.loads(f.read_text())
+    except FileNotFoundError:
+        return "it does not exist"
+    except (OSError, ValueError):
+        return "it cannot be read as JSON"
+    if not isinstance(d, dict):
+        return "it is not a JSON object"
+    for name in ("opencode-go", "opencode"):
+        v = d.get(name)
+        if isinstance(v, dict) and v.get("type") == "api" and isinstance(v.get("key"), str) and v["key"].strip():
+            return None
+    return 'it has no "opencode-go" or "opencode" API key'
+
+
+def opencode_key_check(tiers: Path):
+    """A hosted model runs only in the sandbox, which uses its own key file, not the owner's login. Says plainly when a
+    lane could not reach its paid model, and how to log in once per machine."""
     pins = opencode_key_pins(tiers)
     if not pins:
         return
-    f = repo / ".cotal" / "mgr-service.json"
-    readd = (f"cotal svc stop mgr -s {space} --yes, then cotal svc remove mgr -s {space} --yes, "
-             "then rerun project-setup from a shell with the key set.")
-    lines = []
-    has_ref = f.exists() and "OPENCODE_API_KEY" in json.loads(f.read_text()).get("envRefs", {})
-    if has_ref and (os.environ.get("OPENCODE_API_KEY") or not mgr_started):
-        pass  # the manager holds it, whatever this shell has
-    elif not os.environ.get("OPENCODE_API_KEY"):
-        lines += [f"warning: {who} pins {m} and OPENCODE_API_KEY is not set: a paid model is not listed without it, "
-                  "and its agents exit on launch." for who, m in pins]
-        lines += ["  `opencode auth login` does not reach an agent's own database. Once per machine:",
-                  "  1. Create an API key in the OpenCode console and export OPENCODE_API_KEY in your shell setup.",
-                  f"  2. If mgr already exists, at a natural stop: {readd}"]
-    elif f.exists():
-        lines += [f"warning: mgr was added without OPENCODE_API_KEY: a paid model like {pins[0][1]} is not listed without "
-                  "it, and its agents exit on launch.", f"  At a natural stop: {readd}"]
-    lines.append("note: this check only sees whether the key is set. It cannot tell a wrong key from a spent quota: "
-                 "either shows only on the agent's first model call.")
+    f = sandbox_key_file()
+    problem = sandbox_key_problem(f)
+    if problem is None:
+        return
+    lines = [f"warning: {who} pins {m}, and the sandbox has no usable key in {f} ({problem}): a lane on it stops at launch."
+             for who, m in pins]
+    lines += ["  `opencode auth login` does not reach the sandbox; it uses a key file of its own. Once per machine:",
+              "  1. Create an API key for lanes only in the OpenCode console.",
+              f'  2. Save it to {f} as {{"opencode-go":{{"type":"api","key":"<the key>"}}}}, with chmod 600.',
+              "note: this check only sees that the key file is usable; a launch asks the provider, and a wrong key or a "
+              "spent quota shows there."]
     print("\n".join(lines), file=sys.stderr, flush=True)
+
+
+def seat_wrapper_note(tiers: Path):
+    """After the manager step. A manager that was already running keeps its old PATH, so a required tier stays refused."""
+    try:
+        rows = check_tier_table(tiers.read_text())
+    except (OSError, UnicodeDecodeError, Fail):
+        return
+    tier = next((t for t, h, s, _ in rows if s == "required" and h != "none"), None)
+    if tier is None:
+        return
+    r = subprocess.run(["bash", str(HERE / "scripts" / "lane-tier"), str(tiers), tier], capture_output=True, text=True)
+    if r.returncode == 4:
+        print(f"note: {r.stderr.splitlines()[0].removeprefix('lane-tier: refused: ')}", file=sys.stderr, flush=True)
 
 
 def with_cotal_ignored(text: str) -> str:
@@ -448,8 +482,14 @@ def check_tier_table(text: str) -> list:
 def sandbox_note(tier_text: str):
     refused = [t for t, h, s, _ in check_tier_table(tier_text) if s == "required" and h != "none"]
     if refused:
-        print(f"note: {', '.join(refused)} has sandbox required: Orca + Cotal refuses it until Cotal has a per-seat "
-              "launch wrapper, so that work goes one tier up or to Rove (docs/orca.md).", file=sys.stderr, flush=True)
+        print(f"note: {', '.join(refused)} has sandbox required: under Orca + Cotal it runs in the sandbox through the "
+              "launch wrapper, and lane-tier refuses it until the running manager uses that wrapper (docs/orca.md).",
+              file=sys.stderr, flush=True)
+
+
+# Comments earlier templates shipped that today's template no longer has: an untouched old table may still carry them.
+OLD_TEMPLATE_COMMENTS = ("# sandbox: required = never runs bare (a hosted OpenCode model; refused under Orca + Cotal, see "
+                         "docs/orca.md); none = may run without it.",)
 
 
 def table_rows(text: str, drop_sandbox: bool = False) -> list:
@@ -461,10 +501,18 @@ def table_rows(text: str, drop_sandbox: bool = False) -> list:
     return rows
 
 
-def is_older_default_table(text: str, default_text: str) -> bool:
-    """An unedited table from before the sandbox column: the defaults, minus that column and its comment."""
+def table_is_unedited(text: str, default_text: str, answered_text: str) -> bool:
+    """Whether a project's table only holds what the defaults hold, so --opencode may replace it. Rows are compared
+    with the answered defaults, or with the defaults minus the sandbox column for a table from before that column. A
+    comment that no template shipped is the owner's own note: .cotal/ is gitignored, so replacing it would lose it."""
+    comments = {l for l in text.splitlines() if l.startswith("#")}
+    known = {l for l in default_text.splitlines() if l.startswith("#")} | set(OLD_TEMPLATE_COMMENTS)
+    if not comments <= known:
+        return False
     rows = table_rows(text)
-    return bool(rows) and "sandbox" not in rows[0] and rows == table_rows(default_text, drop_sandbox=True)
+    if not rows:
+        return False
+    return rows == table_rows(answered_text) or ("sandbox" not in rows[0] and rows == table_rows(default_text, drop_sandbox=True))
 
 
 def answered_table(default_text: str, was: dict) -> str:
@@ -570,7 +618,7 @@ def choose_tiers(repo: Path, a, default_table: Path) -> str:
             return table.read_text()
         if a.opencode and table.exists():
             current = table.read_text()
-            if current != answered_table(default_text, record(repo)) and not is_older_default_table(current, default_text):
+            if not table_is_unedited(current, default_text, answered_table(default_text, record(repo))):
                 raise Fail(f"{table} differs from the current defaults, and --opencode would replace it with them. Edit "
                            "that file instead, or delete it first to start again from the defaults")
     except (OSError, UnicodeDecodeError) as e:
@@ -639,6 +687,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     table = repo / ".cotal" / "lanes.tsv"
     design_lead = "design-lead" in old
     texts = {}
+    no_restart = set()
     for name in ["coordinator"] + (["design-lead"] if design_lead else []) + ["reviewer"]:
         if name in old:
             h = re.search(r"^agent: (\S+)$", old[name], re.M)
@@ -648,7 +697,8 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             harness, model = h.group(1), m.group(1)
             if harness == "opencode" and model.startswith(HOSTED_OPENCODE):
                 print(f"warning: persona {name} pins {model}: a hosted OpenCode model runs only inside the sandbox, "
-                      "which a Cotal agent cannot do yet. Do not restart it on that model.", file=sys.stderr, flush=True)
+                      "which this agent does not. Do not restart it on that model.", file=sys.stderr, flush=True)
+                no_restart.add(name)
         else:
             harness, model = reviewer
         texts[name] = (harness, model, render_persona((HERE / "personas" / f"{name}.md").read_text(), harness, model,
@@ -687,6 +737,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     if skill != "exists":
         for n in ("coordinator", "design-lead"):
             needs.setdefault(n, "skill changed")
+    needs = {n: why for n, why in needs.items() if n not in no_restart}
     if not needs:
         say("restart", "none", "nothing changed")
         return 0
@@ -830,6 +881,11 @@ def start_stack(repo: Path, space: str, port_flag) -> bool:
     if svc.get("mgr") == "running":
         say("manager", "exists", "mgr (runtime orca)")
         return False
+    # The manager resolves `opencode` from its PATH at boot, so the launch wrapper goes first on it. Cotal's schema
+    # refuses COTAL_* names in envRefs, so COTAL_OPENCODE_BIN cannot be passed on (the same reason as COTAL_ORCA_BIN).
+    shim = Path.home() / ".agents" / "bin" / SEAT_DIR
+    if (shim / "opencode").exists():
+        os.environ["PATH"] = f"{shim}:{os.environ.get('PATH', '')}"
     if "mgr" not in svc:
         # PATH (starting with the Orca CLI's folder) lets Cotal's Orca driver find `orca-ide`/`orca`: Cotal's schema
         # refuses COTAL_* names here, so COTAL_ORCA_BIN can't be passed on.
@@ -1399,9 +1455,11 @@ def main(argv=None) -> int:
     for flag, pin in (("--coordinator", coord), ("--design-lead", lead), ("--reviewer", reviewer)):
         if pin and pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
             print(f"project-setup: {flag} {pin[0]}/{pin[1]}: a hosted OpenCode model runs only inside the sandbox, and "
-                  "a Cotal agent cannot run there yet. Use claude/<model>, or an opencode/<provider>/<model> on a "
-                  "gateway you run yourself", file=sys.stderr)
+                  "this agent does not run in it. Use claude/<model>, or an opencode/<provider>/<model> on a gateway "
+                  "you run yourself", file=sys.stderr)
             return 2
+        if pin and pin[0] == "opencode":
+            print(f"note: {flag} {pin[0]}/{pin[1]}: {OWN_NOTE}", flush=True)
     if not a.skip_adapt and not a.refresh and {adapter[0], adapt_reviewer[0]} != {"claude"}:
         print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
               "project, and a third-party lane may not read private data", file=sys.stderr)
@@ -1483,11 +1541,13 @@ def main(argv=None) -> int:
         project_table = repo / ".cotal" / "lanes.tsv"
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
-            opencode_key_check(repo, space, project_table)
+            opencode_key_check(project_table)
             say("start", "skipped", "--no-start")
             return 0
         mgr_started = start_stack(repo, space, a.port)
-        opencode_key_check(repo, space, project_table, mgr_started)
+        opencode_key_check(project_table)
+        if not mgr_started:
+            seat_wrapper_note(project_table)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = None
