@@ -1,5 +1,9 @@
 """Checks on the persona, skill and tier-table content that project-setup installs."""
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -297,6 +301,69 @@ class LaneSkillCliTests(unittest.TestCase):
         self.assertNotIn("opencode/deepseek", self.text)
         for word in ("`none`", "`inherit`"):
             self.assertIn(word, self.text)
+
+
+class BeadsSteeringTests(unittest.TestCase):
+    """The beads rules from issues.md reach agents in onboarded projects, which never see issues.md."""
+    RULES = (
+        ("never close", "lane never closes issues"),
+        ("--status open", "stopped lane goes back to open"),
+        ("Resume note", "with a Resume note"),
+        ("bd search", "search before filing"),
+        ("PR body", "nits go in the PR body"),
+        ("bd git hooks", "no bd git hooks"),
+    )
+
+    def check(self, path, text):
+        low = " ".join(text.lower().split())
+        for needle, why in self.RULES:
+            self.assertIn(needle.lower(), low, f"{path.name}: {why}")
+
+    def test_coordinator_design_lead_and_brief_carry_the_rules(self):
+        for path in (PERSONAS / "coordinator.md", PERSONAS / "design-lead.md", BRIEF):
+            self.check(path, path.read_text())
+
+    def test_lane_key_is_a_label_everywhere(self):
+        for name in ("issues.md", "model-routing.md", "templates/AGENTS-coordination.md", "personas/coordinator.md"):
+            text = (ROOT / name).read_text()
+            self.assertIn("lane:<KEY", text, name)
+            self.assertNotIn("external-ref", text, name)
+
+
+@unittest.skipUnless(shutil.which("jq") and shutil.which("bash"), "needs jq and bash")
+class StaleClaimsKeyTests(unittest.TestCase):
+    def run_check(self, issues):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "bin").mkdir()
+            (d / "repo").mkdir()
+            (d / "bin" / "rove").write_text(
+                "#!/bin/sh\n[ \"$2\" = list ] && echo '{\"tasks\":[{\"title\":\"BD-1 Beads steering\"}]}'\nexit 0\n")
+            (d / "bin" / "bd").write_text("#!/bin/sh\ncat \"$ISSUES\"\n")
+            for n in ("rove", "bd"):
+                (d / "bin" / n).chmod(0o755)
+            (d / "issues.json").write_text(issues)
+            (d / "conf.sh").write_text(f'declare -A COORD_REPO=([p]="{d}/repo")\ndeclare -A COORD_TASK=([p]=t)\nCOORD_TAB=x\n')
+            env = {"PATH": f"{d}/bin:" + os.environ["PATH"], "PLAYBOOK_CONFIG": str(d / "conf.sh"),
+                   "ISSUES": str(d / "issues.json"), "HOME": str(d)}
+            return subprocess.run(["bash", str(ROOT / "scripts" / "stale-claims.sh")], env=env, capture_output=True,
+                                  text=True).stdout.strip()
+
+    def test_lane_label_is_the_task_key(self):
+        issue = '[{"id":"lc-1","labels":["lane:BD-1"],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
+        self.assertEqual(self.run_check(issue), "p: 0 stale")
+
+    def test_tier_label_is_not_a_key(self):
+        tier = '[{"id":"lc-1","external_ref":"BD-1","labels":["lane:deep"],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
+        self.assertEqual(self.run_check(tier), "p: 0 stale")
+        both = '[{"id":"lc-1","labels":["lane:deep","lane:BD-1"],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
+        self.assertEqual(self.run_check(both), "p: 0 stale")
+
+    def test_old_external_ref_still_counts_and_unkeyed_is_stale(self):
+        old = '[{"id":"lc-1","external_ref":"BD-1","labels":[],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
+        self.assertEqual(self.run_check(old), "p: 0 stale")
+        none = '[{"id":"lc-2","labels":["lane:XX-9"],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
+        self.assertEqual(self.run_check(none), "p: 1 stale")
 
 
 if __name__ == "__main__":

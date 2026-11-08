@@ -3,7 +3,7 @@
 Owner-approved 2026-10-30. Applies to every project; a project's AGENTS.md carries it in its own words.
 
 ## Lifecycle
-- **One issue, one key, one lane.** An issue becomes work when it gets its task key (`<KEY>-<n>`, bd `--external-ref`); the task title starts with that key.
+- **One issue, one key, one lane.** An issue becomes work when it gets its task key (`<KEY>-<n>`), kept as the label `lane:<KEY>-<n>` on the issue; the task title starts with that key.
 - **Claim at launch.** The coordinator (or the lane, first thing) runs `bd update <id> --claim`. No running lane without an in-progress issue.
 - **Close at merge.** The coordinator closes every issue a merge names, then syncs beads. A lane never closes issues.
 - **In progress means a lane exists.** When a lane stops without merging, its issue goes back to open (`bd update <id> --status open`) with a Resume note (`--notes`).
