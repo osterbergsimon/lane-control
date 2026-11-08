@@ -821,6 +821,39 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("Read(/.git/**)", rules)
         self.assertFalse(any(".lane-control" in x for x in rules), rules)
 
+    def test_env_files_are_denied_unless_templates(self):
+        r = self.private_repo()
+        for n in (".env.production", ".env.example", ".env.sample", ".env.template", ".envrc"):
+            (r / n).write_text("x\n")
+        git("add", "-f", ".env.production", ".env.sample", ".env.template", ".envrc", cwd=r)
+        rules = load().private_rules(r)
+        self.assertIn("Read(/.env.production)", rules)
+        for ok in (".env.example", ".env.sample", ".env.template", ".envrc"):
+            self.assertNotIn(f"Read(/{ok})", rules)
+
+    def test_submodule_and_embedded_repo_files_are_denied_and_git_at_any_depth(self):
+        r = self.private_repo()
+        sub = self.e.home / "subsrc"
+        sub.mkdir()
+        git("init", "-q", "-b", "main", cwd=sub)
+        (sub / ".gitignore").write_text("data/\n.env\n")
+        (sub / "a.txt").write_text("a\n")
+        git("add", ".", cwd=sub)
+        git("commit", "-q", "-m", "s", cwd=sub)
+        git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "submod", cwd=r)
+        (r / "submod" / "data").mkdir()
+        (r / "submod" / "data" / "x.txt").write_text("x\n")
+        (r / "submod" / ".env").write_text("S=1\n")
+        emb = r / "vendor" / "foo"
+        emb.mkdir(parents=True)
+        git("init", "-q", "-b", "main", cwd=emb)
+        (emb / ".gitignore").write_text(".env\n")
+        (emb / ".env").write_text("S=1\n")
+        rules = load().private_rules(r)
+        for want in ("Read(/submod/data/**)", "Read(/submod/.env)", "Read(/vendor/foo/.env)", "Read(/**/.git/**)",
+                     "Read(/**/.git)"):
+            self.assertIn(want, rules)
+
     def test_private_flag_adds_tracked_files(self):
         r = self.private_repo()
         mod = load()
@@ -910,6 +943,13 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.models(), ["sonnet", "sonnet", "opus"])
         self.assertNotIn(".lane-control/SUGGESTIONS.md", self.committed_paths())
         self.assertNotEqual((self.repo / ADAPTED_FILE).read_text(), "half\n")
+
+    def test_reviewer_running_out_of_turns_is_a_clean_fail_too(self):
+        self.e.script_agents(sonnet=[WRITE], opus=[{"say": "Error: Reached max turns (60)", "exit": 1}])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the reviewer used all 60 turns", r.stderr)
+        self.assertNotIn("--readapt", r.stderr)
 
     def test_default_models_adapter_sonnet_reviewer_opus(self):
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])

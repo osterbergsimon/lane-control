@@ -45,7 +45,8 @@ Blockers:
 
 Majors:
 13. Under-tiered paths. Open code behind every swift row and any row that looks low (a sample of files per row):
-    parsers of untrusted input, formats, migrations, auth, sandboxes, host-acting code, secrets and agent prompts must be deep. In doubt, one up.
+    parsers of untrusted input, formats, migrations, auth, sandboxes, host-acting code, secrets and agent prompts
+    must be deep. In doubt, one up.
 14. Review letters. C for formats, validators, spec statements, limits, hostile input, vendored parsers and security;
     A only where no product behaviour can change.
 15. False or unsupported claims. Verify a sample of about three facts per file at their source, starting with

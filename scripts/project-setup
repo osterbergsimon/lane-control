@@ -1156,20 +1156,59 @@ RULE_UNSAFE = set("()*?[]{}\\\n")  # a name with one of these cannot be put into
 DENY_LIMIT = 100000  # bytes of deny rules; they are command-line arguments
 
 
+ENV_TEMPLATE_ENDS = (".example", ".sample", ".template")
+NESTED_DEPTH = 5  # submodules inside submodules
+
+
+def env_private(name: str) -> bool:
+    """A .env* file other than a template (.env.example, .env.sample, .env.template) or .envrc."""
+    return name.startswith(".env") and name != ".envrc" and not name.endswith(ENV_TEMPLATE_ENDS)
+
+
+def nested_repos(repo: Path, untracked_dirs: list) -> list:
+    """Submodules and embedded repos below `repo`: git lists neither one's own ignored files from here."""
+    found = []
+    for line in git_z(repo, "ls-files", "-s"):
+        mode, _, rest = line.partition(" ")
+        if mode == "160000":
+            found.append(rest.partition("\t")[2])
+    for d in untracked_dirs:  # an untracked folder is not listed inside, so look for a .git in it
+        for here, dirs, files in os.walk(repo / d):
+            if ".git" in dirs or ".git" in files:
+                found.append(str(Path(here).relative_to(repo)))
+                dirs[:] = []
+            dirs[:] = [x for x in dirs if x != ".git"]
+    return sorted(set(found))
+
+
+def repo_private_names(repo: Path, prefix: str, depth: int = 0) -> list:
+    """Paths (relative to the outer repo) to deny inside `repo`, then inside each repo nested in it."""
+    ignored = git_z(repo, "ls-files", "-o", "-i", "--exclude-standard", "--directory")
+    others = git_z(repo, "ls-files", "-c", "-o", "--exclude-standard")
+    untracked_dirs = [n for n in git_z(repo, "ls-files", "-o", "--exclude-standard", "--directory") if n.endswith("/")]
+    names = [n for n in ignored if (prefix + n).rstrip("/") != ADAPTED]
+    names += [n for n in others if env_private(Path(n).name)]
+    out = [prefix + n for n in names]
+    nested = nested_repos(repo, untracked_dirs)
+    if nested and depth >= NESTED_DEPTH:
+        raise Fail(f"repos nested more than {NESTED_DEPTH} deep: their private files cannot all be denied")
+    for sub in nested:
+        if (repo / sub).is_dir():
+            out += repo_private_names(repo / sub, f"{prefix}{sub}/", depth + 1)
+    return out
+
+
 def private_rules(repo: Path) -> list:
     """Read-deny rules for what the onboarding agents must not see, by name; the list is never written to a file.
 
-    The .git folder, every git-ignored path (data folders, local settings, keys, the .beads link, .direnv), every .env* file git does not
-    track, and each --private glob. Tracked files stay readable, .env.example included. Grep skips ignored files on its
-    own but not when it is pointed at one, so these rules cover Read, Glob and Grep alike."""
-    ignored = git_z(repo, "ls-files", "-o", "-i", "--exclude-standard", "--directory")
-    untracked = git_z(repo, "ls-files", "-o", "--exclude-standard")
-    names = [n for n in ignored if n.rstrip("/") != ADAPTED]
-    names += [n for n in untracked if Path(n).name.startswith(".env")]
-    rules = ["Read(/.git/**)"]  # remote URLs and hooks live there; no onboarding step reads git
-    for n in names:
+    A .git folder or file at any depth; every git-ignored path (data folders, local settings, keys, the .beads link,
+    .direnv), also inside submodules and embedded repos; every .env* file except templates and .envrc; and each --private
+    glob. Other tracked files stay readable. Grep skips ignored files on its own but not when it is pointed at one, so
+    these rules cover Read, Glob and Grep alike."""
+    rules = ["Read(/.git/**)", "Read(/.git)", "Read(/**/.git/**)", "Read(/**/.git)"]  # remote URLs and hooks
+    for n in repo_private_names(repo, ""):
         if RULE_UNSAFE & set(n):
-            raise Fail("a git-ignored or untracked .env name has a character that a deny rule cannot carry "
+            raise Fail("a git-ignored or .env name has a character that a deny rule cannot carry "
                        f"(one of ( ) * ? [ ] {{ }} \\ or a newline): {n!r}. Rename it, or move it out of the repo")
         rules.append(f"Read(/{n}**)" if n.endswith("/") else f"Read(/{n})")
     for g in PRIVATE_GLOBS:
@@ -1203,11 +1242,11 @@ def agent_cmd(model: str, prompt: str, write: bool, deny: tuple = ()) -> list:
 def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
     p = run(agent_cmd(who[1], prompt, write, tuple(private_rules(repo))), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL, check=False)
     if p.returncode != 0:
-        said = (p.stderr.strip() or p.stdout.strip()).splitlines()
+        said = (p.stderr.strip() + "\n" + p.stdout.strip()).strip().splitlines()
         # the adapter may have left half-written files; a plain re-run would review them as if they were complete
         left = (f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or remove {ADAPTED}/"
                 if write else "")
-        if "max turns" in " ".join(said[-1:]).lower():
+        if any("max turns" in l.lower() for l in said):
             raise Fail(f"the {'adapting agent' if write else 'reviewer'} used all {MAX_TURNS[write]} turns and was "
                        f"stopped before it finished. Nothing was committed and no Orca step ran.{left}")
         raise Fail(f"claude -p --model failed: {said[-1] if said else p.returncode}. Nothing was committed.{left}")
