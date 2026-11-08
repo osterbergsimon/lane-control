@@ -182,6 +182,25 @@ The coordinator (or the design lead, for its own frontend lanes) follows the `or
 
 Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
 
+### Launching OpenCode lanes
+- Cotal gives every OpenCode agent its own empty database (section 7), so the owner's `opencode auth login` does not
+  reach it. Without `OPENCODE_API_KEY` in the manager's environment, that agent's server lists only free models.
+- A pinned model the server does not list stops the agent before it joins. The connector prints
+  `<model>: GET /api/model does not list it. Refusing before join` into the tab, which closes, so `cotal_spawn` shows
+  only `<name> exited on launch`. [tested]
+- `opencode models` prints the whole catalog whatever the credentials, so it does not prove a lane can use a model.
+- For a paid model, export `OPENCODE_API_KEY` before `project-setup`: it records the name (never the value) in the
+  `mgr` service, and Cotal forwards the key to each OpenCode agent. Setup warns, with these steps, when an OpenCode pin
+  not named as free has no key and the manager does not hold one. The warning can also name a free model without
+  `-free` in its name.
+- A `mgr` service that already exists keeps its old variable list. At a natural stop, run
+  `cotal svc stop mgr -s <space> --yes` and `cotal svc remove mgr -s <space> --yes`, then rerun `project-setup` with the
+  key exported. Afterwards `cotal svc start` refuses in a shell that does not set the key.
+- Setup only sees whether the key is set. A wrong key or a spent quota shows only on the agent's first model call, and
+  setup cannot tell them apart.
+- Free models, such as those named `*-free`, need no key. Pin one in `.cotal/lanes.tsv` only if the owner accepts it
+  for that project.
+
 ### Permission modes (Claude)
 - `auto` is the default: Claude screens each tool call, as `--opt permission-mode=auto` on spawn.
 - Every Claude agent also starts with `--allow-dangerously-skip-permissions`, so bypass is in its Shift+Tab mode

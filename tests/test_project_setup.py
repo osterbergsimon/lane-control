@@ -55,6 +55,7 @@ class Env:
         self.env = {**os.environ, "HOME": str(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.state),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
+        self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
 
     def run(self, *args, adapt=False, env_extra=None):
@@ -979,6 +980,98 @@ class RunTests(unittest.TestCase):
         self.assertEqual(d["launch"]["options"], {"root": str(repo), "runtime": "orca"})
         self.assertEqual(d["envRefs"].get("HTTPS_PROXY"), "HTTPS_PROXY")
         self.assertNotIn("http_proxy", d["envRefs"])  # only names set in the caller's env
+
+    def test_mgr_passes_opencode_key_by_name_only(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = (repo / ".cotal" / "mgr-service.json").read_text()
+        self.assertEqual(json.loads(text)["envRefs"].get("OPENCODE_API_KEY"), "OPENCODE_API_KEY")
+        self.assertNotIn("sentinel-key-value", text)
+        self.assertNotIn("sentinel-key-value", r.stdout + r.stderr)
+        self.assertNotIn("OPENCODE_API_KEY is not set", r.stderr)
+
+    def test_paid_opencode_tier_without_key_warns(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stderr, r"swift.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
+        self.assertIn("export OPENCODE_API_KEY", r.stderr)
+        self.assertIn("cotal svc stop mgr -s shop --yes", r.stderr)
+        self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
+        self.assertRegex(r.stderr, r"cannot tell .*quota")
+
+    def test_manager_holding_the_key_is_not_warned_about(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        del self.e.env["OPENCODE_API_KEY"]
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("warning:", r.stderr)
+        self.assertRegex(r.stderr, r"cannot tell .*quota")
+
+    def test_empty_key_counts_as_unset(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = ""
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("OPENCODE_API_KEY is not set", r.stderr)
+        d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
+        self.assertNotIn("OPENCODE_API_KEY", d["envRefs"])
+
+    def test_paid_opencode_coordinator_without_key_warns(self):
+        repo = self.e.repo()
+        tiers = self.e.home / "free-lanes.tsv"
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x-free\t-\n")
+        r = self.e.run(str(repo), "--name", "Shop", "--tiers", str(tiers),
+                       "--coordinator", "opencode/opencode/deepseek-v4.1-flash")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stderr, r"coordinator.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
+
+    def test_key_check_runs_with_no_start(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("OPENCODE_API_KEY is not set", r.stderr)
+
+    def test_warning_does_not_claim_every_pin_is_paid(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertNotIn("those lanes will exit on launch", r.stderr)
+        self.assertRegex(r.stderr, r"a paid model")
+
+    def test_following_the_key_steps_clears_the_warning(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        state = json.loads(self.e.state.read_text())  # the owner ran `cotal svc remove mgr`; the file stays behind
+        del state["services"]["mgr"]
+        self.e.state.write_text(json.dumps(state))
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("mgr was added without", r.stderr)
+        d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
+        self.assertEqual(d["envRefs"].get("OPENCODE_API_KEY"), "OPENCODE_API_KEY")
+
+    def test_key_set_but_mgr_added_without_it_warns(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("mgr was added without OPENCODE_API_KEY", r.stderr)
+        self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
+        self.assertNotIn("sentinel-key-value", r.stdout + r.stderr)
+
+    def test_free_opencode_tier_without_key_is_quiet(self):
+        repo = self.e.repo()
+        tiers = self.e.home / "free-lanes.tsv"
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x-free\t-\n")
+        r = self.e.run(str(repo), "--name", "Shop", "--tiers", str(tiers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("OPENCODE_API_KEY is not set", r.stderr)
 
     def test_opencode_coordinator(self):
         repo = self.e.repo()
