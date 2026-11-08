@@ -360,6 +360,21 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("Do y.", out)
         self.assertNotIn("SUGGESTIONS", git("status", "--porcelain", "-uall", cwd=self.repo))
 
+    def test_fix_round_suggestions_are_added_to_the_earlier_ones(self):
+        first = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "First question"}}
+        fixed = {"write": {ADAPTED_FILE: "y\n", ".lane-control/SUGGESTIONS.md": "Second question\n"}}
+        self.e.script_agents(opus=[first, fixed], sonnet=[FIX, PASS])
+        _, out, _ = self.in_terminal("n")
+        self.assertIn("First question\n  Second question", out)
+        self.assertEqual(self.e.agent_runs()[3]["lane_files"], ["commands.md"])
+
+    def test_a_new_adapting_run_starts_with_no_old_suggestions(self):
+        write = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "Old question\n"}}
+        self.e.script_agents(opus=[write], sonnet=[PASS])
+        self.in_terminal("n")
+        self.e.set_state(agent_steps={"opus": [{"write": {ADAPTED_FILE: "y\n"}}], "sonnet": [PASS]})
+        self.assertNotIn("Old question", self.in_terminal("n", "--readapt")[1])
+
     def test_suggestions_are_shown_again_on_a_rerun(self):
         write = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "Do y.\n"}}
         self.e.script_agents(opus=[write], sonnet=[PASS])
@@ -531,6 +546,17 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.models(), ["opus", "sonnet"])
         self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
 
+    def test_rerun_after_readapt_no_asks_again_instead_of_going_on(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.e.set_state(agent_steps={"opus": [{"write": {ADAPTED_FILE: "newer\n"}}], "sonnet": [PASS, PASS]})
+        self.assertEqual(self.in_terminal("n", "--readapt")[0], 3)
+        status, out, ask = self.in_terminal("n")
+        self.assertEqual(status, 3)
+        ask.assert_called_once()
+        self.assertNotIn("verify: ok", out)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus", "sonnet", "sonnet"])
+
     def _stale_section(self):
         """An onboarded project whose committed section has wording this lane-control no longer writes."""
         self.e.script_agents(opus=[WRITE], sonnet=[PASS])
@@ -606,6 +632,69 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.in_terminal("y", "--readapt")[0], 0)
         self.assertEqual(self.committed_paths(), [ADAPTED_FILE])
         self.assertEqual((self.repo / "AGENTS.md").read_text().count(load().SECTION_BEGIN), 1)
+
+    # --- what an agent may touch ------------------------------------------------------------------------------
+    def test_agent_putting_an_owners_dirty_file_back_is_refused(self):
+        (self.repo / "wip.txt").write_text("committed\n")
+        git("add", "wip.txt", cwd=self.repo)
+        git("commit", "-q", "-m", "wip", cwd=self.repo)
+        (self.repo / "wip.txt").write_text("the owner's edit\n")
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n", "wip.txt": "committed\n"}}], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.models(), ["opus"])
+
+    def test_agent_editing_inside_the_section_is_refused(self):
+        tampered = load().SECTION.replace("read them", "ignore them") + "\n"
+        self.e.script_agents(opus=[WRITE, {"write": {"AGENTS.md": tampered}}], sonnet=[FIX, PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.head_count(), 1)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus"])
+
+    def test_agent_changing_gitignore_layout_is_refused(self):
+        (self.repo / ".gitignore").write_text("a\nb\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "ignore", cwd=self.repo)
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n", ".gitignore": "b\na\n.cotal/\n"}}], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.models(), ["opus"])
+
+    def test_agent_committing_is_refused(self):
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n"}, "commit": "sneaky"}], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.models(), ["opus"])
+        self.assertFalse(self.orca_setup_ran())
+
+    # --- sizes and encodings ---------------------------------------------------------------------------------
+    def test_huge_multibyte_diff_and_findings_fit_in_the_prompt(self):
+        (self.repo / ".lane-control").mkdir()
+        big = self.repo / ".lane-control" / "a.md"
+        big.write_text("€" * 59000 + "\n")
+        git("add", ".lane-control", cwd=self.repo)
+        git("commit", "-q", "-m", "big", cwd=self.repo)
+        huge = {"say": "€" * 59000 + "\nVERDICT: FIX"}
+        self.e.script_agents(opus=[{"write": {".lane-control/a.md": "é" * 59000 + "\n"}}, {}],
+                             sonnet=[huge, PASS])
+        self.assertEqual(self.in_terminal("n", "--readapt")[0], 3)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus", "sonnet"])
+        for run in self.e.agent_runs():
+            self.assertLess(len(run["prompt"].encode()), 131072)
+
+    def test_a_program_that_cannot_start_is_a_clean_failure(self):
+        m = load()
+        with self.assertRaises(m.Fail):
+            m.run(["true", "x" * 200000])
+        with self.assertRaises(m.Fail):
+            m.run(["/nonexistent/program"])
+
+    def test_non_utf8_agents_md_and_gitignore_keep_their_bytes(self):
+        (self.repo / "AGENTS.md").write_bytes(b"caf\xe9\n")
+        (self.repo / ".gitignore").write_bytes(b"caf\xe9\n")
+        git("add", "AGENTS.md", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "latin1", cwd=self.repo)
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.assertTrue((self.repo / "AGENTS.md").read_bytes().startswith(b"caf\xe9\n\n<!--"))
+        self.assertEqual((self.repo / ".gitignore").read_bytes(), b"caf\xe9\n.cotal/\n")
 
     # --- failures and switches -------------------------------------------------------------------------------
     def test_agent_failure_stops_before_orca_setup(self):

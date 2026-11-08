@@ -115,9 +115,12 @@ def say(step: str, what: str, detail: str = "") -> None:
 
 def run(cmd, cwd=None, check=True, timeout=180, **kw):
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, **kw)
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="surrogateescape", timeout=timeout,
+                           **kw)
     except subprocess.TimeoutExpired:
         raise Fail(f"{' '.join(cmd[:3])} timed out after {timeout}s")
+    except OSError as e:
+        raise Fail(f"{' '.join(cmd[:3])} could not start: {e.strerror or e}")
     if check and p.returncode != 0:
         msg = (p.stderr.strip() or p.stdout.strip()).splitlines()
         raise Fail(f"{' '.join(cmd[:3])} failed: {msg[-1] if msg else p.returncode}")
@@ -315,14 +318,21 @@ def claude_wiring(repo: Path, space: str):
     say("claude-wiring", "created", space)
 
 
-def ignore_cotal(repo: Path) -> str:
-    gi = repo / ".gitignore"
-    text = gi.read_bytes().decode() if gi.exists() else ""
+def with_cotal_ignored(text: str) -> str:
     lines = text.splitlines()
     if ".cotal/" in lines or ".cotal" in lines:
-        return "exists"
+        return text
     nl = "\r\n" if "\r\n" in text else "\n"
-    gi.write_bytes((text + ("" if not text or text.endswith("\n") else nl) + ".cotal/" + nl).encode())
+    return text + ("" if not text or text.endswith("\n") else nl) + ".cotal/" + nl
+
+
+def ignore_cotal(repo: Path) -> str:
+    gi = repo / ".gitignore"
+    text = read_raw(gi)
+    new = with_cotal_ignored(text)
+    if new == text:
+        return "exists"
+    write_raw(gi, new)
     return "updated"
 
 
@@ -602,7 +612,8 @@ SECTION = (f"{SECTION_BEGIN}\n## lane-control\n\nThis project is run with lane-c
            f"`{ADAPTED}/`: read them before you start work.\n{SECTION_END}")
 MAX_FIX_ROUNDS = 2
 AGENT_TIMEOUT = 1800  # seconds per headless agent run
-DIFF_LIMIT = 60000  # characters of diff in a prompt; one argument may hold at most 128 KiB
+DIFF_LIMIT = 60000  # bytes of diff in a prompt; one argument may hold at most 128 KiB
+FINDINGS_LIMIT = 30000  # bytes of reviewer findings in a prompt
 STOPPED = 3  # exit status: the owner's answer is needed, and no Orca step ran
 READ_TOOLS = ("Read", "Glob", "Grep")
 TEMPLATES = HERE / "templates" / "adapt"
@@ -616,6 +627,20 @@ Rules for this run:
 REVIEW_RULES = """
 You can only read. Report every finding with its file. End your reply with one last line, exactly `VERDICT: PASS` when
 nothing needs fixing, or `VERDICT: FIX` when something does."""
+
+
+def read_raw(f: Path) -> str:
+    """A file as text, whatever its encoding: bytes that aren't UTF-8 survive read_raw and write_raw unchanged."""
+    return f.read_bytes().decode(errors="surrogateescape") if f.exists() else ""
+
+
+def write_raw(f: Path, text: str):
+    f.write_bytes(text.encode(errors="surrogateescape"))
+
+
+def clip(text: str, limit: int) -> str:
+    raw = text.encode(errors="surrogateescape")
+    return text if len(raw) <= limit else raw[:limit].decode(errors="ignore") + "\n(cut short: read the files)\n"
 
 
 def without_section(text: str) -> str:
@@ -646,7 +671,7 @@ def with_section(text: str) -> str:
 def head_text(repo: Path, path: str) -> str:
     """The file as committed at HEAD, bytes kept as they are; empty when it isn't there."""
     p = subprocess.run(["git", "show", f"HEAD:{path}"], cwd=repo, capture_output=True)
-    return p.stdout.decode() if p.returncode == 0 else ""
+    return p.stdout.decode(errors="surrogateescape") if p.returncode == 0 else ""
 
 
 def agents_md(repo: Path) -> str:
@@ -661,33 +686,31 @@ def agents_md(repo: Path) -> str:
 
 
 def check_agents_md(repo: Path):
-    """AGENTS.md may differ from HEAD only by our section: that is all the commit is allowed to carry."""
+    """AGENTS.md must be as committed, or exactly that plus our section: all the commit is allowed to carry."""
     path = agents_md(repo)
     f = repo / path
-    now = f.read_bytes().decode() if f.exists() else ""
-    if without_section(now).rstrip() != without_section(head_text(repo, path)).rstrip():
+    head = head_text(repo, path)
+    if read_raw(f) not in (head, with_section(head)):
         raise Fail(f"{path} has uncommitted changes besides the lane-control section; commit or undo them and run "
                    "again. Nothing was committed")
 
 
 def check_gitignore(repo: Path):
-    """.gitignore may differ from HEAD only by the .cotal/ line, for the same reason."""
-    def others(text):
-        return [l for l in text.splitlines() if l not in (".cotal/", ".cotal")]
-    f = repo / ".gitignore"
-    if others(f.read_bytes().decode() if f.exists() else "") != others(head_text(repo, ".gitignore")):
+    """.gitignore must be as committed, or exactly that plus the .cotal/ line, for the same reason."""
+    head = head_text(repo, ".gitignore")
+    if read_raw(repo / ".gitignore") not in (head, with_cotal_ignored(head)):
         raise Fail(".gitignore has uncommitted changes besides .cotal/; commit or undo them and run again. "
                    "Nothing was committed")
 
 
 def write_section(repo: Path):
     f = repo / agents_md(repo)
-    text = f.read_bytes().decode() if f.exists() else ""
+    text = read_raw(f)
     new = with_section(text)
     if new == text:
         say("agents-md", "exists", "lane-control section")
         return
-    f.write_bytes(new.encode())
+    write_raw(f, new)
     say("agents-md", "updated" if text else "created", "lane-control section")
 
 
@@ -712,14 +735,24 @@ def fingerprint(f: Path):
     return hashlib.sha1(f.read_bytes()).hexdigest() if f.is_file() else None
 
 
+HEAD_KEY = "\0HEAD"  # no path holds a NUL
+
+
+def current_head(repo: Path) -> str:
+    return run(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd=repo, check=False).stdout.strip()
+
+
 def snapshot(repo: Path) -> dict:
     """What is already uncommitted before an agent starts, so it is neither blamed on the agent nor committed."""
-    return {p: fingerprint(repo / p) for p, _ in git_changes(repo)}
+    return {**{p: fingerprint(repo / p) for p, _ in git_changes(repo)}, HEAD_KEY: current_head(repo)}
 
 
 def check_scope(repo: Path, before: dict):
-    strays = [p for p, _ in git_changes(repo)
-              if not ours(repo, p) and (p not in before or before[p] != fingerprint(repo / p))]
+    if current_head(repo) != before[HEAD_KEY]:
+        raise Fail("HEAD moved while an agent ran; agents never commit. Nothing further was committed")
+    # before's paths too: a file put back to its committed state no longer shows in git status
+    seen = {p for p, _ in git_changes(repo)} | (set(before) - {HEAD_KEY})
+    strays = sorted(p for p in seen if not ours(repo, p) and (p not in before or before[p] != fingerprint(repo / p)))
     if strays:
         raise Fail(f"an agent changed files outside {ADAPTED}/: {' '.join(strays)}. Nothing was committed")
     check_agents_md(repo)
@@ -749,10 +782,15 @@ def kept_suggestions(repo: Path) -> Path:
 
 
 def adapt(repo: Path, who: tuple, prompt: str, before: dict):
-    """One run of the adapting agent. Its suggestions leave the repo before anything reviews the result."""
+    """One run of the adapting agent. Its suggestions leave the repo before anything reviews the result; a fix round's
+    are added to the earlier ones."""
     run_agent(repo, who, prompt, write=True)
-    if (repo / SUGGESTIONS).is_file():
-        os.replace(repo / SUGGESTIONS, kept_suggestions(repo))
+    new = repo / SUGGESTIONS
+    if new.is_file():
+        kept = kept_suggestions(repo)
+        old = kept.read_bytes() if kept.exists() else b""
+        kept.write_bytes(old + (b"" if not old or old.endswith(b"\n") else b"\n") + new.read_bytes())
+        new.unlink()
     check_scope(repo, before)
 
 
@@ -773,8 +811,7 @@ def review_prompt(repo: Path, project: str, design_lead: bool) -> str:
     files = "\n".join(f"- {p} ({m})" for p, m in changes)
     tracked = [p for p, m in changes if m != "added"]
     diff = run(["git", "diff", "HEAD", "--", *tracked], cwd=repo, check=False).stdout if tracked else ""
-    if len(diff) > DIFF_LIMIT:
-        diff = diff[:DIFF_LIMIT] + "\n(diff cut short: read the files)\n"
+    diff = clip(diff, DIFF_LIMIT)
     return (fill("review-prompt.md", project, design_lead) + f"\nUncommitted files to review:\n{files}\n"
             + (f"\nDiff of the files already tracked:\n{diff}" if diff else "") + REVIEW_RULES)
 
@@ -803,7 +840,7 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
             return out.strip()
         fixes += 1
         say("adapt", "fixing", f"round {fixes} of {MAX_FIX_ROUNDS}")
-        found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{out.strip()}"
+        found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(out.strip(), FINDINGS_LIMIT)}"
         adapt(repo, adapter, fill("prompt.md", project, design_lead, found) + ADAPT_RULES, before)
 
 
@@ -812,9 +849,9 @@ def show_changes(repo: Path, changes: list):
     for p, mark in changes:
         print(f"  {mark}: {p}")
     f = kept_suggestions(repo)
-    if f.is_file() and f.read_text().strip():
+    if f.is_file() and f.read_text(errors="replace").strip():
         print("\nSuggested AGENTS.md edits (not applied, not committed):")
-        for line in f.read_text().strip().splitlines():
+        for line in f.read_text(errors="replace").strip().splitlines():
             print(f"  {line}")
     print(flush=True)
 
@@ -847,7 +884,8 @@ def onboarded(repo: Path) -> bool:
 
 def refresh_section(repo: Path) -> bool:
     """An onboarded project whose committed AGENTS.md section is out of date: update it in place, on the owner's yes.
-    True when the Orca setup may run. Without a terminal nothing is written, so an unattended re-run still gets there."""
+    True when the Orca setup may run. Without a terminal nothing is written, so an unattended re-run still gets
+    there."""
     path = agents_md(repo)
     head = head_text(repo, path)
     if with_section(head) == head:
@@ -868,8 +906,9 @@ def refresh_section(repo: Path) -> bool:
 
 def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
     """The steps in front of the Orca setup; True when that setup may run. A re-run is safe: committed files are left
-    alone unless `again`, and uncommitted ones from an earlier run go back to review instead of being rewritten."""
-    if onboarded(repo) and not again:
+    alone unless `again`, and uncommitted ones (an earlier run, a hand edit) go back to review instead of being
+    rewritten."""
+    if onboarded(repo) and not again and not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
         say("adapt", "exists", f"{ADAPTED}/ is committed")
         return refresh_section(repo)
     if not shutil.which("claude"):
@@ -904,6 +943,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     if not owner_says_yes():
         say("adapt", "stopped", "files left uncommitted, no Orca setup. Run again in a terminal to answer")
         return False
+    check_scope(repo, before)  # the owner took their time, and may have edited meanwhile
     commit_adapted(repo, [p for p, _ in changes])
     kept_suggestions(repo).unlink(missing_ok=True)
     return True
