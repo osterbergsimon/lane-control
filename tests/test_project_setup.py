@@ -872,13 +872,136 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("wrong test command", self.e.agent_runs()[2]["prompt"])
         self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "fixed\n")
 
-    def test_two_fix_rounds_then_stops_and_commits_nothing(self):
-        self.e.script_agents(sonnet=[WRITE, {}, {}, {}], opus=[FIX, FIX, FIX, PASS])
+    def test_a_review_that_keeps_failing_still_reaches_the_file_list_with_the_last_fix_marked(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[FIX, FIX])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        # full review, fix, check, last fix, then the file list: no third review
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet"])
+        ask.assert_called_once()
+        listed = out.split("Files added or changed", 1)[1]
+        self.assertIn("Fixed, not re-checked", listed)
+        self.assertIn("wrong test command", listed)
+        self.assertIn("wrong test command", self.e.agent_runs()[4]["prompt"])  # the last fix was asked for it
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+
+    def test_a_later_review_gets_the_earlier_findings_and_the_check_only_prompt(self):
+        self.e.script_agents(sonnet=[WRITE, {}], opus=[FIX, PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        first, second = self.e.agent_runs()[1]["prompt"], self.e.agent_runs()[3]["prompt"]
+        self.assertIn("Weakened doctrine", first)  # the full audit
+        self.assertNotIn("not a new audit", first)
+        self.assertIn("not a new audit", second)
+        self.assertNotIn("Weakened doctrine", second)
+        self.assertIn("wrong test command", second)
+        self.assertIn(ADAPTED_FILE, second)
+
+    def test_a_passing_check_lists_nothing_as_unchecked(self):
+        self.e.script_agents(sonnet=[WRITE, {}], opus=[FIX, PASS])
+        _, out, _ = self.in_terminal("y")
+        self.assertNotIn("not re-checked", out)
+
+    SAFETY_FIX = {"say": "- blocker [safety] .lane-control/project.md:3 a path under /home/ -> remove it\n"
+                         "VERDICT: FIX"}
+
+    def test_a_safety_finding_gets_one_more_check_after_the_last_fix(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[FIX, self.SAFETY_FIX, PASS])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet", "opus"])
+        self.assertIn("not a new audit", self.e.agent_runs()[5]["prompt"])
+        self.assertIn("[safety]", self.e.agent_runs()[5]["prompt"])
+        self.assertNotIn("not re-checked", out)  # the check cleared it
+
+    def test_a_safety_finding_still_open_after_the_extra_check_stops_with_nothing_committed(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[FIX, self.SAFETY_FIX, self.SAFETY_FIX])
         status, out, ask = self.in_terminal("y")
         self.assertEqual(status, 3)
         self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet", "opus"])
         ask.assert_not_called()
-        self.assertIn("wrong test command", out)
+        self.assertIn("a path under /home/", out)
+        self.assertEqual(self.head_count(), 1)
+        self.assertFalse(self.orca_setup_ran())
+
+    def test_a_safety_check_with_no_verdict_stops_too(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[self.SAFETY_FIX, self.SAFETY_FIX,
+                                                           {"say": "looks fine to me"}])
+        status, _, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        ask.assert_not_called()
+        self.assertEqual(self.head_count(), 1)
+
+    def test_the_safety_mark_counts_in_any_shape(self):
+        for text in ("1. blocker [safety] a:1", "- blocker: [safety] a:1", "- [safety] blocker a:1",
+                     "**blocker** [SAFETY] a:1"):
+            with self.subTest(text=text):
+                self.assertTrue(load().has_safety(text))
+        self.assertFalse(load().has_safety("- blocker a:1 a plain finding"))
+
+    def test_a_safety_finding_in_another_shape_still_gets_the_extra_check_and_stops(self):
+        odd = {"say": "1. blocker [safety] .lane-control/project.md:3 private path\nVERDICT: FIX"}
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[odd, odd, odd])
+        status, _, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet", "opus"])
+        ask.assert_not_called()
+        self.assertEqual(self.head_count(), 1)
+
+    def test_a_minor_safety_finding_under_a_pass_stops_when_the_extra_check_has_it(self):
+        minor = {"say": "- minor [safety] .lane-control/project.md:3 still there\nVERDICT: PASS"}
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[self.SAFETY_FIX, self.SAFETY_FIX, minor])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        self.assertIn("still there", out)
+        ask.assert_not_called()
+
+    def test_a_minor_safety_finding_under_a_first_pass_gets_a_fix_round(self):
+        minor = {"say": "- minor [safety] .lane-control/project.md:3 a path\nVERDICT: PASS"}
+        self.e.script_agents(sonnet=[WRITE, {}], opus=[minor, PASS])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus"])
+
+    def test_a_later_review_that_crashes_counts_as_no_verdict(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[FIX, {"exit": 1, "err": "API error"}])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet"])
+        self.assertIn("gave no verdict", out)
+
+    def test_a_crashed_safety_check_stops_the_run(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}],
+                             opus=[self.SAFETY_FIX, self.SAFETY_FIX, {"exit": 1, "err": "API error"}])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        self.assertIn("gave no verdict", out)
+        ask.assert_not_called()
+
+    def test_a_check_review_gets_the_check_closing_rules(self):
+        self.e.script_agents(sonnet=[WRITE, {}], opus=[FIX, PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        first, second = self.e.agent_runs()[1]["prompt"], self.e.agent_runs()[3]["prompt"]
+        self.assertIn("Report every finding with its file", first)
+        self.assertNotIn("Report every finding with its file", second)
+        self.assertIn("Report only the earlier findings", second)
+
+    def test_a_stopped_safety_review_reruns_without_the_adapter_and_keeps_a_hand_edit(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[self.SAFETY_FIX, self.SAFETY_FIX, self.SAFETY_FIX])
+        self.assertEqual(self.in_terminal("y")[0], 3)
+        (self.repo / ADAPTED_FILE).write_text("owner's hand edit\n")
+        self.e.script_agents(sonnet=[], opus=[PASS])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.models()[6:], ["opus"])  # no new adapter run, only the full review
+        self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "owner's hand edit\n")
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+
+    def test_a_failed_check_scope_after_the_last_fix_still_stops(self):
+        outside = {"write": {"outside.txt": "x\n"}}
+        self.e.script_agents(sonnet=[WRITE, {}, outside], opus=[FIX, FIX])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet"])
         self.assertEqual(self.head_count(), 1)
         self.assertFalse(self.orca_setup_ran())
 
@@ -886,11 +1009,23 @@ class OnboardingTests(unittest.TestCase):
         for reply in ("All good, I think.", "VERDICT: PASS\nbut see above", ""):
             with self.subTest(reply=reply):
                 self.assertIsNone(load().verdict(reply))
+
+    def test_a_first_review_without_a_verdict_stops_with_nothing_committed(self):
         self.e.script_agents(sonnet=[WRITE], opus=[{"say": "All good, I think."}])
-        status, _, ask = self.in_terminal("y")
+        status, out, ask = self.in_terminal("y")
         self.assertEqual(status, 3)
         ask.assert_not_called()
+        self.assertIn("first review gave no verdict", out)
+        self.assertNotIn("still open after the last fix", out)
+        self.assertEqual(self.models(), ["sonnet", "opus"])
         self.assertEqual(self.head_count(), 1)
+
+    def test_a_later_check_without_a_verdict_is_listed_and_the_last_fix_still_runs(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[FIX, {"say": "hm"}])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet"])
+        self.assertIn("gave no verdict", out)
 
     def test_verdict_tolerates_bold(self):
         self.assertEqual(load().verdict("x\n**VERDICT: PASS**\n"), "PASS")

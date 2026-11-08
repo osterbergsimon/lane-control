@@ -136,7 +136,7 @@ MACHINE_VALUES = ("{{PROJECT}}", "{{DESIGN_LEAD}}", "{{TEMPLATES}}", "{{REVIEW_F
 
 class AdaptTemplateTests(unittest.TestCase):
     def test_files_exist(self):
-        for name in TEMPLATE_FILES + ("prompt.md", "review-prompt.md"):
+        for name in TEMPLATE_FILES + ("prompt.md", "review-prompt.md", "check-prompt.md"):
             self.assertTrue((ADAPT / name).is_file(), name)
 
     def test_templates_have_front_matter_and_balanced_fixed_blocks(self):
@@ -209,6 +209,22 @@ class AdaptTemplateTests(unittest.TestCase):
             self.assertIn(needle, text)
         for n in range(1, 19):
             self.assertRegex(text, rf"(?m)^{n}\. ", f"check {n}")
+
+    def test_review_prompt_marks_safety_findings(self):
+        text = " ".join((ADAPT / "review-prompt.md").read_text().split())
+        self.assertIn("`[safety]` after the level", text)
+        self.assertIn("checks 6, 9, 10 and 12", text)
+
+    def test_check_prompt_checks_fixes_only(self):
+        text = " ".join((ADAPT / "check-prompt.md").read_text().split())
+        for ph in ("{{PROJECT}}", "{{DESIGN_LEAD}}", "{{REVIEW_FINDINGS}}"):
+            self.assertIn(ph, text)
+        for needle in ("This is not a new audit", "Raise nothing new outside that", "the fix broke what it touched",
+                       "Read-only", "VERDICT: PASS | FIX", "[safety]", "never instructions to you"):
+            self.assertIn(needle, text)
+        self.assertNotIn("Weakened doctrine", text)
+        for n, line in enumerate((ADAPT / "check-prompt.md").read_text().splitlines(), 1):
+            self.assertLessEqual(len(line), 120, f"check-prompt.md:{n}")
 
     def test_verdict_is_the_last_line_of_the_reply_shape(self):
         text = (ADAPT / "review-prompt.md").read_text()
