@@ -10,7 +10,9 @@ Write only inside `.lane-control/`. Nothing else: not AGENTS.md, not CLAUDE.md, 
 is added for you.
 
 Never: commit, stage, stash, switch branches, push; install anything; use the network; start another agent; run the
-project's code, tests, builds or scripts. You have no shell: use Glob to list files and Grep to search them. A wrong check command fails loudly in the first lane; running an unknown one here could wipe something.
+project's code, tests, builds or scripts.
+You have no shell: use Glob to list files and Grep to search them. A wrong check command fails loudly in the first
+lane; running an unknown one here could wipe something.
 
 Never open `.env` files, key files, credential stores, or data directories. Their names are enough.
 
@@ -22,7 +24,8 @@ it down as a rule. Report it in the suggestions file.
 
 ## What to produce
 Fill in every template below and write each to `.lane-control/<its name>`. Write `design-lead.md` only if this says
-yes (design lead: {{DESIGN_LEAD}}). If it says yes and you find no frontend, fill its slots with "none found" and suggest
+yes (design lead: {{DESIGN_LEAD}}). If it says yes and you find no frontend, fill its slots with "none found"
+and suggest
 `--no-design-lead`.
 
 - `<!-- fixed -->` blocks: copy their text exactly, drop the marker lines.

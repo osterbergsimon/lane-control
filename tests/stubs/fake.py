@@ -63,14 +63,18 @@ def orca():
         state["worktrees"].append(w)
         if state.get("setup_tab"):
             # A repo setup script: Orca runs it in a "Setup" tab; our scripts end by writing the marker.
-            state["terminals"].append({"handle": f"term_{len(state['terminals']) + 1}", "title": "Setup",
-                                       "worktreePath": path})
+            tab = {"handle": f"term_{sum(t['handle'].startswith('term_') for t in state['terminals']) + 1}", "title": path, "paneTitle": "Setup", "worktreePath": path}
+            if state.get("setup_tab") == "runner":  # real Orca, before paneTitle is set
+                tab = {k: v for k, v in dict(tab, title="bash /x/orca/setup-runner.sh").items() if k != "paneTitle"}
+            state["terminals"].append(tab)
             Path(path, ".git").mkdir(exist_ok=True)
             Path(path, "orca.yaml").write_text("scripts:\n  setup: |\n    touch \"$(git rev-parse --git-dir)/orca-setup-done\"\n")
-            Path(path, ".git", "orca-setup-done").write_text("")
+            if not state.get("setup_never_done"):
+                Path(path, ".git", "orca-setup-done").write_text("")
         # Orca opens a plain shell in every new worktree.
-        state["terminals"].append({"handle": f"term_{len(state['terminals']) + 1}", "title": f"dev@box: {path}",
-                                   "worktreePath": path})
+        shell = {"handle": f"term_{sum(t['handle'].startswith('term_') for t in state['terminals']) + 1}", "title": f"dev@box: {path}", "worktreePath": path}
+        shell["preview"] = state.get("shell_preview", "user@box ~/wt $")
+        state["terminals"].append(shell)
         out({"ok": True, "result": {"worktree": {"id": f"{repo}::{path}", "path": path,
                                                  "parentWorktreeId": w["parent"]}}})
     if cmd == "terminal list":
@@ -79,7 +83,7 @@ def orca():
         state["terminals"] = [t for t in state["terminals"] if t["handle"] != opt("--terminal")]
         out({"ok": True, "result": {}})
     if cmd == "terminal create":
-        t = {"handle": f"term_{len(state['terminals']) + 1}", "title": opt("--title", "shell"),
+        t = {"handle": f"term_{sum(t['handle'].startswith('term_') for t in state['terminals']) + 1}", "title": opt("--title", "shell"),
              "worktreePath": opt("--worktree").split(":", 1)[1]}
         state["terminals"].append(t)
         out({"ok": True, "result": {"terminal": t}})
@@ -131,6 +135,9 @@ def cotal():
     if args[:1] == ["spawn"]:
         name = args[1]
         state["agents"].append({"name": name, "cwd": opt("--cwd")})
+        # The agent's own tab, as the worst case: nothing marks it as an agent yet (identity lags, no cotal- title).
+        state.setdefault("terminals", []).append({"handle": f"agent_{name}", "title": f"{name}",
+                                                   "worktreePath": opt("--cwd"), "preview": ""})
         print("Agent joined")
         state_path.write_text(json.dumps(state))
         sys.exit(0)
