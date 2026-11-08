@@ -183,8 +183,9 @@ def persona_mode(text: str):
 
 
 def persona_pins(agents: Path) -> tuple:
-    """(models, mode, design_lead) the rendered personas in `agents` carry: {role: "harness/model"}, a mode or None."""
-    models, mode, texts = {}, None, {}
+    """(models, mode, design_lead, mixed) the rendered personas in `agents` carry: {role: "harness/model"}, their mode (None
+    when none records one or they differ), and whether they differ."""
+    models, modes, texts = {}, set(), {}
     for n in ("coordinator", "design-lead", "reviewer"):
         try:
             texts[n] = (agents / f"{n}.md").read_text()
@@ -193,8 +194,9 @@ def persona_pins(agents: Path) -> tuple:
         h, m = re.search(r"^agent: (\S+)$", texts[n], re.M), re.search(r"^model: (\S+)$", texts[n], re.M)
         if h and m:
             models[n] = f"{h.group(1)}/{m.group(1)}"
-        mode = mode or persona_mode(texts[n])
-    return models, mode, "design-lead" in texts
+        if persona_mode(texts[n]):
+            modes.add(persona_mode(texts[n]))
+    return models, (next(iter(modes)) if len(modes) == 1 else None), "design-lead" in texts, len(modes) > 1
 
 
 def migrate(repo: Path) -> None:
@@ -203,6 +205,16 @@ def migrate(repo: Path) -> None:
     store already has wins and the old one stays where it is, named. Pins the personas carry fill in what the old record
     never held (models, mode, design lead), so a re-run without flags keeps them."""
     cotal, said = repo / ".cotal", []
+    if not store_dir(repo).exists():
+        for other in sorted(store_dir(repo).parent.glob(f"{repo.name}-*")) if store_dir(repo).parent.is_dir() else []:
+            try:
+                root = json.loads((other / "settings.json").read_text()).get("root")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(root, str) and root != str(repo.resolve()) and not Path(root).exists():
+                print(f"warning: {other} belongs to {root}, which is gone. This checkout ({repo}) has a new store; if "
+                      f"it is that project moved or renamed, copy lanes.tsv, sandbox-ports and the settings you want "
+                      f"from there into {store_dir(repo)}", file=sys.stderr, flush=True)
     first = keyed_by_name_only(repo)
     if first.is_dir() and not store_dir(repo).exists():
         try:
@@ -237,7 +249,7 @@ def migrate(repo: Path) -> None:
         else:
             print(f"warning: {old_tab} differs from {new_tab}; the store's table is the one used, and this old one was "
                   "left where it is", file=sys.stderr, flush=True)
-    models, mode, lead = persona_pins(cotal / "agents")
+    models, mode, lead, mixed = persona_pins(cotal / "agents")
     fill = {}
     if "coordinator" in models and "models" not in st:
         fill.update(models=models, design_lead=lead)
@@ -249,6 +261,9 @@ def migrate(repo: Path) -> None:
             fill["name"] = named.group(1)
         if mode and "permission_mode" not in st:
             fill["permission_mode"] = mode
+        if mixed:  # storing one of them could widen another's mode
+            say("permission-mode", "mixed", "the personas carry different modes, so none is stored and each keeps its own; "
+                "set permission_mode in settings.json to make them one")
         said.append("models, design lead and permission mode read from the personas in .cotal/agents/")
     if said or fill:
         settings(repo, root=str(repo), **fill)
@@ -888,8 +903,8 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     changed = []
     kept = {"root": str(repo), "design_lead": design_lead,
             "models": {**{n: f"{h}/{m}" for n, (h, m, _) in texts.items()}, **(stored.get("models") or {})}}
-    if any(modes.values()):
-        kept["permission_mode"] = stored.get("permission_mode") or others
+    if len({v for v in modes.values() if v}) == 1 and not forced:
+        kept["permission_mode"] = others
     settings(repo, **{k: v for k, v in kept.items() if k not in stored})  # fills what the store lacks, never overrides
     for name, (harness, model, text) in texts.items():
         state = write_if_changed(agents / f"{name}.md", text)
@@ -1650,6 +1665,35 @@ def bad_glob(g) -> bool:
         or bool(RULE_UNSAFE & set(g) - set("*?[]"))
 
 
+def validate_settings(repo: Path, st: dict) -> None:
+    """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
+    f = store_dir(repo) / "settings.json"
+    want = {"private": list, "own_models": list, "models": dict, "design_lead": bool, "name": str, "root": str,
+            "permission_mode": str, "port": int}
+    for k, t in want.items():
+        if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
+            raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
+                       f"not {json.dumps(st[k])[:40]}")
+    for k in ("private", "own_models"):
+        if any(not isinstance(x, str) for x in st.get(k, [])):
+            raise Fail(f"{f}: {k} must be a list of strings")
+
+
+def own_check(flag_pins: list, own: set):
+    """None when every flagged opencode pin is declared own (by a flag or the store); else the refusal, printed. A hosted
+    model never gets here."""
+    for flag, pin in flag_pins:
+        if pin[0] != "opencode":
+            continue
+        if pin[1] not in own:
+            print(f"project-setup: {flag} {pin[0]}/{pin[1]}: this model would run bare on this machine, and nothing "
+                  f"says it is yours. Use claude/<model>, or add --own-model {pin[1]} only if it is on a gateway you "
+                  "run yourself, offline or internal", file=sys.stderr)
+            return 2
+        print(f"note: {flag} {pin[0]}/{pin[1]}: {OWN_NOTE}", flush=True)
+    return None
+
+
 def resolve_settings(repo: Path, a) -> dict:
     """What this run uses, flag over the store over the default, and the store updated with it: models per role, whether
     the project has a design lead, the permission mode and the --private globs (which add to the stored ones, so no run
@@ -1787,13 +1831,6 @@ def main(argv=None) -> int:
                   "this agent does not run in it. Use claude/<model>, or an opencode/<provider>/<model> on a gateway "
                   "you run yourself", file=sys.stderr)
             return 2
-        if pin[0] == "opencode":
-            if pin[1] not in own_models:
-                print(f"project-setup: {flag} {pin[0]}/{pin[1]}: this model would run bare on this machine, and nothing "
-                      f"says it is yours. Use claude/<model>, or add --own-model {pin[1]} only if it is on a gateway you "
-                      "run yourself, offline or internal", file=sys.stderr)
-                return 2
-            print(f"note: {flag} {pin[0]}/{pin[1]}: {OWN_NOTE}", flush=True)
     if not a.skip_adapt and not a.refresh and {adapter[0], adapt_reviewer[0]} != {"claude"}:
         print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
               "project, and a third-party lane may not read private data", file=sys.stderr)
@@ -1850,6 +1887,12 @@ def main(argv=None) -> int:
             repo = Path(top.stdout.strip())
             migrate(repo)
             st = settings(repo)
+            validate_settings(repo, st)
+            bad = own_check(flag_pins, own_models | set(st.get("own_models") or []))
+            if bad:
+                return bad
+            if a.name:
+                settings(repo, name=a.name)
             stored_reviewer = (st.get("models") or {}).get("reviewer") if isinstance(st.get("models"), dict) else None
             return refresh(repo, a.name or "", st.get("permission_mode") or "auto", tiers,
                            harness_model(a.reviewer or stored_reviewer or DEFAULT_PINS["reviewer"]))
@@ -1867,6 +1910,10 @@ def main(argv=None) -> int:
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
         beads_note(repo)
         migrate(repo)
+        validate_settings(repo, settings(repo))
+        bad = own_check(flag_pins, own_models | set(settings(repo).get("own_models") or []))
+        if bad:
+            return bad
         cfg = resolve_settings(repo, a)
         coord, reviewer = cfg["pins"]["coordinator"], cfg["pins"]["reviewer"]
         lead = cfg["pins"]["design-lead"] if cfg["lead"] else None

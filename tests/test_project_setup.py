@@ -2609,6 +2609,56 @@ class SettingsStoreTests(unittest.TestCase):
         for n in ("coordinator", "design-lead", "reviewer"):
             self.assertIn('"permission-mode": "bypassPermissions"', (self.repo / ".cotal" / "agents" / f"{n}.md").read_text())
 
+    def test_personas_with_different_modes_are_left_alone_and_none_is_stored(self):
+        self.run_setup("--permission-mode", "bypassPermissions")
+        rv = self.repo / ".cotal" / "agents" / "reviewer.md"
+        rv.write_text(rv.read_text().replace("bypassPermissions", "default"))
+        before = {n: (self.repo / ".cotal" / "agents" / f"{n}.md").read_text() for n in ("coordinator", "reviewer")}
+        self.legacy()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("permission-mode: mixed", r.stdout)
+        self.assertNotIn("permission_mode", self.e.settings(self.repo))
+        for n, text in before.items():
+            self.assertEqual((self.repo / ".cotal" / "agents" / f"{n}.md").read_text(), text)
+
+    def test_refresh_name_is_stored(self):
+        self.run_setup("--name", "A")
+        self.assertEqual(self.e.run(str(self.repo), "--refresh", "--name", "B", adapt=True).returncode, 0)
+        self.assertEqual(self.e.settings(self.repo)["name"], "B")
+        self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertIn("B coordinator;", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+
+    def test_a_moved_checkout_gets_a_new_store_and_a_warning_naming_the_old_one(self):
+        self.run_setup()
+        old_store = self.store
+        new = self.e.home / "elsewhere" / "app"  # the checkout moved to another parent, same folder name
+        new.parent.mkdir()
+        self.repo.rename(new)
+        r = self.e.run(str(new), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("belongs to " + str(self.repo) + ", which is gone", r.stderr)
+        self.assertIn(str(old_store), r.stderr)
+        self.assertNotEqual(self.e.store(new), old_store)
+
+    def test_an_own_model_stored_earlier_allows_a_later_pin_without_the_flag(self):
+        self.run_setup("--own-model", "my/x")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/x", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/y", "--no-start")
+        self.assertEqual(r.returncode, 2)
+
+    def test_hand_edited_values_of_the_wrong_type_are_refused_and_named(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        for key, bad in (("private", "secret"), ("private", 5), ("own_models", "my/x"), ("models", "claude/opus"),
+                         ("design_lead", "no"), ("private", [1])):
+            (self.store / "settings.json").write_text(json.dumps({**st, key: bad}))
+            r = self.e.run(str(self.repo))
+            self.assertEqual(r.returncode, 1, (key, bad))
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn(key, r.stderr)
+
     def test_show_is_exclusive_with_refresh(self):
         self.assertEqual(self.e.run(str(self.repo), "--show", "--refresh", adapt=True).returncode, 2)
 
