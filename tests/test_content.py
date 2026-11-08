@@ -115,13 +115,22 @@ class LaneSkillCliTests(unittest.TestCase):
 
     def test_uses_the_real_orca_cli_in_project_setup_order(self):
         t = self.text
-        order = [t.index(x) for x in ("$ORCA_CLI", "~/.orca/cli/bin/orca", "orca-ide", "linux-orca-cli-shim")]
+        line = next(l for l in t.splitlines() if l.startswith("for c in "))
+        order = [line.index(x) for x in ('"$ORCA_CLI"', ".orca/cli/bin/orca", "orca-ide", "linux-orca-cli-shim",
+                                          "command -v orca)")]
         self.assertEqual(order, sorted(order))
-        for line in t.splitlines():
-            if line.lstrip().startswith("orca "):
-                self.fail(f"bare orca command: {line}")
+        self.assertIn("in double quotes", t)
+        for l in t.splitlines():
+            if l.lstrip().startswith("orca "):
+                self.fail(f"bare orca command: {l}")
+            for m in re.finditer(r"`orca ([a-z]+ [a-z]+)", l):
+                self.assertEqual(m.group(1), "terminal send", f"bare orca in backticks: {l}")
 
     def test_finds_the_setup_tab_without_trusting_the_title(self):
         t = self.text
         for needle in ('`paneTitle` is "Setup"', "setup-runner.sh", "bare prompt", "If unsure, leave it open"):
             self.assertIn(needle, t)
+
+    def test_resolver_does_not_rely_on_a_shell_variable(self):
+        self.assertIn("new shell", self.text)
+        self.assertNotIn("ORCA=${", self.text)

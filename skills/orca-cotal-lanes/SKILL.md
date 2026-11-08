@@ -9,14 +9,17 @@ A lane is one Orca worktree (a child task in the Orca GUI, nested under whoever 
 running in it. You talk to a lane only by Cotal DM; it reports back by DM, and the DM wakes you as its own turn. The
 `orca-cli` skill has the full Orca CLI reference.
 
-Plain `orca` on PATH can be another program (on Linux GNOME's screen reader; it may also be OrcaSlicer). Get the real
-CLI first and use `$ORCA` for every `orca` command below, taking the first that exists and is executable: `$ORCA_CLI`,
-`~/.orca/cli/bin/orca`, `orca-ide` on PATH, `~/.config/orca/linux-orca-cli-shim/orca` (the same order as
-`scripts/project-setup`):
+Plain `orca` on PATH can be another program (on Linux GNOME's screen reader; it may also be OrcaSlicer). Find the real
+CLI first: the first that exists and is executable of `$ORCA_CLI`, `~/.orca/cli/bin/orca`, `orca-ide` on PATH,
+`~/.config/orca/linux-orca-cli-shim/orca`, and last `orca` on PATH (the same order as `scripts/project-setup`). Run this once and note the
+absolute path it prints:
 
 ```
-ORCA=${ORCA_CLI:-}; [ -x "$ORCA" ] || ORCA=$HOME/.orca/cli/bin/orca; [ -x "$ORCA" ] || ORCA=$(command -v orca-ide); [ -x "$ORCA" ] || ORCA=$HOME/.config/orca/linux-orca-cli-shim/orca
+for c in "$ORCA_CLI" ~/.orca/cli/bin/orca "$(command -v orca-ide)" ~/.config/orca/linux-orca-cli-shim/orca "$(command -v orca)"; do [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; break; }; done
 ```
+
+Every command runs in a new shell, so a variable would not survive: write that absolute path, in double quotes, in place of
+`$ORCA` in each `orca` command below.
 
 Never type into an agent's terminal: never use `orca terminal send` on an agent, and do not use Orca's
 `orchestration` skill (task-create, dispatch --inject, check --wait). Those type into the composer; Cotal DMs do not.
