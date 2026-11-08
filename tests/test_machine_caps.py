@@ -507,7 +507,9 @@ class SandboxGateTests(Machine):
         tools = self.install()
         out = self.run_block()[0].stdout.splitlines()
         state = self.env["LANE_STATE_DIR"]
-        self.assertIn(f"rw {state}", out)
+        self.assertIn(f"rw {state}/heavy.0", out)
+        self.assertNotIn(f"rw {state}", out)   # the files, never the directory: a lane could plant links the gate follows
+        self.assertTrue(Path(state, "heavy.0").is_file())
         self.assertIn(f"setenv LANE_STATE_DIR {state}", out)   # the lane must not work out a path of its own
         for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
             self.assertIn(f"ro {tools / name}", out)
@@ -517,6 +519,9 @@ class SandboxGateTests(Machine):
         self.install()
         self.write_limits(LANE_HEAVY_SLOTS=3, LANE_HEAVY_MEM_GB=7)
         r, lane = self.run_block()
+        for i in range(3):
+            self.assertIn(f"rw {self.env['LANE_STATE_DIR']}/heavy.{i}", r.stdout.splitlines())
+        self.assertNotIn("heavy.3", r.stdout)
         self.assertIn(f"ro {lane / 'limits.sh'} /run/sandbox/limits.sh", r.stdout.splitlines())
         self.assertIn("setenv LANE_LIMITS_FILE /run/sandbox/limits.sh", r.stdout.splitlines())
         written = (lane / "limits.sh").read_text()
@@ -527,7 +532,7 @@ class SandboxGateTests(Machine):
         self.install()
         self.limits.write_text("echo hello\nno-such-command\nLANE_HEAVY_SLOTS=2\n")
         r, lane = self.run_block()
-        self.assertIn(f"rw {self.env['LANE_STATE_DIR']}", r.stdout.splitlines())
+        self.assertIn(f"rw {self.env['LANE_STATE_DIR']}/heavy.1", r.stdout.splitlines())
         self.assertIn("LANE_HEAVY_SLOTS=2\n", (lane / "limits.sh").read_text())
 
     def test_without_the_tools_it_binds_nothing_and_says_so(self):
@@ -543,6 +548,24 @@ class SandboxGateTests(Machine):
         r, _ = self.run_block()
         self.assertEqual(r.stdout, "")
         self.assertIn("no machine-wide heavy-work gate", r.stderr)
+
+    def test_a_slot_that_is_a_link_binds_nothing_and_creates_nothing(self):
+        self.install()
+        state = Path(self.env["LANE_STATE_DIR"])
+        state.mkdir(mode=0o700)
+        outside = self.dir / "outside"
+        outside.mkdir()
+        (state / "heavy.0").symlink_to(outside / "created-by-gate")
+        r, _ = self.run_block()
+        self.assertEqual(r.stdout, "")
+        self.assertIn("no machine-wide heavy-work gate", r.stderr)
+        self.assertFalse((outside / "created-by-gate").exists())
+
+    def test_a_slot_that_is_not_a_file_binds_nothing(self):
+        self.install()
+        Path(self.env["LANE_STATE_DIR"], "heavy.0").mkdir(parents=True)
+        r, _ = self.run_block()
+        self.assertEqual(r.stdout, "")
 
     def test_the_helpers_exist_where_the_block_runs(self):
         text = SANDBOX.read_text().split(MARK)[0]

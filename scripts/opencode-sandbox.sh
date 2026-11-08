@@ -25,7 +25,7 @@
 # Instance paths are not hardcoded here: private paths the test checks are SANDBOX_TEST_* in the playbook config.
 #
 # Changes (newest first):
-#   2026-11-08  the machine-wide heavy-work gate works inside: lane-heavy, lane-room, the machine's slot directory and
+#   2026-11-08  the machine-wide heavy-work gate works inside: lane-heavy, lane-room, the machine's slot files and
 #               its resolved limits are bound (nothing is bound, and it says so, when project-setup has not installed them)
 #   2026-10-31  moved to lane-control; the day/night file comes from the playbook config (MODE_FILE) or
 #               OPENCODE_SANDBOX_MODE_FILE instead of a fixed path
@@ -52,8 +52,9 @@
 #   read-write  the worktree; its per-worktree git dir (HEAD, index); a lane-private git dir
 #               (new objects and refs; the shared repo's objects read-only through alternates);
 #               per-lane opencode data/state/cache, CARGO_HOME, SCCACHE_DIR; private /tmp and $HOME;
-#               the machine's heavy-work slot directory, shared with every lane: a steered lane can hold or delete
-#               slots and so slow or ungate other lanes' builds, and reach nothing else through it
+#               the machine's heavy-work slot files, shared with every lane, each bound on its own so it can
+#               be neither replaced nor deleted (never the directory: the gate outside would follow a link planted
+#               there): a steered lane can hold slots and so slow other lanes' builds, and reach nothing else
 #   read-only   /nix/store, /etc pieces (DNS, TLS, passwd, profiles), ~/.config/opencode/opencode.jsonc
 #               and plugins/rove-agent-state.js, ~/.config/git, the lane key (the bare key, a file of its
 #               own), the opencode binary, the day/night switch file, lane-heavy and lane-room from ~/.agents/bin
@@ -519,7 +520,7 @@ done
 
 # --- the machine-wide heavy-work gate ---
 # /run and the owner's config are absent inside: a lane left to itself would make private slots under its own default
-# limits and share a limit with nobody. So it gets the real slot directory and the limits worked out here. lane-heavy
+# limits and share a limit with nobody. So it gets the real slot files and the limits worked out here. lane-heavy
 # finds no systemd scope inside and says so; the memory cap of this lane's own scope still holds.
 tools=$HOME/.agents/bin
 slots=
@@ -529,15 +530,20 @@ if [ -x "$tools/lane-heavy" ] && [ -x "$tools/lane-room" ] && [ -r "$tools/lane-
     . "$tools/lane-limits.sh" >/dev/null
     mkdir -p -- "$LANE_STATE_DIR" 2>/dev/null && [ ! -L "$LANE_STATE_DIR" ] && [ -O "$LANE_STATE_DIR" ] &&
       chmod 700 -- "$LANE_STATE_DIR" 2>/dev/null || exit 0
+    for ((i = 0; i < LANE_HEAVY_SLOTS; i++)); do
+      f=$LANE_STATE_DIR/heavy.$i
+      { [ ! -L "$f" ] && { [ ! -e "$f" ] || [ -f "$f" ]; } && : >>"$f"; } 2>/dev/null || exit 0
+    done
     for v in LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_HEAVY_POLL_SECS LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD \
              LANE_ROOM_MAX_AGENTS; do
       printf '%s=%s\n' "$v" "${!v}"
     done >"$lane/limits.sh"
-    printf '%s' "$LANE_STATE_DIR")
+    printf '%s %s' "$LANE_HEAVY_SLOTS" "$LANE_STATE_DIR")
 fi
 if [ -n "$slots" ]; then
+  slot_count=${slots%% *} slots=${slots#* }
   for t in lane-limits.sh lane-heavy lane-room; do ro "$tools/$t"; done
-  rw "$slots"
+  for ((i = 0; i < slot_count; i++)); do rw "$slots/heavy.$i"; done
   ro "$lane/limits.sh" /run/sandbox/limits.sh
   setenv LANE_STATE_DIR "$slots"; setenv LANE_LIMITS_FILE /run/sandbox/limits.sh
 else
