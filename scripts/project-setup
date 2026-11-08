@@ -4,12 +4,18 @@
   project-setup <git-url|dir> [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE] [--no-start]
+                [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL] [--readapt | --skip-adapt]
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
-re-run reports `exists` for each. It never commits in the target repo.
+re-run reports `exists` for each.
+
+Before the Orca steps, a headless adapting agent writes the project's files into .lane-control/ and a reviewer on
+another model checks them. They are committed, by explicit path, only on the owner's yes in a terminal; on no, or
+without a terminal, they stay uncommitted, no Orca step runs and it exits 3. Nothing else is ever committed.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -27,6 +33,7 @@ MODES = ("auto", "bypassPermissions", "default")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
+HOST_FILES = ("scripts/project-setup", "personas", "skills", "templates", "model-routing.md")  # what --host copies
 
 
 class Fail(Exception):
@@ -106,11 +113,14 @@ def say(step: str, what: str, detail: str = "") -> None:
     print(f"{step}: {what}" + (f" {detail}" if detail else ""), flush=True)
 
 
-def run(cmd, cwd=None, check=True, timeout=180):
+def run(cmd, cwd=None, check=True, timeout=180, **kw):
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="surrogateescape", timeout=timeout,
+                           **kw)
     except subprocess.TimeoutExpired:
         raise Fail(f"{' '.join(cmd[:3])} timed out after {timeout}s")
+    except OSError as e:
+        raise Fail(f"{' '.join(cmd[:3])} could not start: {e.strerror or e}")
     if check and p.returncode != 0:
         msg = (p.stderr.strip() or p.stdout.strip()).splitlines()
         raise Fail(f"{' '.join(cmd[:3])} failed: {msg[-1] if msg else p.returncode}")
@@ -148,8 +158,7 @@ def on_host(host: str, argv: list, target: str) -> int:
         print("project-setup: with --host, give a URL or an absolute (or ~/) path on the host", file=sys.stderr)
         return 2
     remote = "~/.local/share/lane-control"
-    pack = subprocess.Popen(["tar", "-C", str(HERE), "-cf", "-", "scripts/project-setup", "personas", "skills",
-                             "templates"], stdout=subprocess.PIPE)
+    pack = subprocess.Popen(["tar", "-C", str(HERE), "-cf", "-", *HOST_FILES], stdout=subprocess.PIPE)
     copy = subprocess.run([*ssh_base(), host, f"mkdir -p {remote} && tar -C {remote} -xf -"], stdin=pack.stdout)
     pack.stdout.close()
     if pack.wait() != 0 or copy.returncode != 0:
@@ -309,28 +318,59 @@ def claude_wiring(repo: Path, space: str):
     say("claude-wiring", "created", space)
 
 
-def opencode_key_check(repo: Path, space: str, tiers: Path):
-    """Each OpenCode agent has its own empty database, so a paid model needs the key by name (docs/orca.md)."""
-    paid = [(r[0], r[2]) for r in (l.split("\t") for l in tiers.read_text().splitlines()[1:] if not l.startswith("#"))
+def paid_opencode_tiers(tiers: Path) -> list:
+    return [(r[0], r[2]) for r in (l.split("\t") for l in tiers.read_text().splitlines()[1:] if not l.startswith("#"))
             if len(r) > 2 and r[1] == "opencode" and r[2].startswith(("opencode/", "opencode-go/"))
             and not r[2].endswith("-free")]
+
+
+def readd_mgr_steps(space: str) -> str:
+    return (f"cotal svc stop mgr -s {space} --yes, then cotal svc remove mgr -s {space} --yes, "
+            "then rerun project-setup from a shell with the key set.")
+
+
+def opencode_key_check(space: str, tiers: Path):
+    """Each OpenCode agent has its own empty database, so a paid model needs the key by name (docs/orca.md)."""
+    paid = paid_opencode_tiers(tiers)
     if not paid:
         return
-    readd = (f"cotal svc stop mgr -s {space} --yes, then cotal svc remove mgr -s {space} --yes, "
-             "then rerun project-setup from a shell with the key set.")
-    f = repo / ".cotal" / "mgr-service.json"
     lines = []
     if "OPENCODE_API_KEY" not in os.environ:
         lines += [f"warning: tier {t} pins {m} but OPENCODE_API_KEY is not set: those lanes will exit on launch." for t, m in paid]
         lines += ["  `opencode auth login` does not reach an agent's own database. Once per machine:",
                   "  1. Create an API key in the OpenCode console and export OPENCODE_API_KEY in your shell setup.",
-                  f"  2. If mgr already exists, at a natural stop: {readd}"]
-    elif f.exists() and "OPENCODE_API_KEY" not in json.loads(f.read_text()).get("envRefs", {}):
-        lines += [f"warning: mgr was added without OPENCODE_API_KEY, so lanes on {paid[0][1]} will exit on launch.",
-                  f"  At a natural stop: {readd}"]
+                  f"  2. If mgr already exists, at a natural stop: {readd_mgr_steps(space)}"]
     lines.append("note: this check only sees whether the key is set. It cannot tell a wrong key from a spent quota: "
                  "either shows only on the agent's first model call.")
     print("\n".join(lines), file=sys.stderr, flush=True)
+
+
+def stale_mgr_key_check(repo: Path, space: str, tiers: Path):
+    """After start_stack: only a mgr kept from before the key still has a definition without it."""
+    paid = paid_opencode_tiers(tiers)
+    f = repo / ".cotal" / "mgr-service.json"
+    if paid and "OPENCODE_API_KEY" in os.environ and f.exists() \
+            and "OPENCODE_API_KEY" not in json.loads(f.read_text()).get("envRefs", {}):
+        print(f"warning: mgr was added without OPENCODE_API_KEY, so lanes on {paid[0][1]} will exit on launch.\n"
+              f"  At a natural stop: {readd_mgr_steps(space)}", file=sys.stderr, flush=True)
+
+
+def with_cotal_ignored(text: str) -> str:
+    lines = text.splitlines()
+    if ".cotal/" in lines or ".cotal" in lines:
+        return text
+    nl = "\r\n" if "\r\n" in text else "\n"
+    return text + ("" if not text or text.endswith("\n") else nl) + ".cotal/" + nl
+
+
+def ignore_cotal(repo: Path) -> str:
+    gi = repo / ".gitignore"
+    text = read_raw(gi)
+    new = with_cotal_ignored(text)
+    if new == text:
+        return "exists"
+    write_raw(gi, new)
+    return "updated"
 
 
 def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tiers: Path):
@@ -343,14 +383,8 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
                               review_persona, design_lead=lead is not None)
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
     say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
-    opencode_key_check(repo, slug(project), tiers)
-    gi = repo / ".gitignore"
-    lines = gi.read_text().splitlines() if gi.exists() else []
-    if ".cotal/" in lines or ".cotal" in lines:
-        say("gitignore", "exists", ".cotal/")
-    else:
-        gi.write_text("\n".join(lines + [".cotal/"]) + "\n")
-        say("gitignore", "updated", ".cotal/")
+    opencode_key_check(slug(project), tiers)
+    say("gitignore", ignore_cotal(repo), ".cotal/")
 
 
 SETUP_MARKER = "orca-setup-done"
@@ -633,6 +667,361 @@ def verify(repo: Path, space: str, wt):
     say("verify", "ok", "coordinator and design-lead live; design-lead nested under the main checkout")
 
 
+# --- onboarding: adapted files, reviewed, committed only on the owner's yes ----------------------------------------
+
+ADAPTED = ".lane-control"
+SUGGESTIONS = f"{ADAPTED}/SUGGESTIONS.md"  # moved out of the repo before any review; never committed
+SECTION_BEGIN = "<!-- lane-control:begin -->"
+SECTION_END = "<!-- lane-control:end -->"
+SECTION = (f"{SECTION_BEGIN}\n## lane-control\n\nThis project is run with lane-control. Its adapted files are in "
+           f"`{ADAPTED}/`: read them before you start work.\n{SECTION_END}")
+MAX_FIX_ROUNDS = 2
+AGENT_TIMEOUT = 1800  # seconds per headless agent run
+DIFF_LIMIT = 60000  # bytes of diff in a prompt; one argument may hold at most 128 KiB
+FINDINGS_LIMIT = 30000  # bytes of reviewer findings in a prompt
+STOPPED = 3  # exit status: the owner's answer is needed, and no Orca step ran
+READ_TOOLS = ("Read", "Glob", "Grep")
+TEMPLATES = HERE / "templates" / "adapt"
+PROMPTS = ("prompt.md", "review-prompt.md")  # the two prompts; every other file there is a template to adapt
+ADAPT_RULES = f"""
+Rules for this run:
+- Write only inside {ADAPTED}/. Never edit AGENTS.md or anything else in the project.
+- If AGENTS.md should change, write the suggested edits to {SUGGESTIONS} for the owner; do not make them. That file
+  is taken away before anything is reviewed: never refer to it in the other files.
+- Leave everything uncommitted."""
+REVIEW_RULES = """
+You can only read. Report every finding with its file. End your reply with one last line, exactly `VERDICT: PASS` when
+nothing needs fixing, or `VERDICT: FIX` when something does."""
+
+
+def read_raw(f: Path) -> str:
+    """A file as text, whatever its encoding: bytes that aren't UTF-8 survive read_raw and write_raw unchanged."""
+    return f.read_bytes().decode(errors="surrogateescape") if f.exists() else ""
+
+
+def write_raw(f: Path, text: str):
+    f.write_bytes(text.encode(errors="surrogateescape"))
+
+
+def clip(text: str, limit: int) -> str:
+    raw = text.encode(errors="surrogateescape")
+    return text if len(raw) <= limit else raw[:limit].decode(errors="ignore") + "\n(cut short: read the files)\n"
+
+
+def without_section(text: str) -> str:
+    """text minus lane-control's marked section. Refuses markers it can't pair: never guess which lines are ours."""
+    if text.count(SECTION_BEGIN) != text.count(SECTION_END) or text.count(SECTION_BEGIN) > 1:
+        raise Fail(f"AGENTS.md has unpaired or repeated {SECTION_BEGIN} markers; fix it by hand and run again")
+    if SECTION_BEGIN not in text:
+        return text
+    if text.index(SECTION_END) < text.index(SECTION_BEGIN):
+        raise Fail(f"AGENTS.md has {SECTION_END} before {SECTION_BEGIN}; fix it by hand and run again")
+    head, rest = text.split(SECTION_BEGIN, 1)
+    return head + rest.split(SECTION_END, 1)[1]
+
+
+def with_section(text: str) -> str:
+    """text with lane-control's section: replaced in place when present, else added at the end. Nothing else changes."""
+    without_section(text)
+    nl = "\r\n" if "\r\n" in text else "\n"
+    block = SECTION.replace("\n", nl)
+    if SECTION_BEGIN in text:
+        head, rest = text.split(SECTION_BEGIN, 1)
+        return head + block + rest.split(SECTION_END, 1)[1]
+    if not text:
+        return block + nl
+    return text + ("" if text.endswith("\n") else nl) + nl + block + nl
+
+
+def head_text(repo: Path, path: str) -> str:
+    """The file as committed at HEAD, bytes kept as they are; empty when it isn't there."""
+    p = subprocess.run(["git", "show", f"HEAD:{path}"], cwd=repo, capture_output=True)
+    return p.stdout.decode(errors="surrogateescape") if p.returncode == 0 else ""
+
+
+def agents_md(repo: Path) -> str:
+    """The repo path that holds AGENTS.md: a symlink's target, which must be in the repo for git to commit it."""
+    f = repo / "AGENTS.md"
+    if not f.is_symlink():
+        return "AGENTS.md"
+    try:
+        return str(f.resolve().relative_to(repo.resolve()))
+    except ValueError:
+        raise Fail("AGENTS.md links outside the repo, so its section could not be committed. Nothing was committed")
+
+
+def check_agents_md(repo: Path):
+    """AGENTS.md must be as committed, or exactly that plus our section: all the commit is allowed to carry."""
+    path = agents_md(repo)
+    f = repo / path
+    head = head_text(repo, path)
+    if read_raw(f) not in (head, with_section(head)):
+        raise Fail(f"{path} has uncommitted changes besides the lane-control section; commit or undo them and run "
+                   "again. Nothing was committed")
+
+
+def check_gitignore(repo: Path):
+    """.gitignore must be as committed, or exactly that plus the .cotal/ line, for the same reason."""
+    head = head_text(repo, ".gitignore")
+    if read_raw(repo / ".gitignore") not in (head, with_cotal_ignored(head)):
+        hint = " (an earlier project-setup may have rewritten its line endings)" if "\r\n" in head else ""
+        raise Fail(f".gitignore has uncommitted changes besides .cotal/{hint}; commit or undo them and run again. "
+                   "Nothing was committed")
+
+
+def write_section(repo: Path):
+    f = repo / agents_md(repo)
+    text = read_raw(f)
+    new = with_section(text)
+    if new == text:
+        say("agents-md", "exists", "lane-control section")
+        return
+    write_raw(f, new)
+    say("agents-md", "updated" if text else "created", "lane-control section")
+
+
+def git_changes(repo: Path) -> list:
+    """(path, mark) for every file git sees as added, changed or deleted: the record of what happened on disk."""
+    out = run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"], cwd=repo).stdout
+    rows = []
+    for entry in filter(None, out.split("\0")):
+        status, path = entry[:2], entry[3:]
+        mark = "added" if status == "??" or "A" in status else "changed (deleted)" if "D" in status else "changed"
+        rows.append((path, mark))
+    return rows
+
+
+def ours(repo: Path, path: str) -> bool:
+    return path in (agents_md(repo), ".gitignore") or path.startswith(ADAPTED + "/")
+
+
+def fingerprint(f: Path):
+    if f.is_symlink():
+        return "link:" + os.readlink(f)
+    return hashlib.sha1(f.read_bytes()).hexdigest() if f.is_file() else None
+
+
+HEAD_KEY = "\0HEAD"  # no path holds a NUL
+
+
+def current_head(repo: Path) -> str:
+    return run(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd=repo, check=False).stdout.strip()
+
+
+def snapshot(repo: Path) -> dict:
+    """What is already uncommitted before an agent starts, so it is neither blamed on the agent nor committed."""
+    return {**{p: fingerprint(repo / p) for p, _ in git_changes(repo)}, HEAD_KEY: current_head(repo)}
+
+
+def check_scope(repo: Path, before: dict):
+    if current_head(repo) != before[HEAD_KEY]:
+        raise Fail("HEAD moved while an agent ran; onboarding's agents never commit. Nothing further was committed")
+    # before's paths too: a file put back to its committed state no longer shows in git status
+    seen = {p for p, _ in git_changes(repo)} | (set(before) - {HEAD_KEY})
+    strays = sorted(p for p in seen if not ours(repo, p) and (p not in before or before[p] != fingerprint(repo / p)))
+    if strays:
+        raise Fail(f"changed outside {ADAPTED}/ while an agent ran: {' '.join(strays)}. Nothing was committed")
+    check_agents_md(repo)
+    check_gitignore(repo)
+
+
+def agent_cmd(model: str, prompt: str, write: bool) -> list:
+    """A plain headless Claude run: no Orca or Cotal space exists yet, and neither is needed.
+
+    Permissions are what the job needs: read the project except .env files; write only inside .lane-control/, and only
+    for the adapting agent. No shell, so neither can run project code or git; no web; no MCP servers; the project's own
+    settings and hooks are not loaded. Anything else is refused, not asked."""
+    tools = READ_TOOLS + (("Edit", "Write") if write else ())
+    allow = READ_TOOLS + ((f"Edit(/{ADAPTED}/**)",) if write else ())
+    return ["claude", "-p", "--model", model, "--no-session-persistence", "--restricted", "--strict-mcp-config",
+            "--tools", ",".join(tools), "--allowedTools", ",".join(allow),
+            "--disallowedTools", "Read(**/.env*)", "--permission-mode", "dontAsk", prompt]
+
+
+def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
+    return run(agent_cmd(who[1], prompt, write), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL).stdout
+
+
+def kept_suggestions(repo: Path) -> Path:
+    """Where SUGGESTIONS.md waits for the owner: in the git dir, so it is neither reviewed nor committed."""
+    return repo / run(["git", "rev-parse", "--git-path", "lane-control-suggestions.md"], cwd=repo).stdout.strip()
+
+
+def adapt(repo: Path, who: tuple, prompt: str, before: dict):
+    """One run of the adapting agent. Its suggestions leave the repo before anything reviews the result; a fix round's
+    are added to the earlier ones."""
+    run_agent(repo, who, prompt, write=True)
+    new = repo / SUGGESTIONS
+    if new.is_file():
+        kept = kept_suggestions(repo)
+        old = kept.read_bytes() if kept.exists() else b""
+        kept.write_bytes(old + (b"" if not old or old.endswith(b"\n") else b"\n") + new.read_bytes())
+        new.unlink()
+    check_scope(repo, before)
+
+
+def fill(name: str, project: str, design_lead: bool, findings: str = "") -> str:
+    """A prompt template with its machine values, so its wording can change without touching this script."""
+    text = (TEMPLATES / name).read_text()
+    inlined = "\n\n".join(f"--- {t.name} ---\n{t.read_text().rstrip()}" for t in sorted(TEMPLATES.glob("*.md"))
+                          if t.name not in PROMPTS)
+    if findings and "{{REVIEW_FINDINGS}}" not in text:
+        text += "\n{{REVIEW_FINDINGS}}\n"
+    return (text.replace("{{PROJECT}}", project).replace("{{DESIGN_LEAD}}", "yes" if design_lead else "no")
+            .replace("{{TEMPLATES}}", inlined).replace("{{REVIEW_FINDINGS}}", findings).rstrip() + "\n")
+
+
+def review_prompt(repo: Path, project: str, design_lead: bool) -> str:
+    """Built from git and the project alone, so the reviewer never reads the adapting agent's account of its work."""
+    changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
+    files = "\n".join(f"- {p} ({m})" for p, m in changes)
+    tracked = [p for p, m in changes if m != "added"]
+    diff = run(["git", "diff", "HEAD", "--", *tracked], cwd=repo, check=False).stdout if tracked else ""
+    diff = clip(diff, DIFF_LIMIT)
+    return (fill("review-prompt.md", project, design_lead) + f"\nUncommitted files to review:\n{files}\n"
+            + (f"\nDiff of the files already tracked:\n{diff}" if diff else "") + REVIEW_RULES)
+
+
+def verdict(text: str):
+    """PASS or FIX from the reviewer's last line; None when it gave neither, which never counts as a pass."""
+    lines = [l for l in re.sub(r"\x1b\[[0-9;]*m", "", text).splitlines() if l.strip()]
+    m = re.fullmatch(r"[\s*`_]*VERDICT:\s*(PASS|FIX)[\s*`_.]*", lines[-1]) if lines else None
+    return m.group(1) if m else None
+
+
+def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple, before: dict, design_lead: bool):
+    """Review, with at most MAX_FIX_ROUNDS rounds of fixes. None when it passed, else what is still unresolved."""
+    fixes = 0
+    while True:
+        say("review", "running", "/".join(reviewer))
+        out = run_agent(repo, reviewer, review_prompt(repo, project, design_lead), write=False)
+        check_scope(repo, before)
+        result = verdict(out)
+        if result == "PASS":
+            say("review", "passed", f"after {fixes} round(s) of fixes")
+            return None
+        if result is None:
+            return out.strip() + "\n(the reviewer gave no verdict)"
+        if fixes == MAX_FIX_ROUNDS:
+            return out.strip()
+        fixes += 1
+        say("adapt", "fixing", f"round {fixes} of {MAX_FIX_ROUNDS}")
+        found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(out.strip(), FINDINGS_LIMIT)}"
+        adapt(repo, adapter, fill("prompt.md", project, design_lead, found) + ADAPT_RULES, before)
+
+
+def show_suggestions(repo: Path):
+    f = kept_suggestions(repo)
+    if f.is_file() and f.read_text(errors="replace").strip():
+        print("\nSuggested AGENTS.md edits (not applied, not committed):")
+        for line in f.read_text(errors="replace").strip().splitlines():
+            print(f"  {line}")
+
+
+def show_changes(repo: Path, changes: list):
+    print("\nFiles added or changed (from git):")
+    for p, mark in changes:
+        print(f"  {mark}: {p}")
+    show_suggestions(repo)
+    print(flush=True)
+
+
+def has_terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def owner_says_yes() -> bool:
+    if not has_terminal():
+        say("commit", "skipped", "no terminal to ask the owner in")
+        return False
+    try:
+        return input("Commit these files and run the Orca setup? [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def commit_adapted(repo: Path, paths: list, message: str = "Add lane-control files adapted to this project"):
+    """Only these paths, whatever else is staged; with the identity git is configured with, and no attribution."""
+    run(["git", "add", "--", *paths], cwd=repo)
+    run(["git", "commit", "-q", "-m", message, "--only", "--", *paths], cwd=repo)
+    say("commit", "created", f"{len(paths)} file(s)")
+
+
+def onboarded(repo: Path) -> bool:
+    files = run(["git", "ls-tree", "-r", "--name-only", "HEAD", "--", ADAPTED], cwd=repo, check=False).stdout
+    return bool(files.strip()) and SECTION_BEGIN in head_text(repo, agents_md(repo))
+
+
+def refresh_section(repo: Path) -> bool:
+    """An onboarded project whose committed AGENTS.md section is out of date: update it in place, on the owner's yes.
+    True when the Orca setup may run. Without a terminal nothing is written, so an unattended re-run still gets
+    there."""
+    path = agents_md(repo)
+    head = head_text(repo, path)
+    if with_section(head) == head:
+        say("agents-md", "exists", "lane-control section")
+        return True
+    if not has_terminal():
+        say("agents-md", "stale", "lane-control section left as it is; run again in a terminal to update it")
+        return True
+    check_agents_md(repo)
+    write_section(repo)
+    show_changes(repo, [(p, m) for p, m in git_changes(repo) if p == path])
+    if not owner_says_yes():
+        say("adapt", "stopped", f"{path} left uncommitted, no Orca setup. Run again in a terminal to answer")
+        return False
+    commit_adapted(repo, [path], "Update the lane-control section of AGENTS.md")
+    return True
+
+
+def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
+    """The steps in front of the Orca setup; True when that setup may run. A re-run is safe: committed files are left
+    alone unless `again`, and uncommitted ones (an earlier run, a hand edit) go back to review instead of being
+    rewritten."""
+    if onboarded(repo) and not again and not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
+        say("adapt", "exists", f"{ADAPTED}/ is committed")
+        return refresh_section(repo)
+    if not shutil.which("claude"):
+        raise Fail("claude not on PATH, but the onboarding agents use it")
+    for key in ("user.name", "user.email"):
+        if not run(["git", "config", "--get", key], cwd=repo, check=False).stdout.strip():
+            raise Fail(f"git has no {key} here, so the owner's commit can't be made; set it and run again")
+    check_agents_md(repo)
+    check_gitignore(repo)
+    # Before the agent starts, so nothing in .cotal/ can pass for its work; committed with its files.
+    say("gitignore", ignore_cotal(repo), ".cotal/")
+    before = snapshot(repo)
+    if any(p.startswith(ADAPTED + "/") for p in before) and not again:
+        say("adapt", "exists", f"uncommitted {ADAPTED}/ from an earlier run; reviewing it again")
+    else:
+        say("adapt", "running", "/".join(adapter))
+        kept_suggestions(repo).unlink(missing_ok=True)
+        adapt(repo, adapter, fill("prompt.md", project, design_lead) + ADAPT_RULES, before)
+    if not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
+        show_suggestions(repo)
+        kept_suggestions(repo).unlink(missing_ok=True)
+        if onboarded(repo):
+            say("adapt", "exists", "the agent changed nothing")
+            return refresh_section(repo)
+        raise Fail(f"the adapting agent wrote nothing under {ADAPTED}/ (is it gitignored?)")
+    write_section(repo)
+    unresolved = review_with_fixes(repo, project, adapter, reviewer, before, design_lead)
+    if unresolved is not None:
+        print(f"\nThe review did not pass (at most {MAX_FIX_ROUNDS} rounds of fixes). It said:\n{unresolved}\n")
+        say("adapt", "stopped", f"nothing committed, no Orca setup. Owner: fix {ADAPTED}/ and run again, or remove it")
+        return False
+    changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
+    show_changes(repo, changes)
+    if not owner_says_yes():
+        say("adapt", "stopped", "files left uncommitted, no Orca setup. Run again in a terminal to answer")
+        return False
+    check_agents_md(repo)  # the owner may have edited meanwhile; only what the commit carries matters here
+    check_gitignore(repo)
+    commit_adapted(repo, [p for p, _ in changes])
+    kept_suggestions(repo).unlink(missing_ok=True)
+    return True
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="project-setup", description=__doc__.split("\n\n")[0])
     ap.add_argument("target")
@@ -654,6 +1043,13 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int)
     ap.add_argument("--tiers", default=str(HERE / "templates" / "lanes.tsv"))
     ap.add_argument("--no-start", action="store_true")
+    ap.add_argument("--adapter", default="claude/opus",
+                    help="harness/model of the agent that adapts the project's files")
+    ap.add_argument("--adapt-reviewer", default="claude/sonnet",
+                    help="harness/model that reviews the adapted files; must be a different model from --adapter")
+    again = ap.add_mutually_exclusive_group()
+    again.add_argument("--readapt", action="store_true", help="adapt the project again although it was done before")
+    again.add_argument("--skip-adapt", action="store_true", help="only the Orca setup: no adapting agent, no commit")
     argv = sys.argv[1:] if argv is None else argv
     a = ap.parse_args(argv)
 
@@ -666,6 +1062,15 @@ def main(argv=None) -> int:
     coord = harness_model(a.coordinator)
     lead = None if a.no_design_lead else harness_model(a.design_lead)
     reviewer = harness_model(a.reviewer)
+    adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
+    if not a.skip_adapt and {adapter[0], adapt_reviewer[0]} != {"claude"}:
+        print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
+              "project, and a third-party lane may not read private data", file=sys.stderr)
+        return 2
+    if not a.skip_adapt and adapter[1] == adapt_reviewer[1]:
+        print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are {adapter[1]}",
+              file=sys.stderr)
+        return 2
     tiers = Path(a.tiers).expanduser()
     if a.host:
         return on_host(a.host, argv, a.target)
@@ -694,6 +1099,8 @@ def main(argv=None) -> int:
         if "claude" in needed and not a.no_start:
             ensure_claude_trust(repo, record=a.trust_folder)
         project = a.name or repo.name
+        if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+            return STOPPED
         space = slug(project)
         repo_id = orca_repo(repo)
         skills()
@@ -706,6 +1113,7 @@ def main(argv=None) -> int:
             say("start", "skipped", "--no-start")
             return 0
         start_stack(repo, space, a.port)
+        stale_mgr_key_check(repo, space, tiers)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = None

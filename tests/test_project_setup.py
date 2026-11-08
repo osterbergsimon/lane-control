@@ -1,6 +1,8 @@
 """project-setup against stub orca/cotal executables (tests/stubs/fake.py) in a temporary HOME."""
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import re
 import os
@@ -15,6 +17,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "project-setup"
 STUB = ROOT / "tests" / "stubs" / "fake.py"
+FAKE_AGENT = ROOT / "tests" / "stubs" / "fake_agent.py"
 
 
 def load():
@@ -52,10 +55,24 @@ class Env:
         self.env = {**os.environ, "HOME": str(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.state),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
+        self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
 
-    def run(self, *args, env_extra=None):
-        return subprocess.run([sys.executable, str(SCRIPT), *args], env={**self.env, **(env_extra or {})}, capture_output=True, text=True)
+    def run(self, *args, adapt=False, env_extra=None):
+        """adapt False: only today's Orca setup steps; True: the onboarding flow in front of them too."""
+        args = [*args, *([] if adapt else ["--skip-adapt"])]
+        return subprocess.run([sys.executable, str(SCRIPT), *args], env={**self.env, **(env_extra or {})},
+                              capture_output=True, text=True)
+
+    def script_agents(self, **steps):
+        """Replace the harness binaries with the agent stub; steps: {model: [step, ...]}, see tests/stubs/fake_agent.py."""
+        (self.bin / "claude").unlink()
+        (self.bin / "claude").symlink_to(FAKE_AGENT)
+        self.set_state(agent_steps=steps)
+
+    def agent_runs(self):
+        f = Path(str(self.log) + ".agents")
+        return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
 
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -225,6 +242,621 @@ class PureTests(unittest.TestCase):
             self.m.harness_model("vim/opus")
 
 
+class Tty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+ADAPTED_FILE = ".lane-control/commands.md"
+PASS = {"say": "Looks right.\nVERDICT: PASS"}
+FIX = {"say": "commands.md names the wrong test command.\nVERDICT: FIX"}
+WRITE = {"write": {ADAPTED_FILE: "run the tests\n"}, "say": "I checked everything and it is perfect."}
+
+
+class OnboardingTests(unittest.TestCase):
+    def setUp(self):
+        self.e = Env()
+        self.addCleanup(self.e.close)
+        self.repo = self.e.repo()
+
+    def in_terminal(self, answer, *args):
+        """main() as if the owner sat at a terminal and answered `answer`; returns (status, stdout, input mock)."""
+        m = load()
+        out = Tty()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", return_value=answer) as ask, contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            status = m.main([str(self.repo), *args])
+        return status, out.getvalue(), ask
+
+    def head_count(self):
+        return int(git("rev-list", "--count", "HEAD", cwd=self.repo))
+
+    def committed_paths(self):
+        return git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
+
+    def orca_setup_ran(self):
+        return any(c.startswith(("orca repo add", "cotal space create")) for c in self.e.calls())
+
+    def models(self):
+        return [r["model"] for r in self.e.agent_runs()]
+
+    # --- the yes/no ------------------------------------------------------------------------------------------
+    def test_yes_commits_then_runs_orca_setup(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        status, out, ask = self.in_terminal("y", "--name", "Shop")
+        self.assertEqual(status, 0)
+        ask.assert_called_once()
+        self.assertTrue(in_order(self.e.calls(), ["claude -p --model opus", "claude -p --model sonnet",
+                                                  "orca repo add", "cotal spawn coordinator"]), self.e.calls())
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        message = git("log", "-1", "--format=%B", cwd=self.repo)
+        self.assertNotRegex(message, r"(?i)co-authored|claude|generated")
+        self.assertEqual(git("log", "-1", "--format=%an <%ae>", cwd=self.repo), "t <t@t>")
+
+    def test_no_stops_and_leaves_files_uncommitted(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        status, out, ask = self.in_terminal("n")
+        self.assertEqual(status, 3)
+        self.assertEqual(self.head_count(), 1)
+        self.assertTrue((self.repo / ADAPTED_FILE).exists())
+        self.assertFalse(self.orca_setup_ran())
+
+    def test_empty_answer_is_no(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("")[0], 3)
+        self.assertEqual(self.head_count(), 1)
+
+    def test_no_terminal_never_commits_or_runs_orca_setup(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn(f"added: {ADAPTED_FILE}", r.stdout)
+        self.assertEqual(self.head_count(), 1)
+        self.assertFalse(self.orca_setup_ran())
+
+    def test_commit_takes_only_our_paths(self):
+        (self.repo / "wip.txt").write_text("work in progress")
+        (self.repo / "staged.txt").write_text("the owner's staged work")
+        git("add", "staged.txt", cwd=self.repo)
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("yes")[0], 0)
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        status = git("status", "--porcelain", cwd=self.repo)
+        self.assertIn("?? wip.txt", status)
+        self.assertIn("A  staged.txt", status)
+
+    # --- the list --------------------------------------------------------------------------------------------
+    def test_list_comes_from_git_with_marks_and_suggestions(self):
+        (self.repo / ".lane-control").mkdir()
+        (self.repo / ".lane-control" / "old.md").write_text("old\n")
+        git("add", ".lane-control", cwd=self.repo)
+        git("commit", "-q", "-m", "earlier", cwd=self.repo)
+        write = {"write": {".lane-control/old.md": "new\n", ADAPTED_FILE: "x\n",
+                           ".lane-control/SUGGESTIONS.md": "Add the release checklist.\n"},
+                 "say": "I only touched one file."}
+        self.e.script_agents(opus=[write], sonnet=[PASS])
+        status, out, _ = self.in_terminal("n", "--readapt")
+        self.assertEqual(status, 3)
+        self.assertIn("changed: .lane-control/old.md", out)
+        self.assertIn(f"added: {ADAPTED_FILE}", out)
+        self.assertIn("added: AGENTS.md", out)
+        listing, _, suggested = out.partition("Suggested AGENTS.md edits")
+        self.assertIn("Add the release checklist.", suggested)
+        self.assertNotIn("SUGGESTIONS", listing.split("Files added or changed")[1])
+
+    def test_suggestions_are_never_committed(self):
+        write = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "Do y.\n"}}
+        self.e.script_agents(opus=[write], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.assertNotIn(".lane-control/SUGGESTIONS.md", self.committed_paths())
+        self.assertFalse((self.repo / ".lane-control" / "SUGGESTIONS.md").exists())
+
+    def test_suggestions_leave_the_repo_before_the_review(self):
+        write = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "Do y.\n"}}
+        self.e.script_agents(opus=[write], sonnet=[PASS])
+        _, out, _ = self.in_terminal("n")
+        reviewer = self.e.agent_runs()[1]
+        self.assertEqual(reviewer["lane_files"], ["commands.md"])
+        self.assertNotIn("Do y.", reviewer["prompt"])
+        self.assertIn("Do y.", out)
+        self.assertNotIn("SUGGESTIONS", git("status", "--porcelain", "-uall", cwd=self.repo))
+
+    def test_fix_round_suggestions_are_added_to_the_earlier_ones(self):
+        first = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "First question"}}
+        fixed = {"write": {ADAPTED_FILE: "y\n", ".lane-control/SUGGESTIONS.md": "Second question\n"}}
+        self.e.script_agents(opus=[first, fixed], sonnet=[FIX, PASS])
+        _, out, _ = self.in_terminal("n")
+        self.assertIn("First question\n  Second question", out)
+        self.assertEqual(self.e.agent_runs()[3]["lane_files"], ["commands.md"])
+
+    def test_a_new_adapting_run_starts_with_no_old_suggestions(self):
+        write = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "Old question\n"}}
+        self.e.script_agents(opus=[write], sonnet=[PASS])
+        self.in_terminal("n")
+        self.e.set_state(agent_steps={"opus": [{"write": {ADAPTED_FILE: "y\n"}}], "sonnet": [PASS]})
+        self.assertNotIn("Old question", self.in_terminal("n", "--readapt")[1])
+
+    def test_suggestion_only_readapt_shows_them(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.e.set_state(agent_steps={"opus": [{"write": {".lane-control/SUGGESTIONS.md": "Only a question\n"}}]})
+        status, out, _ = self.in_terminal("y", "--readapt")
+        self.assertEqual(status, 0)
+        self.assertIn("Only a question", out)
+        self.assertEqual(out.count("Only a question"), 1)
+
+    def test_suggestions_are_shown_again_on_a_rerun(self):
+        write = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "Do y.\n"}}
+        self.e.script_agents(opus=[write], sonnet=[PASS])
+        self.in_terminal("n")
+        self.e.set_state(agent_steps={"sonnet": [PASS]})
+        self.assertIn("Do y.", self.in_terminal("n")[1])
+
+    # --- the reviewer ----------------------------------------------------------------------------------------
+    def test_reviewer_never_sees_the_adapting_agents_account(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.in_terminal("n")
+        adapter, reviewer = self.e.agent_runs()
+        self.assertNotIn("perfect", reviewer["prompt"])
+        self.assertIn(ADAPTED_FILE, reviewer["prompt"])
+        self.assertIn("VERDICT", reviewer["prompt"])
+
+    def test_same_model_for_both_is_refused(self):
+        self.e.script_agents()
+        r = self.e.run(str(self.repo), "--adapter", "claude/opus", "--adapt-reviewer", "claude/opus", adapt=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_fix_round_passes_findings_back(self):
+        fixed = {"write": {ADAPTED_FILE: "fixed\n"}}
+        self.e.script_agents(opus=[WRITE, fixed], sonnet=[FIX, PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus", "sonnet"])
+        self.assertIn("wrong test command", self.e.agent_runs()[2]["prompt"])
+        self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "fixed\n")
+
+    def test_two_fix_rounds_then_stops_and_commits_nothing(self):
+        self.e.script_agents(opus=[WRITE, {}, {}, {}], sonnet=[FIX, FIX, FIX, PASS])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus", "sonnet", "opus", "sonnet"])
+        ask.assert_not_called()
+        self.assertIn("wrong test command", out)
+        self.assertEqual(self.head_count(), 1)
+        self.assertFalse(self.orca_setup_ran())
+
+    def test_review_without_a_verdict_is_not_a_pass(self):
+        for reply in ("All good, I think.", "VERDICT: PASS\nbut see above", ""):
+            with self.subTest(reply=reply):
+                self.assertIsNone(load().verdict(reply))
+        self.e.script_agents(opus=[WRITE], sonnet=[{"say": "All good, I think."}])
+        status, _, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        ask.assert_not_called()
+        self.assertEqual(self.head_count(), 1)
+
+    def test_verdict_tolerates_bold(self):
+        self.assertEqual(load().verdict("x\n**VERDICT: PASS**\n"), "PASS")
+
+    # --- AGENTS.md -------------------------------------------------------------------------------------------
+    def _with_agents_md(self, text="# Rules\n\nBe kind.\n"):
+        (self.repo / "AGENTS.md").write_text(text)
+        git("add", "AGENTS.md", cwd=self.repo)
+        git("commit", "-q", "-m", "agents", cwd=self.repo)
+
+    def test_existing_agents_md_only_gains_the_section(self):
+        self._with_agents_md()
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        m = load()
+        text = (self.repo / "AGENTS.md").read_text()
+        self.assertTrue(text.startswith("# Rules\n\nBe kind.\n"))
+        self.assertEqual(text.count(m.SECTION_BEGIN), 1)
+        self.assertEqual(m.without_section(text).rstrip(), "# Rules\n\nBe kind.")
+
+    def test_no_agents_md_creates_one_with_only_the_section(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.in_terminal("n")
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), load().SECTION + "\n")
+
+    def _link_agents_md(self, target):
+        (self.repo / "AGENTS.md").symlink_to(target)
+        git("add", "AGENTS.md", cwd=self.repo)
+        git("commit", "-q", "-m", "link", cwd=self.repo)
+
+    def test_symlinked_agents_md_gets_the_section_in_its_target(self):
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "rules.md").write_text("# Rules\n")
+        git("add", "docs", cwd=self.repo)
+        self._link_agents_md("docs/rules.md")
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.assertTrue((self.repo / "AGENTS.md").is_symlink())
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "docs/rules.md", ADAPTED_FILE]))
+        self.assertIn(load().SECTION_BEGIN, (self.repo / "docs" / "rules.md").read_text())
+
+    def test_agents_md_linking_outside_the_repo_is_refused(self):
+        outside = self.e.home / "shared.md"
+        outside.write_text("# Shared\n")
+        self._link_agents_md(str(outside))
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(outside.read_text(), "# Shared\n")
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_section_updated_in_place_never_duplicated(self):
+        m = load()
+        old = f"before\n{m.SECTION_BEGIN}\nstale\n{m.SECTION_END}\nafter\n"
+        new = m.with_section(old)
+        self.assertEqual(new, f"before\n{m.SECTION}\nafter\n")
+        self.assertEqual(m.with_section(new), new)
+
+    def test_section_keeps_crlf_and_a_missing_final_newline(self):
+        m = load()
+        self.assertTrue(m.with_section("a\r\nb\r\n").startswith("a\r\nb\r\n\r\n<!--"))
+        self.assertIn("\r\n", m.with_section("a\r\nb\r\n").split(m.SECTION_BEGIN)[1])
+        self.assertEqual(m.with_section("a"), f"a\n\n{m.SECTION}\n")
+
+    def test_broken_markers_are_refused(self):
+        m = load()
+        for text in (m.SECTION_BEGIN, m.SECTION_END + m.SECTION_BEGIN, m.SECTION + m.SECTION):
+            with self.subTest(text=text), self.assertRaises(m.Fail):
+                m.with_section(text)
+
+    def test_owners_uncommitted_agents_md_edit_stops_before_any_agent(self):
+        self._with_agents_md()
+        (self.repo / "AGENTS.md").write_text("# Rules\n\nBe very kind.\n")
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_agent_editing_agents_md_is_refused(self):
+        self._with_agents_md()
+        write = {"write": {ADAPTED_FILE: "x\n", "AGENTS.md": "# Rewritten\n"}}
+        self.e.script_agents(opus=[write], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.head_count(), 2)
+        self.assertFalse(self.orca_setup_ran())
+
+    def test_agent_writing_outside_its_folder_is_refused(self):
+        write = {"write": {ADAPTED_FILE: "x\n", "src/app.py": "oops\n"}}
+        self.e.script_agents(opus=[write], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.head_count(), 1)
+        self.assertEqual(self.models(), ["opus"])
+
+    def test_owners_dirty_files_are_not_blamed_on_the_agent(self):
+        (self.repo / "wip.txt").write_text("mine")
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("n")[0], 3)
+
+    # --- re-runs ---------------------------------------------------------------------------------------------
+    def test_rerun_after_yes_starts_no_agent(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        head, runs = git("rev-parse", "HEAD", cwd=self.repo), len(self.e.agent_runs())
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("adapt: exists", r.stdout)
+        self.assertEqual(len(self.e.agent_runs()), runs)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+
+    def test_rerun_with_symlinked_agents_md_starts_no_agent(self):
+        (self.repo / "CLAUDE.md").write_text("# Rules\n")
+        git("add", "CLAUDE.md", cwd=self.repo)
+        (self.repo / "AGENTS.md").symlink_to("CLAUDE.md")
+        git("add", "AGENTS.md", cwd=self.repo)
+        git("commit", "-q", "-m", "link", cwd=self.repo)
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        self.assertTrue(load().onboarded(self.repo))
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.models(), ["opus", "sonnet"])
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+
+    def test_rerun_after_readapt_no_asks_again_instead_of_going_on(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.e.set_state(agent_steps={"opus": [{"write": {ADAPTED_FILE: "newer\n"}}], "sonnet": [PASS, PASS]})
+        self.assertEqual(self.in_terminal("n", "--readapt")[0], 3)
+        status, out, ask = self.in_terminal("n")
+        self.assertEqual(status, 3)
+        ask.assert_called_once()
+        self.assertNotIn("verify: ok", out)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus", "sonnet", "sonnet"])
+
+    def _stale_section(self):
+        """An onboarded project whose committed section has wording this lane-control no longer writes."""
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        m = load()
+        f = self.repo / "AGENTS.md"
+        f.write_text(f.read_text().replace(m.SECTION, f"{m.SECTION_BEGIN}\nOLD WORDING\n{m.SECTION_END}"))
+        git("add", "AGENTS.md", cwd=self.repo)
+        git("commit", "-q", "-m", "old section", cwd=self.repo)
+        self.e.log.write_text("")
+        return f, m
+
+    def test_plain_rerun_updates_a_stale_section_on_yes(self):
+        f, m = self._stale_section()
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0)
+        ask.assert_called_once()
+        self.assertEqual(self.models(), ["opus", "sonnet"])
+        self.assertNotIn("OLD WORDING", f.read_text())
+        self.assertEqual(f.read_text().count(m.SECTION_BEGIN), 1)
+        self.assertEqual(self.committed_paths(), ["AGENTS.md"])
+        self.assertIn("changed: AGENTS.md", out)
+        self.assertIn("verify: ok", out)
+
+    def test_plain_rerun_stale_section_no_leaves_it_uncommitted(self):
+        f, _ = self._stale_section()
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        status, out, _ = self.in_terminal("n")
+        self.assertEqual(status, 3)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+        self.assertNotIn("OLD WORDING", f.read_text())
+        self.assertNotIn("verify: ok", out)
+
+    def test_rerun_without_terminal_leaves_a_stale_section_and_runs_setup(self):
+        f, _ = self._stale_section()
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("agents-md: stale", r.stdout)
+        self.assertIn("OLD WORDING", f.read_text())
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+        self.assertIn("verify: ok", r.stdout)
+
+    def test_readapt_with_no_agent_change_updates_a_stale_section(self):
+        f, _ = self._stale_section()
+        self.e.set_state(agent_steps={"opus": [{}]})
+        self.assertEqual(self.in_terminal("y", "--readapt")[0], 0)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus"])
+        self.assertNotIn("OLD WORDING", f.read_text())
+        self.assertEqual(self.committed_paths(), ["AGENTS.md"])
+
+    def test_rerun_with_a_current_section_never_asks(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        status, _, ask = self.in_terminal("n")
+        self.assertEqual(status, 0)
+        ask.assert_not_called()
+
+    def test_rerun_after_no_reviews_without_rewriting(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.in_terminal("n")
+        (self.repo / ADAPTED_FILE).write_text("the owner's hand edit\n")
+        self.e.set_state(agent_steps={"sonnet": [PASS]})
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.assertEqual(self.models(), ["opus", "sonnet", "sonnet"])
+        self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "the owner's hand edit\n")
+        self.assertEqual(self.committed_paths().count("AGENTS.md"), 1)
+
+    def test_readapt_after_yes_keeps_one_section(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.e.set_state(agent_steps={"opus": [{"write": {ADAPTED_FILE: "newer\n"}}], "sonnet": [PASS]})
+        self.assertEqual(self.in_terminal("y", "--readapt")[0], 0)
+        self.assertEqual(self.committed_paths(), [ADAPTED_FILE])
+        self.assertEqual((self.repo / "AGENTS.md").read_text().count(load().SECTION_BEGIN), 1)
+
+    # --- what an agent may touch ------------------------------------------------------------------------------
+    def test_agent_putting_an_owners_dirty_file_back_is_refused(self):
+        (self.repo / "wip.txt").write_text("committed\n")
+        git("add", "wip.txt", cwd=self.repo)
+        git("commit", "-q", "-m", "wip", cwd=self.repo)
+        (self.repo / "wip.txt").write_text("the owner's edit\n")
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n", "wip.txt": "committed\n"}}], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.models(), ["opus"])
+
+    def test_agent_editing_inside_the_section_is_refused(self):
+        tampered = load().SECTION.replace("read them", "ignore them") + "\n"
+        self.e.script_agents(opus=[WRITE, {"write": {"AGENTS.md": tampered}}], sonnet=[FIX, PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.head_count(), 1)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus"])
+
+    def test_agent_changing_gitignore_layout_is_refused(self):
+        (self.repo / ".gitignore").write_text("a\nb\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "ignore", cwd=self.repo)
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n", ".gitignore": "b\na\n.cotal/\n"}}], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.models(), ["opus"])
+
+    def _yes_after(self, change):
+        """The owner answers yes, but `change` happens while the question waits. Returns (status, stderr)."""
+        m = load()
+        err = io.StringIO()
+
+        def answer(_):
+            change()
+            return "y"
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", side_effect=answer), contextlib.redirect_stdout(Tty()), \
+                contextlib.redirect_stderr(err):
+            return m.main([str(self.repo)]), err.getvalue()
+
+    def test_owners_other_work_at_the_prompt_does_not_cost_the_yes(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        status, err = self._yes_after(lambda: (self.repo / "notes.txt").write_text("mine"))
+        self.assertEqual(status, 0, err)
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertIn("?? notes.txt", git("status", "--porcelain", cwd=self.repo))
+
+    def test_agents_md_edited_at_the_prompt_stops_the_commit(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        f = self.repo / "AGENTS.md"
+        status, err = self._yes_after(lambda: f.write_text(f.read_text() + "the owner's line\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("AGENTS.md has uncommitted changes", err)
+        self.assertNotIn("agent", err.replace("AGENTS.md", ""))
+        self.assertEqual(self.head_count(), 1)
+
+    def test_change_during_an_agent_run_does_not_claim_who_made_it(self):
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n", "src/app.py": "oops\n"}}])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("src/app.py", r.stderr)
+        self.assertNotIn("an agent changed", r.stderr)
+
+    def test_gitignore_rewritten_by_an_earlier_setup_says_so(self):
+        (self.repo / ".gitignore").write_bytes(b"a\r\nb\r\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "ignore", cwd=self.repo)
+        (self.repo / ".gitignore").write_bytes(b"a\nb\n.cotal/\n")
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("earlier project-setup may have rewritten its line endings", r.stderr)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_agent_committing_is_refused(self):
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n"}, "commit": "sneaky"}], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.models(), ["opus"])
+        self.assertFalse(self.orca_setup_ran())
+
+    # --- sizes and encodings ---------------------------------------------------------------------------------
+    def test_huge_multibyte_diff_and_findings_fit_in_the_prompt(self):
+        (self.repo / ".lane-control").mkdir()
+        big = self.repo / ".lane-control" / "a.md"
+        big.write_text("€" * 59000 + "\n")
+        git("add", ".lane-control", cwd=self.repo)
+        git("commit", "-q", "-m", "big", cwd=self.repo)
+        huge = {"say": "€" * 59000 + "\nVERDICT: FIX"}
+        self.e.script_agents(opus=[{"write": {".lane-control/a.md": "é" * 59000 + "\n"}}, {}],
+                             sonnet=[huge, PASS])
+        self.assertEqual(self.in_terminal("n", "--readapt")[0], 3)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus", "sonnet"])
+        for run in self.e.agent_runs():
+            self.assertLess(len(run["prompt"].encode()), 131072)
+
+    def test_a_program_that_cannot_start_is_a_clean_failure(self):
+        m = load()
+        with self.assertRaises(m.Fail):
+            m.run(["true", "x" * 200000])
+        with self.assertRaises(m.Fail):
+            m.run(["/nonexistent/program"])
+
+    def test_non_utf8_agents_md_and_gitignore_keep_their_bytes(self):
+        (self.repo / "AGENTS.md").write_bytes(b"caf\xe9\n")
+        (self.repo / ".gitignore").write_bytes(b"caf\xe9\n")
+        git("add", "AGENTS.md", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "latin1", cwd=self.repo)
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.assertTrue((self.repo / "AGENTS.md").read_bytes().startswith(b"caf\xe9\n\n<!--"))
+        self.assertEqual((self.repo / ".gitignore").read_bytes(), b"caf\xe9\n.cotal/\n")
+
+    # --- failures and switches -------------------------------------------------------------------------------
+    def test_agent_failure_stops_before_orca_setup(self):
+        self.e.script_agents(opus=[{"exit": 1, "say": "boom"}])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(self.orca_setup_ran())
+        self.assertFalse((self.repo / "AGENTS.md").exists())
+
+    def test_agent_writing_nothing_stops(self):
+        self.e.script_agents(opus=[{}])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("wrote nothing", r.stderr)
+
+    def test_no_git_identity_stops_before_any_agent(self):
+        (self.e.home / ".gitconfig").write_text("")
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("user.name", r.stderr)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_skip_adapt_runs_only_todays_setup(self):
+        self.e.script_agents()
+        r = self.e.run(str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.e.agent_runs(), [])
+        self.assertFalse((self.repo / "AGENTS.md").exists())
+
+    # --- how the agents are started --------------------------------------------------------------------------
+    def test_claude_adapter_may_write_only_its_folder(self):
+        cmd = load().agent_cmd("opus", "PROMPT", write=True)
+        self.assertEqual(cmd[:2], ["claude", "-p"])
+        self.assertEqual(cmd[-1], "PROMPT")
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Glob,Grep,Edit,Write")
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Read,Glob,Grep,Edit(/.lane-control/**)")
+        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
+        self.assertIn("--restricted", cmd)
+
+    def test_claude_reviewer_only_reads(self):
+        cmd = load().agent_cmd("sonnet", "PROMPT", write=False)
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertNotIn("Edit", " ".join(cmd[:-1]))
+
+    def test_onboarding_agents_are_claude_only(self):
+        # They read the whole project, and a third-party lane may not read private data.
+        self.e.script_agents()
+        for flag in ("--adapter", "--adapt-reviewer"):
+            with self.subTest(flag=flag):
+                r = self.e.run(str(self.repo), flag, "opencode/x/y", adapt=True)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn("claude/<model>", r.stderr)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    # --- .gitignore ------------------------------------------------------------------------------------------
+    def test_gitignore_is_listed_and_committed_before_the_agent_runs(self):
+        seen = {"write": {ADAPTED_FILE: "x\n", ".cotal/scratch.txt": "not the agent's"}}
+        self.e.script_agents(opus=[seen], sonnet=[PASS])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0)
+        self.assertIn("added: .gitignore", out)
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(git("show", "HEAD:.gitignore", cwd=self.repo), ".cotal/")
+
+    def test_gitignore_keeps_other_lines_and_crlf(self):
+        (self.repo / ".gitignore").write_bytes(b"a\r\nb\r\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "ignore", cwd=self.repo)
+        self.assertEqual(load().ignore_cotal(self.repo), "updated")
+        self.assertEqual((self.repo / ".gitignore").read_bytes(), b"a\r\nb\r\n.cotal/\r\n")
+
+    def test_owners_uncommitted_gitignore_edit_stops_before_any_agent(self):
+        (self.repo / ".gitignore").write_text("mine\n")
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_agent_editing_gitignore_is_refused(self):
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n", ".gitignore": ".cotal/\nsecrets\n"}}], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.head_count(), 1)
+
+    # --- prompts and --host ----------------------------------------------------------------------------------
+    def test_prompt_templates_get_their_machine_values(self):
+        fixed = {"write": {ADAPTED_FILE: "fixed\n"}}
+        self.e.script_agents(opus=[WRITE, fixed], sonnet=[FIX, PASS])
+        self.in_terminal("n", "--name", "Shop", "--no-design-lead")
+        first, review, second, _ = self.e.agent_runs()
+        for run in (first, review, second):
+            self.assertIn("Shop", run["prompt"])
+            self.assertNotIn("{{", run["prompt"])
+        self.assertIn("design lead: no", first["prompt"])
+        self.assertNotIn("wrong test command", first["prompt"])
+        self.assertIn("wrong test command", second["prompt"])
+
+    def test_host_mode_carries_what_onboarding_reads(self):
+        m = load()
+        self.assertIn("templates", m.HOST_FILES)  # templates/adapt/ with it
+        self.assertIn("model-routing.md", m.HOST_FILES)
+        for path in m.HOST_FILES:
+            self.assertTrue((ROOT / path).exists(), path)
+
+
 class RunTests(unittest.TestCase):
     def setUp(self):
         self.e = Env()
@@ -365,6 +997,19 @@ class RunTests(unittest.TestCase):
         self.assertIn("cotal svc stop mgr -s shop --yes", r.stderr)
         self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
         self.assertRegex(r.stderr, r"cannot tell .*quota")
+
+    def test_following_the_key_steps_clears_the_warning(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        state = json.loads(self.e.state.read_text())  # the owner ran `cotal svc remove mgr`; the file stays behind
+        del state["services"]["mgr"]
+        self.e.state.write_text(json.dumps(state))
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("mgr was added without", r.stderr)
+        d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
+        self.assertEqual(d["envRefs"].get("OPENCODE_API_KEY"), "OPENCODE_API_KEY")
 
     def test_key_set_but_mgr_added_without_it_warns(self):
         repo = self.e.repo()
