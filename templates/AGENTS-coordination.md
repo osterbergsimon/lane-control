@@ -1,4 +1,8 @@
-# AGENTS.md sections to adapt
+# AGENTS.md sections to adapt (Rove flow)
+
+**Rove flow only.** The Orca flow (`project-setup`) does not paste this file into a project. It uses
+`templates/adapt/` (the path map is `.lane-control/routing.md`) and `templates/lane-brief.md`. The report shape at the end
+is the same 6-line shape as `templates/lane-brief.md`.
 
 Copy into a project's AGENTS.md and replace every `<...>` (paths, components, gate commands, key prefix).
 Tiers are roles (swift, standard, deep, top); the machine's config maps them to engines and models.
@@ -77,7 +81,7 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
   `rove api send --prompt-file - <<'EOF'` with the **report format** below; check `"delivered":true`.
   Report `failed` or `blocked` instead of guessing outside your scope.
 - **Report format** (every report costs a coordinator turn). One message, at the end only; no progress,
-  receipt or acknowledgement messages; mid-lane only for a blocker. At most 5 lines, no narrative, no
+  receipt or acknowledgement messages; mid-lane only for a blocker. At most 6 lines, no narrative, no
   file lists, no retelling of the diff; details go in the PR body or the issue notes.
   ```
   <KEY> succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP: <one line>
@@ -85,4 +89,5 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
   gates: <command> ok|fail, ...
   deviations: none | <brief item: already fixed / deferred and why, one line each>
   filed: none | <issue ids>
+  agents-md: none | <one line the next agent would need that AGENTS.md lacks; never commit it yourself>
   ```

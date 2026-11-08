@@ -1,6 +1,6 @@
 # Model routing for coordinator lanes
 
-Shared by all project coordinators on a machine. Tiers are **roles**; the config maps them to engines and models. Each project keeps its own **path map** in its AGENTS.md; this file holds the common rules. The ledger is `lane-ledger.tsv`.
+Shared by all project coordinators on a machine. Tiers are **roles**; the config maps them to engines and models. Each project keeps its own **path map** in `.lane-control/routing.md` (older setups: its AGENTS.md); this file holds the common rules. The ledger is `lane-ledger.tsv`.
 
 ## Tiers
 | Tier | Role | Engine / model / budget |
