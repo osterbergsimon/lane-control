@@ -5,7 +5,7 @@
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE | --opencode hosted|own|none [--opencode-model M]] [--own-model M]... [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
-                [--readapt | --skip-adapt | --refresh]
+                [--readapt | --skip-adapt | --refresh | --show]
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
@@ -17,11 +17,17 @@ without a terminal, they stay uncommitted, no Orca step runs and it exits 3. Not
 
 --refresh is for a project set up earlier, after lane-control's personas or skill changed: it re-renders the personas
 in .cotal/agents/ (keeping each one's harness, model and permission mode), reinstalls the skill, leaves the project's
-.cotal/lanes.tsv alone and says which running agents keep the old text until restarted. No adapting or reviewing
+tier table alone and says which running agents keep the old text until restarted. No adapting or reviewing
 agent, no broker, no Orca worktree, no commit.
 
 The tier table is decided once per project: with a terminal project-setup asks how OpenCode lanes run; without one,
---opencode or a full --tiers say it, and given neither it is hosted (sandbox required). A re-run keeps .cotal/lanes.tsv.
+--opencode or a full --tiers say it, and given neither it is hosted (sandbox required). A re-run keeps the project's table.
+
+Per-project settings live outside the repo and outside .cotal/ (which Cotal owns), in
+~/.config/lane-control/projects/<folder name>/: settings.json (models per role, design lead on or off, permission mode,
+--private globs, OpenCode answer, own models, broker port), lanes.tsv (the tier table) and sandbox-ports. Flags update
+the store and a run without them reuses it; --show prints it. A project set up before the store existed is moved there
+once, automatically, and the run says what moved. Only the rendered personas stay in .cotal/agents/. No secret goes in.
 """
 import argparse
 import hashlib
@@ -112,14 +118,117 @@ def free_port(start: int) -> int:
     raise Fail("no free broker port in 14200-14999")
 
 
-def record(repo: Path, **kw) -> dict:
-    f = repo / ".cotal" / "lane-control.json"
-    data = json.loads(f.read_text()) if f.exists() else {}
+SETTING_KEYS = ("root", "name", "models", "design_lead", "permission_mode", "private", "opencode", "opencode_model",
+                "own_models", "port", "claude_setup")  # all that is ever written: names and choices, never a secret
+DEFAULT_PINS = {"coordinator": "claude/opus", "design-lead": "claude/opus", "reviewer": "claude/opus"}
+
+
+def config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path(os.environ.get("HOME", str(Path.home()))) / ".config")
+
+
+def store_dir(repo: Path) -> Path:
+    """The project's settings store, outside the repo and outside .cotal/ (which Cotal owns). Keyed by the main
+    checkout's folder name, like the sandbox's ports file (scripts/opencode-sandbox.sh)."""
+    return config_home() / "lane-control" / "projects" / repo.name
+
+
+def store_table(repo: Path) -> Path:
+    return store_dir(repo) / "lanes.tsv"
+
+
+def write_atomic(path: Path, data: bytes, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    tmp.write_bytes(data)
+    tmp.chmod(mode)
+    os.replace(tmp, path)
+
+
+def settings(repo: Path, **kw) -> dict:
+    """The project's settings.json (and, with keywords, updated). Only the names in SETTING_KEYS are written."""
+    f = store_dir(repo) / "settings.json"
+    try:
+        data = json.loads(f.read_text()) if f.exists() else {}
+    except (OSError, ValueError) as e:
+        raise Fail(f"cannot read {f}: {e}; fix or remove it")
+    if not isinstance(data, dict):
+        raise Fail(f"{f} is not a JSON object; fix or remove it")
     if kw:
-        data.update(kw)
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(data, indent=2) + "\n")
+        bad = sorted(set(kw) - set(SETTING_KEYS))
+        if bad:
+            raise Fail(f"settings key {bad[0]!r} is not one project-setup keeps (no secrets go in the store)")
+        if any(data.get(k) != v for k, v in kw.items()):
+            data.update(kw)
+            store_dir(repo).mkdir(parents=True, exist_ok=True)
+            store_dir(repo).chmod(0o700)
+            write_atomic(f, (json.dumps(data, indent=2) + "\n").encode(), 0o600)
     return data
+
+
+def persona_mode(text: str):
+    """The mode a persona was rendered with: its launch line (Claude), else its body line (opencode)."""
+    m = (re.search(r'"permission-mode": "(\w+)"', text) or re.search(r"permission mode is `(\w+)`", text))
+    return m.group(1) if m else None
+
+
+def persona_pins(agents: Path) -> tuple:
+    """(models, mode, design_lead) the rendered personas in `agents` carry: {role: "harness/model"}, a mode or None."""
+    models, mode, texts = {}, None, {}
+    for n in ("coordinator", "design-lead", "reviewer"):
+        try:
+            texts[n] = (agents / f"{n}.md").read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        h, m = re.search(r"^agent: (\S+)$", texts[n], re.M), re.search(r"^model: (\S+)$", texts[n], re.M)
+        if h and m:
+            models[n] = f"{h.group(1)}/{m.group(1)}"
+        mode = mode or persona_mode(texts[n])
+    return models, mode, "design-lead" in texts
+
+
+def migrate(repo: Path) -> None:
+    """Moves a project set up before the store existed: .cotal/lane-control.json into settings.json and .cotal/lanes.tsv
+    into lanes.tsv. Once, automatically, and it says what moved. An edited table is copied byte for byte; a file the
+    store already has wins and the old one stays where it is, named. Pins the personas carry fill in what the old record
+    never held (models, mode, design lead), so a re-run without flags keeps them."""
+    cotal, said = repo / ".cotal", []
+    old_rec, old_tab, new_tab = cotal / "lane-control.json", cotal / "lanes.tsv", store_table(repo)
+    st = settings(repo)
+    if old_rec.is_file():
+        try:
+            old = json.loads(old_rec.read_text())
+            if not isinstance(old, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as e:
+            raise Fail(f"cannot read {old_rec}: {e}; fix or remove it")
+        kept = {k: v for k, v in old.items() if k in SETTING_KEYS and k not in st}
+        st = settings(repo, **kept) if kept else st
+        old_rec.unlink()
+        said.append(f"{old_rec.relative_to(repo)} -> {store_dir(repo) / 'settings.json'} ({', '.join(sorted(kept)) or 'nothing new'})")
+    if old_tab.is_file():
+        data = old_tab.read_bytes()
+        if not new_tab.exists():
+            write_atomic(new_tab, data)
+            old_tab.unlink()
+            said.append(f"{old_tab.relative_to(repo)} -> {new_tab} (copied as it was)")
+        elif new_tab.read_bytes() == data:
+            old_tab.unlink()
+            said.append(f"{old_tab.relative_to(repo)} removed (the store has the same table)")
+        else:
+            print(f"warning: {old_tab} differs from {new_tab}; the store's table is the one used, and this old one was "
+                  "left where it is", file=sys.stderr, flush=True)
+    models, mode, lead = persona_pins(cotal / "agents")
+    fill = {}
+    if "coordinator" in models and "models" not in st:
+        fill.update(models=models, design_lead=lead)
+        if mode and "permission_mode" not in st:
+            fill["permission_mode"] = mode
+        said.append("models, design lead and permission mode read from the personas in .cotal/agents/")
+    if said or fill:
+        settings(repo, root=str(repo), **fill)
+    if said:
+        say("settings", "moved", "; ".join(said))
 
 
 def say(step: str, what: str, detail: str = "") -> None:
@@ -373,12 +482,12 @@ def cotal_space(repo: Path, space: str):
 
 def claude_wiring(repo: Path, space: str):
     """Cotal's Claude plugin and wake channel for this space; recorded only once `cotal setup` succeeded."""
-    if record(repo).get("claude_setup"):
+    if settings(repo).get("claude_setup"):
         say("claude-wiring", "exists", space)
         return
     run(["cotal", "setup", "--destination", "local", "-H", "claude", "--runtime", "orca", "--project", str(repo),
          "-s", space, "-y", "--configure-only"], cwd=repo, timeout=600)
-    record(repo, claude_setup=True)
+    settings(repo, claude_setup=True)
     say("claude-wiring", "created", space)
 
 
@@ -610,18 +719,18 @@ def ask_opencode(repo: Path) -> tuple:
 def choose_tiers(repo: Path, a, default_table: Path) -> str:
     """The project's tier table, decided once. An explicit --tiers or --opencode wins; otherwise a table the project
     already has is kept and nothing is asked."""
-    table = repo / ".cotal" / "lanes.tsv"
+    table = store_table(repo)
     try:
         default_text = default_table.read_text()
         if a.tiers:
             check_tier_table(default_text)
-            record(repo, opencode="tiers")
+            settings(repo, opencode="tiers")
             return default_text
         if not a.opencode and table.exists():
             return table.read_text()
         if a.opencode and table.exists():
             current = table.read_text()
-            if not table_is_unedited(current, default_text, answered_table(default_text, record(repo))):
+            if not table_is_unedited(current, default_text, answered_table(default_text, settings(repo))):
                 raise Fail(f"{table} differs from the current defaults, and --opencode would replace it with them. Edit "
                            "that file instead, or delete it first to start again from the defaults")
     except (OSError, UnicodeDecodeError) as e:
@@ -635,7 +744,7 @@ def choose_tiers(repo: Path, a, default_table: Path) -> str:
             if not model:
                 raise Fail("--opencode own needs a model, and none was chosen")
     else:
-        was = record(repo)
+        was = settings(repo)
         if was.get("opencode") in ("hosted", "own", "none"):
             answer, model = was["opencode"], was.get("opencode_model", "")
         elif has_terminal():
@@ -643,21 +752,21 @@ def choose_tiers(repo: Path, a, default_table: Path) -> str:
         else:
             answer, model = "hosted", ""
             say("opencode", "default", "hosted (sandbox required): no terminal to ask in; set --opencode or --tiers")
-    record(repo, opencode=answer, opencode_model=model)
+    settings(repo, opencode=answer, opencode_model=model)
     say("opencode", "chosen", answer + (f" {model}" if model else ""))
     return tiers_for_answer(default_text, answer, model)
 
 
 def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tier_text: str):
     """lead None: the project has no design lead. tier_text: the project's table, from choose_tiers."""
-    table = str(repo / ".cotal" / "lanes.tsv")
+    table = str(store_table(repo))
     review_persona = str(repo / ".cotal" / "agents" / "reviewer.md")
     roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
     for name, (h, m) in roles:
         text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project, table,
                               review_persona, design_lead=lead is not None)
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
-    say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tier_text), ".cotal/lanes.tsv")
+    say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
     sandbox_note(tier_text)
     say("gitignore", ignore_cotal(repo), ".cotal/")
 
@@ -665,7 +774,7 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
 def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -> int:
     """Refresh mode: an onboarded project picks up lane-control's current personas and skill. Each persona keeps the
     harness, model and permission mode it was set up with (a missing reviewer persona, from before it existed, is made
-    from `reviewer` and the mode of the others), the project's own .cotal/lanes.tsv is never replaced, and nothing is
+    from `reviewer` and the mode of the others), the project's own tier table is never replaced, and nothing is
     adapted, launched or committed. Running agents keep their old persona: they are listed to restart."""
     agents = repo / ".cotal" / "agents"
     if not (agents / "coordinator.md").is_file():
@@ -676,19 +785,16 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     except (OSError, UnicodeDecodeError) as e:
         raise Fail(f"cannot read a persona in {agents}: {getattr(e, 'filename', None) or e}")
     named = re.search(r"^description: (.+?) coordinator;", old["coordinator"], re.M)
-    project = project or (named.group(1) if named else repo.name)
+    project = project or settings(repo).get("name") or (named.group(1) if named else repo.name)
 
-    def recorded(text: str):
-        """The mode a persona was rendered with: its launch line (Claude), else its body line (opencode)."""
-        m = (re.search(r'"permission-mode": "(\w+)"', text) or re.search(r"permission mode is `(\w+)`", text))
-        return m.group(1) if m else None
-    modes = {n: recorded(t) for n, t in old.items()}
+    modes = {n: persona_mode(t) for n, t in old.items()}
     others = next((v for v in modes.values() if v), mode)  # a persona with no record: what the others carry
     if not any(modes.values()):
         say("permission-mode", "unknown", f"no persona records it, so they are rendered with `{mode}`; if the project "
             f"ran another, correct it in {agents}")
-    table = repo / ".cotal" / "lanes.tsv"
-    design_lead = "design-lead" in old
+    table = store_table(repo)
+    stored = settings(repo)
+    design_lead = stored.get("design_lead", "design-lead" in old)
     texts = {}
     no_restart = set()
     for name in ["coordinator"] + (["design-lead"] if design_lead else []) + ["reviewer"]:
@@ -703,26 +809,27 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
                       "which this agent does not. Do not restart it on that model.", file=sys.stderr, flush=True)
                 no_restart.add(name)
         else:
-            harness, model = reviewer
+            pin = (stored.get("models") or {}).get(name)  # the store's pin for a persona that is missing
+            harness, model = harness_model(pin) if isinstance(pin, str) and name != "reviewer" else reviewer
         texts[name] = (harness, model, render_persona((HERE / "personas" / f"{name}.md").read_text(), harness, model,
                                                       modes.get(name) or others, project, str(table),
                                                       str(agents / "reviewer.md"), design_lead=design_lead))
     try:
         check_tier_table(tiers.read_text())
-        default_text = answered_table(tiers.read_text(), record(repo))
+        default_text = answered_table(tiers.read_text(), settings(repo))
         own_text = table.read_text() if table.exists() else None
     except (OSError, UnicodeDecodeError) as e:
         raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
     if own_text is None:
-        say("tiers", write_if_changed(table, default_text), ".cotal/lanes.tsv (was missing)")
+        say("tiers", write_if_changed(table, default_text), f"{table} (was missing)")
     elif own_text == default_text:
-        say("tiers", "exists", ".cotal/lanes.tsv kept (same as the defaults)")
+        say("tiers", "exists", f"{table} kept (same as the defaults)")
     else:
         def rows(text):
             return {l for l in text.splitlines() if l.strip() and not l.startswith("#")}
         mine, theirs = rows(own_text) - rows(default_text), rows(default_text) - rows(own_text)
         key = lambda rs: ", ".join(sorted(r.split("\t")[0] for r in rs)) or "none"
-        say("tiers", "exists", f".cotal/lanes.tsv kept, differs from the defaults: only in the project: {key(mine)}; "
+        say("tiers", "exists", f"{table} kept, differs from the defaults: only in the project: {key(mine)}; "
             f"only in the defaults: {key(theirs)}")
     if own_text is not None:
         try:
@@ -730,6 +837,11 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         except Fail as e:
             print(f"warning: {e}: lane-tier refuses every tier until it is fixed", file=sys.stderr, flush=True)
     changed = []
+    kept = {"root": str(repo), "design_lead": design_lead,
+            "models": {**{n: f"{h}/{m}" for n, (h, m, _) in texts.items()}, **(stored.get("models") or {})}}
+    if any(modes.values()):
+        kept["permission_mode"] = stored.get("permission_mode") or others
+    settings(repo, **{k: v for k, v in kept.items() if k not in stored})  # fills what the store lacks, never overrides
     for name, (harness, model, text) in texts.items():
         state = write_if_changed(agents / f"{name}.md", text)
         say(f"persona {name}", state, f"{harness}/{model}")
@@ -872,12 +984,12 @@ def services(repo: Path, space: str):
 def start_stack(repo: Path, space: str, port_flag) -> bool:
     """Broker and manager up. True when this run started the manager, False when it was already running."""
     svc = services(repo, space)
-    recorded = record(repo).get("port")
+    recorded = settings(repo).get("port")
     if svc.get("stack-broker") == "running":
         say("broker", "exists", f"nats://127.0.0.1:{recorded or port_flag or derive_port(space)}")
     else:
         port = port_flag or recorded or free_port(derive_port(space))
-        record(repo, port=port)
+        settings(repo, port=port)
         run(["cotal", "up", "--no-manager", "--server", f"nats://127.0.0.1:{port}", "--space", space], cwd=repo)
         say("broker", "created", f"nats://127.0.0.1:{port}")
         svc = services(repo, space)
@@ -1497,14 +1609,77 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     return True
 
 
+def bad_glob(g) -> bool:
+    return not isinstance(g, str) or not g or g.startswith(("/", "~", "!")) or ".." in Path(g).parts \
+        or bool(RULE_UNSAFE & set(g) - set("*?[]"))
+
+
+def resolve_settings(repo: Path, a) -> dict:
+    """What this run uses, flag over the store over the default, and the store updated with it: models per role, whether
+    the project has a design lead, the permission mode and the --private globs (which add to the stored ones, so no run
+    drops a private path by leaving a flag out)."""
+    st = settings(repo)
+    stored = st.get("models") if isinstance(st.get("models"), dict) else {}
+    pins = {}
+    for role, flag in (("coordinator", a.coordinator), ("design-lead", a.design_lead), ("reviewer", a.reviewer)):
+        spec = flag or stored.get(role) or DEFAULT_PINS[role]
+        try:
+            pins[role] = harness_model(spec)
+        except SystemExit:
+            raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is {spec!r}, expected <claude|opencode>/<model>")
+        if not flag and pins[role][0] == "opencode" and pins[role][1].startswith(HOSTED_OPENCODE):
+            raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is a hosted OpenCode model, which runs only "
+                       "inside the sandbox, and this agent does not")
+    lead_on = False if a.no_design_lead else bool(a.design_lead) or st.get("design_lead", True) is not False
+    mode = a.permission_mode or st.get("permission_mode") or "auto"
+    if mode not in MODES:
+        raise Fail(f"{store_dir(repo) / 'settings.json'}: permission_mode {mode!r} must be one of {', '.join(MODES)}")
+    private = list(dict.fromkeys([*(st.get("private") or []), *a.private]))
+    for g in private:
+        if bad_glob(g):
+            raise Fail(f"{store_dir(repo) / 'settings.json'}: private glob {g!r} is not a glob relative to the repo root")
+    changes = {"root": str(repo), "models": {r: f"{h}/{m}" for r, (h, m) in pins.items()}, "design_lead": lead_on,
+               "permission_mode": mode, "private": private}
+    if a.name:
+        changes["name"] = a.name
+    settings(repo, **changes)
+    return {"pins": pins, "lead": lead_on, "mode": mode, "private": private, "name": a.name or st.get("name")}
+
+
+def show(repo: Path) -> int:
+    """Prints the project's store, writes nothing."""
+    d, st = store_dir(repo), settings(repo)
+    print(f"settings store: {d}")
+    print(f"settings.json: {d / 'settings.json'}" + ("" if (d / "settings.json").exists() else " (not there yet)"))
+    for line in json.dumps(st, indent=2).splitlines() if st else []:
+        print("  " + line)
+    tab = store_table(repo)
+    try:
+        tiers = [l.split("\t")[0] for l in tab.read_text().splitlines() if l.strip() and not l.startswith("#")][1:]
+        print(f"lanes.tsv: {tab} (tiers: {', '.join(tiers) or 'none'})")
+    except (OSError, UnicodeDecodeError):
+        print(f"lanes.tsv: {tab} (not there yet)")
+    ports = d / "sandbox-ports"
+    try:
+        n = [l.split("#")[0].strip() for l in ports.read_text().splitlines() if l.split("#")[0].strip()]
+        print(f"sandbox-ports: {ports} ({', '.join(n) or 'none'})")
+    except OSError:
+        print(f"sandbox-ports: {ports} (none)")
+    old = [f".cotal/{n}" for n in ("lane-control.json", "lanes.tsv") if (repo / ".cotal" / n).is_file()]
+    if old:
+        print(f"not moved yet: {', '.join(old)} (project-setup moves them on its next run, also with --refresh)")
+    print("rendered personas: " + str(repo / ".cotal" / "agents") + " (Cotal reads them there)")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(allow_abbrev=False, prog="project-setup", description=__doc__.split("\n\n")[0])
     ap.add_argument("target")
     ap.add_argument("--host")
     ap.add_argument("--name")
     ap.add_argument("--dest", default=str(Path.home() / "code"))
-    ap.add_argument("--coordinator", default="claude/opus")
-    ap.add_argument("--design-lead", default="claude/opus")
+    ap.add_argument("--coordinator", help="harness/model (default claude/opus); kept in the project's settings store")
+    ap.add_argument("--design-lead", help="harness/model (default claude/opus); also turns the design lead on again")
     ap.add_argument("--trust-folder", action="store_true",
                     help="answer Claude Code's 'Do you trust this folder?' with yes for the repo, without asking "
                          "(for unattended runs)")
@@ -1512,9 +1687,10 @@ def main(argv=None) -> int:
                     help="no design lead (projects without a frontend): only the coordinator is started")
     ap.add_argument("--write-orca-yaml", action="store_true",
                     help="write the drafted setup script as orca.yaml in the repo (uncommitted) instead of .cotal/")
-    ap.add_argument("--reviewer", default="claude/opus",
-                    help="default harness/model of the reviewer persona; leads pick one per lane from the tiers")
-    ap.add_argument("--permission-mode", default="auto")
+    ap.add_argument("--reviewer",
+                    help="default harness/model of the reviewer persona (default claude/opus); leads pick one per lane "
+                         "from the tiers")
+    ap.add_argument("--permission-mode", help="Claude permission mode (default auto)")
     ap.add_argument("--port", type=int)
     table = ap.add_mutually_exclusive_group()
     table.add_argument("--tiers", help="a full tier table to use as it is")
@@ -1530,7 +1706,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-start", action="store_true")
     ap.add_argument("--private", action="append", default=[], metavar="GLOB",
                     help="a tracked file or folder the onboarding agents must not read, relative to the repo root "
-                         "(repeatable, e.g. 'shot*.png' or 'private/**'); git-ignored paths are always denied")
+                         "(repeatable, e.g. 'shot*.png' or 'private/**'); git-ignored paths are always denied. Kept in "
+                         "the settings store: a later run adds to the list, it never drops one")
     ap.add_argument("--adapter", default="claude/sonnet",
                     help="harness/model of the agent that adapts the project's files")
     ap.add_argument("--adapt-reviewer", default="claude/opus",
@@ -1539,7 +1716,10 @@ def main(argv=None) -> int:
     again.add_argument("--readapt", action="store_true", help="adapt the project again although it was done before")
     again.add_argument("--refresh", action="store_true",
                        help="onboarded project: re-render the personas in .cotal/, reinstall the skill, say which "
-                            "running agents need a restart; keeps .cotal/lanes.tsv, starts and commits nothing")
+                            "running agents need a restart; keeps the project's tier table, starts and commits nothing")
+    again.add_argument("--show", action="store_true",
+                       help="print the project's settings store (settings.json, lanes.tsv, sandbox-ports) and stop; "
+                            "writes nothing")
     again.add_argument("--skip-adapt", action="store_true", help="only the Orca setup: no adapting agent, no commit")
     argv = sys.argv[1:] if argv is None else argv
     a = ap.parse_args(argv)
@@ -1547,12 +1727,11 @@ def main(argv=None) -> int:
     if os.geteuid() == 0:
         print("project-setup: refusing to run as root; agents run as a normal user", file=sys.stderr)
         return 2
-    if a.permission_mode not in MODES:
+    if a.permission_mode is not None and a.permission_mode not in MODES:
         print(f"project-setup: --permission-mode must be one of {', '.join(MODES)}", file=sys.stderr)
         return 2
-    coord = harness_model(a.coordinator)
-    lead = None if a.no_design_lead else harness_model(a.design_lead)
-    reviewer = harness_model(a.reviewer)
+    flag_pins = [(f, harness_model(v)) for f, v in (("--coordinator", a.coordinator), ("--design-lead", a.design_lead),
+                                                    ("--reviewer", a.reviewer)) if v]
     adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
     bad_own = [m for m in a.own_model if not usable_own_model(m)]
     if bad_own:
@@ -1561,17 +1740,16 @@ def main(argv=None) -> int:
         return 2
     own_models = set(a.own_model) | ({a.opencode_model} if a.opencode_model else set())
     for g in a.private:
-        if not g or g.startswith(("/", "~", "!")) or ".." in Path(g).parts or RULE_UNSAFE & set(g) - set("*?[]"):
+        if bad_glob(g):
             print(f"project-setup: --private takes a glob relative to the repo root, got {g!r}", file=sys.stderr)
             return 2
-    PRIVATE_GLOBS[:] = a.private
-    for flag, pin in (("--coordinator", coord), ("--design-lead", lead), ("--reviewer", reviewer)):
-        if pin and pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
+    for flag, pin in flag_pins:
+        if pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
             print(f"project-setup: {flag} {pin[0]}/{pin[1]}: a hosted OpenCode model runs only inside the sandbox, and "
                   "this agent does not run in it. Use claude/<model>, or an opencode/<provider>/<model> on a gateway "
                   "you run yourself", file=sys.stderr)
             return 2
-        if pin and pin[0] == "opencode":
+        if pin[0] == "opencode":
             if pin[1] not in own_models:
                 print(f"project-setup: {flag} {pin[0]}/{pin[1]}: this model would run bare on this machine, and nothing "
                       f"says it is yours. Use claude/<model>, or add --own-model {pin[1]} only if it is on a gateway you "
@@ -1611,6 +1789,16 @@ def main(argv=None) -> int:
         print(f"project-setup: tier table {tiers} not found", file=sys.stderr)
         return 2
     global ORCA
+    if a.show:
+        try:
+            d = Path(a.target).expanduser().resolve()
+            top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
+            if top is None or top.returncode != 0:
+                raise Fail(f"{d} is not an existing git repository; --show only works on a set-up project")
+            return show(Path(top.stdout.strip()))
+        except Fail as e:
+            print(f"project-setup: {e}", file=sys.stderr)
+            return 1
     if a.refresh:
         add_orca_cli_to_path()
         ORCA = orca_cli()
@@ -1621,7 +1809,12 @@ def main(argv=None) -> int:
             if top is None or top.returncode != 0:
                 raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
             say("repo", "exists", top.stdout.strip())
-            return refresh(Path(top.stdout.strip()), a.name or "", a.permission_mode, tiers, reviewer)
+            repo = Path(top.stdout.strip())
+            migrate(repo)
+            st = settings(repo)
+            stored_reviewer = (st.get("models") or {}).get("reviewer") if isinstance(st.get("models"), dict) else None
+            return refresh(repo, a.name or "", st.get("permission_mode") or "auto", tiers,
+                           harness_model(a.reviewer or stored_reviewer or DEFAULT_PINS["reviewer"]))
         except Fail as e:
             print(f"project-setup: {e}", file=sys.stderr)
             return 1
@@ -1629,13 +1822,23 @@ def main(argv=None) -> int:
     ORCA = orca_cli()
     # Cotal's Orca driver otherwise tries `orca-ide`, then whatever `orca` is on PATH.
     os.environ.setdefault("COTAL_ORCA_BIN", ORCA)
-    needed = {coord[0]} | ({lead[0]} if lead else set())
     base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
     try:
-        preflight(needed)
+        preflight(set())  # the agents' harnesses are checked once the project's settings are known
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
         beads_note(repo)
+        migrate(repo)
+        cfg = resolve_settings(repo, a)
+        coord, reviewer = cfg["pins"]["coordinator"], cfg["pins"]["reviewer"]
+        lead = cfg["pins"]["design-lead"] if cfg["lead"] else None
+        PRIVATE_GLOBS[:] = cfg["private"]
+        mode = cfg["mode"]
+        late = {coord[0]} | ({lead[0]} if lead else set())
+        for h in sorted(late):
+            if not shutil.which(h):
+                raise Fail(f"{h} not on PATH, but this project launches {h} agents")
+        needed = late
         tier_text = choose_tiers(repo, a, tiers)
         tier_harnesses = {h for _, h, _, _ in check_tier_table(tier_text)} & set(HARNESSES)
         tier_harnesses.add(reviewer[0])  # started per lane, like a tier's harness
@@ -1646,7 +1849,7 @@ def main(argv=None) -> int:
         # folder is the owner's call, so it is never written for them.
         if "claude" in needed and not a.no_start:
             ensure_claude_trust(repo, record=a.trust_folder)
-        project = a.name or repo.name
+        project = cfg["name"] or repo.name
         if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
             return STOPPED
         space = slug(project)
@@ -1656,9 +1859,9 @@ def main(argv=None) -> int:
         if "claude" in needed | tier_harnesses:
             claude_wiring(repo, space)
         if own_models:  # outside every lane's reach: opencode-seat starts only models named here or `none` in the table
-            record(repo, own_models=sorted(set(record(repo).get("own_models", [])) | own_models))
-        personas_and_tiers(repo, project, coord, lead, reviewer, a.permission_mode, tier_text)
-        project_table = repo / ".cotal" / "lanes.tsv"
+            settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
+        personas_and_tiers(repo, project, coord, lead, reviewer, mode, tier_text)
+        project_table = store_table(repo)
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
             opencode_key_check(project_table)
@@ -1668,7 +1871,7 @@ def main(argv=None) -> int:
         opencode_key_check(project_table)
         if not mgr_started:
             seat_wrapper_note(project_table)
-        spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
+        spawn(repo, space, "coordinator", *coord, mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = None
         if lead:
@@ -1676,7 +1879,7 @@ def main(argv=None) -> int:
             if created:
                 setup_done = wait_for_setup(wt, "design-lead")
                 before = {t["handle"] for t in worktree_terminals(wt)}
-            spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
+            spawn(repo, space, "design-lead", *lead, mode, wt,
                   "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
             if created:
                 # Only now, so the worktree is never empty when the agent starts: an empty worktree may refuse the
@@ -1684,7 +1887,7 @@ def main(argv=None) -> int:
                 close_startup_tabs(wt, before, setup_done)
                 jrun([ORCA, "terminal", "create", "--worktree", f"path:{wt}", "--json"])  # the owner's shell
         verify(repo, space, wt)
-        print(f"summary: {project} · space {space} · broker 127.0.0.1:{record(repo).get('port')} · orca repo {repo_id}")
+        print(f"summary: {project} · space {space} · broker 127.0.0.1:{settings(repo).get('port')} · orca repo {repo_id}")
         print(f"  open Orca: the project {repo.name}, its main checkout (coordinator)"
               + (" and child task design-lead" if lead else ""))
         return 0

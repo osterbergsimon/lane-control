@@ -46,18 +46,22 @@ case $model in
   opencode/*|opencode-go/*) OPENCODE_SANDBOX_SEAT=1 exec "$here/opencode-sandbox.sh" "$@" ;;
 esac
 # Anything else counts as required unless the manager's project says it is yours. Both places are in the project's
-# .cotal, outside every lane's reach: a tier row with sandbox none, or a model project-setup was given with --own-model.
-root=${COTAL_OPENCODE_HOME:-}/.cotal
+# settings store (~/.config/lane-control/projects/<folder>/), outside every lane's reach: a tier row with sandbox none, or
+# a model project-setup was given with --own-model. A project not moved to the store yet still has them in its .cotal.
+root=${COTAL_OPENCODE_HOME:-}
+store=${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/lane-control/projects/$(basename "$root")
+tiers=$store/lanes.tsv settings=$store/settings.json
+if [ ! -r "$tiers" ] && [ ! -r "$settings" ]; then tiers=$root/.cotal/lanes.tsv settings=$root/.cotal/lane-control.json; fi
 own=
-if [ -r "$root/lanes.tsv" ]; then
-  rows=$("$here/lane-tier" --check "$root/lanes.tsv") || die "$root/lanes.tsv is a bad tier table: not starting $model"
+if [ -r "$tiers" ]; then
+  rows=$("$here/lane-tier" --check "$tiers") || die "$tiers is a bad tier table: not starting $model"
   while read -r _ harness sandbox rowmodel; do
     [ "$harness" = opencode ] && [ "$rowmodel" = "$model" ] || continue
     [ "$sandbox" != required ] \
-      || die "$model is sandbox required in $root/lanes.tsv, and the sandbox runs only opencode/ and opencode-go/ models: not starting it"
+      || die "$model is sandbox required in $tiers, and the sandbox runs only opencode/ and opencode-go/ models: not starting it"
     own=1
   done <<<"$rows"
 fi
-[ -n "$own" ] || { [ -r "$root/lane-control.json" ] && jq -e --arg m "$model" '(.own_models // []) | index($m)' "$root/lane-control.json" >/dev/null 2>&1 && own=1; }
+[ -n "$own" ] || { [ -r "$settings" ] && jq -e --arg m "$model" '(.own_models // []) | index($m)' "$settings" >/dev/null 2>&1 && own=1; }
 [ -n "$own" ] || die "$model is not marked as yours for this project (a tier row with sandbox none, or project-setup --own-model): it counts as sandbox required, and the sandbox runs only opencode/ and opencode-go/ models"
 exec "$real" "$@"
