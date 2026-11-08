@@ -220,15 +220,18 @@ a policy refuses `launchOptions`, which Claude lanes need.
 What a sandboxed seat can reach is in the header of `scripts/opencode-sandbox.sh`. It adds, to what a Rove lane has, only
 what the agent needs: the Cotal broker's port outward, this seat's server port inward on host loopback (its TUI runs
 outside as a client of that server), and read-only this seat's mesh credential and launch material and the Cotal plugin.
+It takes away the owner's global OpenCode config, its MCP servers and the Rove plugin, which a seat does not need.
 The model can read the credential and use the mesh as its own identity, with the grants the broker enforces. A seat's
 branch is the worktree's branch at its first launch, and the model is the one Cotal was asked for. The seat's database
 lives in the lane, so a resumed sandboxed seat keeps it only if the same worktree stays.
 
-What has been proven (Cotal 0.145.1, on a throwaway mesh with the wrapper first on the manager's PATH): a hosted seat
-launched through the wrapper, its `opencode serve` ran only under bubblewrap with the provider and key fixed, it joined
-the mesh from inside the sandbox, and a DM reached its OpenCode session there (its text is in the seat's database)
-[tested]. Not yet observed: the model acting on a DM, because the run's model calls failed on a used-up quota. Treat the
-first `required` lane as a test until that is seen.
+What has been proven (Cotal 0.145.1, on a throwaway mesh with the wrapper first on the manager's PATH, read from the
+seat's own log and database): a hosted seat launched through the wrapper, its `opencode serve` ran only under bubblewrap,
+and it joined the mesh from inside the sandbox. On a free model, its kickoff and a live DM reached the model, the turns
+succeeded, and its `cotal_status` and `cotal_dm` tools completed over the broker [tested]. Not proven: an outside reader
+receiving what the seat sent. `cotal_dm` reported it sent to a CLI sender with no roster row, and `cotal status <seat>`
+showed no activity for the status writes, so that command proves nothing here either way. Treat the first `required`
+lane as the test of that: its report DM to the coordinator is the missing observation.
 
 Limits: static-auth meshes with one broker on host loopback only; a user-auth mesh or remote broker is refused. Marking
 a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`) `none` or

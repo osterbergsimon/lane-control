@@ -349,6 +349,7 @@ c "the real creds dir is absent" bash -c '[ ! -e $(printf '%q' "$seatd/seat.cred
 c "connection variables"         bash -c '[ "\$COTAL_NAME" = sbx-seat ] && [ "\$COTAL_LIFECYCLE_UID" = sbxuid ] && [ "\$OPENCODE_SERVER_PASSWORD" = sbx-pw ]'
 c "no other secrets"             bash -c '[ -z "\${COTAL_FEEDBACK_KEY:-}\${OPENCODE_API_KEY:-}" ]'
 c "free models disabled"         bash -c '[ "\$OPENCODE_DISABLE_FREE_MODELS" = 1 ]'
+c "no global OpenCode config, MCP servers or Rove plugin" bash -c '[ ! -e "\$HOME/.config/opencode/opencode.jsonc" ] && [ ! -e "\$HOME/.config/opencode/opencode.json" ] && [ ! -e "\$HOME/.config/opencode/plugins/rove-agent-state.js" ]'
 c "database in the lane"         bash -c 'case \$OPENCODE_DB in */oc/db/sbx-seat/opencode.db) mkdir -p "\$(dirname "\$OPENCODE_DB")" && touch "\$OPENCODE_DB" ;; *) false ;; esac'
 c "config: plugin and allow kept" bash -c 'jq -e ".plugin == [\"$seatd/plugin\"] and .permission == \"allow\"" <<<"\$OPENCODE_CONFIG_CONTENT" >/dev/null'
 c "config: provider and key fixed" bash -c 'jq -e ".model == \"opencode/sbx-test-model\" and .enabled_providers == [\"opencode\"] and .provider.opencode.options.apiKey == \"{file:/run/sandbox/lane-key}\"" <<<"\$OPENCODE_CONFIG_CONTENT" >/dev/null'

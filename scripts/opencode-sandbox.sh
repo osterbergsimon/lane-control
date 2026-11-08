@@ -81,6 +81,7 @@
 #   read-only   the Cotal plugin directory; this seat's mesh credential and launch material (copies in the lane, this seat's
 #               only, never the other seats'; removed when the seat ends); its persona file. The model can read them.
 #   read-write  the seat's database, in the lane (Cotal's per-agent directory in the project stays out)
+#   absent      unlike a Rove lane, the owner's global OpenCode config (opencode.jsonc, its MCP servers) and the Rove plugin
 #   env         the Cotal connection variables, OPENCODE_DB, the server password, Cotal's config merged under the provider
 #               and key fixed here. A user-auth mesh and a broker that is not on host loopback are refused.
 # The lane leaves the sandbox only through a relay run by this launcher, with fixed meanings:
@@ -550,7 +551,8 @@ ro "$resolv" /etc/resolv.conf
 # of ~/.config/opencode, e.g. service.json with a password, stays out); state per lane
 oc=$(readlink -f "$(command -v opencode)")
 ro "$(dirname "$(dirname "$oc")")"
-for f in opencode.jsonc opencode.json plugins/rove-agent-state.js; do
+# A Cotal seat gets none of it: its config comes inline, and the owner's MCP servers are not something the agent needs.
+[ -n "$seat" ] || for f in opencode.jsonc opencode.json plugins/rove-agent-state.js; do
   [ ! -f "$HOME/.config/opencode/$f" ] || ro "$HOME/.config/opencode/$f"
 done
 [ ! -d "$HOME/.config/git" ] || ro "$HOME/.config/git"
