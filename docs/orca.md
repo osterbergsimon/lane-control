@@ -132,6 +132,10 @@ scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
   [--private GLOB]...
 ```
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
+(Onboarding is safe to interrupt. The adapting agent's run is recorded as finished in the settings store only when it
+ends; files an interrupted run left under `.lane-control/` are never reviewed or committed as if complete, the agent
+runs again over them. Files from a finished run that was declined, or failed its review, go back to review without
+being rewritten. The record is dropped when the files are committed.)
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
 2. Runs `orca repo add`.
 3. Installs the skills for the agent user (`~/.agents/skills/`, linked into `~/.claude/skills/` and
@@ -151,8 +155,9 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    pushed. A yes commits `orca.yaml` by explicit path and pushes the checked-out branch (never forced, nothing else
    set); that push also carries the onboarding commit. With a tracked orca.yaml, or no lockfiles, it asks about the
    push alone when the onboarding commit is unpushed. An untracked `orca.yaml` that differs from the draft is never
-   overwritten or committed. The push is asked only on the branch origin's HEAD names; on another branch, or with no
-   origin, nothing is asked and the run says lanes will not get the files. A no, no terminal or a failed push commits
+   overwritten or committed. The push is asked only on the branch origin's HEAD names; on another branch nothing is
+   asked, and the run says lanes will not get the files only when origin's default branch really lacks them. With no
+   origin Orca makes worktrees from the local branch, so the question is only to commit `orca.yaml`. A no, no terminal or a failed push commits
    and pushes nothing more, and the agents still start, with that warning. Only a no to the file list stops the run.
    A run without onboarding (`--skip-adapt`) drafts into `.cotal/orca.yaml.proposed`, or into `orca.yaml` with
    `--write-orca-yaml`, and never commits. The draft ends by writing `orca-setup-done` in the worktree's git dir;
