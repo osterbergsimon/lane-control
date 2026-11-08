@@ -1569,6 +1569,15 @@ class RefreshTests(unittest.TestCase):
     def persona(self, name="coordinator"):
         return self.repo / ".cotal" / "agents" / f"{name}.md"
 
+    def test_refresh_reinstalls_the_machine_tools(self):
+        self.setup_project()
+        tool = self.e.home / ".agents" / "bin" / "lane-heavy"
+        tool.write_text("#!/bin/sh\necho old\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"lane-tools.*updated")
+        self.assertEqual(tool.read_bytes(), (ROOT / "scripts" / "lane-heavy").read_bytes())
+
     def test_stale_persona_is_rewritten_and_its_running_agent_named(self):
         self.setup_project()
         self.persona().write_text(self.persona().read_text() + "old line\n")

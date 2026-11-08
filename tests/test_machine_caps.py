@@ -19,15 +19,28 @@ SANDBOX = ROOT / "scripts" / "opencode-sandbox.sh"
 MARK = "# --- the machine-wide heavy-work gate"
 TIMEOUT = 20
 
-# The fake scope: the probe answers with a real memory limit, anything else runs the command after `--`.
+# The fake scope: the probe answers with a real memory limit, anything else runs the command after `--`. Like the real
+# one it rewrites $$ to $ in the command unless told not to; old-systemd refuses that option and does not rewrite, unless
+# old-expands says it does too.
 SYSTEMD_RUN = """#!/usr/bin/env sh
 echo "$*" >> "$STUB_DIR/systemd-run.log"
+limit=1073741824
+expand=1
+case "$*" in *--expand-environment=no*)
+  [ -e "$STUB_DIR/old-systemd" ] && { echo "unrecognized option" >&2; exit 1; }
+  expand= ;;
+esac
+[ -e "$STUB_DIR/old-systemd" ] && [ ! -e "$STUB_DIR/old-expands" ] && expand=
 case "$*" in *-probe*)
   [ -e "$STUB_DIR/no-scope" ] && exit 1
-  echo 1073741824; exit 0 ;;
+  if [ -n "$expand" ]; then echo "\\$ $limit"; else echo "\\$\\$ $limit"; fi
+  exit 0 ;;
 esac
 while [ "$1" != "--" ]; do shift; done
 shift
+if [ -n "$expand" ]; then
+  for a; do shift; set -- "$@" "$(printf %s "$a" | sed 's/[$][$]/$/g')"; done
+fi
 exec "$@"
 """
 SYSTEMCTL = """#!/usr/bin/env sh
@@ -128,6 +141,37 @@ class HeavyTests(Machine):
         for needle in ("--user --scope", "MemoryMax=3G", "MemorySwapMax=0", "nice -n 19", "ionice -t -c 2 -n 7"):
             self.assertIn(needle, run[0])
 
+    def job_lines(self):
+        return [l for l in (self.stubs / "systemd-run.log").read_text().splitlines() if "-probe" not in l]
+
+    DOLLARS = 'x=kept; echo "$x $$"'
+
+    def assert_dollars_survived(self, r):
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"^kept \d+\n$")
+
+    def test_dollars_reach_the_job_unchanged(self):
+        r = self.heavy("sh", "-c", self.DOLLARS)
+        self.assert_dollars_survived(r)
+        self.assertEqual(r.stderr, "")
+        self.assertIn("--expand-environment=no", self.job_lines()[0])
+
+    def test_systemd_too_old_for_the_option_still_gets_the_scope(self):
+        (self.stubs / "old-systemd").touch()
+        r = self.heavy("sh", "-c", self.DOLLARS)
+        self.assert_dollars_survived(r)
+        self.assertEqual(r.stderr, "")
+        self.assertNotIn("--expand-environment", self.job_lines()[0])
+        self.assertIn("MemoryMax=3G", self.job_lines()[0])
+
+    def test_a_scope_that_would_rewrite_the_job_is_not_used(self):
+        (self.stubs / "old-systemd").touch()
+        (self.stubs / "old-expands").touch()
+        r = self.heavy("sh", "-c", self.DOLLARS)
+        self.assert_dollars_survived(r)
+        self.assertEqual(r.stderr.count("no memory limit"), 1)
+        self.assertEqual(self.job_lines(), [])
+
     def test_no_working_scope_still_runs_and_says_so(self):
         (self.stubs / "no-scope").touch()
         r = self.heavy("sh", "-c", "exit 3")
@@ -136,7 +180,7 @@ class HeavyTests(Machine):
 
     def test_scope_that_ignores_the_limit_counts_as_no_limit(self):
         # systemd-run succeeds, but the memory controller is not delegated: the scope reads back as "max" or nothing.
-        self.stub("systemd-run", SYSTEMD_RUN.replace("echo 1073741824", "echo max"))
+        self.stub("systemd-run", SYSTEMD_RUN.replace("limit=1073741824", "limit=max"))
         r = self.heavy("true")
         self.assertEqual(r.returncode, 0)
         self.assertIn("no memory limit", r.stderr)
