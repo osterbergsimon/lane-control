@@ -378,5 +378,36 @@ class StaleClaimsKeyTests(unittest.TestCase):
         self.assertEqual(self.run_check(none), "p: 1 stale")
 
 
+class CleanupSteeringTests(unittest.TestCase):
+    """Merged, clean lanes are closed without asking; everything else stays the owner's call."""
+
+    def flat(self, path):
+        return " ".join(path.read_text().lower().split())
+
+    def test_personas_close_merged_clean_lanes_and_keep_the_rest_with_the_owner(self):
+        for name in ("coordinator.md", "design-lead.md"):
+            t = self.flat(PERSONAS / name)
+            for needle in ("clean, pushed and an ancestor of main", "never use `--force`",
+                           "uncommitted changes", "never delete a branch", "reviewer after its last round"):
+                self.assertIn(needle, t, f"{name}: {needle}")
+        self.assertIn("never close a lane whose work did not merge", self.flat(PERSONAS / "coordinator.md"))
+        self.assertNotIn("close a lane, stop an agent", self.flat(PERSONAS / "coordinator.md"))
+
+    def test_skill_gives_the_checks_and_the_order(self):
+        t = self.flat(SKILL)
+        sec = t[t.index("## 6. check and close"):]
+        for needle in ("without asking", "is-ancestor", "set nothing else", "already closed at merge",
+                       "a lane whose work did not merge", "`--force`", "never deletes its branch",
+                       "merged branches stay unless the owner says to delete them", "after its last round"):
+            self.assertIn(needle, sec, needle)
+        self.assertTrue(sec.index("-review") < sec.index("<lane name>") < sec.index("worktree rm"))
+        self.assertNotIn("worktree rm --worktree path:<worktree> --force", sec)
+
+    def test_issues_doctrine_names_the_close_rule(self):
+        t = self.flat(ROOT / "issues.md")
+        for needle in ("close the lane after the merge", "without `--force`", "branches are kept unless the owner says"):
+            self.assertIn(needle, t)
+
+
 if __name__ == "__main__":
     unittest.main()
