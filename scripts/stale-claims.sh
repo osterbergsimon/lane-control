@@ -6,7 +6,7 @@ live=$(rove api list | jq -r '.tasks[].title' | grep -oE '^[A-Z]+-[0-9]+' | sort
 for p in "${!COORD_REPO[@]}"; do
   [ -n "${COORD_TASK[$p]:-}" ] || continue
   stale=$(cd "${COORD_REPO[$p]}" && bd list --status in_progress --json --limit 0 2>/dev/null |
-    jq -r '.[] | "\(.id) \(([(.labels // [])[] | select(startswith("lane:")) | .[5:]][0]) // .external_ref // "-") \(.updated_at[:10]) \(.title[:60])"' |
+    jq -r '.[] | "\(.id) \(([(.labels // [])[] | select(test("^lane:[A-Z]+-[0-9]+$")) | .[5:]][0]) // .external_ref // "-") \(.updated_at[:10]) \(.title[:60])"' |
     while read -r id key day title; do grep -qx -- "$key" <<<"$live" || echo "$id $key $day $title"; done)
   if [ -n "$stale" ]; then
     n=$(wc -l <<<"$stale")

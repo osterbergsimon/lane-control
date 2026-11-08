@@ -353,6 +353,12 @@ class StaleClaimsKeyTests(unittest.TestCase):
         issue = '[{"id":"lc-1","labels":["lane:BD-1"],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
         self.assertEqual(self.run_check(issue), "p: 0 stale")
 
+    def test_tier_label_is_not_a_key(self):
+        tier = '[{"id":"lc-1","external_ref":"BD-1","labels":["lane:deep"],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
+        self.assertEqual(self.run_check(tier), "p: 0 stale")
+        both = '[{"id":"lc-1","labels":["lane:deep","lane:BD-1"],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
+        self.assertEqual(self.run_check(both), "p: 0 stale")
+
     def test_old_external_ref_still_counts_and_unkeyed_is_stale(self):
         old = '[{"id":"lc-1","external_ref":"BD-1","labels":[],"updated_at":"2026-11-08T00:00:00Z","title":"x"}]'
         self.assertEqual(self.run_check(old), "p: 0 stale")
