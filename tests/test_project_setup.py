@@ -35,6 +35,12 @@ def git(*a, cwd):
                           capture_output=True, text=True).stdout.strip()
 
 
+def store_key(repo):
+    """<folder>-<10 hex of sha256 of the real path>, as scripts/project-setup keys the store."""
+    import hashlib
+    return f"{Path(repo).name}-{hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()[:10]}"
+
+
 class Env:
     """Temp HOME with stub orca/cotal and fake harness binaries first on PATH."""
 
@@ -57,6 +63,7 @@ class Env:
         self.env = {**os.environ, "HOME": str(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.state),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
+        self.env.pop("XDG_CONFIG_HOME", None)  # the store is under the temp HOME
         self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
 
@@ -75,6 +82,13 @@ class Env:
     def agent_runs(self):
         f = Path(str(self.log) + ".agents")
         return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+
+    def store(self, repo):
+        """The project's settings store: outside the repo, under the temp HOME."""
+        return self.home / ".config" / "lane-control" / "projects" / store_key(repo)
+
+    def settings(self, repo):
+        return json.loads((self.store(repo) / "settings.json").read_text())
 
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -242,6 +256,16 @@ class PureTests(unittest.TestCase):
                          ("opencode", "opencode/deepseek-v4.1-flash"))
         with self.assertRaises(SystemExit):
             self.m.harness_model("vim/opus")
+
+
+class GitlinkTests(unittest.TestCase):
+    def test_a_gitlink_whose_folder_is_missing_is_skipped_not_a_crash(self):
+        e = Env()
+        self.addCleanup(e.close)
+        repo = e.repo()
+        git("update-index", "--add", "--cacheinfo", "160000,1234567890123456789012345678901234567890,sub", cwd=repo)
+        m = load()
+        self.assertEqual([n for n in m.repo_private_names(repo, "") if n.startswith("sub")], [])
 
 
 class Tty(io.StringIO):
@@ -1185,7 +1209,7 @@ class RunTests(unittest.TestCase):
         agents = repo / ".cotal" / "agents"
         self.assertIn("model: opus", (agents / "coordinator.md").read_text())
         self.assertFalse((repo / ".agents").exists())  # skills are user-level (lane worktrees lack untracked files)
-        self.assertIn("swift\topencode", (repo / ".cotal" / "lanes.tsv").read_text())
+        self.assertIn("swift\topencode", (self.e.store(repo) / "lanes.tsv").read_text())
         self.assertIn("verify: ok", r.stdout)
 
     def test_cotal_calls_name_the_space(self):
@@ -1223,7 +1247,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--coordinator opencode/deepseek/deepseek-chat", r.stdout)
         self.assertIn("writes no sandbox", r.stdout)
-        self.assertEqual(json.loads((repo / ".cotal" / "lane-control.json").read_text())["own_models"], ["deepseek/deepseek-chat"])
+        self.assertEqual(self.e.settings(repo)["own_models"], ["deepseek/deepseek-chat"])
 
     def test_an_opencode_pin_on_a_setup_flag_without_an_explicit_own_choice_is_refused(self):
         repo = self.e.repo()
@@ -1307,12 +1331,12 @@ class RunTests(unittest.TestCase):
 
     def test_setup_calls_the_key_check_with_the_projects_table(self):
         repo, first, again = self._key_check_calls()
-        self.assertEqual(first.args[0], repo / ".cotal" / "lanes.tsv")
-        self.assertEqual(again.args[0], repo / ".cotal" / "lanes.tsv")
+        self.assertEqual(first.args[0], self.e.store(repo) / "lanes.tsv")
+        self.assertEqual(again.args[0], self.e.store(repo) / "lanes.tsv")
 
     def test_key_check_also_runs_with_no_start(self):
         repo, first, _ = self._key_check_calls("--no-start")
-        self.assertEqual(first.args[0], repo / ".cotal" / "lanes.tsv")
+        self.assertEqual(first.args[0], self.e.store(repo) / "lanes.tsv")
     def test_free_opencode_tier_without_key_is_quiet(self):
         repo = self.e.repo()
         tiers = self.e.home / "free-lanes.tsv"
@@ -1761,7 +1785,7 @@ class RunTests(unittest.TestCase):
     def test_port_is_recorded_and_reused(self):
         repo = self.e.repo()
         self.assertEqual(self.e.run(str(repo), "--port", "14999").returncode, 0)
-        rec = json.loads((repo / ".cotal" / "lane-control.json").read_text())
+        rec = self.e.settings(repo)
         self.assertEqual(rec["port"], 14999)
         r = self.e.run(str(repo))
         self.assertIn("nats://127.0.0.1:14999", r.stdout)
@@ -1784,7 +1808,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", oc, "--permission-mode", "bypassPermissions").returncode, 0)
         text = (repo / ".cotal" / "agents" / "coordinator.md").read_text()
         self.assertIn("`bypassPermissions`", text)
-        self.assertIn(str(repo / ".cotal" / "lanes.tsv"), text)
+        self.assertIn(str(self.e.store(repo) / "lanes.tsv"), text)
         self.assertNotIn("{{", text)
 
     def test_host_mode_quotes_tilde_paths(self):
@@ -1817,6 +1841,13 @@ class RefreshTests(unittest.TestCase):
 
     def persona(self, name="coordinator"):
         return self.repo / ".cotal" / "agents" / f"{name}.md"
+
+    def forget_mode(self):
+        """A project whose personas are the only record of its mode (the store holds none)."""
+        f = self.e.store(self.repo) / "settings.json"
+        st = json.loads(f.read_text())
+        st.pop("permission_mode")
+        f.write_text(json.dumps(st))
 
     def test_refresh_reinstalls_the_machine_tools(self):
         self.setup_project()
@@ -1852,7 +1883,7 @@ class RefreshTests(unittest.TestCase):
 
     def test_projects_own_tier_table_is_kept(self):
         self.setup_project()
-        table = self.repo / ".cotal" / "lanes.tsv"
+        table = self.e.store(self.repo) / "lanes.tsv"
         table.write_text(table.read_text() + "# project's own row\n")
         own = table.read_text()
         r = self.refresh()
@@ -1929,6 +1960,7 @@ class RefreshTests(unittest.TestCase):
         rv = self.persona("reviewer")
         rv.write_text(rv.read_text().replace('"permission-mode": "auto"', '"permission-mode": "default"'))
         (self.repo / ".cotal" / "agents" / "zz-extra.md").write_text('"permission-mode": "bypassPermissions"\n')
+        self.forget_mode()
         self.refresh()
         self.assertIn('"permission-mode": "default"', rv.read_text())
         self.assertIn('"permission-mode": "auto"', self.persona().read_text())
@@ -1936,7 +1968,7 @@ class RefreshTests(unittest.TestCase):
     def test_missing_reviewer_is_made_and_the_tier_table_kept(self):
         self.setup_project()
         self.persona("reviewer").unlink()
-        table = self.repo / ".cotal" / "lanes.tsv"
+        table = self.e.store(self.repo) / "lanes.tsv"
         table.write_text(table.read_text() + "# own row\n")
         own = table.read_text()
         r = self.refresh()
@@ -1981,16 +2013,16 @@ class RefreshTests(unittest.TestCase):
 
     def test_refresh_keeps_the_answer_and_the_table(self):
         self.setup_project("--opencode", "own", "--opencode-model", "gateway/m1")
-        table = self.repo / ".cotal" / "lanes.tsv"
+        table = self.e.store(self.repo) / "lanes.tsv"
         before = table.read_text()
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(table.read_text(), before)
-        self.assertIn(".cotal/lanes.tsv kept (same as the defaults)", r.stdout)
+        self.assertIn("lanes.tsv kept (same as the defaults)", r.stdout)
 
     def test_refresh_rewrites_a_missing_table_from_the_answer(self):
         self.setup_project("--opencode", "none")
-        table = self.repo / ".cotal" / "lanes.tsv"
+        table = self.e.store(self.repo) / "lanes.tsv"
         table.unlink()
         self.assertEqual(self.refresh().returncode, 0)
         self.assertIn("swift\tnone\t-\t-\tnone", table.read_text())
@@ -2038,6 +2070,7 @@ class RefreshTests(unittest.TestCase):
             text = self.persona(name).read_text()
             text = re.sub(r'"permission-mode": "\w+"', '"x": "y"', text)
             self.persona(name).write_text(re.sub(r"permission mode is `\w+`", "mode", text))
+        self.forget_mode()
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("permission-mode: unknown", r.stdout)
@@ -2052,14 +2085,14 @@ class RefreshTests(unittest.TestCase):
 
     def test_non_utf8_tier_table_is_a_clean_failure(self):
         self.setup_project()
-        (self.repo / ".cotal" / "lanes.tsv").write_bytes(b"\xff\xfe\n")
+        (self.e.store(self.repo) / "lanes.tsv").write_bytes(b"\xff\xfe\n")
         r = self.refresh()
         self.assertEqual(r.returncode, 1)
         self.assertNotIn("Traceback", r.stderr)
 
     def test_tier_report_names_the_differing_rows(self):
         self.setup_project()
-        table = self.repo / ".cotal" / "lanes.tsv"
+        table = self.e.store(self.repo) / "lanes.tsv"
         table.write_text(table.read_text() + "mine\tclaude\topus\n")
         r = self.refresh()
         self.assertIn("only in the project: mine; only in the defaults: none", r.stdout)
@@ -2274,6 +2307,435 @@ class ManagerGateTests(unittest.TestCase):
         self.assertEqual(r.returncode, 4)
         self.assertIn("no Cotal manager is running", r.stderr)
 
+    def test_a_store_table_finds_its_manager_by_the_root_in_settings_json(self):
+        store = self.root / "cfg" / "lane-control" / "projects" / "p"
+        store.mkdir(parents=True)
+        (store / "lanes.tsv").write_text(self.table.read_text())
+        (store / "settings.json").write_text(json.dumps({"root": str(self.root)}))
+        r = subprocess.run([str(TIER_TOOL), str(store / "lanes.tsv"), "swift"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("no Cotal manager is running", r.stderr)
+        self.manager(ROOT / "scripts" / "opencode-seat")
+        r = subprocess.run([str(TIER_TOOL), str(store / "lanes.tsv"), "swift"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_store_table_without_a_root_is_refused_and_says_why(self):
+        store = self.root / "cfg" / "lane-control" / "projects" / "p"
+        store.mkdir(parents=True)
+        (store / "lanes.tsv").write_text(self.table.read_text())
+        r = subprocess.run([str(TIER_TOOL), str(store / "lanes.tsv"), "swift"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("settings.json", r.stderr)
+
+    def test_a_table_anywhere_else_is_refused(self):
+        other = self.root / "elsewhere" / "lanes.tsv"
+        other.parent.mkdir()
+        other.write_text(self.table.read_text())
+        r = subprocess.run([str(TIER_TOOL), str(other), "swift"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("not a project's tier table", r.stderr)
+
+
+class SettingsStoreTests(unittest.TestCase):
+    """The per-project store under ~/.config/lane-control/projects/<folder>/, outside .cotal/ (SET-1)."""
+    def setUp(self):
+        self.e = Env()
+        self.addCleanup(self.e.close)
+        self.repo = self.e.repo()
+        self.store = self.e.store(self.repo)
+
+    def run_setup(self, *args, **kw):
+        r = self.e.run(str(self.repo), *args, **kw)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def legacy(self, table_text=None):
+        """Put the project back as a setup from before the store left it: record and table in .cotal/, no store."""
+        rec = self.e.settings(self.repo)
+        old = {k: rec[k] for k in ("port", "opencode", "opencode_model", "claude_setup", "own_models") if k in rec}
+        (self.repo / ".cotal" / "lane-control.json").write_text(json.dumps(old))
+        (self.repo / ".cotal" / "lanes.tsv").write_bytes(table_text if table_text is not None else (self.store / "lanes.tsv").read_bytes())
+        shutil.rmtree(self.store)
+        return old
+
+    def test_setup_writes_the_store_and_nothing_of_it_into_cotal(self):
+        self.run_setup("--private", "shot*.png", "--no-design-lead", "--coordinator", "claude/sonnet", "--name", "Shop")
+        self.assertTrue((self.store / "lanes.tsv").is_file())
+        st = self.e.settings(self.repo)
+        self.assertEqual(st["private"], ["shot*.png"])
+        self.assertFalse(st["design_lead"])
+        self.assertEqual(st["models"]["coordinator"], "claude/sonnet")
+        self.assertEqual((st["name"], st["root"], st["permission_mode"]), ("Shop", str(self.repo), "auto"))
+        self.assertFalse((self.repo / ".cotal" / "lanes.tsv").exists())
+        self.assertFalse((self.repo / ".cotal" / "lane-control.json").exists())
+        self.assertTrue((self.repo / ".cotal" / "agents" / "coordinator.md").is_file())
+        self.assertIn(str(self.store / "lanes.tsv"), (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+
+    def test_the_store_is_private_to_its_owner(self):
+        self.run_setup()
+        self.assertEqual((self.store / "settings.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.store.stat().st_mode & 0o777, 0o700)
+
+    def test_a_run_without_flags_reuses_the_store(self):
+        self.run_setup("--private", "shot*.png", "--no-design-lead", "--coordinator", "claude/sonnet", "--permission-mode",
+                       "bypassPermissions", "--name", "Shop")
+        (self.repo / ".cotal" / "agents" / "design-lead.md").unlink(missing_ok=True)
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        self.assertEqual((st["models"]["coordinator"], st["design_lead"], st["permission_mode"], st["name"]),
+                         ("claude/sonnet", False, "bypassPermissions", "Shop"))
+        text = (self.repo / ".cotal" / "agents" / "coordinator.md").read_text()
+        self.assertIn("model: sonnet", text)
+        self.assertIn("bypassPermissions", text)
+        self.assertIn("Shop", text)
+        self.assertFalse((self.repo / ".cotal" / "agents" / "design-lead.md").exists())
+        self.assertIn("This project has no design lead", text)
+
+    def test_private_globs_add_up_and_a_later_run_never_drops_one(self):
+        self.run_setup("--private", "a*.png")
+        self.run_setup("--private", "docs/private/**", "--private", "a*.png")
+        self.run_setup()
+        self.assertEqual(self.e.settings(self.repo)["private"], ["a*.png", "docs/private/**"])
+
+    def test_the_design_lead_comes_back_with_its_flag(self):
+        self.run_setup("--no-design-lead")
+        self.assertFalse(self.e.settings(self.repo)["design_lead"])
+        self.run_setup("--design-lead", "claude/opus")
+        self.assertTrue(self.e.settings(self.repo)["design_lead"])
+        self.assertTrue((self.repo / ".cotal" / "agents" / "design-lead.md").is_file())
+
+    def test_an_unsafe_stored_glob_or_mode_is_refused_and_named(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        (self.store / "settings.json").write_text(json.dumps({**st, "private": ["../x"]}))
+        r = self.e.run(str(self.repo))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("settings.json", r.stderr)
+        (self.store / "settings.json").write_text(json.dumps({**st, "permission_mode": "yolo"}))
+        self.assertEqual(self.e.run(str(self.repo)).returncode, 1)
+
+    def test_a_broken_settings_file_stops_the_run_and_is_not_overwritten(self):
+        self.run_setup()
+        (self.store / "settings.json").write_text("{ nope")
+        r = self.e.run(str(self.repo))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("settings.json", r.stderr)
+        self.assertEqual((self.store / "settings.json").read_text(), "{ nope")
+
+    def test_only_known_names_are_ever_written(self):
+        m = load()
+        with mock.patch.dict(os.environ, {"HOME": str(self.e.home), "XDG_CONFIG_HOME": ""}):
+            with self.assertRaises(m.Fail):
+                m.settings(self.repo, api_key="x")
+            self.assertFalse((self.store / "settings.json").exists())
+        for k in ("root", "name", "models", "design_lead", "permission_mode", "private", "opencode", "opencode_model",
+                  "own_models", "port", "claude_setup"):
+            self.assertIn(k, m.SETTING_KEYS)
+        self.assertFalse([k for k in m.SETTING_KEYS if re.search(r"key|token|secret|password|auth", k)])
+
+    def test_xdg_config_home_moves_the_store(self):
+        xdg = self.e.home / "xdg"
+        self.run_setup(env_extra={"XDG_CONFIG_HOME": str(xdg)})
+        self.assertTrue((xdg / "lane-control" / "projects" / store_key(self.repo) / "settings.json").is_file())
+        self.assertFalse(self.store.exists())
+
+    def test_a_project_set_up_before_the_store_is_moved_once_and_says_what(self):
+        self.run_setup("--port", "14777", "--name", "Shop", "--coordinator", "claude/sonnet", "--no-design-lead")
+        edited = (self.store / "lanes.tsv").read_bytes() + b"# the owner's own note\n"
+        self.legacy(edited)
+        r = self.run_setup()
+        self.assertIn("settings: moved", r.stdout)
+        self.assertIn("lane-control.json", r.stdout)
+        self.assertIn("lanes.tsv", r.stdout)
+        self.assertEqual((self.store / "lanes.tsv").read_bytes(), edited)
+        self.assertFalse((self.repo / ".cotal" / "lanes.tsv").exists())
+        self.assertFalse((self.repo / ".cotal" / "lane-control.json").exists())
+        st = self.e.settings(self.repo)
+        self.assertEqual(st["port"], 14777)
+        # what the old record never held comes from the personas, so a re-run without flags keeps it
+        self.assertEqual((st["models"]["coordinator"], st["design_lead"]), ("claude/sonnet", False))
+        self.assertIn("model: sonnet", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+        self.assertNotIn("settings: moved", self.run_setup().stdout)  # once
+
+    def test_refresh_moves_a_project_too_and_keeps_an_edited_table(self):
+        self.run_setup()
+        edited = (self.store / "lanes.tsv").read_bytes().replace(b"swift", b"swiftest")
+        self.legacy(edited)
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("settings: moved", r.stdout)
+        self.assertEqual((self.store / "lanes.tsv").read_bytes(), edited)
+        self.assertEqual(self.e.settings(self.repo)["root"], str(self.repo))
+
+    def test_a_store_table_that_differs_from_the_old_one_wins_and_the_old_stays(self):
+        self.run_setup()
+        mine = (self.store / "lanes.tsv").read_bytes()
+        (self.repo / ".cotal" / "lanes.tsv").write_bytes(mine + b"# old\n")
+        r = self.run_setup()
+        self.assertEqual((self.store / "lanes.tsv").read_bytes(), mine)
+        self.assertEqual((self.repo / ".cotal" / "lanes.tsv").read_bytes(), mine + b"# old\n")
+        self.assertIn("left where it is", r.stderr)
+
+    def test_a_store_that_has_the_same_table_lets_the_old_copy_go(self):
+        self.run_setup()
+        (self.repo / ".cotal" / "lanes.tsv").write_bytes((self.store / "lanes.tsv").read_bytes())
+        self.assertIn("removed", self.run_setup().stdout)
+        self.assertFalse((self.repo / ".cotal" / "lanes.tsv").exists())
+
+    def test_store_values_win_over_the_old_record(self):
+        self.run_setup("--port", "14888")
+        (self.repo / ".cotal" / "lane-control.json").write_text(json.dumps({"port": 14999, "opencode": "none"}))
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        self.assertEqual(st["port"], 14888)
+        self.assertFalse((self.repo / ".cotal" / "lane-control.json").exists())
+
+    def test_refresh_respects_the_store_design_lead_and_fills_what_it_lacks(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        for k in ("models", "design_lead", "permission_mode"):
+            st.pop(k)
+        (self.store / "settings.json").write_text(json.dumps(st))
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.e.settings(self.repo)
+        self.assertEqual(st["models"]["coordinator"], "claude/opus")
+        self.assertTrue(st["design_lead"])
+        st["design_lead"] = False
+        (self.store / "settings.json").write_text(json.dumps(st))
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertIn("This project has no design lead", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+        self.assertNotIn("persona design-lead", r.stdout)
+
+    def test_show_prints_the_store_and_writes_nothing(self):
+        self.run_setup("--private", "shot*.png")
+        (self.store / "sandbox-ports").write_text("# dev\n5432\n")
+        before = {p: p.read_bytes() for p in self.store.iterdir()}
+        r = self.e.run(str(self.repo), "--show", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for needle in (str(self.store), "shot*.png", "lanes.tsv", "tiers: swift", "sandbox-ports", "5432", '"design_lead": true'):
+            self.assertIn(needle, r.stdout)
+        self.assertEqual({p: p.read_bytes() for p in self.store.iterdir()}, before)
+
+    def test_show_on_an_old_project_says_it_is_not_moved_and_moves_nothing(self):
+        self.run_setup()
+        self.legacy()
+        r = self.e.run(str(self.repo), "--show", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("not moved yet", r.stdout)
+        self.assertIn("(not there yet)", r.stdout)
+        self.assertTrue((self.repo / ".cotal" / "lanes.tsv").exists())
+        self.assertFalse(self.store.exists())
+
+    def test_show_on_something_that_is_not_a_repo_fails_plainly(self):
+        d = self.e.home / "plain"
+        d.mkdir()
+        r = self.e.run(str(d), "--show", adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_two_checkouts_with_the_same_folder_name_get_separate_stores(self):
+        other = self.e.home / "work" / "app"
+        other.mkdir(parents=True)
+        git("init", "-q", "-b", "main", cwd=other)
+        git("commit", "-q", "--allow-empty", "-m", "init", cwd=other)
+        self.e.trust(other)
+        self.run_setup("--private", "a*.png")
+        r = self.e.run(str(other), "--private", "b*.png", "--port", "14555", "--name", "app2", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(self.e.store(self.repo), self.e.store(other))
+        self.assertEqual(self.e.settings(self.repo)["private"], ["a*.png"])
+        self.assertEqual(self.e.settings(other)["private"], ["b*.png"])
+        self.assertTrue(self.e.store(self.repo).name.startswith("app-"))
+
+    def test_a_store_keyed_on_the_folder_name_alone_moves_to_the_path_key(self):
+        first = self.e.home / ".config" / "lane-control" / "projects" / "app"
+        first.mkdir(parents=True)
+        (first / "sandbox-ports").write_text("5432\n")
+        r = self.run_setup()
+        self.assertIn("settings: moved", r.stdout)
+        self.assertFalse(first.exists())
+        self.assertEqual((self.store / "sandbox-ports").read_text(), "5432\n")
+        self.assertTrue((self.store / "settings.json").is_file())
+
+    def test_a_name_only_store_of_another_checkout_stays_where_it_is(self):
+        first = self.e.home / ".config" / "lane-control" / "projects" / "app"
+        first.mkdir(parents=True)
+        (first / "settings.json").write_text(json.dumps({"root": "/somewhere/else/app"}))
+        self.run_setup()
+        self.assertTrue((first / "settings.json").exists())
+        self.assertFalse((self.store / "sandbox-ports").exists())
+
+    def test_the_sandbox_and_the_seat_derive_the_same_key(self):
+        key = store_key(self.repo)
+        sh = subprocess.run(["sh", "-c", f'printf "%s-%s" "$(basename {shlex.quote(str(self.repo.resolve()))})" '
+                             f'"$(printf %s {shlex.quote(str(self.repo.resolve()))} | sha256sum | cut -c1-10)"'],
+                            capture_output=True, text=True).stdout
+        self.assertEqual(sh, key)
+
+    def test_a_normal_run_that_changes_a_running_persona_says_restart(self):
+        self.run_setup("--name", "Shop")
+        self.legacy()
+        p = self.repo / ".cotal" / "agents" / "coordinator.md"
+        p.write_text(p.read_text().replace(str(self.store / "lanes.tsv"), str(self.repo / ".cotal" / "lanes.tsv")))
+        r = self.run_setup()
+        self.assertIn("persona coordinator: updated", r.stdout)
+        self.assertRegex(r.stdout, r"restart: needed coordinator \(persona changed\)")
+
+    def test_a_first_run_names_no_restart(self):
+        self.assertNotIn("restart:", self.run_setup().stdout)
+
+    def test_lane_tier_on_the_old_path_says_it_moved(self):
+        self.run_setup()
+        r = subprocess.run([str(TIER_TOOL), str(self.repo / ".cotal" / "lanes.tsv"), "standard"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("moved to the project's settings store", r.stderr)
+
+    def test_the_project_name_survives_the_move(self):
+        self.run_setup("--name", "Shop")
+        self.legacy()
+        self.e.log.write_text("")
+        self.run_setup()
+        self.assertEqual(self.e.settings(self.repo)["name"], "Shop")
+        self.assertNotIn("space create app", " ".join(self.e.calls()))
+        self.assertIn("Shop coordinator;", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+
+    def test_refresh_takes_the_permission_mode_from_the_store(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        (self.store / "settings.json").write_text(json.dumps({**st, "permission_mode": "bypassPermissions"}))
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for n in ("coordinator", "design-lead", "reviewer"):
+            self.assertIn('"permission-mode": "bypassPermissions"', (self.repo / ".cotal" / "agents" / f"{n}.md").read_text())
+
+    def test_personas_with_different_modes_are_left_alone_and_none_is_stored(self):
+        self.run_setup("--permission-mode", "bypassPermissions")
+        rv = self.repo / ".cotal" / "agents" / "reviewer.md"
+        rv.write_text(rv.read_text().replace("bypassPermissions", "default"))
+        before = {n: (self.repo / ".cotal" / "agents" / f"{n}.md").read_text() for n in ("coordinator", "reviewer")}
+        self.legacy()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("permission-mode: mixed", r.stdout)
+        self.assertNotIn("permission_mode", self.e.settings(self.repo))
+        for n, text in before.items():
+            self.assertEqual((self.repo / ".cotal" / "agents" / f"{n}.md").read_text(), text)
+
+    def test_refresh_name_is_stored(self):
+        self.run_setup("--name", "A")
+        self.assertEqual(self.e.run(str(self.repo), "--refresh", "--name", "B", adapt=True).returncode, 0)
+        self.assertEqual(self.e.settings(self.repo)["name"], "B")
+        self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertIn("B coordinator;", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+
+    def test_a_moved_checkout_gets_a_new_store_and_a_warning_naming_the_old_one(self):
+        self.run_setup()
+        old_store = self.store
+        new = self.e.home / "elsewhere" / "app"  # the checkout moved to another parent, same folder name
+        new.parent.mkdir()
+        self.repo.rename(new)
+        r = self.e.run(str(new), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("belongs to " + str(self.repo) + ", which is gone", r.stderr)
+        self.assertIn(str(old_store), r.stderr)
+        self.assertNotEqual(self.e.store(new), old_store)
+
+    def test_an_own_model_stored_earlier_allows_a_later_pin_without_the_flag(self):
+        self.run_setup("--own-model", "my/x")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/x", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/y", "--no-start")
+        self.assertEqual(r.returncode, 2)
+
+    def test_hand_edited_values_of_the_wrong_type_are_refused_and_named(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        for key, bad in (("private", "secret"), ("private", 5), ("own_models", "my/x"), ("models", "claude/opus"),
+                         ("design_lead", "no"), ("private", [1])):
+            (self.store / "settings.json").write_text(json.dumps({**st, key: bad}))
+            r = self.e.run(str(self.repo))
+            self.assertEqual(r.returncode, 1, (key, bad))
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn(key, r.stderr)
+
+    def mixed_personas(self):
+        self.run_setup("--permission-mode", "bypassPermissions")
+        agents = self.repo / ".cotal" / "agents"
+        for n, mode in (("reviewer", "default"), ("design-lead", "auto")):
+            (agents / f"{n}.md").write_text((agents / f"{n}.md").read_text().replace("bypassPermissions", mode))
+        st = self.e.settings(self.repo)
+        st.pop("permission_mode")
+        (self.store / "settings.json").write_text(json.dumps(st))
+        return agents
+
+    def test_a_normal_run_keeps_each_personas_mode_when_they_differ(self):
+        agents = self.mixed_personas()
+        before = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "design-lead", "reviewer")}
+        self.run_setup("--no-start")
+        for n, text in before.items():
+            self.assertEqual((agents / f"{n}.md").read_text(), text, n)
+        self.assertNotIn("permission_mode", self.e.settings(self.repo))
+        self.run_setup("--no-start", "--permission-mode", "default")  # a flag still makes them one
+        self.assertEqual(self.e.settings(self.repo)["permission_mode"], "default")
+
+    def test_a_normal_run_with_one_recorded_mode_keeps_it_without_a_flag(self):
+        self.run_setup("--permission-mode", "bypassPermissions")
+        st = self.e.settings(self.repo)
+        st.pop("permission_mode")
+        (self.store / "settings.json").write_text(json.dumps(st))
+        self.run_setup("--no-start")
+        self.assertEqual(self.e.settings(self.repo)["permission_mode"], "bypassPermissions")
+        self.assertIn("bypassPermissions", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+
+    def test_a_renamed_checkout_warns_naming_the_old_store(self):
+        self.run_setup()
+        new = self.repo.parent / "renamed"
+        self.repo.rename(new)
+        r = self.e.run(str(new), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(str(self.store), r.stderr)
+
+    def test_a_refused_pin_leaves_nothing_behind(self):
+        d = self.e.home / "fresh"
+        d.mkdir()
+        r = self.e.run(str(d), "--coordinator", "opencode/other/y", "--no-start")
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse((d / ".git").exists())
+
+    def test_a_stored_own_model_still_allows_the_pin_on_a_project_not_yet_moved(self):
+        self.run_setup()
+        old = {"own_models": ["my/x"]}
+        (self.repo / ".cotal" / "lane-control.json").write_text(json.dumps(old))
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/x", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_migrating_run_with_no_start_still_names_a_running_coordinator(self):
+        self.run_setup()
+        self.legacy()
+        p = self.repo / ".cotal" / "agents" / "coordinator.md"
+        p.write_text(p.read_text().replace(str(self.store / "lanes.tsv"), str(self.repo / ".cotal" / "lanes.tsv")))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"restart: needed coordinator")
+
+    def test_refresh_name_on_a_project_never_set_up_stores_nothing(self):
+        r = self.e.run(str(self.repo), "--refresh", "--name", "Z", adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse((self.store / "settings.json").exists())
+
+    def test_models_with_a_non_string_value_are_refused_not_a_traceback(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        (self.store / "settings.json").write_text(json.dumps({**st, "models": {**st["models"], "reviewer": 5}}))
+        for args in ((), ("--refresh",)):
+            r = self.e.run(str(self.repo), *args, adapt=bool(args))
+            self.assertEqual(r.returncode, 1, args)
+            self.assertNotIn("Traceback", r.stderr)
+
+    def test_show_is_exclusive_with_refresh(self):
+        self.assertEqual(self.e.run(str(self.repo), "--show", "--refresh", adapt=True).returncode, 2)
+
 
 class SeatWrapperTests(unittest.TestCase):
     """scripts/opencode-seat decides where a Cotal seat's opencode runs. The sandbox and real binary are stubs."""
@@ -2300,7 +2762,8 @@ class SeatWrapperTests(unittest.TestCase):
         (self.home / ".cotal").mkdir(parents=True)
 
     def seat(self, *args, model=None, config=None):
-        env = {"PATH": f"{self.shim}:{self.d / 'real'}:{os.environ['PATH']}", "COTAL_OPENCODE_HOME": str(self.home)}
+        env = {"PATH": f"{self.shim}:{self.d / 'real'}:{os.environ['PATH']}", "COTAL_OPENCODE_HOME": str(self.home),
+               "HOME": str(self.d / "cfg")}
         if model is not None:
             config = json.dumps({"model": model})
         if config is not None:
@@ -2329,6 +2792,23 @@ class SeatWrapperTests(unittest.TestCase):
         r = self.seat(*self.SERVE, model="gateway/m1")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertRegex(self.ran(), r"^opencode serve .* seat= ")
+
+    def store(self):
+        d = self.d / "cfg" / ".config" / "lane-control" / "projects" / store_key(self.home)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_a_model_declared_own_in_the_store_runs_the_real_binary(self):
+        (self.store() / "settings.json").write_text('{"own_models":["gateway/m1"]}')
+        r = self.seat(*self.SERVE, model="gateway/m1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.ran(), r"^opencode serve .* seat= ")
+
+    def test_a_none_row_in_the_store_runs_unwrapped_and_the_store_beats_the_old_files(self):
+        (self.store() / "lanes.tsv").write_text("tier\tharness\tmodel\tpermission\tsandbox\nswift\topencode\tgateway/m1\t-\tnone\n")
+        (self.home / ".cotal" / "lane-control.json").write_text('{"own_models":["gateway/other"]}')
+        self.assertEqual(self.seat(*self.SERVE, model="gateway/m1").returncode, 0)
+        self.assertEqual(self.seat(*self.SERVE, model="gateway/other").returncode, 2)  # old files are not read once the store has any
 
     def test_a_model_outside_the_table_counts_as_required_and_is_refused(self):
         (self.home / ".cotal" / "lanes.tsv").write_text("tier\tharness\tmodel\tpermission\tsandbox\nswift\topencode\tgateway/other\t-\tnone\n")
@@ -2397,7 +2877,7 @@ class OpencodeChoiceTests(unittest.TestCase):
         self.e = Env()
         self.addCleanup(self.e.close)
         self.repo = self.e.repo()
-        self.table = self.repo / ".cotal" / "lanes.tsv"
+        self.table = self.e.store(self.repo) / "lanes.tsv"
 
     def in_terminal(self, answers, *args):
         m = load()

@@ -89,6 +89,16 @@ class SkillTests(unittest.TestCase):
             self.assertIn(needle, body)
 
 
+class SettingsStoreContentTests(unittest.TestCase):
+    def test_lanes_are_pointed_at_the_store_not_at_cotal(self):
+        for f in (SKILL, PERSONAS / "coordinator.md", PERSONAS / "design-lead.md"):
+            text = f.read_text()
+            self.assertNotIn(".cotal/lanes.tsv", text, f.name)
+        self.assertIn("~/.config/lane-control/projects/<project>/", SKILL.read_text())
+        self.assertIn("{{TIERS}}", (PERSONAS / "design-lead.md").read_text())
+        self.assertIn("{{TIERS}}", (PERSONAS / "coordinator.md").read_text())
+
+
 class TierTableTests(unittest.TestCase):
     def test_default_tiers(self):
         rows = [l.split("\t") for l in TIERS.read_text().splitlines() if l and not l.startswith("#")]

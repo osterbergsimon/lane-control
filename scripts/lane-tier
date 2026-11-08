@@ -31,7 +31,10 @@ else
   [ $# -eq 2 ] || die "usage: lane-tier <table> <tier>"
   table=$1 tier=$2
 fi
-[ -r "$table" ] || die "cannot read the tier table $table"
+if [ ! -r "$table" ]; then
+  case $table in */.cotal/lanes.tsv) die "cannot read the tier table $table: it moved to the project's settings store (~/.config/lane-control/projects/); run project-setup --refresh on the project, then restart this agent, so its persona names the new path" ;; esac
+  die "cannot read the tier table $table"
+fi
 
 # Columns are found by name, so a project's table may order them its own way.
 out=$(awk -F'\t' -v want="$tier" -v check="$check" '
@@ -118,8 +121,16 @@ if [ "$sandbox" = required ]; then
   esac
   seat=$(dirname "$(realpath "$0")")/opencode-seat
   [ -x "$seat" ] || refuse "the launch wrapper $seat is not installed (run project-setup)"
-  case $(realpath "$table") in */.cotal/lanes.tsv) root=$(dirname "$(dirname "$(realpath "$table")")") ;;
-    *) refuse "$table is not a project's .cotal/lanes.tsv, so its manager cannot be found" ;; esac
+  # The project's table is <config>/lane-control/projects/<project>/lanes.tsv, with the project's checkout as "root" in the
+  # settings.json beside it (a table from before the store, <checkout>/.cotal/lanes.tsv, still names its checkout).
+  case $(realpath "$table") in
+    */.cotal/lanes.tsv) root=$(dirname "$(dirname "$(realpath "$table")")") ;;
+    */lane-control/projects/*/lanes.tsv)
+      root=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["root"])' \
+        "$(dirname "$(realpath "$table")")/settings.json" 2>/dev/null) && [ "${root#/}" != "$root" ] \
+        || refuse "$table has no settings.json with the project's root beside it, so its manager cannot be found (run project-setup --refresh)" ;;
+    *) refuse "$table is not a project's tier table (<config>/lane-control/projects/<project>/lanes.tsv), so its manager cannot be found" ;;
+  esac
   menv=$(manager_env "$root") || refuse "no Cotal manager is running for $root"
   mbin=${menv%%$'\n'*} mpath=${menv#*$'\n'}
   # Same order as Cotal: COTAL_OPENCODE_BIN wins, else the first opencode on the manager's PATH.

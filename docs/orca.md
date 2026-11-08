@@ -138,15 +138,16 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    `~/.config/opencode/skills/`): Orca's `orca-cli` and lane-control's `orca-cotal-lanes`. They are user-level
    because a lane worktree carries only committed files.
 4. Creates the Cotal space (`cotal space create`; plus `cotal setup -H claude` for the Claude plugin and wake channel).
-5. Renders the personas from `personas/` (coordinator, design lead, reviewer) and the tier table
-   `templates/lanes.tsv` into `.cotal/`, and gitignores `.cotal/`. Each persona names the tier table and the reviewer
-   persona by absolute path, and the project's Claude permission mode.
+5. Renders the personas from `personas/` (coordinator, design lead, reviewer) into `.cotal/agents/` (Cotal reads them
+   there) and the tier table `templates/lanes.tsv` into the project's settings store (below), and gitignores `.cotal/`.
+   Each persona names the tier table and the reviewer persona by absolute path, and the project's Claude permission
+   mode.
 5a. Setup script: Orca runs `orca.yaml` `scripts.setup` in each new worktree (a "Setup" tab), but reads it from the
    worktree, so only a committed one counts. Without one, project-setup drafts it from the lockfiles (uv, poetry,
    npm/pnpm/yarn/bun, cargo, go, in the root and two levels down; the beads link when `.beads` is a symlink) into
    `.cotal/orca.yaml.proposed`, or into `orca.yaml` with `--write-orca-yaml`, for the owner to review and commit. It
    never commits. The draft ends by writing `orca-setup-done` in the worktree's git dir; agents start only after it.
-6. Starts the broker (`cotal up --no-manager`, on a per-project port recorded in `.cotal/lane-control.json`) and a
+6. Starts the broker (`cotal up --no-manager`, on a per-project port recorded in the settings store) and a
    manager service `mgr` on the Orca runtime.
    `mgr` carries `envRefs` for the proxy variables, because `cotal up` gives its manager a fixed environment without
    them.
@@ -176,13 +177,47 @@ is refused. The list exists only in the agents' command line, never in a file. A
 that is not `.env*` needs `--private` or an ignore line. A name with `( ) * ? [ ] { } \` or a newline cannot be put in a
 rule: setup stops and names it.
 
+### The settings store: per-project choices, outside the repo
+Everything project-setup decides for a project lives in `~/.config/lane-control/projects/<folder>-<hash>/` (under
+`$XDG_CONFIG_HOME` when set). The key is the main checkout's folder name plus the first 10 hex of the sha256 of its real
+path, so `~/code/x` and `~/work/x` have separate settings, tables, ports and sandbox-ports. project-setup, `opencode-seat`
+and the sandbox derive it the same way, not in `.cotal/`, which Cotal owns, and not in the repo:
+
+- `settings.json`: `root` (the checkout, which `lane-tier` uses to find the project's manager), `name`, `models` (harness/model
+  per role: coordinator, design-lead, reviewer), `design_lead` (on or off), `permission_mode`, `private` (the `--private`
+  globs), `opencode` and `opencode_model` (the OpenCode answer), `own_models`, `port` (the broker's) and `claude_setup`.
+  Mode 600 in a 700 folder. Only these names are ever written, and never a secret (keys stay in their own files, e.g.
+  the sandbox key file); committed project knowledge stays in `.lane-control/`.
+- `lanes.tsv`: the tier table. Lanes reach it by this absolute path, so worktrees do not matter.
+- `sandbox-ports`: the host ports the sandbox may forward (below). Its name and format are unchanged.
+
+Machine-wide limits (`lane-limits.sh`, `lane-heavy`, `lane-room`) stay in their own file. Only the rendered personas stay
+in `.cotal/agents/`.
+
+A run reads the store: a flag wins over the stored value, which wins over the default, and the flag is stored (`--coordinator`,
+`--design-lead`, `--reviewer`, `--permission-mode`, `--name`, `--no-design-lead`, `--own-model`). `--private` adds to the
+stored list and never drops an entry; to remove one, edit `settings.json`. `--design-lead` turns a design lead
+that was switched off back on. `--refresh` keeps each persona's own harness and model, takes the design lead and mode from the
+store, and fills in what the store lacks from the personas.
+
+`project-setup <dir> --show` prints the store (settings, the table's tiers, the sandbox ports) and writes nothing.
+
+**Migration.** A project set up before the store existed has `.cotal/lane-control.json` and `.cotal/lanes.tsv`. The next
+`project-setup` run on it, also `--refresh`, moves them once and prints `settings: moved ...`: the record's keys go into
+`settings.json`, the table is copied byte for byte (an edited table is kept as it is) and the old files are removed; models,
+design lead and permission mode, which the old record never held, are read from the rendered personas. If the store already
+has a different table, it wins and the old file stays, with a warning. A store folder keyed on the folder name alone (the
+first version, which held `sandbox-ports`) is renamed to the new key, unless its `root` names another checkout. Until a project is moved, `opencode-seat` still reads
+the old files, so a machine tool updated first does not break a project not yet moved. `--show` moves nothing and says
+what is not moved yet.
+
 ### Refresh: after lane-control's personas, skill or tier defaults change
 ```bash
 scripts/project-setup <dir> --refresh [--name Shop]
 ```
 For a project set up earlier. It re-renders the coordinator, design lead (if the project has one) and reviewer
 personas in `.cotal/agents/`, each keeping the harness, model and permission mode it already has, and reinstalls the
-skill. The project's own `.cotal/lanes.tsv` is never replaced (it names the rows that differ from the defaults; new default
+skill. The project's own `lanes.tsv` in the store is never replaced (it names the rows that differ from the defaults; new default
 rows are for the owner to copy over). It starts no adapting or reviewing agent, broker, coordinator or worktree, and
 commits nothing. Running agents keep the old persona and skill until restarted, so the last line (`restart: needed
 ...`) names the ones to stop and start again. A reviewer persona from before it existed is created (from `--reviewer`). All personas are checked before any is
@@ -192,7 +227,7 @@ written. Changing an agent's harness or model is not a refresh: `--coordinator`,
 
 ### Lanes
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
-1. Pick the tier per `model-routing.md`, then run `~/.agents/bin/lane-tier .cotal/lanes.tsv <tier>` for its harness and model. It refuses a `sandbox required` tier until the running manager uses the launch wrapper (below).
+1. Pick the tier per `model-routing.md`, then run `~/.agents/bin/lane-tier <the table your persona names> <tier>` for its harness and model. It refuses a `sandbox required` tier until the running manager uses the launch wrapper (below).
 2. Run `orca worktree create --name <key> --parent-worktree active --json`, so the new task nests under the caller in
    the GUI. Wait for `orca-setup-done` when the setup script writes it, start the agent (step 3), and only then close
    the startup shell and the Setup tab (it stays if the marker never appears), so the agent's tab is first.
@@ -207,7 +242,7 @@ The coordinator (or the design lead, for its own frontend lanes) follows the `or
 Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
 
 ### The sandbox per tier
-`.cotal/lanes.tsv` has a `sandbox` column, `required` or `none` (rule: `model-routing.md`, "Sandbox per tier"). A table
+The project's `lanes.tsv` has a `sandbox` column, `required` or `none` (rule: `model-routing.md`, "Sandbox per tier"). A table
 with no column, or a row with an empty cell, is `required` for OpenCode tiers and `none` for the rest.
 
 A `required` tier runs inside `scripts/opencode-sandbox.sh`, through a launch wrapper. Cotal's manager starts `opencode`
@@ -215,7 +250,7 @@ for every OpenCode seat, so the wrapper is what it runs: `~/.agents/bin/cotal-op
 `scripts/opencode-seat`, first on the manager's PATH. (Cotal's service schema refuses `COTAL_OPENCODE_BIN` in its
 `envRefs`, so the manager's PATH is the way in.) The wrapper puts `opencode/` and `opencode-go/` models in the sandbox,
 runs a model bare only when the project says it is yours (a tier row with `sandbox none`, or `project-setup --own-model`,
-recorded in `.cotal`, out of every lane's reach), and refuses a seat with no model, any other model, and any way of
+recorded in the settings store, out of every lane's reach), and refuses a seat with no model, any other model, and any way of
 starting `opencode` it does not know. So a model outside the table counts as `required`, even on a direct `cotal_spawn`.
 
 `lane-tier` refuses a `required` tier (exit 4) unless the running manager of that project uses the wrapper, so a tier
@@ -246,12 +281,14 @@ missing observation.
 
 Host ports: a lane can reach no host port except the broker, unless the project lists one. Lanes may need the UI or API
 of a running container, so a project can list specific ports in
-`~/.config/lane-control/projects/<main checkout's folder name>/sandbox-ports`, one per line (`#` comments allowed). Only
+`sandbox-ports` in the settings store, one port per line (`#` comments allowed). Only
 those are forwarded to the lane's loopback, the same way as the broker. It is closed by default, takes ports only, never
 address ranges, and a malformed entry stops the launch. List only test or dev containers, never anything holding real
 data. It applies to every sandbox lane of the project, Rove ones too.
 
-Limits: static-auth meshes with one broker on host loopback only; a user-auth mesh or remote broker is refused. Marking
+The host's global addresses are refused from the list read at launch: an address the host gains later (a rotating public IPv6,
+a DHCP change on a public IPv4) is not refused for a long-lived seat. Limits: static-auth meshes with one broker on host
+loopback only; a user-auth mesh, a remote broker or a space that requires the event plane is refused. Marking
 a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`) `none` or
 `--own-model`.
 
@@ -283,7 +320,7 @@ earlier on a gateway model needs `--own-model` or a `sandbox none` row before th
   `<model>: GET /api/model does not list it. Refusing before join` into the tab, which closes, so `cotal_spawn` shows
   only `<name> exited on launch`. [tested]
 - `opencode models` prints the whole catalog whatever the credentials, so it does not prove a lane can use a model.
-- Free models, such as those named `*-free`, need no key. Pin one in `.cotal/lanes.tsv` only if the owner accepts it
+- Free models, such as those named `*-free`, need no key. Pin one in the project's `lanes.tsv` only if the owner accepts it
   for that project.
 
 ### Permission modes (Claude)

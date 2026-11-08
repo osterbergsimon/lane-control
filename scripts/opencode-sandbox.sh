@@ -71,9 +71,11 @@
 #   network     own namespace through pasta: the internet only. Host loopback ports (rove, sccache, dev servers), abstract
 #               sockets (X11), every private, link-local and multicast address (the LAN, the router, container bridges), and
 #               every global address of this host are refused by an nftables rule set in the namespace before bwrap, which
-#               the lane has no capability to change. DNS goes to a fixed address that pasta forwards to the host's resolver.
+#               the lane has no capability to change. The host's global addresses are read once, at launch: one the host gains later
+#               (a rotating public IPv6, a DHCP change) is not refused for a long-lived seat. DNS goes to a fixed address that pasta forwards to the host's resolver.
 #               Host ports the project lists, and only those, are forwarded to the lane's loopback, as the broker is: one
-#               port per line in ~/.config/lane-control/projects/<main checkout's folder name>/sandbox-ports. Ports only, closed
+#               port per line in ~/.config/lane-control/projects/<folder>-<hash>/sandbox-ports,
+#               keyed on the main checkout's full path (folder name plus the first 10 hex of sha256 of its real path). Ports only, closed
 #               by default; list only test or dev containers, never anything holding real data.
 #   processes   own pid namespace (no /proc of other processes), own session, dies with its parent,
 #               one systemd scope (MemoryMax, no swap) around all of it
@@ -81,7 +83,7 @@
 # its coordinator (live DMs, review rounds); the owner decided this (lc-5xf):
 #   network     one TCP port outward, the Cotal broker on host loopback, and one inward, this seat's `opencode serve` port
 #               (bound on host loopback only, for the seat's TUI, which runs outside as a client of this server). Every
-#               other host loopback port stays unreachable. The broker enforces this seat's grants; the model can use the
+#               other host loopback port stays unreachable, except the project's listed ports (above). The broker enforces this seat's grants; the model can use the
 #               mesh only as its own Cotal identity and can do on it whatever that identity may do.
 #   read-only   the Cotal plugin directory; this seat's mesh credential and launch material (copies in the lane, this seat's
 #               only, never the other seats'; removed when the seat ends); its persona file. The model can read them.
@@ -261,6 +263,8 @@ if [ -n "$seat" ]; then
   [ -r "$mat" ] || die "no COTAL_LAUNCH_MATERIAL (a Cotal seat is started by the manager)"
   [ "$("$jq" -r 'has("userAuth") and (.userAuth != null)' "$mat")" = false ] \
     || die "a user-auth mesh is not supported in the sandbox yet (static-auth meshes only)"
+  [ "$("$jq" -r '(.eventsRequired // false) == false' "$mat")" = true ] \
+    || die "a space that requires the event plane is not supported in the sandbox (the plugin would arm without its workspace root)"
   servers=$("$jq" -r '.servers | strings' "$mat" 2>/dev/null) || servers=""
   [[ $servers =~ ^nats://127\.0\.0\.1:([0-9]{1,5})$ ]] \
     || die "broker '$servers' is not one nats:// address on host loopback: the sandbox opens only that"
@@ -291,7 +295,9 @@ if [ -n "$seat" ]; then
 fi
 
 # the project's allowed host ports: read here, outside; a lane cannot reach the file or set the path
-ports_file=${XDG_CONFIG_HOME:-$HOME/.config}/lane-control/projects/$(basename "$(dirname "$common")")/sandbox-ports
+main_checkout=$(dirname "$common")
+ports_key=$(basename "$main_checkout")-$(printf '%s' "$main_checkout" | sha256sum | cut -c1-10)
+ports_file=${XDG_CONFIG_HOME:-$HOME/.config}/lane-control/projects/$ports_key/sandbox-ports
 extra_ports=""
 if [ -e "$ports_file" ]; then
   [ -f "$ports_file" ] && [ -r "$ports_file" ] || die "$ports_file is not a readable file"

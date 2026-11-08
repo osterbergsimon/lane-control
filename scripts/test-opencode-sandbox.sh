@@ -394,6 +394,9 @@ o0 "seat: a broker off loopback is refused" "not one nats:// address on host loo
 jq '. + {userAuth:{owner:"x"}}' "$seatd/mat/material.json" >"$seatd/mat/m2"; mv "$seatd/mat/m2" "$seatd/mat/material.json"; chmod 600 "$seatd/mat/material.json"
 o0 "seat: a user-auth mesh is refused" "user-auth mesh" "${seatrun[@]}" OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
 material "nats://127.0.0.1:$bport"
+jq '. + {eventsRequired:true}' "$seatd/mat/material.json" >"$seatd/mat/m2"; mv "$seatd/mat/m2" "$seatd/mat/material.json"; chmod 600 "$seatd/mat/material.json"
+o0 "seat: a space that requires the event plane is refused" "event plane" "${seatrun[@]}" OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
+material "nats://127.0.0.1:$bport"
 o0 "seat: a model off OpenCode's providers is refused" "run in the sandbox" "${seatrun[@]}" 'OPENCODE_CONFIG_CONTENT={"model":"deepseek/x","plugin":[]}' OPENCODE_SANDBOX_CMD=true "$S" "${serve[@]}"
 o0 "seat: a serve without --port is refused" "seat mode needs serve" "${seatrun[@]}" OPENCODE_SANDBOX_CMD=true "$S" serve
 # the project's allowed host ports: one listed port reachable, an unlisted one refused, a malformed entry stops the launch
@@ -402,7 +405,7 @@ python3 -c 'import socket,sys
 s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(8)
 while True: c,_=s.accept(); c.close()' "$allowed" & allowed_pid=$!
 trap 'kill "$broker_pid" "$lan_pid" "$allowed_pid" 2>/dev/null; cleanup' EXIT
-pdir=$stubdir/xdg/lane-control/projects/$(basename "$(dirname "$common")"); mkdir -p "$pdir"
+pdir=$stubdir/xdg/lane-control/projects/$(basename "$(dirname "$common")")-$(printf '%s' "$(dirname "$common")" | sha256sum | cut -c1-10); mkdir -p "$pdir"
 printf '# dev container\n%s\n' "$allowed" >"$pdir/sandbox-ports"
 r=$("${seatrun[@]}" XDG_CONFIG_HOME="$stubdir/xdg" OPENCODE_SANDBOX_CMD="bash -c 'exec 3<>/dev/tcp/127.0.0.1/$allowed' && echo allowed-open; bash -c 'exec 3<>/dev/tcp/127.0.0.1/$lanport' 2>/dev/null || echo unlisted-refused" "$S" serve --hostname 127.0.0.1 --port "$(free_port)" 2>&1)
 o "ports: a listed port is reachable" '[[ $r == *allowed-open* ]]'
