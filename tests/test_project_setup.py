@@ -882,6 +882,24 @@ class RunTests(unittest.TestCase):
         self.assertIn("orca", r.stderr.lower())
         self.assertFalse(any("repo add" in c or "spawn" in c for c in self.e.calls()))
 
+    def test_beads_note_is_plain_and_creates_nothing(self):
+        repo = self.e.repo()
+        self.assertIsNone(shutil.which("bd", path=self.e.env["PATH"]), "test needs a PATH without bd")
+        r = self.e.run(str(repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("`bd` is not on PATH", r.stderr)
+        bd = self.e.bin / "bd"
+        bd.write_text("#!/bin/sh\n[ -d .beads ]\n")
+        bd.chmod(0o755)
+        r = self.e.run(str(repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no beads workspace", r.stderr)
+        self.assertFalse((repo / ".beads").exists())
+        (repo / ".beads").mkdir()
+        r = self.e.run(str(repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("beads", r.stderr)
+
     def test_preflight_fails_when_harness_missing(self):
         repo = self.e.repo()
         (self.e.bin / "claude").unlink()
