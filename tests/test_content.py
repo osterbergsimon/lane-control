@@ -171,6 +171,25 @@ class AdaptTemplateTests(unittest.TestCase):
                        "SUGGESTIONS.md", "Hostnames, IP addresses", "Do not agree just to end the round"):
             self.assertIn(needle, text)
 
+    def test_reading_budget_in_both_prompts(self):
+        for name in ("prompt.md", "review-prompt.md"):
+            text = " ".join((ADAPT / name).read_text().split())
+            self.assertIn("Get names from Glob first", text, name)
+            self.assertIn("at most about 25 files", text, name)
+            self.assertIn("never read a tree", text, name)
+            self.assertRegex(text, r"never lower[s]? (a|the)|lower a rating", name)
+        self.assertIn("Sample one or two files in each risky area", " ".join((ADAPT / "prompt.md").read_text().split()))
+        self.assertIn("Check a sample of facts", " ".join((ADAPT / "review-prompt.md").read_text().split()))
+        self.assertIn("a path you could not judge from names and a sample goes one tier up", " ".join((ADAPT / "prompt.md").read_text().split()))
+        review = " ".join((ADAPT / "review-prompt.md").read_text().split())
+        self.assertIn("Always open code behind anything rated low (check 13)", review)
+        self.assertIn("Beyond the adapted files and the project's top-level docs", review)
+
+    def test_the_two_prompts_wrap_at_120(self):
+        for name in ("prompt.md", "review-prompt.md"):
+            for n, line in enumerate((ADAPT / name).read_text().splitlines(), 1):
+                self.assertLessEqual(len(line), 120, f"{name}:{n}")
+
     def test_review_prompt_rules(self):
         text = (ADAPT / "review-prompt.md").read_text()
         for ph in ("{{TEMPLATES}}", "{{PROJECT}}", "{{DESIGN_LEAD}}"):

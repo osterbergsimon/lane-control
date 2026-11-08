@@ -4,7 +4,8 @@
   project-setup <git-url|dir> [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE | --opencode hosted|own|none [--opencode-model M]] [--own-model M]... [--no-start]
-                [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL] [--readapt | --skip-adapt | --refresh]
+                [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
+                [--readapt | --skip-adapt | --refresh]
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
@@ -1059,6 +1060,7 @@ SECTION = (f"{SECTION_BEGIN}\n## lane-control\n\nThis project is run with lane-c
            f"`{ADAPTED}/`: read them before you start work.\n{SECTION_END}")
 MAX_FIX_ROUNDS = 2
 AGENT_TIMEOUT = 1800  # seconds per headless agent run
+MAX_TURNS = {True: 80, False: 60}  # per headless agent run, by write: the adapter, then the reviewer
 DIFF_LIMIT = 60000  # bytes of diff in a prompt; one argument may hold at most 128 KiB
 FINDINGS_LIMIT = 30000  # bytes of reviewer findings in a prompt
 STOPPED = 3  # exit status: the owner's answer is needed, and no Orca step ran
@@ -1207,21 +1209,108 @@ def check_scope(repo: Path, before: dict):
     check_gitignore(repo)
 
 
-def agent_cmd(model: str, prompt: str, write: bool) -> list:
+PRIVATE_GLOBS: list = []  # --private: tracked files that are still private; set by main()
+RULE_UNSAFE = set("()*?[]{}\\\n")  # a name with one of these cannot be put into a deny rule as it is
+DENY_LIMIT = 100000  # bytes of deny rules; they are command-line arguments
+
+
+ENV_TEMPLATE_ENDS = (".example", ".sample", ".template")
+NESTED_DEPTH = 5  # submodules inside submodules
+
+
+def env_private(name: str) -> bool:
+    """A .env* file other than a template (.env.example, .env.sample, .env.template) or .envrc."""
+    return name.startswith(".env") and name != ".envrc" and not name.endswith(ENV_TEMPLATE_ENDS)
+
+
+def nested_repos(repo: Path, untracked_dirs: list) -> list:
+    """Submodules and embedded repos below `repo`: git lists neither one's own ignored files from here."""
+    found = []
+    for line in git_z(repo, "ls-files", "-s"):
+        mode, _, rest = line.partition(" ")
+        if mode == "160000":
+            found.append(rest.partition("\t")[2])
+    for d in untracked_dirs:  # an untracked folder is not listed inside, so look for a .git in it
+        for here, dirs, files in os.walk(repo / d):
+            if ".git" in dirs or ".git" in files:
+                found.append(str(Path(here).relative_to(repo)))
+                dirs[:] = []
+            dirs[:] = [x for x in dirs if x != ".git"]
+    return sorted(set(found))
+
+
+def repo_private_names(repo: Path, prefix: str, depth: int = 0) -> list:
+    """Paths (relative to the outer repo) to deny inside `repo`, then inside each repo nested in it."""
+    ignored = git_z(repo, "ls-files", "-o", "-i", "--exclude-standard", "--directory")
+    others = git_z(repo, "ls-files", "-c", "-o", "--exclude-standard")
+    untracked_dirs = [n for n in git_z(repo, "ls-files", "-o", "--exclude-standard", "--directory") if n.endswith("/")]
+    names = [n for n in ignored if (prefix + n).rstrip("/") != ADAPTED]
+    names += [n for n in others if env_private(Path(n).name)]
+    out = [prefix + n for n in names]
+    nested = nested_repos(repo, untracked_dirs)
+    if nested and depth >= NESTED_DEPTH:
+        raise Fail(f"repos nested more than {NESTED_DEPTH} deep: their private files cannot all be denied")
+    for sub in nested:
+        if (repo / sub / ".git").exists():  # an unpopulated submodule is an empty folder: nothing in it to deny
+            out += repo_private_names(repo / sub, f"{prefix}{sub}/", depth + 1)
+    return out
+
+
+def private_rules(repo: Path) -> list:
+    """Read-deny rules for what the onboarding agents must not see, by name; the list is never written to a file.
+
+    A .git folder or file at any depth; every git-ignored path (data folders, local settings, keys, the .beads link,
+    .direnv), also inside submodules and embedded repos; every .env* file except templates and .envrc; and each --private
+    glob. Other tracked files stay readable. Grep skips ignored files on its own but not when it is pointed at one, so
+    these rules cover Read, Glob and Grep alike."""
+    rules = ["Read(/.git/**)", "Read(/.git)", "Read(/**/.git/**)", "Read(/**/.git)"]  # remote URLs and hooks
+    for n in repo_private_names(repo, ""):
+        if RULE_UNSAFE & set(n):
+            raise Fail("a git-ignored or .env name has a character that a deny rule cannot carry "
+                       f"(one of ( ) * ? [ ] {{ }} \\ or a newline): {n!r}. Rename it, or move it out of the repo")
+        rules.append(f"Read(/{n}**)" if n.endswith("/") else f"Read(/{n})")
+    for g in PRIVATE_GLOBS:
+        rules.append(f"Read(/{g})")
+    if sum(map(len, rules)) > DENY_LIMIT:
+        raise Fail(f"{len(rules)} private paths are too many to deny one by one; ignore a folder instead of its files")
+    return rules
+
+
+def git_z(repo: Path, *args) -> list:
+    out = run(["git", *args, "-z"], cwd=repo).stdout
+    return [n for n in out.split("\0") if n]
+
+
+def agent_cmd(model: str, prompt: str, write: bool, deny: tuple = ()) -> list:
     """A plain headless Claude run: no Orca or Cotal space exists yet, and neither is needed.
 
-    Permissions are what the job needs: read the project except .env files; write only inside .lane-control/, and only
-    for the adapting agent. No shell, so neither can run project code or git; no web; no MCP servers; the project's own
-    settings and hooks are not loaded. Anything else is refused, not asked."""
+    Permissions are what the job needs: read the project except the private paths in `deny` (see private_rules); write
+    only inside .lane-control/, and only for the adapting agent. No shell, so neither can run project code or git; no
+    web; no MCP servers; the project's own settings and hooks are not loaded; the file tools stay inside the repo
+    (--restricted), so a symlink out of it is refused. Anything else is refused, not asked."""
     tools = READ_TOOLS + (("Edit", "Write") if write else ())
     allow = READ_TOOLS + ((f"Edit(/{ADAPTED}/**)",) if write else ())
-    return ["claude", "-p", "--model", model, "--no-session-persistence", "--restricted", "--strict-mcp-config",
-            "--tools", ",".join(tools), "--allowedTools", ",".join(allow),
-            "--disallowedTools", "Read(**/.env*)", "--permission-mode", "dontAsk", prompt]
+    cmd = ["claude", "-p", "--model", model, "--no-session-persistence", "--restricted", "--strict-mcp-config",
+           "--tools", ",".join(tools), "--allowedTools", ",".join(allow)]
+    if deny:  # variadic: another flag must follow, or it would take the prompt
+        cmd += ["--disallowedTools", *deny]
+    return cmd + ["--permission-mode", "dontAsk", "--max-turns", str(MAX_TURNS[write]), prompt]
 
 
 def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
-    return run(agent_cmd(who[1], prompt, write), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL).stdout
+    p = run(agent_cmd(who[1], prompt, write, tuple(private_rules(repo))), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL, check=False)
+    if p.returncode != 0:
+        said = (p.stderr.strip() + "\n" + p.stdout.strip()).strip().splitlines()
+        shown = (p.stderr.strip() or p.stdout.strip()).splitlines()
+        # the adapter may have left half-written files; a plain re-run would review them as if they were complete
+        left = (f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or remove {ADAPTED}/"
+                if write else "")
+        if any("max turns" in l.lower() for l in said):
+            raise Fail(f"the {'adapting agent' if write else 'reviewer'} used all {MAX_TURNS[write]} turns and was "
+                       f"stopped before it finished. Nothing was committed and no Orca step ran.{left}")
+        raise Fail(f"claude -p --model failed: {shown[-1] if shown else p.returncode}. "
+                   f"Nothing was committed.{left}")
+    return p.stdout
 
 
 def kept_suggestions(repo: Path) -> Path:
@@ -1232,13 +1321,15 @@ def kept_suggestions(repo: Path) -> Path:
 def adapt(repo: Path, who: tuple, prompt: str, before: dict):
     """One run of the adapting agent. Its suggestions leave the repo before anything reviews the result; a fix round's
     are added to the earlier ones."""
-    run_agent(repo, who, prompt, write=True)
-    new = repo / SUGGESTIONS
-    if new.is_file():
-        kept = kept_suggestions(repo)
-        old = kept.read_bytes() if kept.exists() else b""
-        kept.write_bytes(old + (b"" if not old or old.endswith(b"\n") else b"\n") + new.read_bytes())
-        new.unlink()
+    try:
+        run_agent(repo, who, prompt, write=True)
+    finally:  # also when the run failed: the suggestions are never left where a later run could commit them
+        new = repo / SUGGESTIONS
+        if new.is_file():
+            kept = kept_suggestions(repo)
+            old = kept.read_bytes() if kept.exists() else b""
+            kept.write_bytes(old + (b"" if not old or old.endswith(b"\n") else b"\n") + new.read_bytes())
+            new.unlink()
     check_scope(repo, before)
 
 
@@ -1435,9 +1526,12 @@ def main(argv=None) -> int:
     ap.add_argument("--opencode-model", help="with --opencode own: the provider/model for OpenCode tiers. Writes no "
                                              "sandbox: only for a gateway you run yourself")
     ap.add_argument("--no-start", action="store_true")
-    ap.add_argument("--adapter", default="claude/opus",
+    ap.add_argument("--private", action="append", default=[], metavar="GLOB",
+                    help="a tracked file or folder the onboarding agents must not read, relative to the repo root "
+                         "(repeatable, e.g. 'shot*.png' or 'private/**'); git-ignored paths are always denied")
+    ap.add_argument("--adapter", default="claude/sonnet",
                     help="harness/model of the agent that adapts the project's files")
-    ap.add_argument("--adapt-reviewer", default="claude/sonnet",
+    ap.add_argument("--adapt-reviewer", default="claude/opus",
                     help="harness/model that reviews the adapted files; must be a different model from --adapter")
     again = ap.add_mutually_exclusive_group()
     again.add_argument("--readapt", action="store_true", help="adapt the project again although it was done before")
@@ -1464,6 +1558,11 @@ def main(argv=None) -> int:
               "opencode-go/ model: those need the sandbox", file=sys.stderr)
         return 2
     own_models = set(a.own_model) | ({a.opencode_model} if a.opencode_model else set())
+    for g in a.private:
+        if not g or g.startswith(("/", "~", "!")) or ".." in Path(g).parts or RULE_UNSAFE & set(g) - set("*?[]"):
+            print(f"project-setup: --private takes a glob relative to the repo root, got {g!r}", file=sys.stderr)
+            return 2
+    PRIVATE_GLOBS[:] = a.private
     for flag, pin in (("--coordinator", coord), ("--design-lead", lead), ("--reviewer", reviewer)):
         if pin and pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
             print(f"project-setup: {flag} {pin[0]}/{pin[1]}: a hosted OpenCode model runs only inside the sandbox, and "
