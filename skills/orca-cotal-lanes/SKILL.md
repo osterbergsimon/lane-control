@@ -116,7 +116,9 @@ Before you call a lane good: look at its diff in the worktree, rerun its checks 
 scope. Merge only when the owner says so.
 
 Close a lane once its PR is merged, without asking, if its worktree is clean (`git status` empty), pushed, and its
-branch is an ancestor of main (`git merge-base --is-ancestor <branch> origin/main`). The lane's issue is already
+branch is an ancestor of the branch its PR merged into: run `git fetch origin`, then
+`git merge-base --is-ancestor <branch> origin/<base>` (`<base>` is main, or the design lead's branch for a design
+lane). The lane's issue is already
 closed at merge. Do these in order, and set nothing else:
 
 ```

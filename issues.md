@@ -6,7 +6,7 @@ Owner-approved 2026-10-30. Applies to every project; a project's AGENTS.md carri
 - **One issue, one key, one lane.** An issue becomes work when it gets its task key (`<KEY>-<n>`), kept as the label `lane:<KEY>-<n>` on the issue; the task title starts with that key.
 - **Claim at launch.** The coordinator (or the lane, first thing) runs `bd update <id> --claim`. No running lane without an in-progress issue.
 - **Close at merge.** The coordinator closes every issue a merge names, then syncs beads. A lane never closes issues.
-- **Close the lane after the merge.** When a lane's PR is merged and its worktree is clean, pushed and an ancestor of main, the coordinator closes the lane (stops its reviewer and agent, removes the worktree without `--force`). Anything else, an unmerged lane or uncommitted changes, goes to the owner. Branches are kept unless the owner says to delete them.
+- **Close the lane after the merge.** When a lane's PR is merged and its worktree is clean, pushed and an ancestor of the branch its PR merged into, the coordinator closes the lane (stops its reviewer and agent, removes the worktree without `--force`). Anything else, an unmerged lane or uncommitted changes, goes to the owner. Branches are kept unless the owner says to delete them.
 - **In progress means a lane exists.** When a lane stops without merging, its issue goes back to open (`bd update <id> --status open`) with a Resume note (`--notes`).
 
 ## Setup

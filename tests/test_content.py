@@ -387,16 +387,17 @@ class CleanupSteeringTests(unittest.TestCase):
     def test_personas_close_merged_clean_lanes_and_keep_the_rest_with_the_owner(self):
         for name in ("coordinator.md", "design-lead.md"):
             t = self.flat(PERSONAS / name)
-            for needle in ("clean, pushed and an ancestor of main", "never use `--force`",
+            for needle in ("an ancestor of the branch its pr merged into", "never use `--force`",
                            "uncommitted changes", "never delete a branch", "reviewer after its last round"):
                 self.assertIn(needle, t, f"{name}: {needle}")
-        self.assertIn("never close a lane whose work did not merge", self.flat(PERSONAS / "coordinator.md"))
+        self.assertIn("without the owner's word for that lane, never close a lane whose work did not merge",
+                      self.flat(PERSONAS / "coordinator.md"))
         self.assertNotIn("close a lane, stop an agent", self.flat(PERSONAS / "coordinator.md"))
 
     def test_skill_gives_the_checks_and_the_order(self):
         t = self.flat(SKILL)
         sec = t[t.index("## 6. check and close"):]
-        for needle in ("without asking", "is-ancestor", "set nothing else", "already closed at merge",
+        for needle in ("without asking", "is-ancestor", "git fetch origin", "origin/<base>", "set nothing else", "already closed at merge",
                        "a lane whose work did not merge", "`--force`", "never deletes its branch",
                        "merged branches stay unless the owner says to delete them", "after its last round"):
             self.assertIn(needle, sec, needle)
