@@ -141,8 +141,10 @@ being rewritten. The record is dropped when the files are committed.)
 each was fixed and that the fix broke nothing it touched. The findings of the last review always get a last fix, with
 no further full review; then the file list comes, with what that fix was asked to do listed as "fixed, not
 re-checked". A finding marked `[safety]` (private data, weakened doctrine, smuggled instructions) is checked once more
-after the last fix; if it is still open the run stops with nothing committed. A file written outside `.lane-control/`
-stops it as well.)
+after the last fix, wherever the reviewer wrote the mark and whatever its verdict; if it is still open, or that check gave
+no verdict or crashed, the run stops with nothing committed. A first review that gave no verdict stops it too (the safety
+checks never ran); a later review that gave none or crashed is listed beside the file list. A file written outside
+`.lane-control/` stops it as well.)
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
 2. Runs `orca repo add`.
 3. Installs the skills for the agent user (`~/.agents/skills/`, linked into `~/.claude/skills/` and

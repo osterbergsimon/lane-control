@@ -931,6 +931,60 @@ class OnboardingTests(unittest.TestCase):
         ask.assert_not_called()
         self.assertEqual(self.head_count(), 1)
 
+    def test_the_safety_mark_counts_in_any_shape(self):
+        for text in ("1. blocker [safety] a:1", "- blocker: [safety] a:1", "- [safety] blocker a:1",
+                     "**blocker** [SAFETY] a:1"):
+            with self.subTest(text=text):
+                self.assertTrue(load().has_safety(text))
+        self.assertFalse(load().has_safety("- blocker a:1 a plain finding"))
+
+    def test_a_safety_finding_in_another_shape_still_gets_the_extra_check_and_stops(self):
+        odd = {"say": "1. blocker [safety] .lane-control/project.md:3 private path\nVERDICT: FIX"}
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[odd, odd, odd])
+        status, _, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet", "opus"])
+        ask.assert_not_called()
+        self.assertEqual(self.head_count(), 1)
+
+    def test_a_minor_safety_finding_under_a_pass_stops_when_the_extra_check_has_it(self):
+        minor = {"say": "- minor [safety] .lane-control/project.md:3 still there\nVERDICT: PASS"}
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[self.SAFETY_FIX, self.SAFETY_FIX, minor])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        self.assertIn("still there", out)
+        ask.assert_not_called()
+
+    def test_a_minor_safety_finding_under_a_first_pass_gets_a_fix_round(self):
+        minor = {"say": "- minor [safety] .lane-control/project.md:3 a path\nVERDICT: PASS"}
+        self.e.script_agents(sonnet=[WRITE, {}], opus=[minor, PASS])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus"])
+
+    def test_a_later_review_that_crashes_counts_as_no_verdict(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[FIX, {"exit": 1, "err": "API error"}])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(self.models(), ["sonnet", "opus", "sonnet", "opus", "sonnet"])
+        self.assertIn("gave no verdict", out)
+
+    def test_a_crashed_safety_check_stops_the_run(self):
+        self.e.script_agents(sonnet=[WRITE, {}, {}],
+                             opus=[self.SAFETY_FIX, self.SAFETY_FIX, {"exit": 1, "err": "API error"}])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 3)
+        self.assertIn("gave no verdict", out)
+        ask.assert_not_called()
+
+    def test_a_check_review_gets_the_check_closing_rules(self):
+        self.e.script_agents(sonnet=[WRITE, {}], opus=[FIX, PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        first, second = self.e.agent_runs()[1]["prompt"], self.e.agent_runs()[3]["prompt"]
+        self.assertIn("Report every finding with its file", first)
+        self.assertNotIn("Report every finding with its file", second)
+        self.assertIn("Report only the earlier findings", second)
+
     def test_a_stopped_safety_review_reruns_without_the_adapter_and_keeps_a_hand_edit(self):
         self.e.script_agents(sonnet=[WRITE, {}, {}], opus=[self.SAFETY_FIX, self.SAFETY_FIX, self.SAFETY_FIX])
         self.assertEqual(self.in_terminal("y")[0], 3)
@@ -961,7 +1015,8 @@ class OnboardingTests(unittest.TestCase):
         status, out, ask = self.in_terminal("y")
         self.assertEqual(status, 3)
         ask.assert_not_called()
-        self.assertIn("run again", out)
+        self.assertIn("first review gave no verdict", out)
+        self.assertNotIn("still open after the last fix", out)
         self.assertEqual(self.models(), ["sonnet", "opus"])
         self.assertEqual(self.head_count(), 1)
 

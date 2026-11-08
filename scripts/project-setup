@@ -1264,6 +1264,10 @@ Rules for this run:
 REVIEW_RULES = """
 You can only read. Report every finding with its file. End your reply with one last line, exactly `VERDICT: PASS` when
 nothing needs fixing, or `VERDICT: FIX` when something does."""
+CHECK_RULES = """
+You can only read. Report only the earlier findings that are still open or newly broken, each with its file, and
+nothing else. End your reply with one last line, exactly `VERDICT: PASS` when no blocker or major is open, or
+`VERDICT: FIX` when one is."""
 
 
 def read_raw(f: Path) -> str:
@@ -1567,7 +1571,7 @@ def review_prompt(repo: Path, project: str, design_lead: bool, earlier: str = ""
     head = (fill("check-prompt.md", project, design_lead, clip(earlier, FINDINGS_LIMIT)) if earlier
             else fill("review-prompt.md", project, design_lead))
     return (head + f"\nUncommitted files to review:\n{files}\n"
-            + (f"\nDiff of the files already tracked:\n{diff}" if diff else "") + REVIEW_RULES)
+            + (f"\nDiff of the files already tracked:\n{diff}" if diff else "") + (CHECK_RULES if earlier else REVIEW_RULES))
 
 
 def verdict(text: str):
@@ -1577,25 +1581,30 @@ def verdict(text: str):
     return m.group(1) if m else None
 
 
-SAFETY_FINDING = re.compile(r"(?im)^[\s*\-`_]*(?:blocker|major|minor)\b[\s*`_]*\[safety\]")
+SAFETY_FINDING = re.compile(r"\[safety\]", re.I)
 
 
 def has_safety(findings: str) -> bool:
-    """True when a finding carries the reviewer's [safety] mark (private data, weakened doctrine, smuggled
-    instructions)."""
+    """True when the reviewer's words carry the [safety] mark anywhere (private data, weakened doctrine, smuggled
+    instructions). Any shape counts: a format drift must stop the run, never let a finding through."""
     return bool(SAFETY_FINDING.search(findings))
 
 
 def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple, before: dict, design_lead: bool):
     """The first review is the full audit; every later one only checks the earlier findings. At most MAX_FIX_ROUNDS
     fix rounds, and the findings of the last review always get theirs. Returns (stop, notes): stop is None unless a
-    safety finding is still open (or unverified) after one more check, else the reviewer's words; notes are lines for
+    safety finding is still open (or unverified), else the full stop message; notes are lines for
     the owner beside the file list: what the last fix was asked to do and was not re-checked, or still open."""
     notes = []
 
     def review(earlier: str = "") -> str:
         say("review", "running", "/".join(reviewer) + (" (checks the fixes only)" if earlier else ""))
-        out = run_agent(repo, reviewer, review_prompt(repo, project, design_lead, earlier), write=False)
+        try:
+            out = run_agent(repo, reviewer, review_prompt(repo, project, design_lead, earlier), write=False)
+        except Fail as e:
+            if not earlier:  # a first review that crashes stops the run
+                raise
+            out = f"(the review failed: {e})"  # no verdict, like a reply without one
         check_scope(repo, before)
         return out
 
@@ -1604,6 +1613,8 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
     fixes = 0
     while True:
         result = verdict(out)
+        if result == "PASS" and has_safety(out):  # a safety finding open under a PASS still needs its fix
+            result = "FIX"
         if result == "PASS":
             say("review", "passed", f"after {fixes} round(s) of fixes")
             return None, notes
@@ -1612,7 +1623,8 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
         else:
             notes.append("A review gave no verdict, so it cleared nothing: " + (clip(out.strip(), 2000) or "(empty)"))
             if not findings:  # no review has happened: the safety checks never ran, so nothing may go on
-                return out.strip() + "\n(the reviewer gave no verdict; run again)", notes
+                return ("The first review gave no verdict, so the safety checks did not run and no fix was made. "
+                        "It said:\n" + (out.strip() or "(empty)") + "\nRun again."), notes
         fixes += 1
         say("adapt", "fixing", f"round {fixes} of {MAX_FIX_ROUNDS}")
         found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(findings, FINDINGS_LIMIT)}"
@@ -1623,11 +1635,15 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
     if has_safety(findings):  # a safety finding never passes unverified: one more check, then it is open or gone
         out = review(findings)
         result = verdict(out)
+        if result is None:
+            return ("A safety finding was raised and the check after the last fix gave no verdict, so it is "
+                    "unverified. It said:\n" + (out.strip() or "(empty)")), notes
+        if has_safety(out):
+            return ("A safety finding is still open after the last fix and one more check (at most "
+                    f"{MAX_FIX_ROUNDS} rounds of fixes). It said:\n{out.strip()}"), notes
         if result == "PASS":
             say("review", "passed", f"after {fixes} round(s) of fixes")
             return None, notes
-        if result is None or has_safety(out):
-            return out.strip() + ("\n(the reviewer gave no verdict)" if result is None else ""), notes
         notes.append("Still open after the last fix and its check (not safety findings):\n" + out.strip())
         return None, notes
     notes.append("Fixed, not re-checked (the last fix was asked to do this; no review followed it):\n" + findings)
@@ -1874,8 +1890,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     write_section(repo)
     unresolved, notes = review_with_fixes(repo, project, adapter, reviewer, before, design_lead)
     if unresolved is not None:
-        print(f"\nA safety finding is still open after the last fix and one more check (at most {MAX_FIX_ROUNDS} "
-              f"rounds of fixes). It said:\n{unresolved}\n")
+        print(f"\n{unresolved}\n")
         say("adapt", "stopped", f"nothing committed, no Orca setup. Owner: fix {ADAPTED}/ and run again, or remove it")
         return False
     changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
