@@ -178,9 +178,10 @@ class AdaptTemplateTests(unittest.TestCase):
             self.assertIn("at most about 25 files", text, name)
             self.assertIn("never read a tree", text, name)
             self.assertRegex(text, r"never lower[s]? (a|the)|lower a rating", name)
-        self.assertIn("a path you did not open goes one tier up", (ADAPT / "prompt.md").read_text())
+        self.assertIn("a path you could not judge from names and a sample goes one tier up", (ADAPT / "prompt.md").read_text())
         review = " ".join((ADAPT / "review-prompt.md").read_text().split())
-        self.assertIn("Always open the code behind anything rated low", review)
+        self.assertIn("Always open code behind anything rated low (check 13)", review)
+        self.assertIn("Beyond the adapted files and the project's top-level docs", review)
 
     def test_review_prompt_rules(self):
         text = (ADAPT / "review-prompt.md").read_text()

@@ -1168,11 +1168,13 @@ def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
     p = run(agent_cmd(who[1], prompt, write), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL, check=False)
     if p.returncode != 0:
         said = (p.stderr.strip() or p.stdout.strip()).splitlines()
+        # the adapter may have left half-written files; a plain re-run would review them as if they were complete
+        left = (f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or remove {ADAPTED}/"
+                if write else "")
         if "max turns" in " ".join(said[-1:]).lower():
             raise Fail(f"the {'adapting agent' if write else 'reviewer'} used all {MAX_TURNS[write]} turns and was "
-                       "stopped before it finished. Nothing was committed and no Orca step ran. Run again, or "
-                       "make the repo smaller to read")
-        raise Fail(f"claude -p --model failed: {said[-1] if said else p.returncode}. Nothing was committed")
+                       f"stopped before it finished. Nothing was committed and no Orca step ran.{left}")
+        raise Fail(f"claude -p --model failed: {said[-1] if said else p.returncode}. Nothing was committed.{left}")
     return p.stdout
 
 
@@ -1184,13 +1186,15 @@ def kept_suggestions(repo: Path) -> Path:
 def adapt(repo: Path, who: tuple, prompt: str, before: dict):
     """One run of the adapting agent. Its suggestions leave the repo before anything reviews the result; a fix round's
     are added to the earlier ones."""
-    run_agent(repo, who, prompt, write=True)
-    new = repo / SUGGESTIONS
-    if new.is_file():
-        kept = kept_suggestions(repo)
-        old = kept.read_bytes() if kept.exists() else b""
-        kept.write_bytes(old + (b"" if not old or old.endswith(b"\n") else b"\n") + new.read_bytes())
-        new.unlink()
+    try:
+        run_agent(repo, who, prompt, write=True)
+    finally:  # also when the run failed: the suggestions are never left where a later run could commit them
+        new = repo / SUGGESTIONS
+        if new.is_file():
+            kept = kept_suggestions(repo)
+            old = kept.read_bytes() if kept.exists() else b""
+            kept.write_bytes(old + (b"" if not old or old.endswith(b"\n") else b"\n") + new.read_bytes())
+            new.unlink()
     check_scope(repo, before)
 
 

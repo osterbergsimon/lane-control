@@ -49,7 +49,7 @@ Commands must be copied from where the repo writes them, and the Checks table sa
    CODEOWNERS, `orca.yaml`. Take the file list from Glob. Commit history is not available to you; do not guess at it.
    Reading budget: the project may be big, and you have a limited number of turns. Get names from Glob first. Beyond
    the files named above and the test and tool scripts, open at most about 25 files. Sample one or two files in each
-   risky area; never read a tree. The budget never lowers a tier: a path you did not open goes one tier up.
+   risky area; never read a tree. The budget never lowers a tier: a path you could not judge from names and a sample goes one tier up.
 2. Read what the test and tool scripts do before you list them as checks. Anything that deletes, reaches a real host
    or account, or needs special setup goes under "Do not run".
 3. For the path map, judge from names and a sample before you call it low-risk. Deep and review C: parsers of untrusted input, formats

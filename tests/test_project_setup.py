@@ -811,6 +811,19 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.head_count(), 1)
         self.assertFalse(self.orca_setup_ran())
 
+    def test_rerun_after_running_out_of_turns_restarts_the_adapter_and_commits_no_suggestions(self):
+        half = {"write": {ADAPTED_FILE: "half\n", ".lane-control/SUGGESTIONS.md": "q\n"},
+                "say": "Error: Reached max turns (80)", "exit": 1}
+        self.e.script_agents(sonnet=[half])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertIn("--readapt", r.stderr)
+        self.assertFalse((self.repo / ".lane-control" / "SUGGESTIONS.md").exists())
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.in_terminal("y", "--readapt")
+        self.assertEqual(self.models(), ["sonnet", "sonnet", "opus"])
+        self.assertNotIn(".lane-control/SUGGESTIONS.md", self.committed_paths())
+        self.assertNotEqual((self.repo / ADAPTED_FILE).read_text(), "half\n")
+
     def test_default_models_adapter_sonnet_reviewer_opus(self):
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.in_terminal("n")
