@@ -157,8 +157,9 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    this, so it writes `hasTrustDialogAccepted` for the folder into `~/.claude.json` the way Claude does: atomically,
    keeping everything else, refusing a file it can't parse, and checking afterwards that a running Claude session
    didn't overwrite it.
-8. Creates the Orca worktree `design-lead` as a child of the main checkout, closes Orca's startup shell, waits for
-   the setup script, starts the design lead there, then opens a shell after the agent's tab. With
+8. Creates the Orca worktree `design-lead` as a child of the main checkout, waits for the setup script, starts the design lead there, and only then closes
+   Orca's startup shell and the Setup tab (kept if the script never finishes; an empty worktree may refuse the spawn),
+   then opens a shell after the agent's tab. With
    `--no-design-lead` (a project without a frontend) there is no design lead: the coordinator routes any UI work
    itself and its persona says so.
 9. Verifies that the agents are live and that the design lead's task is nested.
@@ -169,7 +170,8 @@ With `--host`, it copies itself to `~/.local/share/lane-control/` on the host an
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
 1. Pick the tier per `model-routing.md`, then look up the harness and model in `.cotal/lanes.tsv`.
 2. Run `orca worktree create --name <key> --parent-worktree active --json`, so the new task nests under the caller in
-   the GUI. Close the startup shell (not the Setup tab) and wait for `orca-setup-done` when the setup script writes it.
+   the GUI. Wait for `orca-setup-done` when the setup script writes it, start the agent (step 3), and only then close
+   the startup shell and the Setup tab (it stays if the marker never appears), so the agent's tab is first.
 3. Call `cotal_spawn` with `agent`, `model`, `cwd` = that worktree, role `lane`, an inline `persona`, and the lane
    brief as `prompt`. For OpenCode add `events: false`; for Claude, `launchOptions: {"permission-mode": …}`.
 4. The lane reports by `cotal_dm`, and the DM wakes the parent as its own turn.
