@@ -171,6 +171,16 @@ class AdaptTemplateTests(unittest.TestCase):
         self.assertLess(text.index("- minor ..."), text.index("VERDICT: PASS | FIX"))
         self.assertNotIn("and nothing else", text)
 
+    def test_rerun_and_suggestions_wording_on_fix_rounds(self):
+        text = (ADAPT / "prompt.md").read_text()
+        self.assertIn("Only when there are no review findings below", text)
+        self.assertIn("write only entries that are new this", text)
+
+    def test_review_prompt_has_no_literal_double_braces_but_its_placeholders(self):
+        left = re.sub(r"\{\{(PROJECT|DESIGN_LEAD|TEMPLATES)\}\}", "", (ADAPT / "review-prompt.md").read_text())
+        self.assertNotIn("{{", left)
+        self.assertNotIn("}}", left)
+
     def test_prompts_ask_for_no_shell_commands(self):
         # the headless agents have Read, Glob and Grep (plus Edit and Write for the adapter), no shell
         for name in ("prompt.md", "review-prompt.md"):

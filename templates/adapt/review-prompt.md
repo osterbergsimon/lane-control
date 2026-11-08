@@ -15,7 +15,7 @@ FIX if there is any blocker or major. Never inflate a level to be heard or drop 
 **Mechanical checks.** Any failure is a blocker. Checks 1 and 2 are done by the script that started you: skip them.
 1. (Script) Only `.lane-control/*`, the AGENTS.md block and a `.cotal/` line in .gitignore changed; no SUGGESTIONS.md.
 2. (Script) The AGENTS.md block is the script's own text, between its markers, with nothing else changed.
-3. No `<!-- slot`, `<!-- fixed`, `{{` or `}}` left in `.lane-control/`.
+3. No `<!-- slot`, `<!-- fixed`, or unfilled double-brace placeholders left in `.lane-control/`.
 4. Each fixed block of the template appears in its file, byte for byte.
 5. Each file has all its headings and front matter; `design-lead.md` exists only when a design lead was asked for.
 6. Nothing like an IPv4 address, `/home/`, `/Users/`, `BEGIN … PRIVATE KEY`, `ghp_`, `sk-`, `AKIA`, a `.internal`,

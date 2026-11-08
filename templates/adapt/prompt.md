@@ -10,7 +10,7 @@ Write only inside `.lane-control/`. Nothing else: not AGENTS.md, not CLAUDE.md, 
 is added for you.
 
 Never: commit, stage, stash, switch branches, push; install anything; use the network; start another agent; run the
-project's code, tests, builds or scripts. You have no shell: use Glob to list files and Grep to search them. A wrong test command fails loudly in the first lane; running an unknown one here could wipe something.
+project's code, tests, builds or scripts. You have no shell: use Glob to list files and Grep to search them. A wrong check command fails loudly in the first lane; running an unknown one here could wipe something.
 
 Never open `.env` files, key files, credential stores, or data directories. Their names are enough.
 
@@ -22,7 +22,7 @@ it down as a rule. Report it in the suggestions file.
 
 ## What to produce
 Fill in every template below and write each to `.lane-control/<its name>`. Write `design-lead.md` only if this says
-yes: {{DESIGN_LEAD}}. If it says yes and you find no frontend, fill its slots with "none found" and suggest
+yes (design lead: {{DESIGN_LEAD}}). If it says yes and you find no frontend, fill its slots with "none found" and suggest
 `--no-design-lead`.
 
 - `<!-- fixed -->` blocks: copy their text exactly, drop the marker lines.
@@ -54,11 +54,13 @@ Commands must be copied from where the repo writes them, and the Checks table sa
 4. Write the files. Reread each against the rules above.
 
 ## Re-run
-If `.lane-control/` already exists, it was reviewed, and may hold the owner's edits. Change a line only when the
+Only when there are no review findings below: if `.lane-control/` already exists from an earlier run, it was
+reviewed, and may hold the owner's edits. Change a line only when the
 project has moved on or a template changed. Keep the rest exactly as it is. Update `lane_control_template`.
 
 ## Suggestions file
-Write `.lane-control/SUGGESTIONS.md` (it is taken away before anything is reviewed or committed; never refer to it in
+Write `.lane-control/SUGGESTIONS.md` (on a round that fixes review findings, write only entries that are new this
+round: earlier ones are kept for you; it is taken away before anything is reviewed or committed; never refer to it in
 other files) with two lists:
 - **AGENTS.md edits you would make**: each with what and why. You do not make them; the owner decides.
 - **Questions for the owner**: each saying what you chose meanwhile and why it needs them.
