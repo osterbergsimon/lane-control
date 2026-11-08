@@ -301,3 +301,30 @@ class LaneSkillCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BeadsSteeringTests(unittest.TestCase):
+    """The beads rules from issues.md reach agents in onboarded projects, which never see issues.md."""
+    RULES = (
+        ("never close", "lane never closes issues"),
+        ("--status open", "stopped lane goes back to open"),
+        ("Resume note", "with a Resume note"),
+        ("bd search", "search before filing"),
+        ("PR body", "nits go in the PR body"),
+        ("bd git hooks", "no bd git hooks"),
+    )
+
+    def check(self, path, text):
+        low = " ".join(text.lower().split())
+        for needle, why in self.RULES:
+            self.assertIn(needle.lower(), low, f"{path.name}: {why}")
+
+    def test_coordinator_design_lead_and_brief_carry_the_rules(self):
+        for path in (PERSONAS / "coordinator.md", PERSONAS / "design-lead.md", BRIEF):
+            self.check(path, path.read_text())
+
+    def test_lane_key_is_a_label_everywhere(self):
+        for name in ("issues.md", "model-routing.md", "templates/AGENTS-coordination.md", "personas/coordinator.md"):
+            text = (ROOT / name).read_text()
+            self.assertIn("lane:<KEY", text, name)
+            self.assertNotIn("external-ref", text, name)

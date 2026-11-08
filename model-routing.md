@@ -36,7 +36,7 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 - Escalating to the deep tier is cheap unless the job is huge; escalating to the top tier is expensive and is not a light decision.
 - Coordinators (project and machine) are the planning lanes. Workflows (multi-agent orchestration inside a lane) are allowed where a net positive.
 
-## Routing: by paths, decided when an issue gets its task key (`lane:` label)
+## Routing: by paths, decided when an issue gets its task key (the issue's `lane:<KEY>-<n>` label)
 1. **Take the tier from the project's path map** for the paths the task will touch. The highest tier wins.
 2. **deep**, whatever the paths, if the task is: a diagnosis (cause unknown); a cross-cutting refactor; a feature with subtle text or locale handling; an open design question; a follow-up of a silent-loss or false-gate-claim finding.
 3. **swift** only for prose docs, statistics docs, scripts without private data, and CI. It may port or refactor existing tests but **never add test expectations** or add/edit spec statement ids. Never a task that needs private data.

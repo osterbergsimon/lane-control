@@ -209,6 +209,17 @@ def preflight(needed_harnesses):
             raise Fail(f"{h} not on PATH, but this project launches {h} agents")
 
 
+def beads_note(repo):
+    """Says plainly when bd is not set up for this project. Creates nothing: where beads lives is the owner's call."""
+    if not shutil.which("bd"):
+        print("project-setup: note: `bd` is not on PATH; the coordinator and lanes use beads for issues "
+              "(see issues.md). Install it if this project should use beads.", file=sys.stderr)
+    elif not (repo / ".beads").exists():
+        print(f"project-setup: note: {repo} has no .beads; agents will find no issue tracker. "
+              "Where beads lives is your choice (a symlink to a separate repo, or `bd init`); nothing was created.",
+              file=sys.stderr)
+
+
 def host_hygiene():
     os.umask(0o022)
     for d in (Path.home() / ".config", Path.home() / ".config" / "cotal"):
@@ -1055,6 +1066,7 @@ def main(argv=None) -> int:
             print(f"project-setup: note: tier harness not on PATH: {' '.join(missing_tier)}", file=sys.stderr)
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
+        beads_note(repo)
         # An agent tab can't answer Claude's first-start trust prompt, and the launch times out on it. Trusting the
         # folder is the owner's call, so it is never written for them.
         if "claude" in needed and not a.no_start:

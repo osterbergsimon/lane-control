@@ -50,7 +50,7 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
   checkout; each issue is one child task with its own worktree and branch, briefed by the issue
   and this file. Names, set by the coordinator at creation
   (`rove api add --title ... --branch ...`, then `update --parent <main task>` if needed):
-  every issue that becomes a task gets the next task key `<KEY_PREFIX>-<n>` (issue `--external-ref`
+  every issue that becomes a task gets the next task key `<KEY_PREFIX>-<n>` (issue label `lane:<KEY_PREFIX>-<n>`
   and ` (<KEY_PREFIX>-<n>)` at the end of the issue title); task title `<KEY_PREFIX>-<n> <short title>`,
   branch `<key_prefix>-<n>-<slug>` (lower case, ≤ 40 chars); one issue, one task, one branch;
   a follow-up round on the same issue reuses the branch. Never rename a branch after its first push.
