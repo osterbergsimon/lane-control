@@ -115,7 +115,7 @@ task. It reviews read-only and reports to you by DM.
 Before you call a lane good: look at its diff in the worktree, rerun its checks there, look for files outside its
 scope. Merge only when the owner says so.
 
-Close a lane once its PR is merged, without asking, if its worktree is clean (`git status --ignored` shows nothing but known build output; any other ignored
+Close a lane once its PR is merged, without asking, if its worktree is clean (`git status --ignored` shows nothing but known build output and the `.beads` symlink; any other ignored
 file, such as a local `.env` or notes, goes to the owner first), pushed, and its
 branch is an ancestor of the branch its PR merged into: run `git fetch origin`, then
 `git merge-base --is-ancestor <branch> origin/<base>` (`<base>` is main, or the design lead's branch for a design

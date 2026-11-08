@@ -387,7 +387,7 @@ class CleanupSteeringTests(unittest.TestCase):
     def test_personas_close_merged_clean_lanes_and_keep_the_rest_with_the_owner(self):
         for name in ("coordinator.md", "design-lead.md"):
             t = self.flat(PERSONAS / name)
-            for needle in ("an ancestor of the branch its pr merged into", "never use `--force`",
+            for needle in ("clean, pushed and an ancestor of the branch its pr merged into", "never use `--force`",
                            "uncommitted changes", "never delete a branch", "reviewer after its last round"):
                 self.assertIn(needle, t, f"{name}: {needle}")
         self.assertIn("without the owner's word for that lane, never close a lane whose work did not merge",
@@ -399,7 +399,7 @@ class CleanupSteeringTests(unittest.TestCase):
     def test_skill_gives_the_checks_and_the_order(self):
         t = self.flat(SKILL)
         sec = t[t.index("## 6. check and close"):]
-        for needle in ("without asking", "is-ancestor", "git status --ignored", "known build output", "any other ignored file", "older host", "tell the owner", "uncommitted changes", "is clean", "git fetch origin", "origin/<base>", "set nothing else", "already closed at merge",
+        for needle in ("without asking", "is-ancestor", "git status --ignored", "known build output and the `.beads` symlink", "any other ignored file", "older host", "tell the owner", "uncommitted changes", "is clean", "git fetch origin", "origin/<base>", "set nothing else", "already closed at merge",
                        "a lane whose work did not merge", "`--force`", "never deletes its branch",
                        "merged branches stay unless the owner says to delete them", "after its last round"):
             self.assertIn(needle, sec, needle)
