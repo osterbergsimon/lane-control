@@ -4,14 +4,14 @@ Check each item on a new box before adopting the playbook.
 
 ## Resources
 - [ ] Cores and memory (`nproc`, `free -g`). Set `MEM_LOW_GB`, `SWAP_HIGH_GB` and `NIGHT_MEM_MIN_GB` in the config from them; the owner's own work shares the machine, so leave headroom.
-- [ ] Machine caps (see below): check the limits `scripts/lane-room` prints; a wrapper script per project if builds are large.
+- [ ] Machine caps (see below): check the limits `~/.agents/bin/lane-room` prints; a wrapper script per project if builds are large.
 - [ ] Swap size and whether the OS kills on OOM or freezes; the watch fires on available memory, not on crashes.
 - [ ] Temp directory for the mode file and night-start snapshots (default `$TMPDIR` or `/tmp`); it must survive between routine runs, not reboots.
 
 ## Machine caps
 The limit on heavy work is per machine, across every project and lane, not per project: several lanes building at once overwhelm a machine (load 23 on 12 cores with four lanes).
-- **Heavy work:** every build or full test suite runs through `scripts/lane-heavy <command>`. A fixed number run at once; the rest wait, at low priority, with a memory limit where the host supports one.
-- **Opening a lane:** `scripts/lane-room` first. If it exits non-zero, hold the lane and tell the owner. Its limit is looser than the heavy-work gate: idle agents cost little.
+- **Heavy work:** every build or full test suite runs through `~/.agents/bin/lane-heavy <command>`, the per-machine install of `scripts/lane-heavy` (a lane in another project has no `scripts/` of ours). A fixed number run at once; the rest wait, at low priority, with a memory limit where the host supports one.
+- **Opening a lane:** `~/.agents/bin/lane-room` first. If it exits non-zero, hold the lane and tell the owner. Its limit is looser than the heavy-work gate: idle agents cost little.
 - **Settings:** one per-machine file outside any repo, `~/.config/lane-control/limits.sh` (`limits.example.sh`); without it the defaults follow cores and memory. The `MEM_LOW_GB` family in the config is the machine coordinator's watch, a separate thing.
 
 ## Usage feeds (per metered budget)

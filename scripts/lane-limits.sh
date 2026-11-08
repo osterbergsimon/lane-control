@@ -44,17 +44,20 @@ if [ -z "${LANE_STATE_DIR:-}" ]; then
   fi
 fi
 
+# The tools run with set -u; an unset variable in the file would end them, so it counts as an empty (bad) value.
+set +u
 if [ -r "$LANE_LIMITS_FILE" ]; then
   # shellcheck disable=SC1090
   . "$LANE_LIMITS_FILE"
 fi
+set -u
 
 # lane_setting <name> <default> [min]: a bad value in the file must not break the gate, so it falls back and says so.
 lane_setting() {
   local value=${!1:-}
   case $value in
     '' | *[!0-9]*) ;;
-    *) [ "$value" -ge "${3:-0}" ] && return 0 ;;
+    *) if [ "$value" -ge "${3:-0}" ] 2>/dev/null; then printf -v "$1" %d "$((10#$value))"; return 0; fi ;;   # 08 is not octal
   esac
   echo "lane-limits: ignoring $1='$value' in $LANE_LIMITS_FILE, using $2" >&2
   printf -v "$1" %s "$2"

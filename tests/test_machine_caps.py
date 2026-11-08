@@ -352,6 +352,20 @@ class LimitsTests(Machine):
             self.assertIn("LANE_HEAVY_SLOTS", self.stderr)
 
 
+    def test_leading_zeros_are_plain_decimals(self):
+        self.write_limits(LANE_HEAVY_SLOTS="08", LANE_ROOM_MIN_MEM_GB="09")
+        seen = self.limits_seen(12, 64)
+        self.assertEqual((seen["LANE_HEAVY_SLOTS"], seen["LANE_ROOM_MIN_MEM_GB"], self.stderr), (8, 9, ""))
+        r = self.heavy("sh", "-c", "exit 9")
+        self.assertEqual((r.returncode, r.stderr.count("value too great")), (9, 0))
+
+    def test_a_broken_file_does_not_stop_the_job(self):
+        for line in ("LANE_HEAVY_SLOTS=$NOPE", "LANE_HEAVY_SLOTS=$((1 / 0))", "if then"):
+            self.limits.write_text(line + "\n")
+            r = self.heavy("sh", "-c", "exit 9")
+            self.assertEqual(r.returncode, 9, f"{line}: {r.stderr}")
+
+
 class ContentTests(unittest.TestCase):
     def test_every_setting_is_documented(self):
         names = set(re.findall(r"^(LANE_(?:HEAVY|ROOM)_[A-Z_]+)=", LIMITS.read_text(), re.M))
@@ -370,7 +384,8 @@ class ContentTests(unittest.TestCase):
         text = (ROOT / "machine.md").read_text()
         self.assertNotIn("one heavy build or run at a time per project", text)
         self.assertIn("## Machine caps", text)
-        self.assertIn("lane-heavy", text)
+        self.assertIn("~/.agents/bin/lane-heavy", text)
+        self.assertIn("~/.agents/bin/lane-room", text)
 
     def test_the_brief_sends_heavy_work_through_the_gate(self):
         self.assertIn("lane-heavy COMMAND", (ROOT / "templates" / "lane-brief.md").read_text())
