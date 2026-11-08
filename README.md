@@ -54,7 +54,7 @@ About half an hour for one project. Everything marked **planned** is manual toda
 4. **Set up a project.**
    - `rove add <path>`: the repo's main task is its coordinator. Put its task id in `COORD_TASK` and the checkout in `COORD_REPO` in the config.
    - `bd init` in the checkout; no bd git hooks (`issues.md`).
-   - Copy the sections of `templates/AGENTS-coordination.md` into the project's `AGENTS.md` and fill in the **path map** (which paths need which tier), gate commands and private data directories.
+   - Write the project's **path map** (which paths need which tier, and which review tier) in `.lane-control/routing.md`, from `templates/adapt/routing.md`; gate commands, private data directories and the other project facts go in `.lane-control/project.md`. The Rove flow pasted `templates/AGENTS-coordination.md` into AGENTS.md instead; the Orca flow does not.
    - Install `templates/project-settings.json` as the project's agent settings, `templates/coordinator-settings.local.json` as the coordinator's gitignored local settings, and `templates/rove-init.sh` as `.rove/init.sh`.
    - For third-party lanes: pin the model in `templates/opencode.json`, list private paths in `SANDBOX_PRIVATE_PATHS`, run `scripts/test-opencode-sandbox.sh` once.
 5. **Start the coordinators.** Open the machine coordinator's main task on a repo holding your instance notes (owner decisions, caps, priorities) and have it read `README.md`, `roles.md`, `model-routing.md`, `reliability.md` and the config. Open each project coordinator on its repo, pointing at its `AGENTS.md`. Queue issues, then tell it to go.
