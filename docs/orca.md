@@ -128,7 +128,7 @@ composer. [tested]
 ```bash
 scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
-  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml (only with --skip-adapt)] [--no-design-lead] [--trust-folder] [--no-start (opt-out of starting)] \
+  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml (leaves an uncommitted draft as orca.yaml)] [--no-design-lead] [--trust-folder] [--no-start (opt-out of starting)] \
   [--private GLOB]...
 ```
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
@@ -154,13 +154,16 @@ being rewritten. The record is dropped when the files are committed.)
    list, it asks a second question: no orca.yaml was found, here is the generated text, it must be committed and
    pushed. A yes commits `orca.yaml` by explicit path and pushes the checked-out branch (never forced, nothing else
    set); that push also carries the onboarding commit. With a tracked orca.yaml, or no lockfiles, it asks about the
-   push alone when the onboarding commit is unpushed. An untracked `orca.yaml` that differs from the draft is never
+   push alone, only when origin's default branch lacks the onboarding files or `orca.yaml`; the question lists the
+   commits the push carries. An already onboarded project is asked too on a re-run (that is how a declined, failed or
+   interrupted answer is asked again), also with `--write-orca-yaml`. An untracked `orca.yaml` that differs from the draft is never
    overwritten or committed. The push is asked only on the branch origin's HEAD names; on another branch nothing is
    asked, and the run says lanes will not get the files only when origin's default branch really lacks them. With no
    origin Orca makes worktrees from the local branch, so the question is only to commit `orca.yaml`. A no, no terminal or a failed push commits
    and pushes nothing more, and the agents still start, with that warning. Only a no to the file list stops the run.
-   A run without onboarding (`--skip-adapt`) drafts into `.cotal/orca.yaml.proposed`, or into `orca.yaml` with
-   `--write-orca-yaml`, and never commits. The draft ends by writing `orca-setup-done` in the worktree's git dir;
+   A run without onboarding (`--skip-adapt`) asks nothing and never commits: it drafts into
+   `.cotal/orca.yaml.proposed`. `--write-orca-yaml` only changes where an uncommitted draft is left (as `orca.yaml` in
+   the repo, which a later run offers to commit); it never commits by itself. The draft ends by writing `orca-setup-done` in the worktree's git dir;
    agents start only after it.
 6. Starts the broker (`cotal up --no-manager`, on a per-project port recorded in the settings store) and a
    manager service `mgr` on the Orca runtime.
