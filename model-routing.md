@@ -74,7 +74,7 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 - Coordinators report each prod with `rove api report`; the machine coordinator reads `rove api deliveries` for the morning report.
 
 ## Message protocol
-- **Lane → coordinator:** the 5-line report in `templates/AGENTS-coordination.md`, once, at the end; mid-lane only for a blocker.
+- **Lane → coordinator:** the 6-line report in `templates/AGENTS-coordination.md`, once, at the end; mid-lane only for a blocker.
   ```
   <KEY> succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP: <one line>
   branch <b> · PR #<n> · ci passing|pending|failing
