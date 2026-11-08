@@ -206,15 +206,25 @@ def migrate(repo: Path) -> None:
     never held (models, mode, design lead), so a re-run without flags keeps them."""
     cotal, said = repo / ".cotal", []
     if not store_dir(repo).exists():
-        for other in sorted(store_dir(repo).parent.glob(f"{repo.name}-*")) if store_dir(repo).parent.is_dir() else []:
+        parent, seen = store_dir(repo).parent, {}
+        for other in sorted(parent.glob(f"{repo.name}-*")) if parent.is_dir() else []:
             try:
                 root = json.loads((other / "settings.json").read_text()).get("root")
             except (OSError, ValueError, AttributeError):
                 continue
             if isinstance(root, str) and root != str(repo.resolve()) and not Path(root).exists():
-                print(f"warning: {other} belongs to {root}, which is gone. This checkout ({repo}) has a new store; if "
-                      f"it is that project moved or renamed, copy lanes.tsv, sandbox-ports and the settings you want "
-                      f"from there into {store_dir(repo)}", file=sys.stderr, flush=True)
+                seen[other] = root
+        try:  # a renamed checkout: its coordinator persona still names the old store's table
+            m = re.search(r"([^\s`]*/lane-control/projects/[^/\s`]+)/lanes\.tsv",
+                          (cotal / "agents" / "coordinator.md").read_text())
+        except (OSError, UnicodeDecodeError):
+            m = None
+        if m and Path(m.group(1)) != store_dir(repo) and Path(m.group(1)).is_dir():
+            seen.setdefault(Path(m.group(1)), "")
+        for other, root in seen.items():
+            print(f"warning: {other} was this checkout's store" + (f" (it belongs to {root}, which is gone)" if root else "")
+                  + f". This checkout ({repo}) has a new store; if it is that project moved or renamed, copy lanes.tsv, "
+                  f"sandbox-ports and the settings you want from there into {store_dir(repo)}", file=sys.stderr, flush=True)
     first = keyed_by_name_only(repo)
     if first.is_dir() and not store_dir(repo).exists():
         try:
@@ -804,7 +814,8 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
     roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
     changed = []  # personas that existed and now read differently: a running agent keeps the old text
     for name, (h, m) in roles:
-        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m, mode, project, table,
+        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m,
+                              mode.get(name, "default") if isinstance(mode, dict) else mode, project, table,
                               review_persona, design_lead=lead is not None)
         state = write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text)
         say(f"persona {name}", state, f"{h}/{m}")
@@ -1677,6 +1688,34 @@ def validate_settings(repo: Path, st: dict) -> None:
     for k in ("private", "own_models"):
         if any(not isinstance(x, str) for x in st.get(k, [])):
             raise Fail(f"{f}: {k} must be a list of strings")
+    if any(not isinstance(v, str) for v in (st.get("models") or {}).values()):
+        raise Fail(f"{f}: models must map each role to a harness/model string")
+
+
+def known_own_models(repo) -> set:
+    """own_models the project holds, read-only and tolerant: the store, else a record from before the store."""
+    out = set()
+    if repo is None:
+        return out
+    for f in (store_dir(repo) / "settings.json", repo / ".cotal" / "lane-control.json"):
+        try:
+            v = json.loads(f.read_text()).get("own_models")
+            out |= {x for x in v if isinstance(x, str)} if isinstance(v, list) else set()
+        except (OSError, ValueError, AttributeError):
+            pass
+    return out
+
+
+def peek_repo(target: str, dest: Path, name: str):
+    """The repo project-setup would use, without creating, cloning or moving anything; None when there is none yet."""
+    if re.match(r"^(https?|ssh|git|file)://|^[\w.-]+@[\w.-]+:", target):
+        path = dest / name
+        return path if (path / ".git").exists() else None
+    d = Path(target).expanduser().resolve()
+    if not d.is_dir():
+        return None
+    top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False)
+    return Path(top.stdout.strip()) if top.returncode == 0 else None
 
 
 def own_check(flag_pins: list, own: set):
@@ -1711,7 +1750,18 @@ def resolve_settings(repo: Path, a) -> dict:
             raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is a hosted OpenCode model, which runs only "
                        "inside the sandbox, and this agent does not")
     lead_on = False if a.no_design_lead else bool(a.design_lead) or st.get("design_lead", True) is not False
-    mode = a.permission_mode or st.get("permission_mode") or "auto"
+    mode = a.permission_mode or st.get("permission_mode")
+    persona_modes = {}
+    if not mode:  # nothing says it: the personas already rendered do, and when they differ each keeps its own
+        _, mode, _, mixed = persona_pins(repo / ".cotal" / "agents")
+        if mixed:
+            for n in ("coordinator", "design-lead", "reviewer"):
+                try:
+                    persona_modes[n] = persona_mode((repo / ".cotal" / "agents" / f"{n}.md").read_text()) or "default"
+                except (OSError, UnicodeDecodeError):
+                    pass
+            mode = "default"  # the most restrictive, for a persona that is new
+        mode = mode or "auto"
     if mode not in MODES:
         raise Fail(f"{store_dir(repo) / 'settings.json'}: permission_mode {mode!r} must be one of {', '.join(MODES)}")
     private = list(dict.fromkeys([*(st.get("private") or []), *a.private]))
@@ -1719,11 +1769,13 @@ def resolve_settings(repo: Path, a) -> dict:
         if bad_glob(g):
             raise Fail(f"{store_dir(repo) / 'settings.json'}: private glob {g!r} is not a glob relative to the repo root")
     changes = {"root": str(repo), "models": {r: f"{h}/{m}" for r, (h, m) in pins.items()}, "design_lead": lead_on,
-               "permission_mode": mode, "private": private}
+               "private": private}
+    if not persona_modes:
+        changes["permission_mode"] = mode
     if a.name:
         changes["name"] = a.name
     settings(repo, **changes)
-    return {"pins": pins, "lead": lead_on, "mode": mode, "private": private, "name": a.name or st.get("name")}
+    return {"pins": pins, "lead": lead_on, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
 
 
 def show(repo: Path) -> int:
@@ -1885,17 +1937,18 @@ def main(argv=None) -> int:
                 raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
             say("repo", "exists", top.stdout.strip())
             repo = Path(top.stdout.strip())
+            bad = own_check(flag_pins, own_models | known_own_models(repo))  # before anything is moved
+            if bad:
+                return bad
             migrate(repo)
             st = settings(repo)
             validate_settings(repo, st)
-            bad = own_check(flag_pins, own_models | set(st.get("own_models") or []))
-            if bad:
-                return bad
-            if a.name:
-                settings(repo, name=a.name)
             stored_reviewer = (st.get("models") or {}).get("reviewer") if isinstance(st.get("models"), dict) else None
-            return refresh(repo, a.name or "", st.get("permission_mode") or "auto", tiers,
+            rc = refresh(repo, a.name or "", st.get("permission_mode") or "auto", tiers,
                            harness_model(a.reviewer or stored_reviewer or DEFAULT_PINS["reviewer"]))
+            if rc == 0 and a.name:  # only once refresh has accepted the project
+                settings(repo, name=a.name)
+            return rc
         except Fail as e:
             print(f"project-setup: {e}", file=sys.stderr)
             return 1
@@ -1905,20 +1958,21 @@ def main(argv=None) -> int:
     os.environ.setdefault("COTAL_ORCA_BIN", ORCA)
     base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
     try:
+        bad = own_check(flag_pins, own_models | known_own_models(peek_repo(a.target, Path(a.dest).expanduser(), slug(base))))
+        if bad:  # before a folder is made, cloned or moved: a refused run leaves nothing behind
+            return bad
         preflight(set())  # the agents' harnesses are checked once the project's settings are known
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
         beads_note(repo)
         migrate(repo)
         validate_settings(repo, settings(repo))
-        bad = own_check(flag_pins, own_models | set(settings(repo).get("own_models") or []))
-        if bad:
-            return bad
         cfg = resolve_settings(repo, a)
         coord, reviewer = cfg["pins"]["coordinator"], cfg["pins"]["reviewer"]
         lead = cfg["pins"]["design-lead"] if cfg["lead"] else None
         PRIVATE_GLOBS[:] = cfg["private"]
         mode = cfg["mode"]
+        modes = {r: cfg["modes"].get(r, mode) for r in ("coordinator", "design-lead", "reviewer")}
         late = {coord[0]} | ({lead[0]} if lead else set())
         for h in sorted(late):
             if not shutil.which(h):
@@ -1945,7 +1999,7 @@ def main(argv=None) -> int:
             claude_wiring(repo, space)
         if own_models:  # outside every lane's reach: opencode-seat starts only models named here or `none` in the table
             settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
-        changed = personas_and_tiers(repo, project, coord, lead, reviewer, mode, tier_text)
+        changed = personas_and_tiers(repo, project, coord, lead, reviewer, modes, tier_text)
         needs = {n: "persona changed" for n in changed}
         if skill == "updated":
             for n in ("coordinator", "design-lead") if lead else ("coordinator",):
@@ -1953,6 +2007,8 @@ def main(argv=None) -> int:
         project_table = store_table(repo)
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
+            if needs:
+                restart_notice(repo, project, needs)
             opencode_key_check(project_table)
             say("start", "skipped", "--no-start")
             return 0
@@ -1962,7 +2018,7 @@ def main(argv=None) -> int:
         opencode_key_check(project_table)
         if not mgr_started:
             seat_wrapper_note(project_table)
-        spawn(repo, space, "coordinator", *coord, mode, repo,
+        spawn(repo, space, "coordinator", *coord, modes["coordinator"], repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = None
         if lead:
@@ -1970,7 +2026,7 @@ def main(argv=None) -> int:
             if created:
                 setup_done = wait_for_setup(wt, "design-lead")
                 before = {t["handle"] for t in worktree_terminals(wt)}
-            spawn(repo, space, "design-lead", *lead, mode, wt,
+            spawn(repo, space, "design-lead", *lead, modes["design-lead"], wt,
                   "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
             if created:
                 # Only now, so the worktree is never empty when the agent starts: an empty worktree may refuse the

@@ -32,7 +32,7 @@ else
   table=$1 tier=$2
 fi
 if [ ! -r "$table" ]; then
-  case $table in */.cotal/lanes.tsv) die "cannot read the tier table $table: it moved to the project's settings store (~/.config/lane-control/projects/); restart this agent so its persona names the new path" ;; esac
+  case $table in */.cotal/lanes.tsv) die "cannot read the tier table $table: it moved to the project's settings store (~/.config/lane-control/projects/); run project-setup --refresh on the project, then restart this agent, so its persona names the new path" ;; esac
   die "cannot read the tier table $table"
 fi
 

@@ -2659,6 +2659,80 @@ class SettingsStoreTests(unittest.TestCase):
             self.assertNotIn("Traceback", r.stderr)
             self.assertIn(key, r.stderr)
 
+    def mixed_personas(self):
+        self.run_setup("--permission-mode", "bypassPermissions")
+        agents = self.repo / ".cotal" / "agents"
+        for n, mode in (("reviewer", "default"), ("design-lead", "auto")):
+            (agents / f"{n}.md").write_text((agents / f"{n}.md").read_text().replace("bypassPermissions", mode))
+        st = self.e.settings(self.repo)
+        st.pop("permission_mode")
+        (self.store / "settings.json").write_text(json.dumps(st))
+        return agents
+
+    def test_a_normal_run_keeps_each_personas_mode_when_they_differ(self):
+        agents = self.mixed_personas()
+        before = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "design-lead", "reviewer")}
+        self.run_setup("--no-start")
+        for n, text in before.items():
+            self.assertEqual((agents / f"{n}.md").read_text(), text, n)
+        self.assertNotIn("permission_mode", self.e.settings(self.repo))
+        self.run_setup("--no-start", "--permission-mode", "default")  # a flag still makes them one
+        self.assertEqual(self.e.settings(self.repo)["permission_mode"], "default")
+
+    def test_a_normal_run_with_one_recorded_mode_keeps_it_without_a_flag(self):
+        self.run_setup("--permission-mode", "bypassPermissions")
+        st = self.e.settings(self.repo)
+        st.pop("permission_mode")
+        (self.store / "settings.json").write_text(json.dumps(st))
+        self.run_setup("--no-start")
+        self.assertEqual(self.e.settings(self.repo)["permission_mode"], "bypassPermissions")
+        self.assertIn("bypassPermissions", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+
+    def test_a_renamed_checkout_warns_naming_the_old_store(self):
+        self.run_setup()
+        new = self.repo.parent / "renamed"
+        self.repo.rename(new)
+        r = self.e.run(str(new), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(str(self.store), r.stderr)
+
+    def test_a_refused_pin_leaves_nothing_behind(self):
+        d = self.e.home / "fresh"
+        d.mkdir()
+        r = self.e.run(str(d), "--coordinator", "opencode/other/y", "--no-start")
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse((d / ".git").exists())
+
+    def test_a_stored_own_model_still_allows_the_pin_on_a_project_not_yet_moved(self):
+        self.run_setup()
+        old = {"own_models": ["my/x"]}
+        (self.repo / ".cotal" / "lane-control.json").write_text(json.dumps(old))
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/x", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_migrating_run_with_no_start_still_names_a_running_coordinator(self):
+        self.run_setup()
+        self.legacy()
+        p = self.repo / ".cotal" / "agents" / "coordinator.md"
+        p.write_text(p.read_text().replace(str(self.store / "lanes.tsv"), str(self.repo / ".cotal" / "lanes.tsv")))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"restart: needed coordinator")
+
+    def test_refresh_name_on_a_project_never_set_up_stores_nothing(self):
+        r = self.e.run(str(self.repo), "--refresh", "--name", "Z", adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse((self.store / "settings.json").exists())
+
+    def test_models_with_a_non_string_value_are_refused_not_a_traceback(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        (self.store / "settings.json").write_text(json.dumps({**st, "models": {**st["models"], "reviewer": 5}}))
+        for args in ((), ("--refresh",)):
+            r = self.e.run(str(self.repo), *args, adapt=bool(args))
+            self.assertEqual(r.returncode, 1, args)
+            self.assertNotIn("Traceback", r.stderr)
+
     def test_show_is_exclusive_with_refresh(self):
         self.assertEqual(self.e.run(str(self.repo), "--show", "--refresh", adapt=True).returncode, 2)
 
