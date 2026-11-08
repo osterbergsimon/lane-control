@@ -204,8 +204,9 @@ A `required` tier runs inside `scripts/opencode-sandbox.sh`, through a launch wr
 for every OpenCode seat, so the wrapper is what it runs: `~/.agents/bin/cotal-opencode/opencode`, a link to
 `scripts/opencode-seat`, first on the manager's PATH. (Cotal's service schema refuses `COTAL_OPENCODE_BIN` in its
 `envRefs`, so the manager's PATH is the way in.) The wrapper puts `opencode/` and `opencode-go/` models in the sandbox,
-runs every other model bare (your own or an internal gateway), and refuses a seat with no model, a model the table marks
-`required` that the sandbox cannot run, and any way of starting `opencode` it does not know.
+runs a model bare only when the project says it is yours (a tier row with `sandbox none`, or `project-setup --own-model`,
+recorded in `.cotal`, out of every lane's reach), and refuses a seat with no model, any other model, and any way of
+starting `opencode` it does not know. So a model outside the table counts as `required`, even on a direct `cotal_spawn`.
 
 `lane-tier` refuses a `required` tier (exit 4) unless the running manager of that project uses the wrapper, so a tier
 never runs bare while a manager runs without it. It also refuses a `required` tier on a model the sandbox cannot run. A
@@ -223,9 +224,9 @@ The model can read the credential and use the mesh as its own identity, with the
 branch is the worktree's branch at its first launch, and the model is the one Cotal was asked for. The seat's database
 lives in the lane, so a resumed sandboxed seat keeps it only if the same worktree stays.
 
-Limits: static-auth meshes with one broker on host loopback only; a user-auth mesh or remote broker is refused. In a
-tier table, another third party's model (`deepseek/...`) runs bare unless its row says `required`, and then it is
-refused: the `sandbox` column decides it, so never mark such a model `none`.
+Limits: static-auth meshes with one broker on host loopback only; a user-auth mesh or remote broker is refused. Marking
+a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`) `none` or
+`--own-model`.
 
 `project-setup` asks once per project, when it has a terminal: 1 hosted models (sandbox required), 2 own models, offline
 or internal gateway (no sandbox), 3 no OpenCode lanes (Claude only). Option 2 lists names from `opencode models`, without
@@ -236,8 +237,10 @@ harness to `none`, so their work goes one tier up. Without a terminal, say it wi
 ask again and keeps the table, and `--refresh` keeps both the table and the answer. An explicit `--opencode` on a re-run
 replaces the table only if the project has not edited it; otherwise it is refused and the table stays.
 
-The same rule covers the agents setup starts itself: `--coordinator`, `--design-lead` and `--reviewer` refuse an
-`opencode/` or `opencode-go/` model, and `--refresh` warns about a persona that already pins one.
+The same rule covers the agents setup starts itself: `--coordinator`, `--design-lead` and `--reviewer` refuse every
+`opencode/<provider>/<model>` unless `--own-model <provider>/<model>` declares it yours; `--own-model` itself refuses an
+`opencode/` or `opencode-go/` model. `--refresh` warns about a persona that already pins a hosted one. An agent set up
+earlier on a gateway model needs `--own-model` or a `sandbox none` row before the launch wrapper will start it again.
 
 ### Launching OpenCode lanes
 - A hosted model runs in the sandbox with a key file of its own, `~/.config/opencode-sandbox/auth.json`

@@ -1012,10 +1012,26 @@ class RunTests(unittest.TestCase):
 
     def test_an_own_model_on_a_setup_flag_gets_the_notice(self):
         repo = self.e.repo()
-        r = self.e.run(str(repo), "--coordinator", "opencode/deepseek/deepseek-chat", "--no-start")
+        r = self.e.run(str(repo), "--coordinator", "opencode/deepseek/deepseek-chat", "--own-model", "deepseek/deepseek-chat", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--coordinator opencode/deepseek/deepseek-chat", r.stdout)
         self.assertIn("writes no sandbox", r.stdout)
+        self.assertEqual(json.loads((repo / ".cotal" / "lane-control.json").read_text())["own_models"], ["deepseek/deepseek-chat"])
+
+    def test_an_opencode_pin_on_a_setup_flag_without_an_explicit_own_choice_is_refused(self):
+        repo = self.e.repo()
+        for args in (["--coordinator", "opencode/deepseek/deepseek-chat"], ["--design-lead", "opencode/gw/m"],
+                     ["--reviewer", "opencode/gw/m", "--own-model", "gw/other"]):
+            r = self.e.run(str(repo), *args, "--no-start")
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("--own-model", r.stderr)
+
+    def test_own_model_refuses_a_hosted_or_malformed_name(self):
+        repo = self.e.repo()
+        for name in ("opencode/x", "opencode-go/x", "noslash"):
+            r = self.e.run(str(repo), "--own-model", name, "--no-start")
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("--own-model", r.stderr)
 
     def test_the_manager_starts_with_the_launch_wrapper_first_on_path(self):
         repo = self.e.repo()
@@ -1100,7 +1116,7 @@ class RunTests(unittest.TestCase):
 
     def test_opencode_coordinator(self):
         repo = self.e.repo()
-        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/deepseek-v4.1-flash")
+        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/deepseek-v4.1-flash", "--own-model", "gateway/deepseek-v4.1-flash")
         self.assertEqual(r.returncode, 0, r.stderr)
         sp = [c for c in self.e.calls() if c.startswith("cotal spawn coordinator")][0]
         self.assertIn("--harness opencode", sp)
@@ -1338,7 +1354,7 @@ class RunTests(unittest.TestCase):
 
     def test_reviewer_persona_rendered(self):
         repo = self.e.repo()
-        r = self.e.run(str(repo), "--reviewer", "opencode/gateway/glm-5", "--no-start")
+        r = self.e.run(str(repo), "--reviewer", "opencode/gateway/glm-5", "--own-model", "gateway/glm-5", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
         text = (repo / ".cotal" / "agents" / "reviewer.md").read_text()
         self.assertIn("agent: opencode", text)
@@ -1409,7 +1425,7 @@ class RunTests(unittest.TestCase):
     def test_untrusted_folder_is_fine_without_claude_agents(self):
         repo = self.e.repo()
         self.e.trust(repo, accepted=False)
-        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/glm-5", "--no-design-lead")
+        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/glm-5", "--own-model", "gateway/glm-5", "--no-design-lead")
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_rerun_leaves_existing_tabs_alone(self):
@@ -1484,10 +1500,10 @@ class RunTests(unittest.TestCase):
         oc = "opencode/gateway/x"
         tiers = self.e.home / "tiers.tsv"
         tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x\t-\n")
-        self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--design-lead", oc, "--reviewer", oc,
+        self.assertEqual(self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", oc, "--design-lead", oc, "--reviewer", oc,
                                     "--tiers", str(tiers)).returncode, 0)
         self.assertFalse(any(c.startswith("cotal setup") for c in self.e.calls()))
-        r = self.e.run(str(repo), "--coordinator", "claude/opus", "--design-lead", oc, "--reviewer", oc,
+        r = self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", "claude/opus", "--design-lead", oc, "--reviewer", oc,
                        "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(any(c.startswith("cotal setup") for c in self.e.calls()))
@@ -1558,7 +1574,7 @@ class RunTests(unittest.TestCase):
     def test_personas_carry_mode_and_tier_path(self):
         repo = self.e.repo()
         oc = "opencode/gateway/x"
-        self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--permission-mode", "bypassPermissions").returncode, 0)
+        self.assertEqual(self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", oc, "--permission-mode", "bypassPermissions").returncode, 0)
         text = (repo / ".cotal" / "agents" / "coordinator.md").read_text()
         self.assertIn("`bypassPermissions`", text)
         self.assertIn(str(repo / ".cotal" / "lanes.tsv"), text)
@@ -1693,7 +1709,7 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.persona().read_text(), "stale\n")
 
     def test_opencode_personas_keep_their_recorded_mode(self):
-        self.setup_project("--coordinator", "opencode/m", "--design-lead", "opencode/m", "--reviewer", "opencode/m",
+        self.setup_project("--own-model", "gw/m", "--coordinator", "opencode/gw/m", "--design-lead", "opencode/gw/m", "--reviewer", "opencode/gw/m",
                            "--permission-mode", "default")
         self.persona().write_text(self.persona().read_text() + "stale\n")
         r = self.refresh()
@@ -2098,10 +2114,24 @@ class SeatWrapperTests(unittest.TestCase):
         self.seat(*self.SERVE, model="opencode/x")
         self.assertNotIn(str(self.shim), self.ran())
 
-    def test_an_own_model_runs_the_real_binary_unwrapped(self):
+    def test_a_model_declared_own_runs_the_real_binary_unwrapped(self):
+        (self.home / ".cotal" / "lane-control.json").write_text('{"own_models":["gateway/m1"]}')
         r = self.seat(*self.SERVE, model="gateway/m1")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertRegex(self.ran(), r"^opencode serve .* seat= ")
+
+    def test_a_model_outside_the_table_counts_as_required_and_is_refused(self):
+        (self.home / ".cotal" / "lanes.tsv").write_text("tier\tharness\tmodel\tpermission\tsandbox\nswift\topencode\tgateway/other\t-\tnone\n")
+        (self.home / ".cotal" / "lane-control.json").write_text('{"own_models":["gateway/another"]}')
+        r = self.seat(*self.SERVE, model="deepseek/deepseek-chat")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("counts as sandbox required", r.stderr)
+        self.assertEqual(self.ran(), "")
+
+    def test_with_no_project_records_an_unknown_model_is_refused(self):
+        r = self.seat(*self.SERVE, model="gateway/m1")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.ran(), "")
 
     def test_no_or_broken_config_is_refused_and_nothing_runs(self):
         for config in (None, "not json", "{}"):

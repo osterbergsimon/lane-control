@@ -3,7 +3,7 @@
 
   project-setup <git-url|dir> [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
-                [--port N] [--tiers FILE | --opencode hosted|own|none [--opencode-model M]] [--no-start]
+                [--port N] [--tiers FILE | --opencode hosted|own|none [--opencode-model M]] [--own-model M]... [--no-start]
                 [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL] [--readapt | --skip-adapt | --refresh]
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
@@ -1426,6 +1426,10 @@ def main(argv=None) -> int:
     table.add_argument("--opencode", choices=("hosted", "own", "none"),
                        help="how OpenCode lanes run, answered without a terminal: hosted (sandbox required), own "
                             "(own models or gateway, no sandbox; needs --opencode-model) or none (Claude only)")
+    ap.add_argument("--own-model", action="append", default=[], metavar="PROVIDER/MODEL",
+                    help="declare a model as your own or on a gateway you run (repeatable). Needed before --coordinator, "
+                         "--design-lead or --reviewer may pin opencode/<provider>/<model>; such a model runs without the "
+                         "sandbox. The launch wrapper also starts only models declared here or marked none in the table")
     ap.add_argument("--opencode-model", help="with --opencode own: the provider/model for OpenCode tiers. Writes no "
                                              "sandbox: only for a gateway you run yourself")
     ap.add_argument("--no-start", action="store_true")
@@ -1452,6 +1456,12 @@ def main(argv=None) -> int:
     lead = None if a.no_design_lead else harness_model(a.design_lead)
     reviewer = harness_model(a.reviewer)
     adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
+    bad_own = [m for m in a.own_model if not usable_own_model(m)]
+    if bad_own:
+        print(f"project-setup: --own-model {bad_own[0]}: must be provider/model, and not a hosted opencode/ or "
+              "opencode-go/ model: those need the sandbox", file=sys.stderr)
+        return 2
+    own_models = set(a.own_model) | ({a.opencode_model} if a.opencode_model else set())
     for flag, pin in (("--coordinator", coord), ("--design-lead", lead), ("--reviewer", reviewer)):
         if pin and pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
             print(f"project-setup: {flag} {pin[0]}/{pin[1]}: a hosted OpenCode model runs only inside the sandbox, and "
@@ -1459,6 +1469,11 @@ def main(argv=None) -> int:
                   "you run yourself", file=sys.stderr)
             return 2
         if pin and pin[0] == "opencode":
+            if pin[1] not in own_models:
+                print(f"project-setup: {flag} {pin[0]}/{pin[1]}: this model would run bare on this machine, and nothing "
+                      f"says it is yours. Use claude/<model>, or add --own-model {pin[1]} only if it is on a gateway you "
+                      "run yourself, offline or internal", file=sys.stderr)
+                return 2
             print(f"note: {flag} {pin[0]}/{pin[1]}: {OWN_NOTE}", flush=True)
     if not a.skip_adapt and not a.refresh and {adapter[0], adapt_reviewer[0]} != {"claude"}:
         print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
@@ -1481,7 +1496,7 @@ def main(argv=None) -> int:
     tiers = Path(a.tiers or HERE / "templates" / "lanes.tsv").expanduser()
     if a.refresh:
         ignored = [f for f in ("--coordinator", "--design-lead", "--no-design-lead", "--permission-mode", "--opencode",
-                               "--opencode-model")
+                               "--opencode-model", "--own-model")
                    if any(x == f or x.startswith(f + "=") for x in argv)]
         if ignored:
             print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
@@ -1537,6 +1552,8 @@ def main(argv=None) -> int:
         cotal_space(repo, space)
         if "claude" in needed | tier_harnesses:
             claude_wiring(repo, space)
+        if own_models:  # outside every lane's reach: opencode-seat starts only models named here or `none` in the table
+            record(repo, own_models=sorted(set(record(repo).get("own_models", [])) | own_models))
         personas_and_tiers(repo, project, coord, lead, reviewer, a.permission_mode, tier_text)
         project_table = repo / ".cotal" / "lanes.tsv"
         setup_script(repo, a.write_orca_yaml)
