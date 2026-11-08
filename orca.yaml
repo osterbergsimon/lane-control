@@ -1,0 +1,6 @@
+# Orca runs scripts.setup in every new worktree of this repo (a lane's checkout). Written by lane-control
+# project-setup from the lockfiles; edit freely. Keep the last line: agents wait for it before starting.
+scripts:
+  setup: |
+    [ -e .beads ] || ln -s "$HOME/code/lane-control-beads/.beads" .beads
+    touch "$(git rev-parse --git-dir)/orca-setup-done"
