@@ -1,6 +1,6 @@
 # Model routing for coordinator lanes
 
-Shared by all project coordinators on a machine. Tiers are **roles**; the config maps them to engines and models. Each project keeps its own **path map** in its AGENTS.md; this file holds the common rules. The ledger is `lane-ledger.tsv`.
+Shared by all project coordinators on a machine. Tiers are **roles**; the config maps them to engines and models. Each project keeps its own **path map** in `.lane-control/routing.md` (older setups: its AGENTS.md); this file holds the common rules. The ledger is `lane-ledger.tsv`.
 
 ## Tiers
 | Tier | Role | Engine / model / budget |
@@ -74,13 +74,14 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 - Coordinators report each prod with `rove api report`; the machine coordinator reads `rove api deliveries` for the morning report.
 
 ## Message protocol
-- **Lane → coordinator:** the 5-line report in `templates/AGENTS-coordination.md`, once, at the end; mid-lane only for a blocker.
+- **Lane → coordinator:** the 6-line report in `templates/AGENTS-coordination.md`, once, at the end; mid-lane only for a blocker.
   ```
   <KEY> succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP: <one line>
   branch <b> · PR #<n> · ci passing|pending|failing
   gates: <command> ok|fail, ...
   deviations: none | <items>
   filed: none | <issue ids>
+  agents-md: none | <one line the next agent would need that AGENTS.md lacks; never commit it yourself>
   ```
 - **Coordinator → machine coordinator, only on events:** `REQ <project>: <slot|top|budget> — <why>` or `FYI <project>: <fact that changes arbitration>`, one line each.
 - **Machine coordinator → coordinators:** `ORDER:` or `FYI:`, one line each; no reply expected.
