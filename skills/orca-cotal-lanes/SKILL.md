@@ -49,34 +49,33 @@ $ORCA worktree set --worktree path:<worktree> --display-name "<KEY> <short title
 `--setup inherit` runs the repo's `orca.yaml` setup script if it has one.
 For independent top-level work the owner asked for, use `--no-parent` instead.
 
-Orca opens a plain shell in the new worktree, and the repo's setup script runs in its own Setup tab. Do these in order,
-so the agent's tab comes first (Orca's CLI cannot reorder tabs):
+Orca opens a plain shell in the new worktree, and the repo's setup script runs in its own Setup tab. Orca's CLI cannot
+reorder tabs, so the agent's tab comes first by closing those two after the agent has started, never before: an empty
+worktree may refuse the spawn and strand the agent's name. Do these in order:
 
-1. Close the plain shell. In `$ORCA terminal list --json`, look at the terminals whose `worktreePath` is the new
-   worktree. The titles are not reliable, so a terminal is the Setup tab if its `paneTitle` is "Setup", or its title or
-   preview contains `setup-runner.sh`. Close only the plain shell: no `agentIdentity`, a title that does not start with
-   `cotal-`, and a preview of one line at most (the prompt, however it looks; more lines mean output or a command),
-   with `$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave it open.
-2. If the worktree's `orca.yaml` ends by writing `orca-setup-done`, wait for it, so the agent never runs checks on
+1. If the worktree's `orca.yaml` ends by writing `orca-setup-done`, wait for it, so the agent never runs checks on
    missing dependencies:
    `until [ -e "$(git -C <worktree> rev-parse --git-dir)/orca-setup-done" ]; do sleep 5; done` (at most 10 minutes).
-3. Once the marker exists, close the Setup tab the same way. If it never appears, keep the Setup tab open, read it
-   with `$ORCA terminal read --terminal <handle>` and tell the owner. With no marker in `orca.yaml` nothing says the
-   script finished, so keep the Setup tab.
+2. Start the agent with the `cotal_spawn` tool:
+   - `name`: the lane key slug (same as the worktree name)
+   - `agent`: the tier's harness (`opencode` or `claude`); `model`: the tier's model
+   - `cwd`: the worktree path from above
+   - `role`: `lane` (your persona holds `role:lane`, which is what allows handing it on)
+   - OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<the project's mode>", "allow-dangerously-skip-permissions": ""}` (the second puts bypass in the Shift+Tab mode cycle for the owner, without starting in it)
+   - `persona`: inline, `{ "prompt": "You are a lane worker for <PROJECT>, started by <you>. Work only in your Orca worktree. Report once by cotal_dm to <you>.", "subscribe": [] }`
+   - `prompt`: the lane brief (`brief.md` next to this skill, filled in)
 
-Then start the agent with the `cotal_spawn` tool:
-
-- `name`: the lane key slug (same as the worktree name)
-- `agent`: the tier's harness (`opencode` or `claude`); `model`: the tier's model
-- `cwd`: the worktree path from above
-- `role`: `lane` (your persona holds `role:lane`, which is what allows handing it on)
-- OpenCode: `events: false`. Claude: `launchOptions: {"permission-mode": "<the project's mode>", "allow-dangerously-skip-permissions": ""}` (the second puts bypass in the Shift+Tab mode cycle for the owner, without starting in it)
-- `persona`: inline, `{ "prompt": "You are a lane worker for <PROJECT>, started by <you>. Work only in your Orca worktree. Report once by cotal_dm to <you>.", "subscribe": [] }`
-- `prompt`: the lane brief (`brief.md` next to this skill, filled in)
-
-The agent opens as a `cotal-<name>` tab inside that worktree. Confirm with `cotal_roster` that it joined; if the
-spawn is refused, report the refusal to the owner rather than working around it. Then give the owner a shell after the
-agent's tab: `$ORCA terminal create --worktree path:<worktree> --json`.
+   The agent opens as a `cotal-<name>` tab inside that worktree. Confirm with `cotal_roster` that it joined; if the
+   spawn is refused, report the refusal to the owner rather than working around it.
+3. Only then close the plain shell and the Setup tab. In `$ORCA terminal list --json`, look at the terminals whose
+   `worktreePath` is the new worktree. The titles are not reliable, so a terminal is the Setup tab if its
+   `paneTitle` is "Setup", or its title or preview contains `setup-runner.sh`. Close the plain shell: no `agentIdentity`, a title
+   that does not start with `cotal-`, and a preview of one line at most (the prompt, however it looks; more lines
+   mean output or a command). Close the Setup tab only if the marker from step 1 appeared. Use
+   `$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave a tab open. If the marker never
+   appeared, keep the Setup tab open, read it with `$ORCA terminal read --terminal <handle>` and tell the owner. With
+   no marker in `orca.yaml` nothing says the script finished, so keep the Setup tab.
+4. Give the owner a shell after the agent's tab: `$ORCA terminal create --worktree path:<worktree> --json`.
 
 ## 3. Mirror the lane in the GUI
 Keep the task card honest so the owner sees state at a glance:

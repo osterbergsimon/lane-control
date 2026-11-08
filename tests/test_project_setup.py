@@ -490,9 +490,9 @@ class RunTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.e.calls()
         self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])  # the Setup tab and the plain shell
-        i_close = max(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
+        i_close = min(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
         i_spawn = next(i for i, c in enumerate(calls) if c.startswith("cotal spawn") and "design-lead" in c)
-        self.assertLess(i_close, i_spawn)
+        self.assertLess(i_spawn, i_close)  # never an empty worktree when the agent starts
 
     def test_setup_tab_found_by_runner_title_too(self):
         repo = self.e.repo()
@@ -536,7 +536,8 @@ class RunTests(unittest.TestCase):
         self.assertIn(str(repo / ".cotal" / "agents" / "reviewer.md"), coord)
 
     def test_design_lead_tab_comes_before_the_shell(self):
-        # Orca opens a shell in a new worktree; the agent tab should be first, a fresh shell second.
+        # Orca opens a shell in a new worktree; it is closed only after the agent started (an empty worktree may
+        # refuse the spawn), and a fresh shell for the owner comes last.
         repo = self.e.repo()
         r = self.e.run(str(repo))
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -544,8 +545,8 @@ class RunTests(unittest.TestCase):
         i_close = next(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
         i_spawn = next(i for i, c in enumerate(calls) if c.startswith("cotal spawn") and "design-lead" in c)
         i_create = next(i for i, c in enumerate(calls) if c.startswith("orca terminal create"))
-        self.assertLess(i_close, i_spawn)
-        self.assertLess(i_spawn, i_create)
+        self.assertLess(i_spawn, i_close)
+        self.assertLess(i_close, i_create)
         self.assertIn("--terminal term_1", calls[i_close])
         self.assertIn("design-lead", calls[i_create])
 

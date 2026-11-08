@@ -689,13 +689,16 @@ def main(argv=None) -> int:
         if lead:
             wt, created = design_worktree(repo, repo_id)
             if created:
-                close_startup_shell(wt)
-                if wait_for_setup(wt, "design-lead"):  # a Setup tab that never finished stays, to read
-                    close_setup_tab(wt)
+                setup_done = wait_for_setup(wt, "design-lead")
             spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
                   "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
-            if created:  # a shell for the owner, after the agent's tab
-                jrun([ORCA, "terminal", "create", "--worktree", f"path:{wt}", "--json"])
+            if created:
+                # Only now, so the worktree is never empty when the agent starts: an empty worktree may refuse the
+                # spawn and strand the name. A Setup tab that never finished stays, to read.
+                close_startup_shell(wt)
+                if setup_done:
+                    close_setup_tab(wt)
+                jrun([ORCA, "terminal", "create", "--worktree", f"path:{wt}", "--json"])  # the owner's shell
         verify(repo, space, wt)
         print(f"summary: {project} · space {space} · broker 127.0.0.1:{record(repo).get('port')} · orca repo {repo_id}")
         print(f"  open Orca: the project {repo.name}, its main checkout (coordinator)"

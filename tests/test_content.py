@@ -125,20 +125,20 @@ class LaneSkillCliTests(unittest.TestCase):
 
     def test_finds_the_setup_tab_without_trusting_the_title(self):
         t = self.text
-        for needle in ('`paneTitle` is "Setup"', "setup-runner.sh", "`agentIdentity`", "one line at most", "If unsure, leave it open"):
+        for needle in ('`paneTitle` is "Setup"', "setup-runner.sh", "`agentIdentity`", "one line at most", "If unsure, leave a tab open"):
             self.assertIn(needle, t)
 
     def test_resolver_does_not_rely_on_a_shell_variable(self):
         self.assertIn("new shell", self.text)
         self.assertNotIn("ORCA=${", self.text)
 
-    def test_closes_the_setup_tab_only_after_the_marker(self):
+    def test_closes_shell_and_setup_tab_only_after_the_agent_started(self):
         t = self.text
-        i_shell, i_wait, i_close, i_spawn = (t.index(x) for x in (
-            "1. Close the plain shell", "2. If the worktree's", "3. Once the marker exists, close the Setup tab",
-            "Then start the agent"))
-        self.assertTrue(i_shell < i_wait < i_close < i_spawn)
-        for needle in ("If it never appears, keep the Setup tab open", "With no marker in `orca.yaml`"):
+        i_wait, i_spawn, i_close, i_owner = (t.index(x) for x in (
+            "1. If the worktree's", "2. Start the agent", "3. Only then close the plain shell", "4. Give the owner a shell"))
+        self.assertTrue(i_wait < i_spawn < i_close < i_owner)
+        for needle in ("an empty\nworktree may refuse the spawn and strand the agent's name", "Close the Setup tab only if the marker",
+                       "If the marker never\n   appeared, keep the Setup tab open", "With\n   no marker in `orca.yaml`"):
             self.assertIn(needle, t)
 
     def test_points_to_the_tier_table_instead_of_copying_it(self):
