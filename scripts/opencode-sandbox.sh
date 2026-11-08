@@ -51,14 +51,13 @@
 # Inside (empty root; only these are bound):
 #   read-write  the worktree; its per-worktree git dir (HEAD, index); a lane-private git dir
 #               (new objects and refs; the shared repo's objects read-only through alternates);
-#               per-lane opencode data/state/cache, CARGO_HOME, SCCACHE_DIR; private /tmp and $HOME;
-#               the machine's heavy-work slot files, shared with every lane, each bound on its own so it can
-#               be neither replaced nor deleted (never the directory: the gate outside would follow a link planted
-#               there): a steered lane can hold slots and so slow other lanes' builds, and reach nothing else
+#               per-lane opencode data/state/cache, CARGO_HOME, SCCACHE_DIR; private /tmp and $HOME
 #   read-only   /nix/store, /etc pieces (DNS, TLS, passwd, profiles), ~/.config/opencode/opencode.jsonc
 #               and plugins/rove-agent-state.js, ~/.config/git, the lane key (the bare key, a file of its
 #               own), the opencode binary, the day/night switch file, lane-heavy and lane-room from ~/.agents/bin
-#               and the machine's limits as worked out at launch
+#               and the machine's limits as worked out at launch; the machine's heavy-work slot files, shared with
+#               every lane, each bound on its own and only lockable (never the directory: the gate outside would follow
+#               a link planted there): a steered lane can hold slots and so slow other lanes' builds, and reach nothing else
 #   absent      everything else: the rest of $HOME (private data, other worktrees, the main checkout,
 #               ~/.rove, ~/.config/gh, ~/.ssh, other projects' caches, beads), /run (user bus, rove.sock,
 #               Claude sockets, docker.sock, nix daemon), the shared repo's refs, config and hooks
@@ -543,11 +542,15 @@ fi
 if [ -n "$slots" ]; then
   slot_count=${slots%% *} slots=${slots#* }
   for t in lane-limits.sh lane-heavy lane-room; do ro "$tools/$t"; done
-  for ((i = 0; i < slot_count; i++)); do rw "$slots/heavy.$i"; done
+  for ((i = 0; i < slot_count; i++)); do ro "$slots/heavy.$i"; done
   ro "$lane/limits.sh" /run/sandbox/limits.sh
   setenv LANE_STATE_DIR "$slots"; setenv LANE_LIMITS_FILE /run/sandbox/limits.sh
 else
-  echo "opencode-sandbox: no machine-wide heavy-work gate in this lane (run project-setup to install it)" >&2
+  if [ -x "$tools/lane-heavy" ] && [ -x "$tools/lane-room" ] && [ -r "$tools/lane-limits.sh" ]; then
+    echo "opencode-sandbox: no machine-wide heavy-work gate in this lane: could not set up its slot files (check LANE_STATE_DIR and the machine's limits file)" >&2
+  else
+    echo "opencode-sandbox: no machine-wide heavy-work gate in this lane (run project-setup to install it)" >&2
+  fi
 fi
 
 # the provider and the model are fixed here, from the lane key and the worktree's pin, over every other

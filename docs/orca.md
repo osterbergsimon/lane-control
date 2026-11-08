@@ -182,7 +182,7 @@ written. Changing an agent's harness or model is not a refresh: `--coordinator`,
 
 ### Lanes
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
-1. Pick the tier per `model-routing.md`, then look up the harness and model in `.cotal/lanes.tsv`.
+1. Pick the tier per `model-routing.md`, then run `~/.agents/bin/lane-tier .cotal/lanes.tsv <tier>` for its harness and model. It refuses a `sandbox required` tier (below).
 2. Run `orca worktree create --name <key> --parent-worktree active --json`, so the new task nests under the caller in
    the GUI. Wait for `orca-setup-done` when the setup script writes it, start the agent (step 3), and only then close
    the startup shell and the Setup tab (it stays if the marker never appears), so the agent's tab is first.
@@ -196,6 +196,39 @@ The coordinator (or the design lead, for its own frontend lanes) follows the `or
 
 Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
 
+### The sandbox per tier
+`.cotal/lanes.tsv` has a `sandbox` column, `required` or `none` (rule: `model-routing.md`, "Sandbox per tier"). A table
+with no column, or a row with an empty cell, is `required` for OpenCode tiers and `none` for the rest.
+
+**A `required` tier cannot launch under Orca + Cotal until the per-seat launch wrapper lands (SBX-2, lc-5xf).**
+`lane-tier` refuses it (exit 4) and the skill never spawns it, so it can never run bare. A hosted OpenCode model marked
+`none` is refused as a bad table. Run that work as a Rove task through `scripts/opencode-sandbox.sh`, or use a `none` tier.
+The refusal is a check the coordinator runs; Cotal does not enforce it. Cotal's `modelPolicy` cannot replace it today,
+because a role under a policy refuses `launchOptions`, which Claude lanes need.
+
+Why a Cotal agent cannot run inside the sandbox on Cotal 0.145.1 (Rove can, because `--command` makes the script the
+whole engine):
+- No per-seat wrapper. The only hook is `COTAL_OPENCODE_BIN` or the `opencode` on the manager's PATH at boot, for every
+  OpenCode agent of that manager.
+- Cotal runs `opencode serve` and a separate TUI from a launcher outside, over loopback, and the plugin inside the
+  server needs the broker on host loopback. The sandbox has no host loopback in either direction.
+- `--clearenv` and the sandbox's own `OPENCODE_CONFIG_CONTENT` remove the Cotal plugin's config and connection
+  variables, and the plugin, launch material, control socket and per-agent database are not bound in.
+- The sandbox takes its model from `.opencode/opencode.json`, `opencode-go/` models only, with its own key file; Cotal
+  passes the model at spawn and `OPENCODE_API_KEY`.
+
+`project-setup` asks once per project, when it has a terminal: 1 hosted models (sandbox required), 2 own models, offline
+or internal gateway (no sandbox), 3 no OpenCode lanes (Claude only). Option 2 lists names from `opencode models`, without
+OpenCode's own hosted ones, or takes one typed, and never reads `opencode.jsonc`. It writes no sandbox, so choose it
+only for a gateway you run yourself: nothing checks that a listed or typed model really is one. Option 3 sets the OpenCode tiers'
+harness to `none`, so their work goes one tier up. Without a terminal, say it with `--opencode hosted|own|none`
+(`own` also needs `--opencode-model <provider/model>`) or a full `--tiers`; given neither, it is hosted. A re-run does not
+ask again and keeps the table, and `--refresh` keeps both the table and the answer. An explicit `--opencode` on a re-run
+replaces the table only if the project has not edited it; otherwise it is refused and the table stays.
+
+The same rule covers the agents setup starts itself: `--coordinator`, `--design-lead` and `--reviewer` refuse an
+`opencode/` or `opencode-go/` model, and `--refresh` warns about a persona that already pins one.
+
 ### Launching OpenCode lanes
 - Cotal gives every OpenCode agent its own empty database (section 7), so the owner's `opencode auth login` does not
   reach it. Without `OPENCODE_API_KEY` in the manager's environment, that agent's server lists only free models.
@@ -204,12 +237,15 @@ Never `orca terminal send` or Orca `orchestration` on agents: those type into th
   only `<name> exited on launch`. [tested]
 - `opencode models` prints the whole catalog whatever the credentials, so it does not prove a lane can use a model.
 - For a paid model, export `OPENCODE_API_KEY` before `project-setup`: it records the name (never the value) in the
-  `mgr` service, and Cotal forwards the key to each OpenCode agent. Setup warns, with these steps, when an OpenCode pin
-  not named as free has no key and the manager does not hold one. The warning can also name a free model without
+  `mgr` service, and Cotal forwards the key to each OpenCode agent. Setup warns, with these steps, when an OpenCode tier
+  that can launch pins a model not named as free and has no key and the manager does not hold one, or `mgr` was added without it. The warning can also name a free model without
   `-free` in its name.
+- Until `required` tiers can launch (SBX-2, lc-5xf) no tier reaches that warning: an `opencode/` or `opencode-go/` model
+  is always `required`, and a `required` tier needs no key because it is refused first.
 - A `mgr` service that already exists keeps its old variable list. At a natural stop, run
   `cotal svc stop mgr -s <space> --yes` and `cotal svc remove mgr -s <space> --yes`, then rerun `project-setup` with the
-  key exported. Afterwards `cotal svc start` refuses in a shell that does not set the key.
+  key exported. Afterwards `cotal svc start` refuses in a shell that does not set the key, but passes on an empty
+  `OPENCODE_API_KEY=`: setup warns when it starts a stopped `mgr` from such a shell.
 - Setup only sees whether the key is set. A wrong key or a spent quota shows only on the agent's first model call, and
   setup cannot tell them apart.
 - Free models, such as those named `*-free`, need no key. Pin one in `.cotal/lanes.tsv` only if the owner accepts it
@@ -265,6 +301,7 @@ into an Orca terminal, which never joined the mesh. Kept for reference; project-
 | Peer message while a draft is typed in the agent's input box (Orca runtime, OpenCode 2.2.1) | pass: the message ran as its own turn (the coordinator answered with `cotal_dm`) and the draft stayed in the input box; same result earlier with Cotal's own pty runtime [tested] |
 | Agents survive the desktop disconnecting | Orca docs say so [docs]; agents kept running while Cotal's manager restarted [tested] |
 | Stopping and respawning agents from Cotal | pass [tested] |
+| A Cotal-spawned OpenCode agent uses a custom provider from an on-disk config (project `opencode.json`, a local stand-in model; the model was called) | pass [tested]; the `~/.config/opencode` layer itself was not tested |
 
 ## 7. Gotchas from the trial
 - **Stale credentials per agent.** Cotal gives every OpenCode agent its own database

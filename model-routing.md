@@ -107,8 +107,11 @@ One line per task, appended when the coordinator closes the issue.
 ## Only owner-decided limits are enforced
 A script, brief or message enforces a limit only if the owner decided it (dated in the instance's routing file). Any other limit (a per-day share, a lane count, a throttle) needs the owner's yes first; until then it is, at most, a recommendation. Same for deterministic machine-wide slot caps: the machine coordinator arbitrates by judgment.
 
+## Sandbox per tier
+Global-region models (for example ones served from China) are not trusted with the owner's machine, so they run only inside `scripts/opencode-sandbox.sh` (header = full contract; `scripts/test-opencode-sandbox.sh` = proof). Every hosted OpenCode model counts as one, because where it is served is unknown. An internal or offline gateway may run without the sandbox: the tier table's `sandbox` column says which (`required` or `none`), and a table with no column means `required` for OpenCode tiers and `none` for Claude tiers.
+A `required` tier never runs as a bare engine command. Under Rove it launches through the script. Under Orca + Cotal it is refused (`scripts/lane-tier`), because a Cotal seat cannot run inside the sandbox yet: use Rove or a `none` tier (`docs/orca.md`).
+
 ## Sandboxed swift lanes (conventions)
-Third-party swift lanes run through `scripts/opencode-sandbox.sh` (header = full contract; `scripts/test-opencode-sandbox.sh` = proof). Never a bare engine command.
 - **Launch form:** `rove api add --repo <repo> --prompt-file <brief> --command "<lane-control>/scripts/opencode-sandbox.sh --auto --prompt"`. Rove appends the brief as the last argument, so it must follow `--prompt`. Always launch with the brief: an `add` without `--prompt` (or `--start`) creates no engine tab.
 - **Nesting and base branch:** called from inside a Rove session, `add` makes the new task a child of the caller and cuts its worktree from the caller's CURRENT branch tip, not the repo default. A launcher on any other branch than the lane's base (a design lead on its own branch, a lane) passes `--base-branch <base>`; `--parent <id>` nests under another task, `--no-parent` makes a top-level task. (Older Rove had a separate `spawn` verb; it is gone.)
 - **Coordinator-set env, never the lane's:** `OPENCODE_SANDBOX_PR_BASE=<branch>` (base of the PR the relay opens, for projects that integrate into a branch other than main); `OPENCODE_SANDBOX_PR_BRANCH=<branch>` (the lane continues an existing PR branch; fast-forward pushes only).

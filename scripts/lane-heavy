@@ -47,7 +47,9 @@ exec {slot_fd}</dev/null   # replaced by a real slot; a valid fd keeps the job's
 take_slot() {
   local i fd
   for ((i = 0; i < LANE_HEAVY_SLOTS; i++)); do
-    { exec {fd}<>"$LANE_STATE_DIR/heavy.$i"; } 2>/dev/null || continue   # on exec itself, 2> would stick to the gate
+    # flock needs no write access, and a sandboxed lane has the slot files read-only; the first gate here creates them
+    { [ -e "$LANE_STATE_DIR/heavy.$i" ] || : >>"$LANE_STATE_DIR/heavy.$i"; } 2>/dev/null
+    { exec {fd}<"$LANE_STATE_DIR/heavy.$i"; } 2>/dev/null || continue   # on exec itself, 2> would stick to the gate
     if flock -n "$fd"; then slot_fd=$fd; return 0; fi
     exec {fd}>&-
   done

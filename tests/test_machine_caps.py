@@ -323,6 +323,26 @@ class HeavyTests(Machine):
         self.assertEqual(r.returncode, 4)
         self.assertNotIn("waiting", r.stderr)
 
+    def test_a_read_only_slot_file_still_takes_the_slot_and_stays_empty(self):
+        # What a sandboxed lane has: a file it can lock and not write.
+        state = Path(self.env["LANE_STATE_DIR"])
+        state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        slot = state / "heavy.0"
+        slot.touch()
+        slot.chmod(0o444)
+        self.addCleanup(slot.chmod, 0o644)
+        self.env["LANE_HEAVY_SLOTS"] = "1"
+        r = self.heavy("true")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("without the machine-wide limit", r.stderr)
+        self.assertEqual(slot.stat().st_size, 0)
+
+    def test_the_gate_creates_a_missing_slot_file(self):
+        state = Path(self.env["LANE_STATE_DIR"])
+        self.env["LANE_HEAVY_SLOTS"] = "1"
+        self.assertEqual(self.heavy("true").returncode, 0)
+        self.assertTrue((state / "heavy.0").is_file())
+
     def test_missing_command_takes_no_slot_and_exits_127(self):
         self.assertEqual(self.heavy("no-such-command-here").returncode, 127)
         self.assertFalse((self.dir / "state").exists())
@@ -507,7 +527,8 @@ class SandboxGateTests(Machine):
         tools = self.install()
         out = self.run_block()[0].stdout.splitlines()
         state = self.env["LANE_STATE_DIR"]
-        self.assertIn(f"rw {state}/heavy.0", out)
+        self.assertIn(f"ro {state}/heavy.0", out)   # only lockable: a lane cannot write onto the host's tmpfs
+        self.assertFalse(any(l.startswith(f"rw {state}") for l in out))
         self.assertNotIn(f"rw {state}", out)   # the files, never the directory: a lane could plant links the gate follows
         self.assertTrue(Path(state, "heavy.0").is_file())
         self.assertIn(f"setenv LANE_STATE_DIR {state}", out)   # the lane must not work out a path of its own
@@ -520,7 +541,7 @@ class SandboxGateTests(Machine):
         self.write_limits(LANE_HEAVY_SLOTS=3, LANE_HEAVY_MEM_GB=7)
         r, lane = self.run_block()
         for i in range(3):
-            self.assertIn(f"rw {self.env['LANE_STATE_DIR']}/heavy.{i}", r.stdout.splitlines())
+            self.assertIn(f"ro {self.env['LANE_STATE_DIR']}/heavy.{i}", r.stdout.splitlines())
         self.assertNotIn("heavy.3", r.stdout)
         self.assertIn(f"ro {lane / 'limits.sh'} /run/sandbox/limits.sh", r.stdout.splitlines())
         self.assertIn("setenv LANE_LIMITS_FILE /run/sandbox/limits.sh", r.stdout.splitlines())
@@ -532,7 +553,7 @@ class SandboxGateTests(Machine):
         self.install()
         self.limits.write_text("echo hello\nno-such-command\nLANE_HEAVY_SLOTS=2\n")
         r, lane = self.run_block()
-        self.assertIn(f"rw {self.env['LANE_STATE_DIR']}/heavy.1", r.stdout.splitlines())
+        self.assertIn(f"ro {self.env['LANE_STATE_DIR']}/heavy.1", r.stdout.splitlines())
         self.assertIn("LANE_HEAVY_SLOTS=2\n", (lane / "limits.sh").read_text())
 
     def test_an_exit_in_the_owners_limits_does_not_stop_the_launch(self):
@@ -566,6 +587,8 @@ class SandboxGateTests(Machine):
         r, _ = self.run_block()
         self.assertEqual(r.stdout, "")
         self.assertIn("no machine-wide heavy-work gate", r.stderr)
+        self.assertIn("could not set up its slot files", r.stderr)   # the tools are there: installing them is no remedy
+        self.assertNotIn("run project-setup", r.stderr)
         self.assertFalse((outside / "created-by-gate").exists())
 
     def test_a_slot_that_is_not_a_file_binds_nothing(self):
@@ -573,6 +596,11 @@ class SandboxGateTests(Machine):
         Path(self.env["LANE_STATE_DIR"], "heavy.0").mkdir(parents=True)
         r, _ = self.run_block()
         self.assertEqual(r.stdout, "")
+
+    def test_without_the_tools_it_says_to_install_them(self):
+        r, _ = self.run_block()
+        self.assertEqual(r.stdout, "")
+        self.assertIn("run project-setup to install it", r.stderr)
 
     def test_the_helpers_exist_where_the_block_runs(self):
         text = SANDBOX.read_text().split(MARK)[0]
