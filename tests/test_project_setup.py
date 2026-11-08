@@ -698,6 +698,58 @@ class OnboardingTests(unittest.TestCase):
         status, out, ask = self.in_terminal(["y", "n"])
         self.assertRegex(out, r"\.\.\. and 3 more")
 
+    def other_clone_pushes(self, bare, path, text, message):
+        other = self.e.home / "other"
+        if not other.exists():
+            git("clone", "-q", str(bare), str(other), cwd=self.e.home)
+        (other / path).write_text(text)
+        git("add", path, cwd=other)
+        git("commit", "-q", "-m", message, cwd=other)
+        git("push", "-q", "origin", "main", cwd=other)
+        git("fetch", "-q", "origin", cwd=self.repo)
+
+    def test_a_checkout_behind_origin_asks_and_warns_nothing(self):
+        bare = self.committed_lockfile_origin()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal(["y", "y"])[0], 0)
+        self.other_clone_pushes(bare, "AGENTS.md", "# changed elsewhere\n", "agents change")
+        head, remote = git("rev-parse", "HEAD", cwd=self.repo), self.origin_main(bare)
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        ask.assert_not_called()
+        self.assertNotIn("will not get", out)
+        self.assertNotIn("does not have", out)
+        r = self.e.run(str(self.repo), adapt=True)  # and without a terminal
+        self.assertNotIn("will not get", r.stdout)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+        self.assertEqual(self.origin_main(bare), remote)
+
+    def test_an_orca_yaml_only_on_origin_is_not_committed_again(self):
+        bare = self.with_origin()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal(["y", "y"])[0], 0)  # onboarding pushed; no lockfile, so no draft yet
+        self.with_lockfile()
+        self.other_clone_pushes(bare, "orca.yaml", "scripts:\n  setup: |\n    make deps\n", "orca from elsewhere")
+        head, remote = git("rev-parse", "HEAD", cwd=self.repo), self.origin_main(bare)
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        ask.assert_not_called()
+        self.assertIn("behind", out)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)  # no commit made
+        self.assertEqual(self.origin_main(bare), remote)
+
+    def test_with_only_orca_yaml_open_the_text_names_no_onboarding_commit_and_no_empty_list(self):
+        bare = self.with_origin()
+        self.with_lockfile()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal(["y", "n"])[0], 0)
+        git("push", "-q", "origin", "main", cwd=self.repo)
+        git("fetch", "-q", "origin", cwd=self.repo)
+        status, out, ask = self.in_terminal("n")
+        self.assertEqual(status, 0, out)
+        self.assertNotIn("onboarding commit", out)
+        self.assertNotIn("whatever it is", out)
+
     def test_an_abort_before_the_second_question_offers_it_on_the_next_run(self):
         bare = self.committed_lockfile_origin()
         old = self.origin_main(bare)
