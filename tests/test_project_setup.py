@@ -1030,6 +1030,35 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("warning:", r.stderr)
         self.assertRegex(r.stderr, r"cannot tell .*quota")
 
+    def _keyed_mgr_in_state(self, state_of_mgr):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        state = json.loads(self.e.state.read_text())
+        state["services"]["mgr"] = state_of_mgr
+        self.e.state.write_text(json.dumps(state))
+        return repo
+
+    def test_empty_key_restarting_a_stopped_keyed_mgr_warns(self):
+        repo = self._keyed_mgr_in_state("stopped")
+        self.e.env["OPENCODE_API_KEY"] = ""  # Cotal's check is `=== undefined`: `svc start` passes with this
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stderr, r"swift.*OPENCODE_API_KEY is not set")
+
+    def test_key_restarting_a_stopped_keyed_mgr_is_quiet(self):
+        repo = self._keyed_mgr_in_state("stopped")
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("warning:", r.stderr)
+
+    def test_empty_key_with_a_running_keyed_mgr_is_quiet(self):
+        repo = self._keyed_mgr_in_state("running")
+        self.e.env["OPENCODE_API_KEY"] = ""  # the manager already holds its value; this shell passes nothing to it
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("warning:", r.stderr)
+
     def test_empty_key_counts_as_unset(self):
         repo = self.e.repo()
         self.e.env["OPENCODE_API_KEY"] = ""

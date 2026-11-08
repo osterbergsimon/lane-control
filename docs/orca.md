@@ -205,11 +205,12 @@ Never `orca terminal send` or Orca `orchestration` on agents: those type into th
 - `opencode models` prints the whole catalog whatever the credentials, so it does not prove a lane can use a model.
 - For a paid model, export `OPENCODE_API_KEY` before `project-setup`: it records the name (never the value) in the
   `mgr` service, and Cotal forwards the key to each OpenCode agent. Setup warns, with these steps, when an OpenCode pin
-  not named as free has no key and the manager does not hold one. The warning can also name a free model without
+  not named as free has no key and the manager does not hold one, or `mgr` was added without it. The warning can also name a free model without
   `-free` in its name.
 - A `mgr` service that already exists keeps its old variable list. At a natural stop, run
   `cotal svc stop mgr -s <space> --yes` and `cotal svc remove mgr -s <space> --yes`, then rerun `project-setup` with the
-  key exported. Afterwards `cotal svc start` refuses in a shell that does not set the key.
+  key exported. Afterwards `cotal svc start` refuses in a shell that does not set the key, but passes on an empty
+  `OPENCODE_API_KEY=`: setup warns when it starts a stopped `mgr` from such a shell.
 - Setup only sees whether the key is set. A wrong key or a spent quota shows only on the agent's first model call, and
   setup cannot tell them apart.
 - Free models, such as those named `*-free`, need no key. Pin one in `.cotal/lanes.tsv` only if the owner accepts it

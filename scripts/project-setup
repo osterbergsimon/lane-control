@@ -376,9 +376,11 @@ def opencode_key_pins(tiers: Path, roles) -> list:
             if h == "opencode" and m.startswith(("opencode/", "opencode-go/")) and not m.endswith("-free")]
 
 
-def opencode_key_check(repo: Path, space: str, tiers: Path, roles):
+def opencode_key_check(repo: Path, space: str, tiers: Path, roles, mgr_started: bool = False):
     """After the manager step, so its definition is current. Each OpenCode agent has its own empty database, so a paid
-    model needs the key in the manager's environment (docs/orca.md)."""
+    model needs the key in the manager's environment (docs/orca.md). `mgr_started`: this run started the manager from
+    this shell, where an empty value passes Cotal's check (`=== undefined`), so the definition's ref alone proves
+    nothing."""
     pins = opencode_key_pins(tiers, roles)
     if not pins:
         return
@@ -386,7 +388,8 @@ def opencode_key_check(repo: Path, space: str, tiers: Path, roles):
     readd = (f"cotal svc stop mgr -s {space} --yes, then cotal svc remove mgr -s {space} --yes, "
              "then rerun project-setup from a shell with the key set.")
     lines = []
-    if f.exists() and "OPENCODE_API_KEY" in json.loads(f.read_text()).get("envRefs", {}):
+    has_ref = f.exists() and "OPENCODE_API_KEY" in json.loads(f.read_text()).get("envRefs", {})
+    if has_ref and (os.environ.get("OPENCODE_API_KEY") or not mgr_started):
         pass  # the manager holds it, whatever this shell has
     elif not os.environ.get("OPENCODE_API_KEY"):
         lines += [f"warning: {who} pins {m} and OPENCODE_API_KEY is not set: a paid model is not listed without it, "
@@ -623,7 +626,8 @@ def services(repo: Path, space: str):
     return {s["name"]: s["state"] for s in inv}
 
 
-def start_stack(repo: Path, space: str, port_flag):
+def start_stack(repo: Path, space: str, port_flag) -> bool:
+    """Broker and manager up. True when this run started the manager, False when it was already running."""
     svc = services(repo, space)
     recorded = record(repo).get("port")
     if svc.get("stack-broker") == "running":
@@ -636,7 +640,7 @@ def start_stack(repo: Path, space: str, port_flag):
         svc = services(repo, space)
     if svc.get("mgr") == "running":
         say("manager", "exists", "mgr (runtime orca)")
-        return
+        return False
     if "mgr" not in svc:
         # PATH (starting with the Orca CLI's folder) lets Cotal's Orca driver find `orca-ide`/`orca`: Cotal's schema
         # refuses COTAL_* names here, so COTAL_ORCA_BIN can't be passed on.
@@ -653,6 +657,7 @@ def start_stack(repo: Path, space: str, port_flag):
         run(["cotal", "svc", "add", "mgr", "--file", str(f), "-s", space], cwd=repo)
     run(["cotal", "svc", "start", "mgr", "-s", space], cwd=repo)
     say("manager", "created", "mgr (runtime orca)")
+    return True
 
 
 def live_agents(repo: Path, space: str) -> dict:
@@ -1269,8 +1274,8 @@ def main(argv=None) -> int:
             opencode_key_check(repo, space, tiers, roles)
             say("start", "skipped", "--no-start")
             return 0
-        start_stack(repo, space, a.port)
-        opencode_key_check(repo, space, tiers, roles)
+        mgr_started = start_stack(repo, space, a.port)
+        opencode_key_check(repo, space, tiers, roles, mgr_started)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = None
