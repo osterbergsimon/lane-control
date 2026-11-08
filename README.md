@@ -1,12 +1,12 @@
 # lane-control
 
-A coordinator platform on top of [Rove](https://github.com/Sma1lboy/rove) (the agent task runner): scripts, templates and written doctrine for keeping several software projects moving with coding agents, unattended, within a budget. You decide only what matters; the rest is queued, launched, reviewed and merged by agents that verify each other's claims.
+A coordinator platform on top of an agent task runner, [Rove](https://github.com/Sma1lboy/rove) or [Orca](https://github.com/stablyai/orca) with [Cotal](https://github.com/Cotal-AI/Cotal): scripts, templates and written doctrine for keeping several software projects moving with coding agents, unattended, within a budget. You decide only what matters; the rest is queued, launched, reviewed and merged by agents that verify each other's claims.
 
 ## What it is
-Three layers of agents, all Rove tasks:
+Three layers of agents, each a task of the runner you use:
 - **Machine coordinator** (optional, one per machine): judgment only. Splits the budget across projects, watches memory and load, runs night mode, approves rare top-tier requests, writes the owner's one report.
-- **Project coordinator** (one per repo): the repo's main task. Queues work in beads (`bd`), writes briefs, launches worker lanes, reruns the gates, reviews, merges, raises owner decisions as Rove gates.
-- **Worker lanes**: Rove child tasks, one issue, one branch, one PR each, on a **tier**.
+- **Project coordinator** (one per repo): the repo's main task. Queues work in beads (`bd`), writes briefs, launches worker lanes, reruns the gates, reviews, merges, raises owner decisions to you (as Rove gates on Rove).
+- **Worker lanes**: child tasks of the coordinator (Rove child tasks, or Orca child tasks with one Cotal agent each), one issue, one branch, one PR each, on a **tier**.
 
 Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so cheap third-party or local models (through opencode) and Claude models mix freely. Any tier may be "none".
 
@@ -15,13 +15,31 @@ Why: the real constraint is a budget (say a weekly plan limit), not attention. W
 What it is not: not a CI system, not a substitute for human review on risky changes, not a hosted service, and not tied to one project or vendor. It assumes a single owner who trusts the agents with their repos.
 
 ## Requirements
-(Rove is the supported runner. Alternatives, from trials: [Orca](https://github.com/stablyai/orca), optionally with [Cotal](https://github.com/Cotal-AI/Cotal) for messaging, in `docs/orca.md`; [wsp](https://github.com/wsp-labs/wsp) in `docs/wsp.md`. The doctrine carries over, the scripts do not.)
+Two supported runners: Rove, and Orca + Cotal (`docs/orca.md`). [wsp](https://github.com/wsp-labs/wsp) is trial notes only (`docs/wsp.md`). The doctrine is the same on each; the scripts are per runner.
+
+Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, and Claude Code (or whichever engines your tiers use), logged in.
+
+**Rove:**
 - Rove, daemon running, with its skill installed for each engine you use (`rove skill install --global --agent <engine>`)
-- Claude Code (or whichever engines your tiers use), logged in
-- beads (`bd`), `gh` (authenticated), `jq`, `git`, bash
-- Optional, for sandboxed third-party lanes: `opencode`, bubblewrap, pasta, systemd user scopes. The sandbox is tested on NixOS only (it fetches `bubblewrap`, `passt` and `curl` through `nix`).
+
+**Orca + Cotal** (what `scripts/project-setup` needs; details and versions in `docs/orca.md` §5b):
+- Orca (the desktop app on your workstation, with Orca's server on a remote host if the agents run there) and Cotal (`cotal-ai`, with its Orca extension: `cotal ext add @cotal-ai/orca`)
+- the agent harnesses you use (`@anthropic-ai/claude-code`, `@opencode/cli`), signed in once as the user the agents run as
+- a normal user, never root; a git identity configured in the repo
+
+Optional for either runner:
+- for sandboxed third-party lanes: `opencode`, bubblewrap, pasta, systemd user scopes. The sandbox is tested on NixOS only (it fetches `bubblewrap`, `passt` and `curl` through `nix`).
 
 ## Quickstart
+### Orca + Cotal
+One run of `project-setup` per project; the rest is in `docs/orca.md` §5b.
+```bash
+git clone https://github.com/osterbergsimon/lane-control ~/code/lane-control
+~/code/lane-control/scripts/project-setup <git-url | /abs/dir>
+```
+It does each step only if it is not done yet. For a repo it has not onboarded, an agent adapts the lane files to the project (`.lane-control/`, a section in `AGENTS.md`) and a second agent reviews them. It then lists the files and asks you once; on yes it commits them, by explicit path. A second question follows: if the repo has no `orca.yaml` it shows the setup script it drafted from the lockfiles and offers to commit it and push, because Orca makes lane worktrees from `origin/<branch>`. Whatever you answer there, the coordinator (and the design lead) start after, with no flag; only a no to the file list stops the run. Interrupting is safe: an unfinished adapter run is run again, and a re-run asks only what is still open. `--no-start` skips starting the agents. Run `scripts/project-setup --help` and see `docs/orca.md` for host setup, `--host`, models and permission modes.
+
+### Rove
 About half an hour for one project. Everything marked **planned** is manual today.
 
 1. **Clone and configure.**
@@ -77,10 +95,10 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 | `reliability.md` | numbered failure, fix, reuse log; read before setting up a coordinator |
 | `machine.md` | what is machine-specific; checks for a new box; CI runner patterns |
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
-| `scripts/` | `window-guard.sh`, `machine-watch.sh`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared); machine caps, installed to `~/.agents/bin` by `project-setup`: `lane-heavy` (the machine-wide gate for builds and full test suites), `lane-room` (the check before opening a lane), `lane-tier` (looks up a tier and refuses a `sandbox required` tier under Orca + Cotal), `lane-limits.sh` (their shared limits; a machine's own in a copy of `limits.example.sh`); for Orca + Cotal (`docs/orca.md` §5b): `project-setup` (an Orca project with a Cotal coordinator and frontend design lead, here or on an SSH host) and `orca-host-install` (Orca's server on a host without downloads, optional scripted pairing); superseded trial scripts `cotal-agent`, `orca-cotal-task`; for wsp (`docs/wsp.md`): `wsp-owner-code.mjs`. Each header is its contract |
+| `scripts/` | `window-guard.sh`, `machine-watch.sh`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared); machine caps, installed to `~/.agents/bin` by `project-setup`: `lane-heavy` (the machine-wide gate for builds and full test suites), `lane-room` (the check before opening a lane), `lane-tier` (looks up a tier and refuses a `sandbox required` tier under Orca + Cotal), `lane-limits.sh` (their shared limits; a machine's own in a copy of `limits.example.sh`); for Orca + Cotal (`docs/orca.md` §5b): `project-setup` (an Orca project with a Cotal coordinator and frontend design lead, here or on an SSH host; one run onboards the repo: an agent adapts the lane files, the owner says yes once to commit them, a second question offers to commit a drafted `orca.yaml` and push, since Orca makes lane worktrees from `origin/<branch>`, and the agents start after, with no flag; safe to re-run or interrupt) and `orca-host-install` (Orca's server on a host without downloads, optional scripted pairing); superseded trial scripts `cotal-agent`, `orca-cotal-task`; for wsp (`docs/wsp.md`): `wsp-owner-code.mjs`. Each header is its contract |
 | `templates/` | AGENTS sections, project and coordinator settings, init script, worker and review briefs, budget ceiling, opencode config |
 | `docs/multi-machine.md` | design (not implemented): projects pinned to machines, one global coordinator over SSH |
-| `docs/orca.md` | trial notes: Orca for SSH remote agents and OpenCode 2, plus Cotal for coordinator-to-lane messaging that never disturbs a half-typed prompt; setup, what was verified, gotchas, Rove verb map, evaluation checklist |
+| `docs/orca.md` | the Orca + Cotal runner (`scripts/project-setup`), with what was tested on a trial box: Orca for SSH remote agents and OpenCode 2, plus Cotal for coordinator-to-lane messaging that never disturbs a half-typed prompt; setup, what was verified, gotchas, Rove verb map, evaluation checklist |
 | `personas/`, `skills/orca-cotal-lanes/`, `templates/lanes.tsv`, `templates/lane-brief.md` | what project-setup installs: Cotal personas (coordinator, design lead), the lane skill (Orca child task + Cotal agent per lane), the tier table (harness and model per tier), the lane brief |
 | `tests/` | `test_content.py`, `test_project_setup.py` (stub orca/cotal), `test-orca-host-install.sh` (against a real host) |
 | `docs/wsp.md` | trial notes: running coordinators and lanes on wsp instead of Rove (setup on an SSH-only box, OpenCode versions, Rove-to-wsp verb map, what has no equivalent); `scripts/wsp-owner-code.mjs` pairs its web UI as owner |
@@ -91,7 +109,7 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 - **Verify, do not trust**: coordinators rerun every deterministic gate and check reviewer claims as well as worker claims.
 - **Route by paths, review by risk**, correctness over token cost; the budget limits lane count, never the tier (`model-routing.md`).
 - **One issue, one key, one lane**; claim at launch, close at merge, park resumably (`issues.md`).
-- **Decisions surface as Rove gates** with a recommendation; messages are few, terse and event-driven.
+- **Decisions surface to you** (as Rove gates on Rove) with a recommendation; messages are few, terse and event-driven.
 - **Scripts enforce only limits the owner decided**; no silent machine-wide caps.
 - **Every failure with a durable fix** goes into `reliability.md`.
 

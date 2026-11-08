@@ -1,10 +1,11 @@
-# Orca (+ optional Cotal) as an alternative to Rove
+# Orca + Cotal as a supported runner (Rove is the other)
 
-Status: trial, not a port. Run on 2026-11-05 with Orca 1.4.250 (desktop on a NixOS workstation), Cotal 0.145.1,
-OpenCode 2.2.1, against a Debian box reached only over SSH, whose internet was limited by an allowlisting proxy.
+Status: Orca + Cotal is a supported runner next to Rove; `scripts/project-setup` (section 5b) is its path. The trial
+runs below were on 2026-11-05 with Orca 1.4.250 (desktop on a NixOS workstation), Cotal 0.145.1, OpenCode 2.2.1,
+against a Debian box reached only over SSH, whose internet was limited by an allowlisting proxy.
 Tags: **[tested]** ran it, **[docs]** read in the project's docs but not run, **[none]** no equivalent.
 
-lane-control's scripts call `rove api` and do **not** run unchanged on either. What carries over is the doctrine
+lane-control's Rove scripts call `rove api` and do **not** run unchanged on Orca or Cotal. What carries over is the doctrine
 (roles, tiers, path map, beads, review by risk) and the shape: one coordinator per project launching worker lanes.
 
 ## 1. Which layer does what
@@ -128,10 +129,14 @@ composer. [tested]
 ```bash
 scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
-  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-design-lead] [--trust-folder] [--no-start] \
+  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml (leaves an uncommitted draft as orca.yaml)] [--no-design-lead] [--trust-folder] [--no-start (opt-out of starting)] \
   [--private GLOB]...
 ```
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
+(Onboarding is safe to interrupt. The adapting agent's run is recorded as finished in the settings store only when it
+ends; files an interrupted run left under `.lane-control/` are never reviewed or committed as if complete, the agent
+runs again over them. Files from a finished run that was declined, or failed its review, go back to review without
+being rewritten. The record is dropped when the files are committed.)
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
 2. Runs `orca repo add`.
 3. Installs the skills for the agent user (`~/.agents/skills/`, linked into `~/.claude/skills/` and
@@ -143,10 +148,24 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    Each persona names the tier table and the reviewer persona by absolute path, and the project's Claude permission
    mode.
 5a. Setup script: Orca runs `orca.yaml` `scripts.setup` in each new worktree (a "Setup" tab), but reads it from the
-   worktree, so only a committed one counts. Without one, project-setup drafts it from the lockfiles (uv, poetry,
-   npm/pnpm/yarn/bun, cargo, go, in the root and two levels down; the beads link when `.beads` is a symlink) into
-   `.cotal/orca.yaml.proposed`, or into `orca.yaml` with `--write-orca-yaml`, for the owner to review and commit. It
-   never commits. The draft ends by writing `orca-setup-done` in the worktree's git dir; agents start only after it.
+   worktree, and creates the worktree from `origin/<branch>` (read from Orca's code, not confirmed by creating a
+   worktree), so the script and the onboarding commit reach lanes only once committed and pushed. Without an
+   `orca.yaml`, project-setup drafts one from the lockfiles (uv, poetry, npm/pnpm/yarn/bun, cargo, go, in the root and
+   two levels down; the beads link when `.beads` is a symlink). During onboarding, after the owner's yes to the file
+   list, it asks a second question: no orca.yaml was found, here is the generated text, it must be committed and
+   pushed. A yes commits `orca.yaml` by explicit path and pushes the checked-out branch (never forced, nothing else
+   set); that push also carries the onboarding commit. With a tracked orca.yaml, or no lockfiles, it asks about the
+   push alone, only when origin's default branch lacks the onboarding files or `orca.yaml`; the question lists the
+   commits the push carries. An already onboarded project is asked too on a re-run (that is how a declined, failed or
+   interrupted answer is asked again), also with `--write-orca-yaml`. An untracked `orca.yaml` that differs from the draft is never
+   overwritten or committed. The push is asked only on the branch origin's HEAD names; on another branch nothing is
+   asked, and the run says lanes will not get the files only when origin's default branch really lacks them. With no
+   origin Orca makes worktrees from the local branch, so the question is only to commit `orca.yaml`. A no, no terminal or a failed push commits
+   and pushes nothing more, and the agents still start, with that warning. Only a no to the file list stops the run.
+   A run without onboarding (`--skip-adapt`) asks nothing and never commits: it drafts into
+   `.cotal/orca.yaml.proposed`. `--write-orca-yaml` only changes where an uncommitted draft is left (as `orca.yaml` in
+   the repo, which a later run offers to commit); it never commits by itself. The draft ends by writing `orca-setup-done` in the worktree's git dir;
+   agents start only after it.
 6. Starts the broker (`cotal up --no-manager`, on a per-project port recorded in the settings store) and a
    manager service `mgr` on the Orca runtime.
    `mgr` carries `envRefs` for the proxy variables, because `cotal up` gives its manager a fixed environment without

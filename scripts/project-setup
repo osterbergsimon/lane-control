@@ -5,7 +5,7 @@
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE | --opencode hosted|own|none [--opencode-model M]] [--own-model M]... [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
-                [--readapt | --skip-adapt | --refresh | --show]
+                [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml]
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
@@ -13,7 +13,10 @@ re-run reports `exists` for each.
 
 Before the Orca steps, a headless adapting agent writes the project's files into .lane-control/ and a reviewer on
 another model checks them. They are committed, by explicit path, only on the owner's yes in a terminal; on no, or
-without a terminal, they stay uncommitted, no Orca step runs and it exits 3. Nothing else is ever committed.
+without a terminal, they stay uncommitted, no Orca step runs and it exits 3. After that commit it asks once more, in a terminal: to commit a
+drafted orca.yaml (from the lockfiles; Orca reads its setup script from the worktree) and to push the default branch,
+since Orca makes lane worktrees from origin/<branch>. A no, no terminal or a failed push commits and pushes nothing more
+and the agents still start. Nothing else is ever committed or pushed.
 
 --refresh is for a project set up earlier, after lane-control's personas or skill changed: it re-renders the personas
 in .cotal/agents/ (keeping each one's harness, model and permission mode), reinstalls the skill, leaves the project's
@@ -975,22 +978,33 @@ def setup_steps(repo: Path) -> list:
     return steps
 
 
-def setup_script(repo: Path, write: bool):
-    """The repo's orca.yaml setup script. Orca reads it from the new worktree, so only a committed one counts: a
-    missing one is drafted for the owner to review and commit (never committed here)."""
-    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "orca.yaml"], cwd=repo,
-                             capture_output=True).returncode == 0
-    if tracked:
-        say("setup-script", "exists", "orca.yaml")
-        return
+def orca_yaml_tracked(repo: Path) -> bool:
+    return subprocess.run(["git", "ls-files", "--error-unmatch", "orca.yaml"], cwd=repo,
+                          capture_output=True).returncode == 0
+
+
+def draft_text(repo: Path):
+    """The orca.yaml drafted from the lockfiles; None when there are none."""
     steps = setup_steps(repo)
     if not steps:
-        say("setup-script", "none", "no lockfiles found")
-        return
+        return None
     body = "\n".join("    " + l for l in steps + [f'touch "$(git rev-parse --git-dir)/{SETUP_MARKER}"'])
-    text = ("# Orca runs scripts.setup in every new worktree of this repo (a lane's checkout). Written by lane-control\n"
+    return ("# Orca runs scripts.setup in every new worktree of this repo (a lane's checkout). Written by lane-control\n"
             "# project-setup from the lockfiles; edit freely. Keep the last line: agents wait for it before starting.\n"
             f"scripts:\n  setup: |\n{body}\n")
+
+
+def setup_script(repo: Path, write: bool):
+    """The repo's orca.yaml setup script. Orca reads it from the new worktree, so only a committed one counts: a
+    missing one is drafted for the owner to review and commit (an onboarding run offers that commit itself, see
+    publish_onboarding)."""
+    if orca_yaml_tracked(repo):
+        say("setup-script", "exists", "orca.yaml")
+        return
+    text = draft_text(repo)
+    if text is None:
+        say("setup-script", "none", "no lockfiles found")
+        return
     if write and not (repo / "orca.yaml").exists():
         (repo / "orca.yaml").write_text(text)
         say("setup-script", "written", "orca.yaml (review it, then commit it: lanes only get it once committed)")
@@ -1494,9 +1508,27 @@ def kept_suggestions(repo: Path) -> Path:
     return repo / run(["git", "rev-parse", "--git-path", "lane-control-suggestions.md"], cwd=repo).stdout.strip()
 
 
+def adapter_record(repo: Path) -> Path:
+    """Where a finished adapter run is recorded: in the settings store, so neither .cotal/ nor the repo carries it."""
+    return store_dir(repo) / "adapter-done.json"
+
+
+def adapter_finished(repo: Path) -> bool:
+    """True when a run of the adapter got to its end and nothing has cleared that since: the uncommitted .lane-control/
+    is its result, whatever the owner has edited or committed elsewhere meanwhile (hand edits go to review, never back
+    to the adapter). An interrupted run leaves no record (it is cleared when a run starts, and at the commit), so what
+    it wrote half-way is never taken for a result."""
+    return adapter_record(repo).is_file()
+
+
+def forget_adapter(repo: Path) -> None:
+    adapter_record(repo).unlink(missing_ok=True)
+
+
 def adapt(repo: Path, who: tuple, prompt: str, before: dict):
     """One run of the adapting agent. Its suggestions leave the repo before anything reviews the result; a fix round's
-    are added to the earlier ones."""
+    are added to the earlier ones. A run that gets to its end is recorded as finished (adapter_finished)."""
+    forget_adapter(repo)
     try:
         run_agent(repo, who, prompt, write=True)
     finally:  # also when the run failed: the suggestions are never left where a later run could commit them
@@ -1507,6 +1539,10 @@ def adapt(repo: Path, who: tuple, prompt: str, before: dict):
             kept.write_bytes(old + (b"" if not old or old.endswith(b"\n") else b"\n") + new.read_bytes())
             new.unlink()
     check_scope(repo, before)
+    d = store_dir(repo)
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    write_atomic(adapter_record(repo), b"{}\n", 0o600)
 
 
 def fill(name: str, project: str, design_lead: bool, findings: str = "") -> str:
@@ -1579,12 +1615,12 @@ def has_terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def owner_says_yes() -> bool:
+def owner_says_yes(question: str = "Commit these files and run the Orca setup? [y/N] ", step: str = "commit") -> bool:
     if not has_terminal():
-        say("commit", "skipped", "no terminal to ask the owner in")
+        say(step, "skipped", "no terminal to ask the owner in")
         return False
     try:
-        return input("Commit these files and run the Orca setup? [y/N] ").strip().lower() in ("y", "yes")
+        return input(question).strip().lower() in ("y", "yes")
     except EOFError:
         return False
 
@@ -1594,6 +1630,143 @@ def commit_adapted(repo: Path, paths: list, message: str = "Add lane-control fil
     run(["git", "add", "--", *paths], cwd=repo)
     run(["git", "commit", "-q", "-m", message, "--only", "--", *paths], cwd=repo)
     say("commit", "created", f"{len(paths)} file(s)")
+
+
+def default_branch(repo: Path, current: str = ""):
+    """The branch origin's HEAD names (what Orca branches a new worktree from), else asked of origin; the branch
+    checked out when origin is still empty (its first push makes that branch the default); None if unknown."""
+    r = run(["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd=repo, check=False)
+    if r.returncode == 0 and r.stdout.strip().startswith("origin/"):
+        return r.stdout.strip()[len("origin/"):]
+    try:
+        r = run(["git", "ls-remote", "--symref", "origin", "HEAD"], cwd=repo, check=False, timeout=30)
+    except Fail:
+        return None
+    m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD", r.stdout, re.M)
+    if m:
+        return m.group(1)
+    try:
+        everything = run(["git", "ls-remote", "origin"], cwd=repo, check=False, timeout=30)
+    except Fail:
+        return None
+    return current or None if everything.returncode == 0 and not everything.stdout.strip() else None
+
+
+def ahead_of_lanes_base(repo: Path, lanes: str, paths: list) -> bool:
+    """Whether HEAD has commits touching `paths` that origin/<lanes> (as last fetched), which a lane's worktree is made
+    from, lacks; true too when there is no such branch there yet. One direction only: a checkout that is behind origin
+    has nothing to push, so it is never read as origin lacking something."""
+    if run(["git", "rev-parse", "-q", "--verify", f"refs/remotes/origin/{lanes}"], cwd=repo, check=False).returncode != 0:
+        return True
+    return run(["git", "log", "--oneline", f"origin/{lanes}..HEAD", "--", *paths], cwd=repo,
+               check=False).stdout.strip() != ""
+
+
+def lanes_base_has(repo: Path, lanes: str, path: str) -> bool:
+    return run(["git", "ls-tree", "--name-only", f"origin/{lanes}", "--", path], cwd=repo,
+               check=False).stdout.strip() != ""
+
+
+def missing_for_lanes(repo: Path, lanes: str, yaml_pending: bool) -> list:
+    """What lanes would not get as it stands: the onboarding files (.lane-control/ and AGENTS.md) and a tracked
+    orca.yaml when HEAD has commits for them that origin/<lanes> lacks, and an orca.yaml about to be committed. An
+    orca.yaml of the owner's own, left alone, is not counted, nor is any other commit."""
+    out = []
+    if onboarded(repo) and ahead_of_lanes_base(repo, lanes, [ADAPTED, agents_md(repo)]):
+        out.append("onboarding files")
+    if yaml_pending or (orca_yaml_tracked(repo) and ahead_of_lanes_base(repo, lanes, ["orca.yaml"])):
+        out.append("orca.yaml")
+    return out
+
+
+def publish_onboarding(repo: Path) -> None:
+    """After the owner's commit of the adapted files: Orca makes a lane's worktree from origin/<branch> (the local
+    branch when there is no origin), so the files reach lanes only once they are there, and orca.yaml (its setup
+    script) only once it is committed and pushed. Asks the owner once more for that. No answer, a no, or a failed
+    push never stops the run; it says what lanes will miss, and says nothing when nothing is missing."""
+    yaml = repo / "orca.yaml"
+    text = None
+    if not orca_yaml_tracked(repo):
+        draft = draft_text(repo)
+        if yaml.exists() or yaml.is_symlink():
+            if draft is not None and yaml.is_file() and yaml.read_text(errors="replace") == draft:
+                text = draft  # an identical one from a declined run
+            else:
+                say("setup-script", "kept", "orca.yaml is already here and differs from the draft: not overwritten, "
+                    "not committed")
+        else:
+            text = draft
+    found = ("No orca.yaml was found. This one was generated from the lockfiles (it runs as a script in every "
+             f"worktree):\n\n{text}\n" if text else "")
+
+    def commit_yaml():
+        if not yaml.exists():
+            yaml.write_text(text)
+        commit_adapted(repo, ["orca.yaml"], "Add the Orca setup script")
+
+    if run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode != 0:
+        if text is None:
+            return
+        print(f"\n{found}\nIt has to be committed for lanes to get a setup script. There is no origin remote, so "
+              "Orca makes worktrees from the local branch: nothing is pushed.\n", flush=True)
+        if not owner_says_yes("Commit orca.yaml? [y/N] ", "publish"):
+            say("publish", "declined", "orca.yaml not committed; lanes will not get a setup script until it is")
+            return
+        try:
+            commit_yaml()
+        except Fail as e:
+            say("publish", "warning", f"orca.yaml not committed ({e}); lanes will not get a setup script")
+        return
+    branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo, check=False).stdout.strip()
+    lanes = default_branch(repo, branch)
+    if lanes is None:
+        say("publish", "skipped", "could not tell which branch lanes branch from, so nothing is pushed; make sure "
+            "the onboarding files and orca.yaml are on origin's default branch")
+        return
+    if text is not None and lanes_base_has(repo, lanes, "orca.yaml"):
+        say("setup-script", "kept", f"origin/{lanes} already has an orca.yaml and this checkout is behind it "
+            "(git pull): not committing another")
+        text = None
+    if branch != lanes:
+        missing = missing_for_lanes(repo, lanes, text is not None)
+        if missing:
+            say("publish", "skipped", f"on {branch or 'no branch'}, but lanes branch from origin/{lanes}, which does "
+                f"not have the current {' and '.join(missing)}: nothing is pushed, so lanes will not get them")
+        return
+    missing = missing_for_lanes(repo, lanes, text is not None)
+    if not missing:  # lanes lack nothing; whatever else is unpushed is the owner's own business
+        return
+    names = " and ".join(missing)
+    miss = f"lanes will not get the current {names} until pushed to origin/{lanes}"
+    ref = f"refs/remotes/origin/{branch}"
+    if run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode == 0:
+        count = int(run(["git", "rev-list", "--count", f"{ref}..HEAD"], cwd=repo, check=False).stdout.strip() or 0)
+        shown = run(["git", "log", "--oneline", "-10", f"{ref}..HEAD"], cwd=repo, check=False).stdout.splitlines()
+        carried = (f"\nThe push carries every commit not yet on origin/{branch}, whatever it is:\n"
+                   + "\n".join("  " + l for l in shown) + (f"\n  ... and {count - len(shown)} more" if count > len(shown) else "")
+                   + "\n") if count else ""
+    else:
+        carried = f"\nThe push creates origin/{branch} with every commit on it.\n"
+    if text is not None:
+        print(f"\n{found}\nIt has to be committed and pushed to give lanes a setup script: Orca creates worktrees "
+              f"from origin/{branch}." + (" The push also carries the onboarding commit." if "onboarding files" in missing
+                                          else "") + f"\n{carried}", flush=True)
+        question = f"Commit orca.yaml and push {branch} to origin? [y/N] "
+    else:
+        print(f"\norigin/{branch} does not have the current {names}. Orca creates worktrees from it, so lanes get "
+              f"the old version, or none, until it is pushed.\n{carried}", flush=True)
+        question = f"Push {branch} to origin? [y/N] "
+    if not owner_says_yes(question, "publish"):
+        say("publish", "declined", f"nothing more committed or pushed; {miss}")
+        return
+    try:
+        if text is not None:
+            commit_yaml()
+        run(["git", "push", "origin", branch], cwd=repo, timeout=120)  # never forced, nothing else set
+    except Fail as e:
+        say("publish", "warning", f"push failed or commit failed ({e}); {miss}")
+        return
+    say("publish", "pushed", f"{branch} to origin")
 
 
 def onboarded(repo: Path) -> bool:
@@ -1640,9 +1813,13 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     # Before the agent starts, so nothing in .cotal/ can pass for its work; committed with its files.
     say("gitignore", ignore_cotal(repo), ".cotal/")
     before = snapshot(repo)
-    if any(p.startswith(ADAPTED + "/") for p in before) and not again:
+    left = any(p.startswith(ADAPTED + "/") for p in before)
+    if left and not again and adapter_finished(repo):
         say("adapt", "exists", f"uncommitted {ADAPTED}/ from an earlier run; reviewing it again")
     else:
+        if left and not again:
+            say("adapt", "unfinished", f"{ADAPTED}/ is from a run that did not finish; "
+                "the adapter runs again over it")
         say("adapt", "running", "/".join(adapter))
         kept_suggestions(repo).unlink(missing_ok=True)
         adapt(repo, adapter, fill("prompt.md", project, design_lead) + ADAPT_RULES, before)
@@ -1667,6 +1844,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     check_agents_md(repo)  # the owner may have edited meanwhile; only what the commit carries matters here
     check_gitignore(repo)
     commit_adapted(repo, [p for p, _ in changes])
+    forget_adapter(repo)
     kept_suggestions(repo).unlink(missing_ok=True)
     return True
 
@@ -1820,7 +1998,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-design-lead", action="store_true",
                     help="no design lead (projects without a frontend): only the coordinator is started")
     ap.add_argument("--write-orca-yaml", action="store_true",
-                    help="write the drafted setup script as orca.yaml in the repo (uncommitted) instead of .cotal/")
+                    help="when orca.yaml is not committed, leave the drafted setup script as orca.yaml in the repo (uncommitted) "
+                         "instead of .cotal/orca.yaml.proposed; never commits by itself")
     ap.add_argument("--reviewer",
                     help="default harness/model of the reviewer persona (default claude/opus); leads pick one per lane "
                          "from the tiers")
@@ -1991,6 +2170,8 @@ def main(argv=None) -> int:
         project = cfg["name"] or repo.name
         if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
             return STOPPED
+        if not a.skip_adapt:  # also on a re-run: a declined or failed push is offered again
+            publish_onboarding(repo)
         space = slug(project)
         repo_id = orca_repo(repo)
         skill = skills()
