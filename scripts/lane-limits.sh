@@ -3,7 +3,7 @@
 #
 # Limits: defaults from cores and memory, then the owner's per-machine file (limits.example.sh documents it):
 #   LANE_LIMITS_FILE   the file (default ~/.config/lane-control/limits.sh; absent is fine)
-# Not settings, for tests only:
+# Not settings; for tests, and LANE_STATE_DIR and LANE_LIMITS_FILE also for opencode-sandbox.sh:
 #   LANE_PROC_DIR      /proc to read (default /proc)   LANE_STATE_DIR   where slots live (default below)
 
 LANE_PROC_DIR=${LANE_PROC_DIR:-/proc}

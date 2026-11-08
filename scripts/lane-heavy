@@ -7,6 +7,9 @@
 #   and say so once on stderr. Waiters poll, so the order is not strictly first come, first served.
 # - The job runs at low CPU and IO priority, and with a memory limit of LANE_HEAVY_MEM_GB (no swap) in a systemd user
 #   scope when the host has a working one. Without one it runs with no memory limit and says so; it never fails for that.
+# - The command's arguments reach it unchanged: systemd-run is told not to expand `$` in them. A systemd too old for that
+#   option refuses it; the scope is then used without the option only if a probe shows `$$` survives, and otherwise
+#   counts as no working scope.
 # - The exit code is the command's. A nested lane-heavy (a project's wrapper calling it again) runs inside the slot
 #   it already holds. Output from the gate goes to stderr only; stdin and stdout are the command's.
 # - Out of memory: when the scope was OOM-killed it prints `OUT OF MEMORY` and keeps the exit code (often 137 or 143,
@@ -14,8 +17,10 @@
 #   counter moved during a failed job, it prints `POSSIBLE OUT OF MEMORY`.
 # - A slot is a kernel lock held by this process alone, so it frees itself however lane-heavy ends. The command does
 #   not inherit it: a daemon the build leaves behind (compiler server, build daemon) cannot hold a slot for ever.
-#   TERM, INT and HUP stop the whole job, every step of it. If lane-heavy itself is SIGKILLed while the job lives on,
-#   the slot frees early. The job runs in its own session (setsid, where the host has it), so it has no terminal.
+#   TERM, INT and HUP stop the whole job, every step of it. If lane-heavy itself is SIGKILLed, the slot frees and the
+#   job's main process dies with it (setpriv --pdeathsig, where the host has it). A step a multi-step `sh -c` already
+#   started, or a whole job on a host without that setpriv, runs on outside the limit.
+#   The job runs in its own session (setsid, where the host has it), so it has no terminal.
 # - If the limit cannot work at all (no flock, no writable state directory) it runs the command anyway and says so.
 #
 # Limits: lane-limits.sh and limits.example.sh. Exit: the command's; 127 not found or not executable; 2 usage.
@@ -75,18 +80,26 @@ scope_args=(--user --scope --quiet)
 scope_props=(-p "MemoryMax=${LANE_HEAVY_MEM_GB}G" -p MemorySwapMax=0 -p CPUWeight=20 -p IOWeight=20)
 
 # systemd-run accepts MemoryMax and silently ignores it when the memory controller is not delegated to the user, so
-# ask the kernel what the scope really got.
-scope_works() {
-  local max
-  command -v systemd-run >/dev/null && command -v systemctl >/dev/null || return 1
-  [ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR=/run/user/$(id -u)
-  max=$(systemd-run "${scope_args[@]}" --unit="$unit-probe" "${scope_props[@]}" -- \
-    sh -c 'cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"' 2>/dev/null </dev/null {slot_fd}>&-)
+# ask the kernel what the scope really got. The `$$` argument must come back as it went in: expanded, the job would
+# silently be a different command.
+scope_probe() {
+  local out max=
+  out=$(systemd-run "${scope_args[@]}" "$@" --unit="$unit-probe" "${scope_props[@]}" -- \
+    sh -c 'echo "$0 $(cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max")"' '$$' \
+    2>/dev/null </dev/null {slot_fd}>&-)
+  case $out in '$$ '*) max=${out#'$$ '} ;; esac
   case $max in
     '' | *[!0-9]*)
       systemctl --user reset-failed "$unit-probe.scope" >/dev/null 2>&1
       return 1 ;;
   esac
+}
+
+scope_works() {
+  command -v systemd-run >/dev/null && command -v systemctl >/dev/null || return 1
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR=/run/user/$(id -u)
+  if scope_probe --expand-environment=no; then scope_args+=(--expand-environment=no); return 0; fi
+  scope_probe
 }
 
 scoped=
@@ -97,6 +110,10 @@ elif scope_works; then
   job=(systemd-run "${scope_args[@]}" --unit="$unit" "${scope_props[@]}" -- "${job[@]}")
 else
   say "no memory limit: this host has no working systemd user scope; running without one"
+fi
+# setsid does not save a job from a SIGKILLed gate, so ask the kernel to end it. An older setpriv lacks the option.
+if command -v setpriv >/dev/null && setpriv --pdeathsig KILL true 2>/dev/null </dev/null; then
+  job=(setpriv --pdeathsig KILL "${job[@]}")
 fi
 # Its own process group, whose id is the job's pid (setsid does not fork here), so a signal reaches every step of `sh -c`.
 if command -v setsid >/dev/null; then job=(setsid "${job[@]}"); fi

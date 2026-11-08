@@ -34,6 +34,9 @@ A tier whose harness is `none` is skipped: go one tier up. `inherit` means the p
 your persona names; pass that value.
 
 ## 2. Open the lane
+First check that the machine has room: run `~/.agents/bin/lane-room`. If it exits non-zero (too busy, or not installed),
+hold the lane and tell the owner what it printed, instead of starting it.
+
 From your own worktree (its cwd makes the new task your child):
 
 ```

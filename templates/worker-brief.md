@@ -3,5 +3,5 @@
 You are a worker on <PROJECT> (<one-line description>), dispatched by the <PROJECT> coordinator (Rove main task). Your task is <KEY_PREFIX>-<n>, issue <ISSUE_ID> "<title>". You run on the <TIER> tier; if something needs a higher tier, stop with "failed: NEEDS_<TIER>: <reason>".
 1. Read AGENTS.md fully (Rules, Build and test, Gate and merge incl. Scope, Tasks/Worker contract). `bd show <ISSUE_ID>`, claim it, do exactly what it asks. <Private data linked or not; what may be committed from it.>
 2. Relevant: <files, docs, scripts, ids>. Measure on main's code (your branch starts at main).
-3. <Heavy builds and runs: the project's wrapper script, one at a time; never read whole logs.>
+3. <Heavy builds and full test suites: `~/.agents/bin/lane-heavy COMMAND` (it may wait for a machine-wide slot, so run it in the background; the project's wrapper goes inside it; if that file is missing, run the command plainly and say so in your report); never read whole logs.>
 4. Living docs in the same branch (new ids appended, never renumber). Commit by explicit path, push, PR to main titled "<KEY_PREFIX>-<n> <title> (<ISSUE_ID>)", rove api pr-attach, never merge. Report last with the bare `rove api send --prompt-file -` form, in the 6-line report format from the worker contract; nothing else, no progress messages.

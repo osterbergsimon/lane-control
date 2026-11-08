@@ -856,6 +856,10 @@ class OnboardingTests(unittest.TestCase):
         for path in m.HOST_FILES:
             self.assertTrue((ROOT / path).exists(), path)
 
+    def test_host_mode_carries_the_machine_tools(self):
+        for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
+            self.assertIn(f"scripts/{name}", load().HOST_FILES)
+
 
 class RunTests(unittest.TestCase):
     def setUp(self):
@@ -1127,6 +1131,50 @@ class RunTests(unittest.TestCase):
         ssh.write_text("#!/bin/sh\necho \"ssh $*\" >> \"$STUB_LOG\"\ncat > /dev/null\n")
         ssh.chmod(0o755)
 
+    def _tools(self):
+        return self.e.home / ".agents" / "bin"
+
+    def test_machine_tools_installed_next_to_each_other(self):
+        r = self.e.run(str(self.e.repo()), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"lane-tools.*created")
+        for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
+            self.assertEqual((self._tools() / name).read_bytes(), (ROOT / "scripts" / name).read_bytes())
+        p = subprocess.run([str(self._tools() / "lane-heavy"), "--help"], env=self.e.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)  # it found lane-limits.sh beside it
+        self.assertIn("LANE_HEAVY_SLOTS", p.stdout)
+        self.assertTrue(os.access(self._tools() / "lane-room", os.X_OK))
+
+    def test_whatever_installs_the_skill_installs_the_machine_tools(self):
+        m = load()  # a refresh goes through skills() too, so it reinstalls them
+        (self.e.home / ".agents" / "skills" / "orca-cli").mkdir(parents=True)
+        with mock.patch.dict(m.os.environ, {"HOME": str(self.e.home)}), mock.patch.object(m, "lane_tools") as tools:
+            m.skills()
+        tools.assert_called_once_with(self.e.home)
+
+    def test_machine_tools_rerun_changes_nothing(self):
+        repo = self.e.repo()
+        self.e.run(str(repo), "--no-start")
+        before = (self._tools() / "lane-heavy").stat().st_ino
+        r = self.e.run(str(repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"lane-tools.*exists")
+        self.assertEqual((self._tools() / "lane-heavy").stat().st_ino, before)
+
+    def test_stale_machine_tool_is_replaced_without_touching_a_running_copy(self):
+        repo = self.e.repo()
+        self.e.run(str(repo), "--no-start")
+        tool = self._tools() / "lane-heavy"
+        tool.write_text("#!/bin/sh\necho old\n")
+        with open(tool) as running:  # bash reads a running script as it goes: the old file must stay whole
+            r = self.e.run(str(repo), "--no-start")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertRegex(r.stdout, r"lane-tools.*updated")
+            self.assertEqual(running.read(), "#!/bin/sh\necho old\n")
+        self.assertEqual(tool.read_bytes(), (ROOT / "scripts" / "lane-heavy").read_bytes())
+        self.assertTrue(os.access(tool, os.X_OK))
+        self.assertEqual(sorted(p.name for p in self._tools().iterdir()), ["lane-heavy", "lane-limits.sh", "lane-room"])
+
     def test_host_mode_copies_and_reexecs(self):
         self._ssh_stub()
         r = self.e.run("https://example.com/acme/shop.git", "--host", "dev@box", "--permission-mode",
@@ -1255,7 +1303,7 @@ class RunTests(unittest.TestCase):
         self.e.set_state(setup_tab=1)
         r = self.e.run(str(repo))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("agent_design-lead", self._closed())  # the stub's agent tab: empty preview, no identity, no cotal- title
+        self.assertNotIn("agent_design-lead", self._closed())  # the stub's agent tab: one-line preview, no identity, no cotal- title: only the handle guard keeps it
 
     def test_shell_with_empty_preview_is_left_open(self):
         repo = self.e.repo()
@@ -1538,6 +1586,15 @@ class RefreshTests(unittest.TestCase):
 
     def persona(self, name="coordinator"):
         return self.repo / ".cotal" / "agents" / f"{name}.md"
+
+    def test_refresh_reinstalls_the_machine_tools(self):
+        self.setup_project()
+        tool = self.e.home / ".agents" / "bin" / "lane-heavy"
+        tool.write_text("#!/bin/sh\necho old\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"lane-tools.*updated")
+        self.assertEqual(tool.read_bytes(), (ROOT / "scripts" / "lane-heavy").read_bytes())
 
     def test_stale_persona_is_rewritten_and_its_running_agent_named(self):
         self.setup_project()

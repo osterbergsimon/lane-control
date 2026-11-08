@@ -25,6 +25,8 @@
 # Instance paths are not hardcoded here: private paths the test checks are SANDBOX_TEST_* in the playbook config.
 #
 # Changes (newest first):
+#   2026-11-08  the machine-wide heavy-work gate works inside: lane-heavy, lane-room, the machine's slot files and
+#               its resolved limits are bound (nothing is bound, and it says so, when project-setup has not installed them)
 #   2026-10-31  moved to lane-control; the day/night file comes from the playbook config (MODE_FILE) or
 #               OPENCODE_SANDBOX_MODE_FILE instead of a fixed path
 #   2026-10-31  OPENCODE_SANDBOX_PR_BASE=<b>: the base branch of the PR the relay opens (default main; for
@@ -49,10 +51,14 @@
 # Inside (empty root; only these are bound):
 #   read-write  the worktree; its per-worktree git dir (HEAD, index); a lane-private git dir
 #               (new objects and refs; the shared repo's objects read-only through alternates);
-#               per-lane opencode data/state/cache, CARGO_HOME, SCCACHE_DIR; private /tmp and $HOME
+#               per-lane opencode data/state/cache, CARGO_HOME, SCCACHE_DIR; private /tmp and $HOME;
+#               the machine's heavy-work slot files, shared with every lane, each bound on its own so it can
+#               be neither replaced nor deleted (never the directory: the gate outside would follow a link planted
+#               there): a steered lane can hold slots and so slow other lanes' builds, and reach nothing else
 #   read-only   /nix/store, /etc pieces (DNS, TLS, passwd, profiles), ~/.config/opencode/opencode.jsonc
 #               and plugins/rove-agent-state.js, ~/.config/git, the lane key (the bare key, a file of its
-#               own), the opencode binary, the day/night switch file
+#               own), the opencode binary, the day/night switch file, lane-heavy and lane-room from ~/.agents/bin
+#               and the machine's limits as worked out at launch
 #   absent      everything else: the rest of $HOME (private data, other worktrees, the main checkout,
 #               ~/.rove, ~/.config/gh, ~/.ssh, other projects' caches, beads), /run (user bus, rove.sock,
 #               Claude sockets, docker.sock, nix daemon), the shared repo's refs, config and hooks
@@ -511,6 +517,38 @@ setenv OPENCODE_SANDBOX 1; setenv OPENCODE_SANDBOX_DEVENV "$devenv"
 for v in TERM COLORTERM LANG LC_ALL LC_CTYPE LOCALE_ARCHIVE TZDIR TERMINFO TERMINFO_DIRS NIX_LD NIX_LD_LIBRARY_PATH; do
   [ -z "${!v:-}" ] || setenv "$v" "${!v}"
 done
+
+# --- the machine-wide heavy-work gate ---
+# /run and the owner's config are absent inside: a lane left to itself would make private slots under its own default
+# limits and share a limit with nobody. So it gets the real slot files and the limits worked out here. lane-heavy
+# finds no systemd scope inside and says so; the memory cap of this lane's own scope still holds.
+tools=$HOME/.agents/bin
+slots=
+if [ -x "$tools/lane-heavy" ] && [ -x "$tools/lane-room" ] && [ -r "$tools/lane-limits.sh" ]; then
+  # A subshell without -e: the owner's limits file is theirs to get wrong, and even an `exit` in it must not end the launch.
+  slots=$(set +eu
+    . "$tools/lane-limits.sh" >/dev/null
+    mkdir -p -- "$LANE_STATE_DIR" 2>/dev/null && [ ! -L "$LANE_STATE_DIR" ] && [ -O "$LANE_STATE_DIR" ] &&
+      chmod 700 -- "$LANE_STATE_DIR" 2>/dev/null || exit 0
+    for ((i = 0; i < LANE_HEAVY_SLOTS; i++)); do
+      f=$LANE_STATE_DIR/heavy.$i
+      { [ ! -L "$f" ] && { [ ! -e "$f" ] || [ -f "$f" ]; } && : >>"$f"; } 2>/dev/null || exit 0
+    done
+    for v in LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_HEAVY_POLL_SECS LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD \
+             LANE_ROOM_MAX_AGENTS; do
+      printf '%s=%s\n' "$v" "${!v}"
+    done >"$lane/limits.sh"
+    printf '%s %s' "$LANE_HEAVY_SLOTS" "$LANE_STATE_DIR") || slots=
+fi
+if [ -n "$slots" ]; then
+  slot_count=${slots%% *} slots=${slots#* }
+  for t in lane-limits.sh lane-heavy lane-room; do ro "$tools/$t"; done
+  for ((i = 0; i < slot_count; i++)); do rw "$slots/heavy.$i"; done
+  ro "$lane/limits.sh" /run/sandbox/limits.sh
+  setenv LANE_STATE_DIR "$slots"; setenv LANE_LIMITS_FILE /run/sandbox/limits.sh
+else
+  echo "opencode-sandbox: no machine-wide heavy-work gate in this lane (run project-setup to install it)" >&2
+fi
 
 # the provider and the model are fixed here, from the lane key and the worktree's pin, over every other
 # config (the inline config wins): one provider (opencode-go), no free models, the pin as the model

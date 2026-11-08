@@ -22,6 +22,8 @@ tier says `inherit`.
 - Merge, close a lane, stop an agent, delete a branch or remove a worktree only when the owner says so for that lane.
 - Read the repo's AGENTS.md (and CLAUDE.md) before planning, and `.lane-control/project.md` and
   `.lane-control/coordinator.md` when they exist; put what matters for a lane into its brief.
+- Before opening a lane run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner instead
+  of starting it.
 - Route every lane by tier: the highest tier of the touched paths wins, in doubt one tier up; the budget decides how
   many lanes run, never the tier. The path map and review tiers are in `.lane-control/routing.md` when the project has
   it, else in the project's AGENTS.md or its `model-routing.md`. When none of them has a path map, tell the owner
