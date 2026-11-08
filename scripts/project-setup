@@ -33,7 +33,9 @@ MODES = ("auto", "bypassPermissions", "default")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
-HOST_FILES = ("scripts/project-setup", "personas", "skills", "templates", "model-routing.md")  # what --host copies
+LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room")  # the library first: a new tool never sees an old one
+HOST_FILES = ("scripts/project-setup", *(f"scripts/{t}" for t in LANE_TOOLS),
+              "personas", "skills", "templates", "model-routing.md")  # what --host copies
 
 
 class Fail(Exception):
@@ -253,9 +255,32 @@ def orca_repo(repo: Path) -> str:
     return rid
 
 
+def lane_tools(home: Path):
+    """The machine-wide limits (lane-heavy, lane-room), once per machine in ~/.agents/bin. Copies, because the checkout
+    they come from may be a worktree that goes away. Replaced by rename: bash reads a running script as it goes, and
+    lanes may be running these right now."""
+    bin_dir = home / ".agents" / "bin"
+    fresh = not (bin_dir / "lane-heavy").exists()
+    changed = False
+    for name in LANE_TOOLS:
+        src, dst = HERE / "scripts" / name, bin_dir / name
+        mode = src.stat().st_mode & 0o777
+        if dst.exists() and dst.read_bytes() == src.read_bytes() and dst.stat().st_mode & 0o777 == mode:
+            continue
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        tmp = bin_dir / f".{name}.{os.getpid()}.tmp"
+        tmp.write_bytes(src.read_bytes())
+        tmp.chmod(mode)
+        os.replace(tmp, dst)
+        changed = True
+    say("lane-tools", "created" if fresh else ("updated" if changed else "exists"), f"lane-heavy, lane-room in {bin_dir}")
+
+
 def skills():
-    """User-level, because lane worktrees carry only committed files: ~/.agents/skills, linked for Claude and OpenCode."""
+    """User-level, because lane worktrees carry only committed files: ~/.agents/skills, linked for Claude and OpenCode.
+    The machine's lane tools go with them, so whatever installs the skill (a setup, a refresh) installs those too."""
     home = Path(os.environ.get("HOME", str(Path.home())))
+    lane_tools(home)
     root = home / ".agents" / "skills"
     dst = root / "orca-cotal-lanes"
     want = {"SKILL.md": (HERE / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text(),

@@ -14,8 +14,10 @@
 #   counter moved during a failed job, it prints `POSSIBLE OUT OF MEMORY`.
 # - A slot is a kernel lock held by this process alone, so it frees itself however lane-heavy ends. The command does
 #   not inherit it: a daemon the build leaves behind (compiler server, build daemon) cannot hold a slot for ever.
-#   TERM, INT and HUP stop the whole job, every step of it. If lane-heavy itself is SIGKILLed while the job lives on,
-#   the slot frees early. The job runs in its own session (setsid, where the host has it), so it has no terminal.
+#   TERM, INT and HUP stop the whole job, every step of it. If lane-heavy itself is SIGKILLed, the slot frees and the
+#   job's main process dies with it (setpriv --pdeathsig, where the host has it). A step a multi-step `sh -c` already
+#   started, or a whole job on a host without that setpriv, runs on outside the limit.
+#   The job runs in its own session (setsid, where the host has it), so it has no terminal.
 # - If the limit cannot work at all (no flock, no writable state directory) it runs the command anyway and says so.
 #
 # Limits: lane-limits.sh and limits.example.sh. Exit: the command's; 127 not found or not executable; 2 usage.
@@ -97,6 +99,10 @@ elif scope_works; then
   job=(systemd-run "${scope_args[@]}" --unit="$unit" "${scope_props[@]}" -- "${job[@]}")
 else
   say "no memory limit: this host has no working systemd user scope; running without one"
+fi
+# setsid does not save a job from a SIGKILLed gate, so ask the kernel to end it. An older setpriv lacks the option.
+if command -v setpriv >/dev/null && setpriv --pdeathsig KILL true 2>/dev/null </dev/null; then
+  job=(setpriv --pdeathsig KILL "${job[@]}")
 fi
 # Its own process group, whose id is the job's pid (setsid does not fork here), so a signal reaches every step of `sh -c`.
 if command -v setsid >/dev/null; then job=(setsid "${job[@]}"); fi

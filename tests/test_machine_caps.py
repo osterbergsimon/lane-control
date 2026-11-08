@@ -1,6 +1,7 @@
 """lane-heavy and lane-room against stubbed systemd and a fake /proc; only temp dirs, and no real load."""
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -14,6 +15,8 @@ HEAVY = ROOT / "scripts" / "lane-heavy"
 ROOM = ROOT / "scripts" / "lane-room"
 LIMITS = ROOT / "scripts" / "lane-limits.sh"
 EXAMPLE = ROOT / "limits.example.sh"
+SANDBOX = ROOT / "scripts" / "opencode-sandbox.sh"
+MARK = "# --- the machine-wide heavy-work gate"
 TIMEOUT = 20
 
 # The fake scope: the probe answers with a real memory limit, anything else runs the command after `--`.
@@ -195,14 +198,34 @@ class HeavyTests(Machine):
         r = self.heavy("true")
         self.assertEqual((r.returncode, r.stderr), (0, ""))
 
-    def test_sigkilled_gate_frees_its_slot(self):
+    def sigkill_the_gate(self):
+        """SIGKILL lane-heavy while its job runs; the job's pid."""
         pidfile = self.dir / "job.pid"
         p = self.start("sh", "-c", f'echo $$ > {pidfile}.tmp; mv {pidfile}.tmp {pidfile}; exec sleep 60')
         self.wait_for(pidfile)
         job = int(pidfile.read_text())
-        self.addCleanup(lambda: os.kill(job, signal.SIGKILL) if Path(f"/proc/{job}").exists() else None)
+        self.addCleanup(lambda: self.is_running(job) and os.kill(job, signal.SIGKILL))
         p.kill()
         p.wait(timeout=TIMEOUT)
+        return job
+
+    @unittest.skipIf(subprocess.run("setpriv --pdeathsig KILL true", shell=True, capture_output=True).returncode,
+                     "this host's setpriv has no --pdeathsig")
+    def test_sigkilled_gate_takes_the_job_with_it(self):
+        job = self.sigkill_the_gate()
+        end = time.time() + TIMEOUT
+        while self.is_running(job):
+            self.assertLess(time.time(), end, "the job outlived the gate")
+            time.sleep(0.02)
+        r = self.heavy("true")
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+
+    def test_setpriv_without_pdeathsig_is_not_used(self):
+        self.stub("setpriv", '#!/usr/bin/env sh\necho "setpriv: unrecognized option" >&2\nexit 1\n')
+        r = self.heavy("echo", "ran")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "ran"))
+        job = self.sigkill_the_gate()   # the limit the header states: the job lives on, and the slot still frees
+        self.assertTrue(self.is_running(job))
         r = self.heavy("true")
         self.assertEqual((r.returncode, r.stderr), (0, ""))
 
@@ -389,6 +412,98 @@ class ContentTests(unittest.TestCase):
 
     def test_the_brief_sends_heavy_work_through_the_gate(self):
         self.assertIn("lane-heavy COMMAND", (ROOT / "templates" / "lane-brief.md").read_text())
+
+    def test_the_rove_brief_sends_heavy_work_through_the_gate(self):
+        text = (ROOT / "templates" / "worker-brief.md").read_text()
+        self.assertIn("~/.agents/bin/lane-heavy COMMAND", text)
+        self.assertNotIn("one at a time", text)
+
+    def test_the_header_states_what_a_killed_gate_leaves_behind(self):
+        header = HEAVY.read_text().split("\nset -u")[0]
+        self.assertIn("--pdeathsig", header)
+        self.assertIn("outside the limit", header)
+
+    def test_the_readme_lists_the_tools(self):
+        text = (ROOT / "README.md").read_text()
+        for tool in ("lane-heavy", "lane-room", "lane-limits.sh", "limits.example.sh"):
+            self.assertIn(f"`{tool}`", text)
+
+    def test_config_comments_sit_on_their_own_settings(self):
+        lines = (ROOT / "config.example.sh").read_text().splitlines()
+        self.assertTrue(any(l.startswith("NIGHT_MEM_MIN_GB=8") and "available memory" in l for l in lines))
+        self.assertFalse(any(l.startswith("WINDOW_STOP_PCT") and "available memory" in l for l in lines))
+
+
+class SandboxGateTests(Machine):
+    """The sandbox's gate block on its own, with the bind helpers stubbed: no real sandbox, no real load."""
+
+    def gate_block(self):
+        text = SANDBOX.read_text()
+        self.assertIn(MARK, text)
+        return text.split(MARK)[1].split("# the provider and the model")[0]
+
+    def run_block(self):
+        lane = self.dir / "lane"
+        lane.mkdir(exist_ok=True)
+        script = "set -euo pipefail\n" + "".join(f'{f}() {{ echo "{f} $*"; }}\n' for f in ("ro", "rw", "setenv"))
+        script += f"lane={lane}\n# " + self.gate_block()
+        r = subprocess.run(["bash", "-c", script], env=dict(self.env, HOME=str(self.dir)), capture_output=True,
+                           text=True, timeout=TIMEOUT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r, lane
+
+    def install(self):
+        tools = self.dir / ".agents" / "bin"
+        tools.mkdir(parents=True, exist_ok=True)
+        for src in (HEAVY, ROOM, LIMITS):
+            shutil.copy(src, tools / src.name)
+        return tools
+
+    def test_the_lane_gets_the_tools_and_the_real_slot_directory(self):
+        tools = self.install()
+        out = self.run_block()[0].stdout.splitlines()
+        state = self.env["LANE_STATE_DIR"]
+        self.assertIn(f"rw {state}", out)
+        self.assertIn(f"setenv LANE_STATE_DIR {state}", out)   # the lane must not work out a path of its own
+        for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
+            self.assertIn(f"ro {tools / name}", out)
+        self.assertEqual(os.stat(state).st_mode & 0o777, 0o700)
+
+    def test_the_lane_gets_the_machines_limits_not_its_own_defaults(self):
+        self.install()
+        self.write_limits(LANE_HEAVY_SLOTS=3, LANE_HEAVY_MEM_GB=7)
+        r, lane = self.run_block()
+        self.assertIn(f"ro {lane / 'limits.sh'} /run/sandbox/limits.sh", r.stdout.splitlines())
+        self.assertIn("setenv LANE_LIMITS_FILE /run/sandbox/limits.sh", r.stdout.splitlines())
+        written = (lane / "limits.sh").read_text()
+        self.assertIn("LANE_HEAVY_SLOTS=3\n", written)
+        self.assertIn("LANE_HEAVY_MEM_GB=7\n", written)
+
+    def test_noisy_or_broken_owner_limits_do_not_stop_the_launch(self):
+        self.install()
+        self.limits.write_text("echo hello\nno-such-command\nLANE_HEAVY_SLOTS=2\n")
+        r, lane = self.run_block()
+        self.assertIn(f"rw {self.env['LANE_STATE_DIR']}", r.stdout.splitlines())
+        self.assertIn("LANE_HEAVY_SLOTS=2\n", (lane / "limits.sh").read_text())
+
+    def test_without_the_tools_it_binds_nothing_and_says_so(self):
+        r, _ = self.run_block()
+        self.assertEqual(r.stdout, "")
+        self.assertIn("no machine-wide heavy-work gate", r.stderr)
+
+    def test_a_slot_directory_it_cannot_trust_binds_nothing(self):
+        self.install()
+        real = self.dir / "elsewhere"
+        real.mkdir()
+        os.symlink(real, self.env["LANE_STATE_DIR"])
+        r, _ = self.run_block()
+        self.assertEqual(r.stdout, "")
+        self.assertIn("no machine-wide heavy-work gate", r.stderr)
+
+    def test_the_helpers_exist_where_the_block_runs(self):
+        text = SANDBOX.read_text().split(MARK)[0]
+        for helper in ("ro()", "rw()", "setenv()"):
+            self.assertIn(helper, text)
 
 
 if __name__ == "__main__":

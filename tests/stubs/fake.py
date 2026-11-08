@@ -137,7 +137,7 @@ def cotal():
         state["agents"].append({"name": name, "cwd": opt("--cwd")})
         # The agent's own tab, as the worst case: nothing marks it as an agent yet (identity lags, no cotal- title).
         state.setdefault("terminals", []).append({"handle": f"agent_{name}", "title": f"{name}",
-                                                   "worktreePath": opt("--cwd"), "preview": ""})
+                                                   "worktreePath": opt("--cwd"), "preview": "starting"})
         print("Agent joined")
         state_path.write_text(json.dumps(state))
         sys.exit(0)

@@ -56,6 +56,12 @@ class PersonaTests(unittest.TestCase):
         for name in ("coordinator.md", "design-lead.md"):
             self.assertIn("{{REVIEWER}}", (PERSONAS / name).read_text(), name)
 
+    def test_leads_check_for_room_before_opening_a_lane(self):
+        for name in ("coordinator.md", "design-lead.md"):
+            text = (PERSONAS / name).read_text()
+            self.assertIn("~/.agents/bin/lane-room", text, name)
+            self.assertIn("hold the lane and tell the owner", " ".join(text.split()), name)
+
     def test_personas_carry_placeholders(self):
         for name in ("coordinator.md", "design-lead.md"):
             text = (PERSONAS / name).read_text()
@@ -64,6 +70,12 @@ class PersonaTests(unittest.TestCase):
 
 
 class SkillTests(unittest.TestCase):
+    def test_a_lane_opens_only_after_the_room_check(self):
+        text = " ".join(SKILL.read_text().split())
+        self.assertIn("`~/.agents/bin/lane-room`", text)
+        self.assertIn("hold the lane and tell the owner", text)
+        self.assertLess(text.index("lane-room"), text.index("worktree create --name"))
+
     def test_skill_frontmatter_and_mechanics(self):
         keys, body = frontmatter(SKILL)
         self.assertEqual(keys["name"], "orca-cotal-lanes")
