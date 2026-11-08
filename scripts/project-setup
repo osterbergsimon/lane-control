@@ -1001,6 +1001,7 @@ SECTION = (f"{SECTION_BEGIN}\n## lane-control\n\nThis project is run with lane-c
            f"`{ADAPTED}/`: read them before you start work.\n{SECTION_END}")
 MAX_FIX_ROUNDS = 2
 AGENT_TIMEOUT = 1800  # seconds per headless agent run
+MAX_TURNS = {True: 80, False: 60}  # per headless agent run, by write: the adapter, then the reviewer
 DIFF_LIMIT = 60000  # bytes of diff in a prompt; one argument may hold at most 128 KiB
 FINDINGS_LIMIT = 30000  # bytes of reviewer findings in a prompt
 STOPPED = 3  # exit status: the owner's answer is needed, and no Orca step ran
@@ -1159,11 +1160,20 @@ def agent_cmd(model: str, prompt: str, write: bool) -> list:
     allow = READ_TOOLS + ((f"Edit(/{ADAPTED}/**)",) if write else ())
     return ["claude", "-p", "--model", model, "--no-session-persistence", "--restricted", "--strict-mcp-config",
             "--tools", ",".join(tools), "--allowedTools", ",".join(allow),
-            "--disallowedTools", "Read(**/.env*)", "--permission-mode", "dontAsk", prompt]
+            "--disallowedTools", "Read(**/.env*)", "--permission-mode", "dontAsk",
+            "--max-turns", str(MAX_TURNS[write]), prompt]
 
 
 def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
-    return run(agent_cmd(who[1], prompt, write), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL).stdout
+    p = run(agent_cmd(who[1], prompt, write), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL, check=False)
+    if p.returncode != 0:
+        said = (p.stderr.strip() or p.stdout.strip()).splitlines()
+        if "max turns" in " ".join(said[-1:]).lower():
+            raise Fail(f"the {'adapting agent' if write else 'reviewer'} used all {MAX_TURNS[write]} turns and was "
+                       "stopped before it finished. Nothing was committed and no Orca step ran. Run again, or "
+                       "make the repo smaller to read")
+        raise Fail(f"claude -p --model failed: {said[-1] if said else p.returncode}. Nothing was committed")
+    return p.stdout
 
 
 def kept_suggestions(repo: Path) -> Path:
@@ -1373,9 +1383,9 @@ def main(argv=None) -> int:
     ap.add_argument("--opencode-model", help="with --opencode own: the provider/model for OpenCode tiers. Writes no "
                                              "sandbox: only for a gateway you run yourself")
     ap.add_argument("--no-start", action="store_true")
-    ap.add_argument("--adapter", default="claude/opus",
+    ap.add_argument("--adapter", default="claude/sonnet",
                     help="harness/model of the agent that adapts the project's files")
-    ap.add_argument("--adapt-reviewer", default="claude/sonnet",
+    ap.add_argument("--adapt-reviewer", default="claude/opus",
                     help="harness/model that reviews the adapted files; must be a different model from --adapter")
     again = ap.add_mutually_exclusive_group()
     again.add_argument("--readapt", action="store_true", help="adapt the project again although it was done before")

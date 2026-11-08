@@ -47,13 +47,16 @@ Commands must be copied from where the repo writes them, and the Checks table sa
 ## How to work
 1. Read AGENTS.md, CLAUDE.md, README, CONTRIBUTING, the docs index, CI config, build manifests and Makefile-like files,
    CODEOWNERS, `orca.yaml`. Take the file list from Glob. Commit history is not available to you; do not guess at it.
+   Reading budget: the project may be big, and you have a limited number of turns. Get names from Glob first. Beyond
+   the files named above and the test and tool scripts, open at most about 25 files. Sample one or two files in each
+   risky area; never read a tree. The budget never lowers a tier: a path you did not open goes one tier up.
 2. Read what the test and tool scripts do before you list them as checks. Anything that deletes, reaches a real host
    or account, or needs special setup goes under "Do not run".
-3. For the path map, open the code before you call it low-risk. Deep and review C: parsers of untrusted input, formats
+3. For the path map, judge from names and a sample before you call it low-risk. Deep and review C: parsers of untrusted input, formats
    and migrations, authentication and permissions, sandboxes, anything acting on a host or deleting data, anything
    that holds secrets, and prompts that steer other agents. Swift: only prose docs, scripts without private data, CI.
    Everything else defaults to standard, B. Give the reason in a few words. Every file must match a row; the last row
-   is `**`. Never put a path lower to save budget.
+   is `**`. Never put a path lower to save budget; in doubt, one tier up.
 4. Write the files. Reread each against the rules above.
 
 ## Re-run

@@ -171,6 +171,17 @@ class AdaptTemplateTests(unittest.TestCase):
                        "SUGGESTIONS.md", "Hostnames, IP addresses", "Do not agree just to end the round"):
             self.assertIn(needle, text)
 
+    def test_reading_budget_in_both_prompts(self):
+        for name in ("prompt.md", "review-prompt.md"):
+            text = " ".join((ADAPT / name).read_text().split())
+            self.assertIn("Get names from Glob first", text, name)
+            self.assertIn("at most about 25 files", text, name)
+            self.assertIn("never read a tree", text, name)
+            self.assertRegex(text, r"never lower[s]? (a|the)|lower a rating", name)
+        self.assertIn("a path you did not open goes one tier up", (ADAPT / "prompt.md").read_text())
+        review = " ".join((ADAPT / "review-prompt.md").read_text().split())
+        self.assertIn("Always open the code behind anything rated low", review)
+
     def test_review_prompt_rules(self):
         text = (ADAPT / "review-prompt.md").read_text()
         for ph in ("{{TEMPLATES}}", "{{PROJECT}}", "{{DESIGN_LEAD}}"):
