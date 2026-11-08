@@ -4,7 +4,7 @@
   project-setup <git-url|dir> [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE] [--no-start]
-                [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL] [--readapt | --skip-adapt]
+                [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL] [--readapt | --skip-adapt | --refresh]
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
@@ -13,6 +13,11 @@ re-run reports `exists` for each.
 Before the Orca steps, a headless adapting agent writes the project's files into .lane-control/ and a reviewer on
 another model checks them. They are committed, by explicit path, only on the owner's yes in a terminal; on no, or
 without a terminal, they stay uncommitted, no Orca step runs and it exits 3. Nothing else is ever committed.
+
+--refresh is for a project set up earlier, after lane-control's personas or skill changed: it re-renders the personas
+in .cotal/agents/ (keeping each one's harness, model and permission mode), reinstalls the skill, leaves the project's
+.cotal/lanes.tsv alone and says which running agents keep the old text until restarted. No adapting or reviewing
+agent, no broker, no Orca worktree, no commit.
 """
 import argparse
 import hashlib
@@ -296,7 +301,9 @@ def skills():
                 agent_dir.mkdir(parents=True, exist_ok=True)
                 link.symlink_to(root / name)
                 changed = True
-    say("skills", "created" if fresh else ("updated" if changed else "exists"), f"orca-cli, orca-cotal-lanes in {root}")
+    state = "created" if fresh else ("updated" if changed else "exists")
+    say("skills", state, f"orca-cli, orca-cotal-lanes in {root}")
+    return state
 
 
 def write_if_changed(path: Path, text: str) -> str:
@@ -336,6 +343,40 @@ def claude_wiring(repo: Path, space: str):
     say("claude-wiring", "created", space)
 
 
+def opencode_key_pins(tiers: Path, roles) -> list:
+    """(who, model) for every OpenCode pin not named as free. A few free models, like big-pickle, have no such name."""
+    rows = (l.split("\t") for l in tiers.read_text().splitlines()[1:] if not l.startswith("#"))
+    pins = [(f"tier {r[0]}", r[1], r[2]) for r in rows if len(r) > 2] + [(n, h, m) for n, (h, m) in roles]
+    return [(who, m) for who, h, m in pins
+            if h == "opencode" and m.startswith(("opencode/", "opencode-go/")) and not m.endswith("-free")]
+
+
+def opencode_key_check(repo: Path, space: str, tiers: Path, roles):
+    """After the manager step, so its definition is current. Each OpenCode agent has its own empty database, so a paid
+    model needs the key in the manager's environment (docs/orca.md)."""
+    pins = opencode_key_pins(tiers, roles)
+    if not pins:
+        return
+    f = repo / ".cotal" / "mgr-service.json"
+    readd = (f"cotal svc stop mgr -s {space} --yes, then cotal svc remove mgr -s {space} --yes, "
+             "then rerun project-setup from a shell with the key set.")
+    lines = []
+    if f.exists() and "OPENCODE_API_KEY" in json.loads(f.read_text()).get("envRefs", {}):
+        pass  # the manager holds it, whatever this shell has
+    elif not os.environ.get("OPENCODE_API_KEY"):
+        lines += [f"warning: {who} pins {m} and OPENCODE_API_KEY is not set: a paid model is not listed without it, "
+                  "and its agents exit on launch." for who, m in pins]
+        lines += ["  `opencode auth login` does not reach an agent's own database. Once per machine:",
+                  "  1. Create an API key in the OpenCode console and export OPENCODE_API_KEY in your shell setup.",
+                  f"  2. If mgr already exists, at a natural stop: {readd}"]
+    elif f.exists():
+        lines += [f"warning: mgr was added without OPENCODE_API_KEY: a paid model like {pins[0][1]} is not listed without "
+                  "it, and its agents exit on launch.", f"  At a natural stop: {readd}"]
+    lines.append("note: this check only sees whether the key is set. It cannot tell a wrong key from a spent quota: "
+                 "either shows only on the agent's first model call.")
+    print("\n".join(lines), file=sys.stderr, flush=True)
+
+
 def with_cotal_ignored(text: str) -> str:
     lines = text.splitlines()
     if ".cotal/" in lines or ".cotal" in lines:
@@ -365,6 +406,88 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
         say(f"persona {name}", write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text), f"{h}/{m}")
     say("tiers", write_if_changed(repo / ".cotal" / "lanes.tsv", tiers.read_text()), ".cotal/lanes.tsv")
     say("gitignore", ignore_cotal(repo), ".cotal/")
+
+
+def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -> int:
+    """Refresh mode: an onboarded project picks up lane-control's current personas and skill. Each persona keeps the
+    harness, model and permission mode it was set up with (a missing reviewer persona, from before it existed, is made
+    from `reviewer` and the mode of the others), the project's own .cotal/lanes.tsv is never replaced, and nothing is
+    adapted, launched or committed. Running agents keep their old persona: they are listed to restart."""
+    agents = repo / ".cotal" / "agents"
+    if not (agents / "coordinator.md").is_file():
+        raise Fail(f"{repo} has no .cotal/agents/coordinator.md: it was not set up; run project-setup without --refresh")
+    old = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "design-lead", "reviewer")
+           if (agents / f"{n}.md").is_file()}
+    named = re.search(r"^description: (.+?) coordinator;", old["coordinator"], re.M)
+    project = project or (named.group(1) if named else repo.name)
+
+    def recorded(text: str):
+        """The mode a persona was rendered with: its launch line (Claude), else its body line (opencode)."""
+        m = (re.search(r'"permission-mode": "(\w+)"', text) or re.search(r"permission mode is `(\w+)`", text))
+        return m.group(1) if m else None
+    modes = {n: recorded(t) for n, t in old.items()}
+    others = next((v for v in modes.values() if v), mode)  # a persona with no record: what the others carry
+    table = repo / ".cotal" / "lanes.tsv"
+    design_lead = "design-lead" in old
+    texts = {}
+    for name in ["coordinator"] + (["design-lead"] if design_lead else []) + ["reviewer"]:
+        if name in old:
+            h = re.search(r"^agent: (\S+)$", old[name], re.M)
+            m = re.search(r"^model: (\S+)$", old[name], re.M)
+            if not (h and m):
+                raise Fail(f"{agents / (name + '.md')} has no agent/model lines to keep; nothing was changed")
+            harness, model = h.group(1), m.group(1)
+        else:
+            harness, model = reviewer
+        texts[name] = (harness, model, render_persona((HERE / "personas" / f"{name}.md").read_text(), harness, model,
+                                                      modes.get(name) or others, project, str(table),
+                                                      str(agents / "reviewer.md"), design_lead=design_lead))
+    try:
+        default_text = tiers.read_text()
+        own_text = table.read_text() if table.exists() else None
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
+    if own_text is None:
+        say("tiers", write_if_changed(table, default_text), ".cotal/lanes.tsv (was missing)")
+    elif own_text == default_text:
+        say("tiers", "exists", ".cotal/lanes.tsv kept (same as the defaults)")
+    else:
+        def rows(text):
+            return {l for l in text.splitlines() if l.strip() and not l.startswith("#")}
+        mine, theirs = rows(own_text) - rows(default_text), rows(default_text) - rows(own_text)
+        key = lambda rs: ", ".join(sorted(r.split("\t")[0] for r in rs)) or "none"
+        say("tiers", "exists", f".cotal/lanes.tsv kept, differs from the defaults: only in the project: {key(mine)}; "
+            f"only in the defaults: {key(theirs)}")
+    changed = []
+    for name, (harness, model, text) in texts.items():
+        state = write_if_changed(agents / f"{name}.md", text)
+        say(f"persona {name}", state, f"{harness}/{model}")
+        if state != "exists":
+            changed.append(name)
+    skill = skills()
+    needs = {n: "persona changed" for n in changed}
+    if skill != "exists":
+        for n in ("coordinator", "design-lead"):
+            needs.setdefault(n, "skill changed")
+    if not needs:
+        say("restart", "none", "nothing changed")
+        return 0
+    try:
+        live = live_agents(repo, slug(project))
+    except Fail:
+        say("restart", "unknown", "no live agent list (broker not running?); restart these if running: "
+            + ", ".join(sorted(needs)))
+        return 0
+    def running(n):  # reviewers run per lane as <key>-review, role reviewer
+        return [a for a, v in live.items() if a == n or (n == "reviewer" and (a.endswith("-review")
+                                                                             or v.get("role") == "reviewer"))]
+    todo = [(", ".join(running(n)), why) for n, why in sorted(needs.items()) if running(n)]
+    if todo:
+        say("restart", "needed", "; ".join(f"{n} ({why})" for n, why in todo)
+            + ". They keep the old text until restarted (stop, then start again)")
+    else:
+        say("restart", "none", "no changed role is running")
+    return 0
 
 
 SETUP_MARKER = "orca-setup-done"
@@ -492,7 +615,10 @@ def start_stack(repo: Path, space: str, port_flag):
     if "mgr" not in svc:
         # PATH (starting with the Orca CLI's folder) lets Cotal's Orca driver find `orca-ide`/`orca`: Cotal's schema
         # refuses COTAL_* names here, so COTAL_ORCA_BIN can't be passed on.
+        # OPENCODE_API_KEY: passed by name; Cotal forwards it from the manager to each OpenCode agent.
         refs = {v: v for v in PROXY_VARS + ("PATH",) if v in os.environ}
+        if os.environ.get("OPENCODE_API_KEY"):
+            refs["OPENCODE_API_KEY"] = "OPENCODE_API_KEY"
         definition = {"schemaVersion": 1, "space": space,
                       "launch": {"type": "adapter", "adapter": "manager-service",
                                  "options": {"root": str(repo), "runtime": "orca"}},
@@ -1028,6 +1154,9 @@ def main(argv=None) -> int:
                     help="harness/model that reviews the adapted files; must be a different model from --adapter")
     again = ap.add_mutually_exclusive_group()
     again.add_argument("--readapt", action="store_true", help="adapt the project again although it was done before")
+    again.add_argument("--refresh", action="store_true",
+                       help="onboarded project: re-render the personas in .cotal/, reinstall the skill, say which "
+                            "running agents need a restart; keeps .cotal/lanes.tsv, starts and commits nothing")
     again.add_argument("--skip-adapt", action="store_true", help="only the Orca setup: no adapting agent, no commit")
     argv = sys.argv[1:] if argv is None else argv
     a = ap.parse_args(argv)
@@ -1042,21 +1171,42 @@ def main(argv=None) -> int:
     lead = None if a.no_design_lead else harness_model(a.design_lead)
     reviewer = harness_model(a.reviewer)
     adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
-    if not a.skip_adapt and {adapter[0], adapt_reviewer[0]} != {"claude"}:
+    if not a.skip_adapt and not a.refresh and {adapter[0], adapt_reviewer[0]} != {"claude"}:
         print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
               "project, and a third-party lane may not read private data", file=sys.stderr)
         return 2
-    if not a.skip_adapt and adapter[1] == adapt_reviewer[1]:
+    if not a.skip_adapt and not a.refresh and adapter[1] == adapt_reviewer[1]:
         print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are {adapter[1]}",
               file=sys.stderr)
         return 2
     tiers = Path(a.tiers).expanduser()
+    if a.refresh:
+        ignored = [f for f in ("--coordinator", "--design-lead", "--no-design-lead", "--permission-mode")
+                   if any(x == f or x.startswith(f + "=") for x in argv)]
+        if ignored:
+            print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
+                  "has (only --reviewer is used, for a reviewer persona that is missing)", file=sys.stderr)
+            return 2
     if a.host:
         return on_host(a.host, argv, a.target)
     if not tiers.is_file():
         print(f"project-setup: tier table {tiers} not found", file=sys.stderr)
         return 2
     global ORCA
+    if a.refresh:
+        add_orca_cli_to_path()
+        ORCA = orca_cli()
+        try:
+            host_hygiene()
+            d = Path(a.target).expanduser().resolve()
+            top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
+            if top is None or top.returncode != 0:
+                raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
+            say("repo", "exists", top.stdout.strip())
+            return refresh(Path(top.stdout.strip()), a.name or "", a.permission_mode, tiers, reviewer)
+        except Fail as e:
+            print(f"project-setup: {e}", file=sys.stderr)
+            return 1
     add_orca_cli_to_path()
     ORCA = orca_cli()
     # Cotal's Orca driver otherwise tries `orca-ide`, then whatever `orca` is on PATH.
@@ -1089,10 +1239,13 @@ def main(argv=None) -> int:
             claude_wiring(repo, space)
         personas_and_tiers(repo, project, coord, lead, reviewer, a.permission_mode, tiers)
         setup_script(repo, a.write_orca_yaml)
+        roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
         if a.no_start:
+            opencode_key_check(repo, space, tiers, roles)
             say("start", "skipped", "--no-start")
             return 0
         start_stack(repo, space, a.port)
+        opencode_key_check(repo, space, tiers, roles)
         spawn(repo, space, "coordinator", *coord, a.permission_mode, repo,
               "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready.")
         wt = None

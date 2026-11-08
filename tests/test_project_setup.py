@@ -55,6 +55,7 @@ class Env:
         self.env = {**os.environ, "HOME": str(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.state),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
+        self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
 
     def run(self, *args, adapt=False, env_extra=None):
@@ -994,6 +995,98 @@ class RunTests(unittest.TestCase):
         self.assertEqual(d["envRefs"].get("HTTPS_PROXY"), "HTTPS_PROXY")
         self.assertNotIn("http_proxy", d["envRefs"])  # only names set in the caller's env
 
+    def test_mgr_passes_opencode_key_by_name_only(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = (repo / ".cotal" / "mgr-service.json").read_text()
+        self.assertEqual(json.loads(text)["envRefs"].get("OPENCODE_API_KEY"), "OPENCODE_API_KEY")
+        self.assertNotIn("sentinel-key-value", text)
+        self.assertNotIn("sentinel-key-value", r.stdout + r.stderr)
+        self.assertNotIn("OPENCODE_API_KEY is not set", r.stderr)
+
+    def test_paid_opencode_tier_without_key_warns(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stderr, r"swift.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
+        self.assertIn("export OPENCODE_API_KEY", r.stderr)
+        self.assertIn("cotal svc stop mgr -s shop --yes", r.stderr)
+        self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
+        self.assertRegex(r.stderr, r"cannot tell .*quota")
+
+    def test_manager_holding_the_key_is_not_warned_about(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        del self.e.env["OPENCODE_API_KEY"]
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("warning:", r.stderr)
+        self.assertRegex(r.stderr, r"cannot tell .*quota")
+
+    def test_empty_key_counts_as_unset(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = ""
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("OPENCODE_API_KEY is not set", r.stderr)
+        d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
+        self.assertNotIn("OPENCODE_API_KEY", d["envRefs"])
+
+    def test_paid_opencode_coordinator_without_key_warns(self):
+        repo = self.e.repo()
+        tiers = self.e.home / "free-lanes.tsv"
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x-free\t-\n")
+        r = self.e.run(str(repo), "--name", "Shop", "--tiers", str(tiers),
+                       "--coordinator", "opencode/opencode/deepseek-v4.1-flash")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stderr, r"coordinator.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
+
+    def test_key_check_runs_with_no_start(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("OPENCODE_API_KEY is not set", r.stderr)
+
+    def test_warning_does_not_claim_every_pin_is_paid(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertNotIn("those lanes will exit on launch", r.stderr)
+        self.assertRegex(r.stderr, r"a paid model")
+
+    def test_following_the_key_steps_clears_the_warning(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        state = json.loads(self.e.state.read_text())  # the owner ran `cotal svc remove mgr`; the file stays behind
+        del state["services"]["mgr"]
+        self.e.state.write_text(json.dumps(state))
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("mgr was added without", r.stderr)
+        d = json.loads((repo / ".cotal" / "mgr-service.json").read_text())
+        self.assertEqual(d["envRefs"].get("OPENCODE_API_KEY"), "OPENCODE_API_KEY")
+
+    def test_key_set_but_mgr_added_without_it_warns(self):
+        repo = self.e.repo()
+        self.assertEqual(self.e.run(str(repo), "--name", "Shop").returncode, 0)
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("mgr was added without OPENCODE_API_KEY", r.stderr)
+        self.assertIn("cotal svc remove mgr -s shop --yes", r.stderr)
+        self.assertNotIn("sentinel-key-value", r.stdout + r.stderr)
+
+    def test_free_opencode_tier_without_key_is_quiet(self):
+        repo = self.e.repo()
+        tiers = self.e.home / "free-lanes.tsv"
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x-free\t-\n")
+        r = self.e.run(str(repo), "--name", "Shop", "--tiers", str(tiers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("OPENCODE_API_KEY is not set", r.stderr)
+
     def test_opencode_coordinator(self):
         repo = self.e.repo()
         r = self.e.run(str(repo), "--coordinator", "opencode/opencode/deepseek-v4.1-flash")
@@ -1425,6 +1518,185 @@ class RunTests(unittest.TestCase):
     def test_bad_permission_mode(self):
         repo = self.e.repo()
         r = self.e.run(str(repo), "--permission-mode", "yolo")
+        self.assertEqual(r.returncode, 2)
+
+
+class RefreshTests(unittest.TestCase):
+    """--refresh: an onboarded project picks up current personas and skill without starting anything."""
+    def setUp(self):
+        self.e = Env()
+        self.addCleanup(self.e.close)
+        self.repo = self.e.repo()
+
+    def setup_project(self, *args):
+        r = self.e.run(str(self.repo), *args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.e.log.write_text("")
+
+    def refresh(self, *args):
+        return self.e.run(str(self.repo), "--refresh", *args, adapt=True)
+
+    def persona(self, name="coordinator"):
+        return self.repo / ".cotal" / "agents" / f"{name}.md"
+
+    def test_stale_persona_is_rewritten_and_its_running_agent_named(self):
+        self.setup_project()
+        self.persona().write_text(self.persona().read_text() + "old line\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("old line", self.persona().read_text())
+        self.assertIn("persona coordinator: updated", r.stdout)
+        self.assertIn("persona design-lead: exists", r.stdout)
+        self.assertRegex(r.stdout, r"restart: needed coordinator \(persona changed\)")
+        self.assertNotIn("design-lead (", r.stdout)
+
+    def test_starts_nothing_and_commits_nothing(self):
+        self.setup_project()
+        self.persona().write_text(self.persona().read_text() + "stale\n")
+        before = git("rev-parse", "HEAD", cwd=self.repo)
+        self.refresh()
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), before)
+        self.assertEqual(self.e.agent_runs(), [])
+        started = [c for c in self.e.calls() if c.startswith(("orca repo add", "orca worktree", "cotal spawn",
+                                                              "cotal up", "cotal space", "cotal svc start",
+                                                              "cotal setup"))]
+        self.assertEqual(started, [])
+
+    def test_projects_own_tier_table_is_kept(self):
+        self.setup_project()
+        table = self.repo / ".cotal" / "lanes.tsv"
+        table.write_text(table.read_text() + "# project's own row\n")
+        own = table.read_text()
+        r = self.refresh()
+        self.assertEqual(table.read_text(), own)
+        self.assertIn("kept, differs from the defaults", r.stdout)
+
+    def test_nothing_changed_says_no_restart(self):
+        self.setup_project()
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("restart: none nothing changed", r.stdout)
+        self.assertNotIn("cotal ps", "\n".join(self.e.calls()))
+
+    def test_stale_persona_whose_agent_is_not_running_needs_no_restart(self):
+        self.setup_project()
+        self.persona("reviewer").write_text(self.persona("reviewer").read_text() + "stale\n")
+        r = self.refresh()
+        self.assertIn("restart: none no changed role is running", r.stdout)
+
+    def test_changed_skill_names_coordinator_and_design_lead(self):
+        self.setup_project()
+        (self.e.home / ".agents" / "skills" / "orca-cotal-lanes" / "SKILL.md").write_text("old\n")
+        r = self.refresh()
+        self.assertIn("skills: updated", r.stdout)
+        self.assertIn("coordinator (skill changed); design-lead (skill changed)", r.stdout)
+
+    def test_keeps_each_personas_harness_model_and_mode(self):
+        self.setup_project("--coordinator", "claude/sonnet", "--permission-mode", "default", "--no-design-lead")
+        self.persona().write_text(self.persona().read_text() + "stale\n")
+        r = self.refresh()
+        text = self.persona().read_text()
+        self.assertRegex(text, r"(?m)^model: sonnet$")
+        self.assertIn('"permission-mode": "default"', text)
+        self.assertFalse(self.persona("design-lead").exists())
+        self.assertIn("claude/sonnet", r.stdout)
+        self.assertIn("This project has no design lead", text)
+
+    def test_project_not_set_up_is_refused(self):
+        r = self.refresh()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not set up", r.stderr)
+        self.assertFalse((self.repo / ".cotal").exists())
+
+    def test_persona_without_agent_and_model_is_refused_unchanged(self):
+        self.setup_project()
+        self.persona().write_text("stale\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.persona().read_text(), "stale\n")
+
+    def test_opencode_personas_keep_their_recorded_mode(self):
+        self.setup_project("--coordinator", "opencode/m", "--design-lead", "opencode/m", "--reviewer", "opencode/m",
+                           "--permission-mode", "default")
+        self.persona().write_text(self.persona().read_text() + "stale\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for n in ("coordinator", "design-lead"):
+            self.assertIn("permission mode is `default`", self.persona(n).read_text())
+
+    def test_each_persona_keeps_its_own_mode(self):
+        self.setup_project()
+        rv = self.persona("reviewer")
+        rv.write_text(rv.read_text().replace('"permission-mode": "auto"', '"permission-mode": "default"'))
+        (self.repo / ".cotal" / "agents" / "zz-extra.md").write_text('"permission-mode": "bypassPermissions"\n')
+        self.refresh()
+        self.assertIn('"permission-mode": "default"', rv.read_text())
+        self.assertIn('"permission-mode": "auto"', self.persona().read_text())
+
+    def test_missing_reviewer_is_made_and_the_tier_table_kept(self):
+        self.setup_project()
+        self.persona("reviewer").unlink()
+        table = self.repo / ".cotal" / "lanes.tsv"
+        table.write_text(table.read_text() + "# own row\n")
+        own = table.read_text()
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("persona reviewer: created", r.stdout)
+        self.assertEqual(table.read_text(), own)
+
+    def test_bad_persona_changes_nothing(self):
+        self.setup_project()
+        self.persona().write_text(self.persona().read_text() + "stale\n")
+        self.persona("reviewer").write_text("broken\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("stale", self.persona().read_text())
+        self.assertNotIn("run without --refresh", r.stderr)
+
+    def test_running_reviewer_seat_is_named(self):
+        self.setup_project()
+        self.persona("reviewer").write_text(self.persona("reviewer").read_text() + "stale\n")
+        self.e.set_state(agents=[{"name": "lane-3-review", "cwd": "/x"}])
+        r = self.refresh()
+        self.assertIn("restart: needed lane-3-review (persona changed)", r.stdout)
+
+    def test_missing_tier_file_is_a_clean_refusal_before_any_write(self):
+        self.setup_project()
+        self.persona().write_text(self.persona().read_text() + "stale\n")
+        r = self.refresh("--tiers", str(self.e.home / "nope.tsv"))
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("stale", self.persona().read_text())
+
+    def test_non_utf8_tier_table_is_a_clean_failure(self):
+        self.setup_project()
+        (self.repo / ".cotal" / "lanes.tsv").write_bytes(b"\xff\xfe\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_tier_report_names_the_differing_rows(self):
+        self.setup_project()
+        table = self.repo / ".cotal" / "lanes.tsv"
+        table.write_text(table.read_text() + "mine\tclaude\topus\n")
+        r = self.refresh()
+        self.assertIn("only in the project: mine; only in the defaults: none", r.stdout)
+
+    def test_flags_that_would_be_ignored_are_refused(self):
+        self.setup_project()
+        for flag in (["--coordinator", "claude/sonnet"], ["--permission-mode=default"], ["--no-design-lead"],
+                     ["--design-lead", "claude/sonnet"]):
+            r = self.refresh(*flag)
+            self.assertEqual(r.returncode, 2, flag)
+            self.assertIn("no effect with --refresh", r.stderr)
+
+    def test_not_a_repository_is_refused_and_nothing_cloned(self):
+        r = self.e.run(str(self.e.home / "nowhere"), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("--refresh only works", r.stderr)
+
+    def test_cannot_combine_with_readapt(self):
+        r = self.e.run(str(self.repo), "--refresh", "--readapt", adapt=True)
         self.assertEqual(r.returncode, 2)
 
 

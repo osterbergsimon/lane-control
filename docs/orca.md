@@ -166,6 +166,20 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
 
 With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
 
+### Refresh: after lane-control's personas, skill or tier defaults change
+```bash
+scripts/project-setup <dir> --refresh [--name Shop]
+```
+For a project set up earlier. It re-renders the coordinator, design lead (if the project has one) and reviewer
+personas in `.cotal/agents/`, each keeping the harness, model and permission mode it already has, and reinstalls the
+skill. The project's own `.cotal/lanes.tsv` is never replaced (it names the rows that differ from the defaults; new default
+rows are for the owner to copy over). It starts no adapting or reviewing agent, broker, coordinator or worktree, and
+commits nothing. Running agents keep the old persona and skill until restarted, so the last line (`restart: needed
+...`) names the ones to stop and start again. A reviewer persona from before it existed is created (from `--reviewer`). All personas are checked before any is
+written. Changing an agent's harness or model is not a refresh: `--coordinator`, `--design-lead`, `--no-design-lead` and
+`--permission-mode` are refused with `--refresh`.
+
+
 ### Lanes
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
 1. Pick the tier per `model-routing.md`, then look up the harness and model in `.cotal/lanes.tsv`.
@@ -181,6 +195,25 @@ The coordinator (or the design lead, for its own frontend lanes) follows the `or
    blocker/major/minor by DM. Blocker and major are fixed, at most two rounds, then the owner decides.
 
 Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
+
+### Launching OpenCode lanes
+- Cotal gives every OpenCode agent its own empty database (section 7), so the owner's `opencode auth login` does not
+  reach it. Without `OPENCODE_API_KEY` in the manager's environment, that agent's server lists only free models.
+- A pinned model the server does not list stops the agent before it joins. The connector prints
+  `<model>: GET /api/model does not list it. Refusing before join` into the tab, which closes, so `cotal_spawn` shows
+  only `<name> exited on launch`. [tested]
+- `opencode models` prints the whole catalog whatever the credentials, so it does not prove a lane can use a model.
+- For a paid model, export `OPENCODE_API_KEY` before `project-setup`: it records the name (never the value) in the
+  `mgr` service, and Cotal forwards the key to each OpenCode agent. Setup warns, with these steps, when an OpenCode pin
+  not named as free has no key and the manager does not hold one. The warning can also name a free model without
+  `-free` in its name.
+- A `mgr` service that already exists keeps its old variable list. At a natural stop, run
+  `cotal svc stop mgr -s <space> --yes` and `cotal svc remove mgr -s <space> --yes`, then rerun `project-setup` with the
+  key exported. Afterwards `cotal svc start` refuses in a shell that does not set the key.
+- Setup only sees whether the key is set. A wrong key or a spent quota shows only on the agent's first model call, and
+  setup cannot tell them apart.
+- Free models, such as those named `*-free`, need no key. Pin one in `.cotal/lanes.tsv` only if the owner accepts it
+  for that project.
 
 ### Permission modes (Claude)
 - `auto` is the default: Claude screens each tool call, as `--opt permission-mode=auto` on spawn.
