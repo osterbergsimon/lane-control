@@ -1652,26 +1652,20 @@ def default_branch(repo: Path, current: str = ""):
     return current or None if everything.returncode == 0 and not everything.stdout.strip() else None
 
 
-def unpushed(repo: Path, branch: str) -> bool:
-    ref = f"refs/remotes/origin/{branch}"
-    if run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode != 0:
-        return True
-    return run(["git", "rev-list", "--count", f"{ref}..HEAD"], cwd=repo, check=False).stdout.strip() != "0"
-
-
-def on_lanes_base(repo: Path, lanes: str, path: str) -> bool:
-    """Whether origin/<lanes>, which a lane's worktree is made from, has `path` (as last fetched)."""
-    return run(["git", "ls-tree", "-r", "--name-only", f"origin/{lanes}", "--", path], cwd=repo,
-               check=False).stdout.strip() != ""
+def differs_from_lanes_base(repo: Path, lanes: str, paths: list) -> bool:
+    """Whether `paths` at HEAD are not what origin/<lanes> (as last fetched), which a lane's worktree is made from,
+    holds: absent there, changed, or no such branch there yet. Content, not existence: a changed file counts."""
+    return run(["git", "diff", "--quiet", f"origin/{lanes}", "HEAD", "--", *paths], cwd=repo, check=False).returncode != 0
 
 
 def missing_for_lanes(repo: Path, lanes: str, yaml_pending: bool) -> list:
-    """What lanes would lack: the onboarding files, and orca.yaml when it is committed here (or about to be) but is
-    not on origin/<lanes>. An orca.yaml of the owner's own, left alone, is not counted."""
+    """What lanes would not get as it stands: the onboarding files (.lane-control/ and AGENTS.md), and orca.yaml when
+    it is committed here (or about to be), where origin/<lanes> has other content or none. An orca.yaml of the owner's
+    own, left alone, is not counted, nor is any other commit."""
     out = []
-    if onboarded(repo) and not on_lanes_base(repo, lanes, ADAPTED):
-        out.append("the onboarding files")
-    if (yaml_pending or orca_yaml_tracked(repo)) and not on_lanes_base(repo, lanes, "orca.yaml"):
+    if onboarded(repo) and differs_from_lanes_base(repo, lanes, [ADAPTED, agents_md(repo)]):
+        out.append("onboarding files")
+    if (yaml_pending or orca_yaml_tracked(repo)) and (yaml_pending or differs_from_lanes_base(repo, lanes, ["orca.yaml"])):
         out.append("orca.yaml")
     return out
 
@@ -1723,25 +1717,30 @@ def publish_onboarding(repo: Path) -> None:
     if branch != lanes:
         missing = missing_for_lanes(repo, lanes, text is not None)
         if missing:
-            say("publish", "skipped", f"on {branch or 'no branch'}, but lanes branch from origin/{lanes}, which lacks "
-                f"{' and '.join(missing)}: nothing is pushed, so lanes will not get them")
+            say("publish", "skipped", f"on {branch or 'no branch'}, but lanes branch from origin/{lanes}, which does "
+                f"not have the current {' and '.join(missing)}: nothing is pushed, so lanes will not get them")
         return
     missing = missing_for_lanes(repo, lanes, text is not None)
     if not missing:  # lanes lack nothing; whatever else is unpushed is the owner's own business
         return
-    miss = f"lanes will not get {' and '.join(missing)} until pushed to origin/{lanes}"
+    names = " and ".join(missing)
+    miss = f"lanes will not get the current {names} until pushed to origin/{lanes}"
     ref = f"refs/remotes/origin/{branch}"
-    ahead = run(["git", "log", "--oneline", "-10", f"{ref}..HEAD"], cwd=repo, check=False).stdout.splitlines() \
-        if run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode == 0 else []
-    carried = ("\nThe push carries every commit not yet on origin/" + branch + (", whatever it is"
-               if ahead else "") + (":\n" + "\n".join("  " + l for l in ahead) if ahead else "") + "\n")
+    if run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode == 0:
+        count = int(run(["git", "rev-list", "--count", f"{ref}..HEAD"], cwd=repo, check=False).stdout.strip() or 0)
+        shown = run(["git", "log", "--oneline", "-10", f"{ref}..HEAD"], cwd=repo, check=False).stdout.splitlines()
+        carried = (f"\nThe push carries every commit not yet on origin/{branch}, whatever it is:\n"
+                   + "\n".join("  " + l for l in shown) + (f"\n  ... and {count - len(shown)} more" if count > len(shown) else "")
+                   + "\n")
+    else:
+        carried = f"\nThe push creates origin/{branch} with every commit on it.\n"
     if text is not None:
         print(f"\n{found}\nIt has to be committed and pushed to give lanes a setup script: Orca creates worktrees "
               f"from origin/{branch}. The push also carries the onboarding commit.\n{carried}", flush=True)
         question = f"Commit orca.yaml and push {branch} to origin? [y/N] "
     else:
-        print(f"\nThe onboarding commit is not pushed. Orca creates worktrees from origin/{branch}, so lanes get "
-              f"nothing of it until it is.\n{carried}", flush=True)
+        print(f"\norigin/{branch} does not have the current {names}. Orca creates worktrees from it, so lanes get "
+              f"the old version, or none, until it is pushed.\n{carried}", flush=True)
         question = f"Push {branch} to origin? [y/N] "
     if not owner_says_yes(question, "publish"):
         say("publish", "declined", f"nothing more committed or pushed; {miss}")

@@ -652,6 +652,52 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.in_terminal("n", "--write-orca-yaml")[0], 0)
         self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
 
+    def test_readapt_of_a_pushed_project_asks_for_the_push_of_the_changed_files(self):
+        bare = self.committed_lockfile_origin()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal(["y", "y"])[0], 0)
+        self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))
+        self.e.set_state(agent_steps={"sonnet": [{"write": {ADAPTED_FILE: "newer\n"}}], "opus": [PASS]})
+        status, out, ask = self.in_terminal(["y", "y"], "--readapt")
+        self.assertEqual(status, 0, out)
+        self.assertEqual(ask.call_count, 2)
+        self.assertTrue(ask.call_args[0][0].startswith("Push main"))
+        self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))
+
+    def test_a_change_to_only_one_of_the_pushed_files_is_still_offered(self):
+        routing = ".lane-control/routing.md"
+        bare = self.committed_lockfile_origin()
+        self.e.script_agents(sonnet=[{"write": {ADAPTED_FILE: "a\n", routing: "b\n"}}], opus=[PASS])
+        self.assertEqual(self.in_terminal(["y", "y"])[0], 0)
+        (self.repo / routing).write_text("b changed by hand\n")
+        git("add", routing, cwd=self.repo)
+        git("commit", "-q", "-m", "tune routing", cwd=self.repo)
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        ask.assert_called_once()
+        self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))
+
+    def test_only_a_missing_orca_yaml_is_worded_as_that(self):
+        self.with_origin()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal(["y", "y"])[0], 0)  # onboarding pushed, no orca.yaml
+        (self.repo / "orca.yaml").write_text("scripts:\n  setup: |\n    make deps\n")
+        git("add", "orca.yaml", cwd=self.repo)
+        git("commit", "-q", "-m", "orca", cwd=self.repo)
+        status, out, ask = self.in_terminal("n")
+        self.assertEqual(status, 0, out)
+        self.assertNotIn("onboarding commit is not pushed", out)
+        self.assertIn("current orca.yaml", out)
+        self.assertNotIn("onboarding files", out)
+
+    def test_a_long_list_of_carried_commits_says_how_many_more(self):
+        self.with_origin()
+        for i in range(12):
+            git("commit", "-q", "--allow-empty", "-m", f"wip {i}", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "n"])
+        self.assertRegex(out, r"\.\.\. and 3 more")
+
     def test_an_abort_before_the_second_question_offers_it_on_the_next_run(self):
         bare = self.committed_lockfile_origin()
         old = self.origin_main(bare)
