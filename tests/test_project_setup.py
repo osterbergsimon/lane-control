@@ -1458,7 +1458,7 @@ class RefreshTests(unittest.TestCase):
         own = table.read_text()
         r = self.refresh()
         self.assertEqual(table.read_text(), own)
-        self.assertIn("kept (differs from the defaults", r.stdout)
+        self.assertIn("kept, differs from the defaults", r.stdout)
 
     def test_nothing_changed_says_no_restart(self):
         self.setup_project()
@@ -1548,6 +1548,36 @@ class RefreshTests(unittest.TestCase):
         self.e.set_state(agents=[{"name": "lane-3-review", "cwd": "/x"}])
         r = self.refresh()
         self.assertIn("restart: needed lane-3-review (persona changed)", r.stdout)
+
+    def test_missing_tier_file_is_a_clean_refusal_before_any_write(self):
+        self.setup_project()
+        self.persona().write_text(self.persona().read_text() + "stale\n")
+        r = self.refresh("--tiers", str(self.e.home / "nope.tsv"))
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("stale", self.persona().read_text())
+
+    def test_non_utf8_tier_table_is_a_clean_failure(self):
+        self.setup_project()
+        (self.repo / ".cotal" / "lanes.tsv").write_bytes(b"\xff\xfe\n")
+        r = self.refresh()
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_tier_report_names_the_differing_rows(self):
+        self.setup_project()
+        table = self.repo / ".cotal" / "lanes.tsv"
+        table.write_text(table.read_text() + "mine\tclaude\topus\n")
+        r = self.refresh()
+        self.assertIn("only in the project: mine; only in the defaults: none", r.stdout)
+
+    def test_flags_that_would_be_ignored_are_refused(self):
+        self.setup_project()
+        for flag in (["--coordinator", "claude/sonnet"], ["--permission-mode=default"], ["--no-design-lead"],
+                     ["--design-lead", "claude/sonnet"]):
+            r = self.refresh(*flag)
+            self.assertEqual(r.returncode, 2, flag)
+            self.assertIn("no effect with --refresh", r.stderr)
 
     def test_not_a_repository_is_refused_and_nothing_cloned(self):
         r = self.e.run(str(self.e.home / "nowhere"), "--refresh", adapt=True)

@@ -164,19 +164,21 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
    itself and its persona says so.
 9. Verifies that the agents are live and that the design lead's task is nested.
 
+With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
+
 ### Refresh: after lane-control's personas, skill or tier defaults change
 ```bash
 scripts/project-setup <dir> --refresh [--name Shop]
 ```
 For a project set up earlier. It re-renders the coordinator, design lead (if the project has one) and reviewer
 personas in `.cotal/agents/`, each keeping the harness, model and permission mode it already has, and reinstalls the
-skill. The project's own `.cotal/lanes.tsv` is never replaced (it says when it differs from the defaults; new default
+skill. The project's own `.cotal/lanes.tsv` is never replaced (it names the rows that differ from the defaults; new default
 rows are for the owner to copy over). It starts no adapting or reviewing agent, broker, coordinator or worktree, and
 commits nothing. Running agents keep the old persona and skill until restarted, so the last line (`restart: needed
 ...`) names the ones to stop and start again. A reviewer persona from before it existed is created (from `--reviewer`). All personas are checked before any is
-written. Changing an agent's harness or model is not a refresh.
+written. Changing an agent's harness or model is not a refresh: `--coordinator`, `--design-lead`, `--no-design-lead` and
+`--permission-mode` are refused with `--refresh`.
 
-With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
 
 ### Lanes
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:

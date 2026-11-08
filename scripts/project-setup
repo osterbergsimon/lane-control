@@ -390,11 +390,22 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         texts[name] = (harness, model, render_persona((HERE / "personas" / f"{name}.md").read_text(), harness, model,
                                                       modes.get(name) or others, project, str(table),
                                                       str(agents / "reviewer.md"), design_lead=design_lead))
-    if table.exists():
-        same = table.read_text() == tiers.read_text()
-        say("tiers", "exists", ".cotal/lanes.tsv kept" + ("" if same else " (differs from the defaults: the project's own)"))
+    try:
+        default_text = tiers.read_text()
+        own_text = table.read_text() if table.exists() else None
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
+    if own_text is None:
+        say("tiers", write_if_changed(table, default_text), ".cotal/lanes.tsv (was missing)")
+    elif own_text == default_text:
+        say("tiers", "exists", ".cotal/lanes.tsv kept (same as the defaults)")
     else:
-        say("tiers", write_if_changed(table, tiers.read_text()), ".cotal/lanes.tsv (was missing)")
+        def rows(text):
+            return {l for l in text.splitlines() if l.strip() and not l.startswith("#")}
+        mine, theirs = rows(own_text) - rows(default_text), rows(default_text) - rows(own_text)
+        key = lambda rs: ", ".join(sorted(r.split("\t")[0] for r in rs)) or "none"
+        say("tiers", "exists", f".cotal/lanes.tsv kept, differs from the defaults: only in the project: {key(mine)}; "
+            f"only in the defaults: {key(theirs)}")
     changed = []
     for name, (harness, model, text) in texts.items():
         state = write_if_changed(agents / f"{name}.md", text)
@@ -1114,8 +1125,18 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
     tiers = Path(a.tiers).expanduser()
+    if a.refresh:
+        ignored = [f for f in ("--coordinator", "--design-lead", "--no-design-lead", "--permission-mode")
+                   if any(x == f or x.startswith(f + "=") for x in argv)]
+        if ignored:
+            print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
+                  "has (only --reviewer is used, for a reviewer persona that is missing)", file=sys.stderr)
+            return 2
     if a.host:
         return on_host(a.host, argv, a.target)
+    if not tiers.is_file():
+        print(f"project-setup: tier table {tiers} not found", file=sys.stderr)
+        return 2
     global ORCA
     if a.refresh:
         add_orca_cli_to_path()
@@ -1131,9 +1152,6 @@ def main(argv=None) -> int:
         except Fail as e:
             print(f"project-setup: {e}", file=sys.stderr)
             return 1
-    if not tiers.is_file():
-        print(f"project-setup: tier table {tiers} not found", file=sys.stderr)
-        return 2
     add_orca_cli_to_path()
     ORCA = orca_cli()
     # Cotal's Orca driver otherwise tries `orca-ide`, then whatever `orca` is on PATH.
