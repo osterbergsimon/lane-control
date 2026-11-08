@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# lane-room: is there room on this machine to open another lane? Run it before opening one; on a non-zero exit hold
+# the lane and tell the owner.
+#
+#   lane-room       Prints available memory, load against cores, the lane agents running, and a verdict line.
+#
+# Too busy when: available memory is under LANE_ROOM_MIN_MEM_GB, the 5-minute load is over LANE_ROOM_MAX_LOAD (a short
+# burst should not hold a lane), or LANE_ROOM_MAX_AGENTS lane agents are running. Idle agents cost little, so this
+# limit is looser than the heavy-work gate (lane-heavy).
+#
+# Lane agents are the Cotal agents of role lane or reviewer run by this user, counted once each however many processes
+# they have, from process environments. Only those two variables are read; nothing else in an environment is kept.
+#
+# Limits: lane-limits.sh and limits.example.sh. Exit: 0 room; 1 too busy; 2 could not read the machine's state.
+set -u
+self=$(readlink -f "$0")
+# shellcheck source=lane-limits.sh
+. "${self%/*}/lane-limits.sh"
+
+avail_mb=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' "$LANE_PROC_DIR/meminfo" 2>/dev/null)
+read -r load1 load5 load15 _ 2>/dev/null <"$LANE_PROC_DIR/loadavg"
+if [ -z "$avail_mb" ] || [ -z "${load5:-}" ]; then
+  echo "lane-room: cannot read memory or load from $LANE_PROC_DIR; hold the lane" >&2
+  exit 2
+fi
+
+declare -A lane_agents=()
+for environ in "$LANE_PROC_DIR"/[0-9]*/environ; do
+  role= id=
+  {
+    while IFS= read -r -d '' entry; do
+      case $entry in
+        COTAL_ROLE=*) role=${entry#*=} ;;
+        COTAL_LIFECYCLE_UID=*) id=${entry#*=} ;;
+      esac
+    done <"$environ"
+  } 2>/dev/null
+  case $role in lane | reviewer) lane_agents[${id:-$environ}]=1 ;; esac
+done
+agents=${#lane_agents[@]}
+
+avail_gb=$(awk -v m="$avail_mb" 'BEGIN { printf "%.1f", m / 1024 }')
+echo "memory  ${avail_gb}G available of ${LANE_MEM_GB}G (hold under ${LANE_ROOM_MIN_MEM_GB}G)"
+echo "load    $load5 over 5 min on $LANE_CORES cores (hold over $LANE_ROOM_MAX_LOAD); 1 min $load1, 15 min $load15"
+echo "lanes   $agents lane agents running (hold at $LANE_ROOM_MAX_AGENTS)"
+
+busy=
+[ "$avail_mb" -ge $((LANE_ROOM_MIN_MEM_GB * 1024)) ] || busy="$busy; memory ${avail_gb}G"
+awk -v l="$load5" -v m="$LANE_ROOM_MAX_LOAD" 'BEGIN { exit !(l <= m) }' || busy="$busy; load $load5"
+[ "$agents" -lt "$LANE_ROOM_MAX_AGENTS" ] || busy="$busy; $agents lane agents"
+
+if [ -n "$busy" ]; then
+  echo "TOO BUSY: ${busy#; }. Hold this lane and tell the owner."
+  exit 1
+fi
+echo "room for another lane"
