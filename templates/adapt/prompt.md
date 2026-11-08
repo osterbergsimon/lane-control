@@ -10,8 +10,7 @@ Write only inside `.lane-control/`. Nothing else: not AGENTS.md, not CLAUDE.md, 
 is added for you.
 
 Never: commit, stage, stash, switch branches, push; install anything; use the network; start another agent; run the
-project's code, tests, builds or scripts. Read-only commands such as `git ls-files`, `git log`, `git grep` and `ls`
-are fine. A wrong test command fails loudly in the first lane; running an unknown one here could wipe something.
+project's code, tests, builds or scripts. You have no shell: use Glob to list files and Grep to search them. A wrong test command fails loudly in the first lane; running an unknown one here could wipe something.
 
 Never open `.env` files, key files, credential stores, or data directories. Their names are enough.
 
@@ -29,7 +28,7 @@ yes: {{DESIGN_LEAD}}. If it says yes and you find no frontend, fill its slots wi
 - `<!-- fixed -->` blocks: copy their text exactly, drop the marker lines.
 - `<!-- slot NAME: guidance -->` lines: replace with what you found. Nothing to say: `none found (looked in: <paths>)`.
   Already stated in AGENTS.md: `see AGENTS.md "<heading>"`, no copy.
-- Keep the front matter. Keep within the size each template states.
+- Keep the front matter. Keep within the `max_lines` (and `max_rows`) in each template's front matter.
 
 Plain short sentences. Project facts only: never repeat general good practice, and never restate a rule a persona
 would have. Test each line by asking whether a new agent would act differently for having read it; if not, delete it.
@@ -44,7 +43,7 @@ Commands must be copied from where the repo writes them, and the Checks table sa
 
 ## How to work
 1. Read AGENTS.md, CLAUDE.md, README, CONTRIBUTING, the docs index, CI config, build manifests and Makefile-like files,
-   CODEOWNERS, `orca.yaml`. Take the file list from `git ls-files` and the last 50 subjects from `git log`.
+   CODEOWNERS, `orca.yaml`. Take the file list from Glob. Commit history is not available to you; do not guess at it.
 2. Read what the test and tool scripts do before you list them as checks. Anything that deletes, reaches a real host
    or account, or needs special setup goes under "Do not run".
 3. For the path map, open the code before you call it low-risk. Deep and review C: parsers of untrusted input, formats

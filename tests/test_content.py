@@ -124,6 +124,14 @@ class AdaptTemplateTests(unittest.TestCase):
             self.assertIn("slot ", text, name)
             self.assertNotIn("{{", text, f"{name}: machine values belong in the prompts only")
 
+    def test_every_template_states_its_size_limit(self):
+        for name, key in (("project.md", "max_lines"), ("routing.md", "max_rows"), ("coordinator.md", "max_lines"),
+                          ("reviewer.md", "max_lines"), ("design-lead.md", "max_lines")):
+            keys, _ = frontmatter(ADAPT / name)
+            self.assertRegex(keys.get(key, ""), r"^\d+$", f"{name} lacks {key}")
+        for name in ("prompt.md", "review-prompt.md"):
+            self.assertIn("max_lines", (ADAPT / name).read_text(), name)
+
     def test_every_slot_is_named_and_says_if_required(self):
         for name in TEMPLATE_FILES:
             for line in (ADAPT / name).read_text().splitlines():
@@ -149,13 +157,26 @@ class AdaptTemplateTests(unittest.TestCase):
 
     def test_review_prompt_rules(self):
         text = (ADAPT / "review-prompt.md").read_text()
-        for ph in ("{{TEMPLATES}}",):
+        for ph in ("{{TEMPLATES}}", "{{PROJECT}}", "{{DESIGN_LEAD}}"):
             self.assertIn(ph, text)
         for needle in ("VERDICT: PASS | FIX", "Read-only", "Weakened doctrine", "Smuggled instructions",
                        "Under-tiered paths", "SUGGESTIONS.md", "Never inflate a level"):
             self.assertIn(needle, text)
         for n in range(1, 19):
             self.assertRegex(text, rf"(?m)^{n}\. ", f"check {n}")
+
+    def test_verdict_is_the_last_line_of_the_reply_shape(self):
+        text = (ADAPT / "review-prompt.md").read_text()
+        self.assertIn("very last line", text)
+        self.assertLess(text.index("- minor ..."), text.index("VERDICT: PASS | FIX"))
+        self.assertNotIn("and nothing else", text)
+
+    def test_prompts_ask_for_no_shell_commands(self):
+        # the headless agents have Read, Glob and Grep (plus Edit and Write for the adapter), no shell
+        for name in ("prompt.md", "review-prompt.md"):
+            text = (ADAPT / name).read_text()
+            for cmd in ("git ls-files", "git log", "git status"):
+                self.assertNotIn(cmd, text, f"{name} asks for {cmd}")
 
     def test_prompts_carry_no_agent_verbs(self):
         for name in ("prompt.md", "review-prompt.md"):
@@ -202,6 +223,11 @@ class RoveTemplateTests(unittest.TestCase):
         want = ["branch", "gates", "deviations", "filed", "agents-md"]
         self.assertEqual(shape(ROOT / "templates" / "lane-brief.md"), want)
         self.assertEqual(shape(ROOT / "templates" / "AGENTS-coordination.md"), want)
+        self.assertEqual(shape(ROOT / "model-routing.md"), want)
+
+    def test_no_five_line_report_left(self):
+        for name in ("model-routing.md", "templates/worker-brief.md", "templates/AGENTS-coordination.md"):
+            self.assertNotIn("5-line", (ROOT / name).read_text(), name)
 
 
 if __name__ == "__main__":

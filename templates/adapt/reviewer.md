@@ -1,5 +1,6 @@
 ---
 lane_control_template: 1
+max_lines: 30
 read_by: reviewer
 ---
 <!-- fixed -->

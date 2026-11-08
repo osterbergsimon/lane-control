@@ -1,5 +1,6 @@
 ---
 lane_control_template: 1
+max_rows: 40
 read_by: coordinator, design lead, reviewer
 ---
 <!-- fixed -->

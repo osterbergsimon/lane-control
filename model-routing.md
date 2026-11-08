@@ -81,6 +81,7 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
   gates: <command> ok|fail, ...
   deviations: none | <items>
   filed: none | <issue ids>
+  agents-md: none | <one line the next agent would need that AGENTS.md lacks; never commit it yourself>
   ```
 - **Coordinator → machine coordinator, only on events:** `REQ <project>: <slot|top|budget> — <why>` or `FYI <project>: <fact that changes arbitration>`, one line each.
 - **Machine coordinator → coordinators:** `ORDER:` or `FYI:`, one line each; no reply expected.

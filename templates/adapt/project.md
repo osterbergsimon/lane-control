@@ -1,5 +1,6 @@
 ---
 lane_control_template: 1
+max_lines: 60
 read_by: every agent
 ---
 <!-- fixed -->
