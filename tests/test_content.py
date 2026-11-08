@@ -96,9 +96,6 @@ class NoTypingIntoAgentsTests(unittest.TestCase):
                         self.assertRegex(line.lower(), r"never|do not|don't", f"{f.name}: '{bad}' outside a prohibition")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class BypassOptionTests(unittest.TestCase):
     def test_lane_skill_offers_bypass_in_the_mode_cycle(self):
@@ -143,3 +140,13 @@ class LaneSkillCliTests(unittest.TestCase):
         self.assertTrue(i_shell < i_wait < i_close < i_spawn)
         for needle in ("If it never appears, keep the Setup tab open", "With no marker in `orca.yaml`"):
             self.assertIn(needle, t)
+
+    def test_points_to_the_tier_table_instead_of_copying_it(self):
+        self.assertIn("tier table file your persona names", self.text)
+        self.assertNotIn("opencode/deepseek", self.text)
+        for word in ("`none`", "`inherit`"):
+            self.assertIn(word, self.text)
+
+
+if __name__ == "__main__":
+    unittest.main()

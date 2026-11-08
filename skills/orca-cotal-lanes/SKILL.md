@@ -26,15 +26,8 @@ Never type into an agent's terminal: never use `orca terminal send` on an agent,
 
 ## 1. Pick the tier, then harness and model
 Tier by the paths the task touches (lane-control model-routing: highest tier wins, in doubt one tier up; swift only
-for prose docs, scripts without private data and CI). Then look the tier up in the tier table your persona names (the
-project's `.cotal/lanes.tsv`, by absolute path, because lane worktrees do not carry it):
-
-```
-tier      harness   model                          permission
-swift     opencode  opencode/deepseek-v4.1-flash   -
-standard  claude    sonnet                         inherit
-deep      claude    opus                           inherit
-```
+for prose docs, scripts without private data and CI). Then look the tier up in the tier table file your persona names (the project's `.cotal/lanes.tsv`, by absolute
+path, because lane worktrees do not carry it). Each row gives the harness, model and permission for a tier.
 
 A tier whose harness is `none` is skipped: go one tier up. `inherit` means the project's Claude permission mode, which
 your persona names; pass that value.
