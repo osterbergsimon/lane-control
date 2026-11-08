@@ -819,8 +819,12 @@ def show_changes(repo: Path, changes: list):
     print(flush=True)
 
 
+def has_terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def owner_says_yes() -> bool:
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if not has_terminal():
         say("commit", "skipped", "no terminal to ask the owner in")
         return False
     try:
@@ -829,17 +833,37 @@ def owner_says_yes() -> bool:
         return False
 
 
-def commit_adapted(repo: Path, paths: list):
+def commit_adapted(repo: Path, paths: list, message: str = "Add lane-control files adapted to this project"):
     """Only these paths, whatever else is staged; with the identity git is configured with, and no attribution."""
     run(["git", "add", "--", *paths], cwd=repo)
-    message = "Add lane-control files adapted to this project"
     run(["git", "commit", "-q", "-m", message, "--only", "--", *paths], cwd=repo)
     say("commit", "created", f"{len(paths)} file(s)")
 
 
 def onboarded(repo: Path) -> bool:
     files = run(["git", "ls-tree", "-r", "--name-only", "HEAD", "--", ADAPTED], cwd=repo, check=False).stdout
-    return bool(files.strip()) and SECTION_BEGIN in head_text(repo, "AGENTS.md")
+    return bool(files.strip()) and SECTION_BEGIN in head_text(repo, agents_md(repo))
+
+
+def refresh_section(repo: Path) -> bool:
+    """An onboarded project whose committed AGENTS.md section is out of date: update it in place, on the owner's yes.
+    True when the Orca setup may run. Without a terminal nothing is written, so an unattended re-run still gets there."""
+    path = agents_md(repo)
+    head = head_text(repo, path)
+    if with_section(head) == head:
+        say("agents-md", "exists", "lane-control section")
+        return True
+    if not has_terminal():
+        say("agents-md", "stale", "lane-control section left as it is; run again in a terminal to update it")
+        return True
+    check_agents_md(repo)
+    write_section(repo)
+    show_changes(repo, [(p, m) for p, m in git_changes(repo) if p == path])
+    if not owner_says_yes():
+        say("adapt", "stopped", f"{path} left uncommitted, no Orca setup. Run again in a terminal to answer")
+        return False
+    commit_adapted(repo, [path], "Update the lane-control section of AGENTS.md")
+    return True
 
 
 def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
@@ -847,7 +871,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     alone unless `again`, and uncommitted ones from an earlier run go back to review instead of being rewritten."""
     if onboarded(repo) and not again:
         say("adapt", "exists", f"{ADAPTED}/ is committed")
-        return True
+        return refresh_section(repo)
     if not shutil.which("claude"):
         raise Fail("claude not on PATH, but the onboarding agents use it")
     for key in ("user.name", "user.email"):
@@ -867,7 +891,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     if not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
         if onboarded(repo):
             say("adapt", "exists", "the agent changed nothing")
-            return True
+            return refresh_section(repo)
         raise Fail(f"the adapting agent wrote nothing under {ADAPTED}/ (is it gitignored?)")
     write_section(repo)
     unresolved = review_with_fixes(repo, project, adapter, reviewer, before, design_lead)

@@ -516,6 +516,79 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(len(self.e.agent_runs()), runs)
         self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
 
+    def test_rerun_with_symlinked_agents_md_starts_no_agent(self):
+        (self.repo / "CLAUDE.md").write_text("# Rules\n")
+        git("add", "CLAUDE.md", cwd=self.repo)
+        (self.repo / "AGENTS.md").symlink_to("CLAUDE.md")
+        git("add", "AGENTS.md", cwd=self.repo)
+        git("commit", "-q", "-m", "link", cwd=self.repo)
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        self.assertTrue(load().onboarded(self.repo))
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.models(), ["opus", "sonnet"])
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+
+    def _stale_section(self):
+        """An onboarded project whose committed section has wording this lane-control no longer writes."""
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        m = load()
+        f = self.repo / "AGENTS.md"
+        f.write_text(f.read_text().replace(m.SECTION, f"{m.SECTION_BEGIN}\nOLD WORDING\n{m.SECTION_END}"))
+        git("add", "AGENTS.md", cwd=self.repo)
+        git("commit", "-q", "-m", "old section", cwd=self.repo)
+        self.e.log.write_text("")
+        return f, m
+
+    def test_plain_rerun_updates_a_stale_section_on_yes(self):
+        f, m = self._stale_section()
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0)
+        ask.assert_called_once()
+        self.assertEqual(self.models(), ["opus", "sonnet"])
+        self.assertNotIn("OLD WORDING", f.read_text())
+        self.assertEqual(f.read_text().count(m.SECTION_BEGIN), 1)
+        self.assertEqual(self.committed_paths(), ["AGENTS.md"])
+        self.assertIn("changed: AGENTS.md", out)
+        self.assertIn("verify: ok", out)
+
+    def test_plain_rerun_stale_section_no_leaves_it_uncommitted(self):
+        f, _ = self._stale_section()
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        status, out, _ = self.in_terminal("n")
+        self.assertEqual(status, 3)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+        self.assertNotIn("OLD WORDING", f.read_text())
+        self.assertNotIn("verify: ok", out)
+
+    def test_rerun_without_terminal_leaves_a_stale_section_and_runs_setup(self):
+        f, _ = self._stale_section()
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("agents-md: stale", r.stdout)
+        self.assertIn("OLD WORDING", f.read_text())
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+        self.assertIn("verify: ok", r.stdout)
+
+    def test_readapt_with_no_agent_change_updates_a_stale_section(self):
+        f, _ = self._stale_section()
+        self.e.set_state(agent_steps={"opus": [{}]})
+        self.assertEqual(self.in_terminal("y", "--readapt")[0], 0)
+        self.assertEqual(self.models(), ["opus", "sonnet", "opus"])
+        self.assertNotIn("OLD WORDING", f.read_text())
+        self.assertEqual(self.committed_paths(), ["AGENTS.md"])
+
+    def test_rerun_with_a_current_section_never_asks(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        status, _, ask = self.in_terminal("n")
+        self.assertEqual(status, 0)
+        ask.assert_not_called()
+
     def test_rerun_after_no_reviews_without_rewriting(self):
         self.e.script_agents(opus=[WRITE], sonnet=[PASS])
         self.in_terminal("n")
