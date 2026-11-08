@@ -14,7 +14,8 @@
 #   counter moved during a failed job, it prints `POSSIBLE OUT OF MEMORY`.
 # - A slot is a kernel lock held by this process alone, so it frees itself however lane-heavy ends. The command does
 #   not inherit it: a daemon the build leaves behind (compiler server, build daemon) cannot hold a slot for ever.
-#   If lane-heavy itself is SIGKILLed while the job lives on, the slot frees early; TERM, INT and HUP stop the job.
+#   TERM, INT and HUP stop the whole job, every step of it. If lane-heavy itself is SIGKILLed while the job lives on,
+#   the slot frees early. The job runs in its own session (setsid, where the host has it), so it has no terminal.
 # - If the limit cannot work at all (no flock, no writable state directory) it runs the command anyway and says so.
 #
 # Limits: lane-limits.sh and limits.example.sh. Exit: the command's; 127 not found or not executable; 2 usage.
@@ -97,6 +98,8 @@ elif scope_works; then
 else
   say "no memory limit: this host has no working systemd user scope; running without one"
 fi
+# Its own process group, whose id is the job's pid (setsid does not fork here), so a signal reaches every step of `sh -c`.
+if command -v setsid >/dev/null; then job=(setsid "${job[@]}"); fi
 
 oom_kills() { awk '$1 == "oom_kill" { print $2 }' "$LANE_PROC_DIR/vmstat" 2>/dev/null; }
 oom_before=$(oom_kills)
@@ -111,7 +114,7 @@ interrupted=
 stop_job() {
   interrupted=1
   if [ -n "$scoped" ] && systemctl --user kill --signal=TERM "$unit.scope" >/dev/null 2>&1; then return; fi
-  kill -TERM "$child" 2>/dev/null
+  kill -TERM -- "-$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null
 }
 trap stop_job TERM INT HUP
 

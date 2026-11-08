@@ -217,6 +217,31 @@ class HeavyTests(Machine):
         self.assertTrue(done.exists())
         self.assertEqual(self.heavy("true").returncode, 0)
 
+    def test_term_stops_every_step_of_a_multi_step_job_without_a_scope(self):
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=0, LANE_HEAVY_POLL_SECS=0.05)
+        step, after = self.dir / "step.pid", self.dir / "after"
+        inner = f"echo \\$\\$ > {step}.tmp; mv {step}.tmp {step}; exec sleep 60"
+        p = self.start("sh", "-c", f'sh -c "{inner}"; touch {after}')
+        self.wait_for(step)
+        pid = int(step.read_text())
+        self.addCleanup(lambda: self.is_running(pid) and os.kill(pid, signal.SIGKILL))
+        p.terminate()
+        p.communicate(timeout=TIMEOUT)
+        self.assertEqual(p.returncode, 143)
+        end = time.time() + TIMEOUT
+        while self.is_running(pid):
+            self.assertLess(time.time(), end, "a step of the job outlived the gate")
+            time.sleep(0.02)
+        time.sleep(0.1)
+        self.assertFalse(after.exists(), "the job went on to its next step")
+
+    @staticmethod
+    def is_running(pid):
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+
     def test_daemon_left_behind_does_not_hold_the_slot(self):
         pidfile = self.dir / "daemon.pid"
         r = self.heavy("sh", "-c", f"sleep 60 >/dev/null 2>&1 </dev/null & echo $! > {pidfile}")
