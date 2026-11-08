@@ -106,6 +106,7 @@ class BypassOptionTests(unittest.TestCase):
 class LaneSkillCliTests(unittest.TestCase):
     def setUp(self):
         self.text = SKILL.read_text()
+        self.flat = " ".join(self.text.split())  # line wraps do not matter
 
     def test_names_the_task_after_creating_it(self):
         self.assertIn('worktree set --worktree path:<worktree> --display-name "<KEY> <short title>" --json', self.text)
@@ -124,8 +125,8 @@ class LaneSkillCliTests(unittest.TestCase):
                 self.assertEqual(m.group(1), "terminal send", f"bare orca in backticks: {l}")
 
     def test_finds_the_setup_tab_without_trusting_the_title(self):
-        t = self.text
-        for needle in ('`paneTitle` is "Setup"', "setup-runner.sh", "`agentIdentity`", "one line at most", "If unsure, leave a tab open"):
+        t = self.flat
+        for needle in ('`paneTitle` is "Setup"', "setup-runner.sh", "`agentIdentity`", "exactly one line", "If unsure, leave a tab open"):
             self.assertIn(needle, t)
 
     def test_resolver_does_not_rely_on_a_shell_variable(self):
@@ -133,13 +134,22 @@ class LaneSkillCliTests(unittest.TestCase):
         self.assertNotIn("ORCA=${", self.text)
 
     def test_closes_shell_and_setup_tab_only_after_the_agent_started(self):
-        t = self.text
+        t = self.flat
         i_wait, i_spawn, i_close, i_owner = (t.index(x) for x in (
-            "1. If the worktree's", "2. Start the agent", "3. Only then close the plain shell", "4. Give the owner a shell"))
+            "1. If the worktree's", "start the agent with the `cotal_spawn`", "3. Only then close the plain shell", "4. Give the owner a shell"))
         self.assertTrue(i_wait < i_spawn < i_close < i_owner)
-        for needle in ("an empty\nworktree may refuse the spawn and strand the agent's name", "Close the Setup tab only if the marker",
-                       "If the marker never\n   appeared, keep the Setup tab open", "With\n   no marker in `orca.yaml`"):
+        for needle in ("an empty worktree may refuse the spawn and strand the agent's name", "Close the Setup tab only if the marker",
+                       "If the marker never appeared, keep the Setup tab open", "With no marker in `orca.yaml`"):
             self.assertIn(needle, t)
+
+    def test_closes_only_handles_noted_before_the_spawn(self):
+        t = self.flat
+        self.assertLess(t.index("note the handle of every terminal"), t.index("start the agent with the `cotal_spawn`"))
+        self.assertIn("only among the handles you noted in step 2", t)
+
+    def test_stops_when_no_real_orca_cli_is_found(self):
+        self.assertIn("If it prints nothing, or only plain `orca` was found", self.flat)
+        self.assertIn("stop and tell the owner", self.flat)
 
     def test_points_to_the_tier_table_instead_of_copying_it(self):
         self.assertIn("tier table file your persona names", self.text)

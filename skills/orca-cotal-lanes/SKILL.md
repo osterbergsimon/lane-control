@@ -18,7 +18,8 @@ absolute path it prints:
 for c in "$ORCA_CLI" ~/.orca/cli/bin/orca "$(command -v orca-ide)" ~/.config/orca/linux-orca-cli-shim/orca "$(command -v orca)"; do [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; break; }; done
 ```
 
-Every command runs in a new shell, so a variable would not survive: write that absolute path, in double quotes, in place of
+If it prints nothing, or only plain `orca` was found and `orca --version` does not answer as the Orca CLI, stop and
+tell the owner. Every command runs in a new shell, so a variable would not survive: write that absolute path, in double quotes, in place of
 `$ORCA` in each `orca` command below.
 
 Never type into an agent's terminal: never use `orca terminal send` on an agent, and do not use Orca's
@@ -56,7 +57,8 @@ worktree may refuse the spawn and strand the agent's name. Do these in order:
 1. If the worktree's `orca.yaml` ends by writing `orca-setup-done`, wait for it, so the agent never runs checks on
    missing dependencies:
    `until [ -e "$(git -C <worktree> rev-parse --git-dir)/orca-setup-done" ]; do sleep 5; done` (at most 10 minutes).
-2. Start the agent with the `cotal_spawn` tool:
+2. In `$ORCA terminal list --json`, note the handle of every terminal whose `worktreePath` is the new worktree. Then
+   start the agent with the `cotal_spawn` tool:
    - `name`: the lane key slug (same as the worktree name)
    - `agent`: the tier's harness (`opencode` or `claude`); `model`: the tier's model
    - `cwd`: the worktree path from above
@@ -67,14 +69,14 @@ worktree may refuse the spawn and strand the agent's name. Do these in order:
 
    The agent opens as a `cotal-<name>` tab inside that worktree. Confirm with `cotal_roster` that it joined; if the
    spawn is refused, report the refusal to the owner rather than working around it.
-3. Only then close the plain shell and the Setup tab. In `$ORCA terminal list --json`, look at the terminals whose
-   `worktreePath` is the new worktree. The titles are not reliable, so a terminal is the Setup tab if its
-   `paneTitle` is "Setup", or its title or preview contains `setup-runner.sh`. Close the plain shell: no `agentIdentity`, a title
-   that does not start with `cotal-`, and a preview of one line at most (the prompt, however it looks; more lines
-   mean output or a command). Close the Setup tab only if the marker from step 1 appeared. Use
-   `$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave a tab open. If the marker never
-   appeared, keep the Setup tab open, read it with `$ORCA terminal read --terminal <handle>` and tell the owner. With
-   no marker in `orca.yaml` nothing says the script finished, so keep the Setup tab.
+3. Only then close the plain shell and the Setup tab, and only among the handles you noted in step 2, so the agent's
+   own tab can never be closed. The titles are not reliable, so a terminal is the Setup tab if its `paneTitle` is
+   "Setup", or its title or preview contains `setup-runner.sh`. Close the plain shell only if it has no
+   `agentIdentity`, its title does not start with `cotal-`, and its preview is exactly one line (the prompt, however it
+   looks; an empty preview or more lines mean output or a command). Close the Setup tab only if the marker from step 1
+   appeared. Use `$ORCA terminal close --terminal <handle> --tab --json`. If unsure, leave a tab open. If the marker
+   never appeared, keep the Setup tab open, read it with `$ORCA terminal read --terminal <handle>` and tell the owner.
+   With no marker in `orca.yaml` nothing says the script finished, so keep the Setup tab.
 4. Give the owner a shell after the agent's tab: `$ORCA terminal create --worktree path:<worktree> --json`.
 
 ## 3. Mirror the lane in the GUI

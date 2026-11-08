@@ -570,24 +570,21 @@ def worktree_terminals(wt: Path) -> list:
 
 
 def fresh_shell(t: dict) -> bool:
-    """A shell nobody has used: no agent in it and a preview of at most one line, the prompt, whatever it looks like.
-    Output or a run command shows more lines; if the preview cannot prove it, leave the tab open."""
-    return not t.get("agentIdentity") and len([l for l in (t.get("preview") or "").splitlines() if l.strip()]) <= 1
+    """A shell nobody has used: no agent in it and a preview of exactly one line, the prompt, whatever it looks like.
+    Output or a run command shows more lines; if the preview cannot prove it (empty or missing), leave the tab open."""
+    return not t.get("agentIdentity") and len([l for l in (t.get("preview") or "").splitlines() if l.strip()]) == 1
 
 
-def close_startup_shell(wt: Path):
-    """Orca opens a plain shell in every new worktree; close it so the agent's tab comes first. Never the Setup tab
-    (the setup script may still run in it), an agent's tab, or a terminal that is not a fresh shell."""
+def close_startup_tabs(wt: Path, before: set, setup_done: bool):
+    """After the agent started: close the plain shell Orca opened and, if the setup script finished, its Setup tab.
+    Only terminals listed in `before` (taken before the spawn) are considered, so the agent's own tab can never match.
+    Never an agent's tab (`agentIdentity`, `cotal-` title), a Setup tab that has not finished, or a shell in use."""
     for t in worktree_terminals(wt):
-        if is_setup_tab(t) or (t.get("title") or "").startswith("cotal-") or not fresh_shell(t):
+        if t["handle"] not in before or t.get("agentIdentity") or (t.get("title") or "").startswith("cotal-"):
             continue
-        jrun([ORCA, "terminal", "close", "--terminal", t["handle"], "--tab", "--json"])
-
-
-def close_setup_tab(wt: Path):
-    """The setup script finished (its marker exists): close its Setup tab so the agent's tab comes first."""
-    for t in worktree_terminals(wt):
-        if is_setup_tab(t):
+        if is_setup_tab(t) and not setup_done:
+            continue
+        if is_setup_tab(t) or fresh_shell(t):
             jrun([ORCA, "terminal", "close", "--terminal", t["handle"], "--tab", "--json"])
 
 
@@ -690,14 +687,13 @@ def main(argv=None) -> int:
             wt, created = design_worktree(repo, repo_id)
             if created:
                 setup_done = wait_for_setup(wt, "design-lead")
+                before = {t["handle"] for t in worktree_terminals(wt)}
             spawn(repo, space, "design-lead", *lead, a.permission_mode, wt,
                   "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
             if created:
                 # Only now, so the worktree is never empty when the agent starts: an empty worktree may refuse the
                 # spawn and strand the name. A Setup tab that never finished stays, to read.
-                close_startup_shell(wt)
-                if setup_done:
-                    close_setup_tab(wt)
+                close_startup_tabs(wt, before, setup_done)
                 jrun([ORCA, "terminal", "create", "--worktree", f"path:{wt}", "--json"])  # the owner's shell
         verify(repo, space, wt)
         print(f"summary: {project} · space {space} · broker 127.0.0.1:{record(repo).get('port')} · orca repo {repo_id}")

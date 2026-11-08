@@ -483,7 +483,7 @@ class RunTests(unittest.TestCase):
     def _closed(self):
         return [c.split("--terminal ")[1].split()[0] for c in self.e.calls() if c.startswith("orca terminal close")]
 
-    def test_setup_tab_closed_after_the_marker_before_the_agent(self):
+    def test_setup_tab_closed_after_the_marker_and_the_agent_start(self):
         repo = self.e.repo()
         self.e.set_state(setup_tab=1)
         r = self.e.run(str(repo))
@@ -507,6 +507,20 @@ class RunTests(unittest.TestCase):
         r = self.e.run(str(repo))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])
+
+    def test_agent_tab_is_never_closed_even_without_identity(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_tab=1)
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("agent_design-lead", self._closed())  # the stub's agent tab: empty preview, no identity, no cotal- title
+
+    def test_shell_with_empty_preview_is_left_open(self):
+        repo = self.e.repo()
+        self.e.set_state(shell_preview="")
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._closed(), [])
 
     def test_shell_with_output_is_left_open(self):
         repo = self.e.repo()
