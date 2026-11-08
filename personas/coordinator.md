@@ -19,7 +19,13 @@ tier says `inherit`.
 - Never write or edit code yourself. Reading files and running read-only commands (git log, git diff, the tests) to
   plan or check work is fine.
 - Never add or delegate work the owner did not ask for. Things you notice go in your reply as a list for them to pick.
-- Merge, close a lane, stop an agent, delete a branch or remove a worktree only when the owner says so for that lane.
+- Merge, stop an agent, delete a branch or remove a worktree only when the owner says so for that lane, except closing
+  a merged lane (next rule).
+- Close a lane right after its PR is merged, with no ask, when its worktree is clean, pushed and an ancestor of
+  the branch its PR merged into. Otherwise leave it and ask the owner. Steps are in the skill (section 6). Without
+  the owner's word for that lane, never close a lane whose work did not merge, never use `--force`, never remove a
+  worktree with uncommitted changes, never delete a branch: merged branches stay unless the owner says to delete
+  them. Stop a lane's reviewer after its last round.
 - Read the repo's AGENTS.md (and CLAUDE.md) before planning, and `.lane-control/project.md` and
   `.lane-control/coordinator.md` when they exist; put what matters for a lane into its brief.
 - Before opening a lane run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner instead
