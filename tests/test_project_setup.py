@@ -794,6 +794,93 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
         self.assertIn("--restricted", cmd)
 
+    # --- private files --------------------------------------------------------------------------------------
+    def private_repo(self):
+        r = self.repo
+        (r / ".gitignore").write_text("data/\nlocal.json\n.env\n.direnv/\n")
+        (r / ".env.example").write_text("A=1\n")
+        (r / "shot.png").write_text("private\n")
+        (r / ".env.local").write_text("S=1\n")  # untracked and not ignored
+        (r / "data").mkdir()
+        (r / "data" / "d.txt").write_text("x\n")
+        (r / "local.json").write_text("{}\n")
+        (r / ".env").write_text("S=1\n")
+        (r / ".direnv").mkdir()
+        (r / ".direnv" / "x").write_text("x\n")
+        git("add", ".gitignore", ".env.example", "shot.png", cwd=r)
+        git("commit", "-q", "-m", "files", cwd=r)
+        return r
+
+    def test_ignored_and_untracked_env_paths_are_denied_tracked_ones_are_not(self):
+        r = self.private_repo()
+        rules = load().private_rules(r)
+        for want in ("Read(/data/**)", "Read(/local.json)", "Read(/.env)", "Read(/.direnv/**)", "Read(/.env.local)"):
+            self.assertIn(want, rules)
+        self.assertNotIn("Read(/.env.example)", rules)
+        self.assertNotIn("Read(/shot.png)", rules)
+        self.assertIn("Read(/.git/**)", rules)
+        self.assertFalse(any(".lane-control" in x for x in rules), rules)
+
+    def test_private_flag_adds_tracked_files(self):
+        r = self.private_repo()
+        mod = load()
+        mod.PRIVATE_GLOBS[:] = ["shot*.png", "docs/private/**"]
+        try:
+            rules = mod.private_rules(r)
+        finally:
+            mod.PRIVATE_GLOBS[:] = []
+        self.assertIn("Read(/shot*.png)", rules)
+        self.assertIn("Read(/docs/private/**)", rules)
+
+    def test_deny_list_reaches_both_agents_and_the_prompt_stays_last(self):
+        self.private_repo()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.in_terminal("n", "--private", "shot.png")
+        adapter, reviewer = self.e.agent_runs()
+        for run in (adapter, reviewer):
+            argv = run["argv"]
+            denied = argv[argv.index("--disallowedTools") + 1:argv.index("--permission-mode")]
+            self.assertIn("Read(/data/**)", denied)
+            self.assertIn("Read(/shot.png)", denied)
+            self.assertNotIn("Read(/.env.example)", denied)
+            self.assertNotIn("Read(**/.env*)", denied)
+            self.assertEqual(argv[-1], run["prompt"])
+            self.assertIn("--restricted", argv)
+
+    def test_denied_names_are_never_committed(self):
+        self.private_repo()
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal("y", "--private", "shot.png")[0], 0)
+        shown = git("show", "--format=", "-p", "HEAD", cwd=self.repo)
+        self.assertNotIn("Read(", shown)
+        self.assertNotIn("d.txt", shown)
+        self.assertNotIn("--disallowedTools", shown)
+
+    def test_a_name_a_rule_cannot_carry_stops_setup(self):
+        r = self.private_repo()
+        (r / ".gitignore").write_text("data/\nodd(1).txt\n")
+        (r / "odd(1).txt").write_text("x\n")
+        git("add", ".gitignore", cwd=r)
+        git("commit", "-q", "-m", "odd", cwd=r)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("cannot carry", r.stderr)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_bad_private_globs_are_refused(self):
+        self.e.script_agents()
+        for bad in ("/etc/x", "../x", "~/x", "a(b)"):
+            with self.subTest(bad=bad):
+                r = self.e.run(str(self.repo), "--private", bad, adapt=True)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn("--private", r.stderr)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_rule_free_agent_cmd_has_no_deny_flag(self):
+        cmd = load().agent_cmd("sonnet", "PROMPT", write=False)
+        self.assertNotIn("--disallowedTools", cmd)
+
     def test_agents_have_a_hard_turn_cap(self):
         mod = load()
         for write in (True, False):

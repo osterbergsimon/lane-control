@@ -128,7 +128,8 @@ composer. [tested]
 ```bash
 scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
-  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-design-lead] [--trust-folder] [--no-start]
+  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml] [--no-design-lead] [--trust-folder] [--no-start] \
+  [--private GLOB]...
 ```
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
@@ -165,6 +166,14 @@ It does each step only if it is not already done, so a re-run prints `exists` fo
 9. Verifies that the agents are live and that the design lead's task is nested.
 
 With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
+
+**Private files during onboarding.** The adapting agent and its reviewer are denied, by name, the `.git` folder, every git-ignored path
+(found at launch with `git ls-files -o -i --exclude-standard --directory`), every `.env*` file git does not track, and
+each `--private <glob>` (repeatable; a tracked file or folder that is still private, relative to the repo root, e.g.
+`--private 'shot*.png'`). Tracked files stay readable, `.env.example` included. The rules cover Read, Glob and Grep, and
+the file tools stay inside the repo, so a symlink pointing out of it is refused. The list exists only in the agents'
+command line, never in a file. An untracked, not-ignored file that is private needs `--private` or an ignore line.
+A name with `( ) * ? [ ] { } \` or a newline cannot be put in a rule: setup stops and names it.
 
 ### Refresh: after lane-control's personas, skill or tier defaults change
 ```bash
