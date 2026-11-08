@@ -345,6 +345,31 @@ class RunTests(unittest.TestCase):
         self.assertEqual(d["envRefs"].get("HTTPS_PROXY"), "HTTPS_PROXY")
         self.assertNotIn("http_proxy", d["envRefs"])  # only names set in the caller's env
 
+    def test_mgr_passes_opencode_key_by_name_only(self):
+        repo = self.e.repo()
+        self.e.env["OPENCODE_API_KEY"] = "sentinel-key-value"
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = (repo / ".cotal" / "mgr-service.json").read_text()
+        self.assertEqual(json.loads(text)["envRefs"].get("OPENCODE_API_KEY"), "OPENCODE_API_KEY")
+        self.assertNotIn("sentinel-key-value", text)
+        self.assertNotIn("sentinel-key-value", r.stdout + r.stderr)
+        self.assertNotIn("OPENCODE_API_KEY is not set", r.stderr)
+
+    def test_paid_opencode_tier_without_key_warns(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--name", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stderr, r"swift.*opencode/deepseek-v4\.1-flash.*OPENCODE_API_KEY is not set")
+
+    def test_free_opencode_tier_without_key_is_quiet(self):
+        repo = self.e.repo()
+        tiers = self.e.home / "free-lanes.tsv"
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x-free\t-\n")
+        r = self.e.run(str(repo), "--name", "Shop", "--tiers", str(tiers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("OPENCODE_API_KEY is not set", r.stderr)
+
     def test_opencode_coordinator(self):
         repo = self.e.repo()
         r = self.e.run(str(repo), "--coordinator", "opencode/opencode/deepseek-v4.1-flash")
