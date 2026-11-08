@@ -57,10 +57,11 @@ class Env:
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
 
-    def run(self, *args, adapt=False):
+    def run(self, *args, adapt=False, env_extra=None):
         """adapt False: only today's Orca setup steps; True: the onboarding flow in front of them too."""
         args = [*args, *([] if adapt else ["--skip-adapt"])]
-        return subprocess.run([sys.executable, str(SCRIPT), *args], env=self.env, capture_output=True, text=True)
+        return subprocess.run([sys.executable, str(SCRIPT), *args], env={**self.env, **(env_extra or {})},
+                              capture_output=True, text=True)
 
     def script_agents(self, **steps):
         """Replace the harness binaries with the agent stub; steps: {model: [step, ...]}, see tests/stubs/fake_agent.py."""
@@ -375,6 +376,15 @@ class OnboardingTests(unittest.TestCase):
         self.e.set_state(agent_steps={"opus": [{"write": {ADAPTED_FILE: "y\n"}}], "sonnet": [PASS]})
         self.assertNotIn("Old question", self.in_terminal("n", "--readapt")[1])
 
+    def test_suggestion_only_readapt_shows_them(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        self.e.set_state(agent_steps={"opus": [{"write": {".lane-control/SUGGESTIONS.md": "Only a question\n"}}]})
+        status, out, _ = self.in_terminal("y", "--readapt")
+        self.assertEqual(status, 0)
+        self.assertIn("Only a question", out)
+        self.assertEqual(out.count("Only a question"), 1)
+
     def test_suggestions_are_shown_again_on_a_rerun(self):
         write = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "Do y.\n"}}
         self.e.script_agents(opus=[write], sonnet=[PASS])
@@ -657,6 +667,53 @@ class OnboardingTests(unittest.TestCase):
         self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n", ".gitignore": "b\na\n.cotal/\n"}}], sonnet=[PASS])
         self.assertEqual(self.in_terminal("y")[0], 1)
         self.assertEqual(self.models(), ["opus"])
+
+    def _yes_after(self, change):
+        """The owner answers yes, but `change` happens while the question waits. Returns (status, stderr)."""
+        m = load()
+        err = io.StringIO()
+
+        def answer(_):
+            change()
+            return "y"
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", side_effect=answer), contextlib.redirect_stdout(Tty()), \
+                contextlib.redirect_stderr(err):
+            return m.main([str(self.repo)]), err.getvalue()
+
+    def test_owners_other_work_at_the_prompt_does_not_cost_the_yes(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        status, err = self._yes_after(lambda: (self.repo / "notes.txt").write_text("mine"))
+        self.assertEqual(status, 0, err)
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertIn("?? notes.txt", git("status", "--porcelain", cwd=self.repo))
+
+    def test_agents_md_edited_at_the_prompt_stops_the_commit(self):
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        f = self.repo / "AGENTS.md"
+        status, err = self._yes_after(lambda: f.write_text(f.read_text() + "the owner's line\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("AGENTS.md has uncommitted changes", err)
+        self.assertNotIn("agent", err.replace("AGENTS.md", ""))
+        self.assertEqual(self.head_count(), 1)
+
+    def test_change_during_an_agent_run_does_not_claim_who_made_it(self):
+        self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n", "src/app.py": "oops\n"}}])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("src/app.py", r.stderr)
+        self.assertNotIn("an agent changed", r.stderr)
+
+    def test_gitignore_rewritten_by_an_earlier_setup_says_so(self):
+        (self.repo / ".gitignore").write_bytes(b"a\r\nb\r\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "ignore", cwd=self.repo)
+        (self.repo / ".gitignore").write_bytes(b"a\nb\n.cotal/\n")
+        self.e.script_agents(opus=[WRITE], sonnet=[PASS])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("earlier project-setup may have rewritten its line endings", r.stderr)
+        self.assertEqual(self.e.agent_runs(), [])
 
     def test_agent_committing_is_refused(self):
         self.e.script_agents(opus=[{"write": {ADAPTED_FILE: "x\n"}, "commit": "sneaky"}], sonnet=[PASS])
@@ -1053,9 +1110,64 @@ class RunTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("setup design-lead: done", r.stdout)
         self.assertLess(r.stdout.index("setup design-lead: done"), r.stdout.index("agent design-lead"))
-        # the Setup tab stays
+
+    def _closed(self):
+        return [c.split("--terminal ")[1].split()[0] for c in self.e.calls() if c.startswith("orca terminal close")]
+
+    def test_setup_tab_closed_after_the_marker_and_the_agent_start(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_tab=1)
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.e.calls()
-        self.assertFalse(any("terminal close" in c and "term_1 " in c + " " for c in calls))
+        self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])  # the Setup tab and the plain shell
+        i_close = min(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
+        i_spawn = next(i for i, c in enumerate(calls) if c.startswith("cotal spawn") and "design-lead" in c)
+        self.assertLess(i_spawn, i_close)  # never an empty worktree when the agent starts
+
+    def test_setup_tab_found_by_runner_title_too(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_tab="runner")
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])
+
+    def test_startup_shell_closed_whatever_its_prompt_looks_like(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_tab=1, shell_preview="app on \ue0a0 main \u276f")
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])
+
+    def test_agent_tab_is_never_closed_even_without_identity(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_tab=1)
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("agent_design-lead", self._closed())  # the stub's agent tab: empty preview, no identity, no cotal- title
+
+    def test_shell_with_empty_preview_is_left_open(self):
+        repo = self.e.repo()
+        self.e.set_state(shell_preview="")
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._closed(), [])
+
+    def test_shell_with_output_is_left_open(self):
+        repo = self.e.repo()
+        self.e.set_state(shell_preview="make test\nrunning...\n\u276f")
+        r = self.e.run(str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._closed(), [])
+
+    def test_running_setup_tab_is_kept_when_the_marker_never_appears(self):
+        repo = self.e.repo()
+        self.e.set_state(setup_tab="runner", setup_never_done=1)
+        r = self.e.run(str(repo), env_extra={"LANE_SETUP_TIMEOUT": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("setup design-lead: timeout", r.stdout)
+        # the startup shell step must not close the running setup script, and nothing closes it after the timeout
+        self.assertEqual(self._closed(), ["term_2"])
 
     def test_reviewer_persona_rendered(self):
         repo = self.e.repo()
@@ -1069,7 +1181,8 @@ class RunTests(unittest.TestCase):
         self.assertIn(str(repo / ".cotal" / "agents" / "reviewer.md"), coord)
 
     def test_design_lead_tab_comes_before_the_shell(self):
-        # Orca opens a shell in a new worktree; the agent tab should be first, a fresh shell second.
+        # Orca opens a shell in a new worktree; it is closed only after the agent started (an empty worktree may
+        # refuse the spawn), and a fresh shell for the owner comes last.
         repo = self.e.repo()
         r = self.e.run(str(repo))
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1077,8 +1190,8 @@ class RunTests(unittest.TestCase):
         i_close = next(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
         i_spawn = next(i for i, c in enumerate(calls) if c.startswith("cotal spawn") and "design-lead" in c)
         i_create = next(i for i, c in enumerate(calls) if c.startswith("orca terminal create"))
-        self.assertLess(i_close, i_spawn)
-        self.assertLess(i_spawn, i_create)
+        self.assertLess(i_spawn, i_close)
+        self.assertLess(i_close, i_create)
         self.assertIn("--terminal term_1", calls[i_close])
         self.assertIn("design-lead", calls[i_create])
 
