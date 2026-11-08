@@ -1842,6 +1842,13 @@ class RefreshTests(unittest.TestCase):
     def persona(self, name="coordinator"):
         return self.repo / ".cotal" / "agents" / f"{name}.md"
 
+    def forget_mode(self):
+        """A project whose personas are the only record of its mode (the store holds none)."""
+        f = self.e.store(self.repo) / "settings.json"
+        st = json.loads(f.read_text())
+        st.pop("permission_mode")
+        f.write_text(json.dumps(st))
+
     def test_refresh_reinstalls_the_machine_tools(self):
         self.setup_project()
         tool = self.e.home / ".agents" / "bin" / "lane-heavy"
@@ -1953,6 +1960,7 @@ class RefreshTests(unittest.TestCase):
         rv = self.persona("reviewer")
         rv.write_text(rv.read_text().replace('"permission-mode": "auto"', '"permission-mode": "default"'))
         (self.repo / ".cotal" / "agents" / "zz-extra.md").write_text('"permission-mode": "bypassPermissions"\n')
+        self.forget_mode()
         self.refresh()
         self.assertIn('"permission-mode": "default"', rv.read_text())
         self.assertIn('"permission-mode": "auto"', self.persona().read_text())
@@ -2062,6 +2070,7 @@ class RefreshTests(unittest.TestCase):
             text = self.persona(name).read_text()
             text = re.sub(r'"permission-mode": "\w+"', '"x": "y"', text)
             self.persona(name).write_text(re.sub(r"permission mode is `\w+`", "mode", text))
+        self.forget_mode()
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("permission-mode: unknown", r.stdout)
