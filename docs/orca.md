@@ -240,8 +240,16 @@ seat's own log and database): a hosted seat launched through the wrapper, its `o
 and it joined the mesh from inside the sandbox. On a free model, its kickoff and a live DM reached the model, the turns
 succeeded, and its `cotal_status` and `cotal_dm` tools completed over the broker [tested]. Not proven: an outside reader
 receiving what the seat sent. `cotal_dm` reported it sent to a CLI sender with no roster row, and `cotal status <seat>`
-showed no activity for the status writes, so that command proves nothing here either way. Treat the first `required`
-lane as the test of that: its report DM to the coordinator is the missing observation.
+showed no activity for the status writes, so that command proves nothing here either way. The owner accepts the first
+real `required` lane, watched by the coordinator, as the test that its outbound messages arrive: its report DM is the
+missing observation.
+
+Host ports: a lane can reach no host port except the broker, unless the project lists one. Lanes may need the UI or API
+of a running container, so a project can list specific ports in
+`~/.config/lane-control/projects/<main checkout's folder name>/sandbox-ports`, one per line (`#` comments allowed). Only
+those are forwarded to the lane's loopback, the same way as the broker. It is closed by default, takes ports only, never
+address ranges, and a malformed entry stops the launch. List only test or dev containers, never anything holding real
+data. It applies to every sandbox lane of the project, Rove ones too.
 
 Limits: static-auth meshes with one broker on host loopback only; a user-auth mesh or remote broker is refused. Marking
 a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`) `none` or

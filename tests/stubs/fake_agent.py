@@ -4,7 +4,7 @@
 Invoked through a symlink named claude. Appends `<tool> -p --model <model>` to $STUB_LOG and one JSON line
 (tool, argv, prompt, the files in .lane-control) to $STUB_LOG.agents. Each call takes the next step queued for its model
 of $STUB_STATE (key agent_steps): {"write": {path: text}, "commit": message, "say": stdout text,
-"exit": code}.
+"err": stderr text, "exit": code}.
 """
 import json
 import os
@@ -30,5 +30,7 @@ for path, text in step.get("write", {}).items():
     Path(path).write_text(text)
 if "commit" in step:
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", step["commit"]], check=True)
+if "err" in step:
+    print(step["err"], file=sys.stderr)
 print(step.get("say", ""))
 sys.exit(step.get("exit", 0))

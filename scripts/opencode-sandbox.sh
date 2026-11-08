@@ -72,6 +72,9 @@
 #               sockets (X11), every private, link-local and multicast address (the LAN, the router, container bridges), and
 #               every global address of this host are refused by an nftables rule set in the namespace before bwrap, which
 #               the lane has no capability to change. DNS goes to a fixed address that pasta forwards to the host's resolver.
+#               Host ports the project lists, and only those, are forwarded to the lane's loopback, as the broker is: one
+#               port per line in ~/.config/lane-control/projects/<main checkout's folder name>/sandbox-ports. Ports only, closed
+#               by default; list only test or dev containers, never anything holding real data.
 #   processes   own pid namespace (no /proc of other processes), own session, dies with its parent,
 #               one systemd scope (MemoryMax, no swap) around all of it
 # A Cotal seat (OPENCODE_SANDBOX_SEAT=1) is the same sandbox with exactly this added, because the model must work under
@@ -285,6 +288,20 @@ if [ -n "$seat" ]; then
     done <<<"$d"
   }
   seat_plugins=$(seat_plugin) || exit 2
+fi
+
+# the project's allowed host ports: read here, outside; a lane cannot reach the file or set the path
+ports_file=${XDG_CONFIG_HOME:-$HOME/.config}/lane-control/projects/$(basename "$(dirname "$common")")/sandbox-ports
+extra_ports=""
+if [ -e "$ports_file" ]; then
+  [ -f "$ports_file" ] && [ -r "$ports_file" ] || die "$ports_file is not a readable file"
+  while IFS= read -r l || [ -n "$l" ]; do
+    l=${l%%#*}; l=${l#"${l%%[![:space:]]*}"}; l=${l%"${l##*[![:space:]]}"}
+    [ -n "$l" ] || continue
+    [[ $l =~ ^[1-9][0-9]{0,4}$ ]] && [ "$l" -le 65535 ] || die "$ports_file: '$l' is not a port number (one port per line, 1-65535; ports only, never a range or address)"
+    case ",$extra_ports," in *",$l,"*) ;; *) extra_ports=${extra_ports:+$extra_ports,}$l ;; esac
+  done <"$ports_file"
+  [ -z "$extra_ports" ] || echo "opencode-sandbox: forwarding host ports from $ports_file: $extra_ports" >&2
 fi
 
 # --- lane-private git dir: the shared repo's refs, config and hooks stay out of reach ---
@@ -611,7 +628,7 @@ if [ -n "$seat" ]; then
   # the connector's variables by name: no other COTAL_* setting (feedback keys, the operator's) comes in
   for v in COTAL_NAME COTAL_ROLE COTAL_SPACE COTAL_ID COTAL_KIND COTAL_LIFECYCLE_UID COTAL_ACCEPTED_TOKEN COTAL_SUBSCRIBE \
            COTAL_ALLOW_SUBSCRIBE COTAL_ALLOW_PUBLISH COTAL_CAPABILITIES COTAL_QUIET COTAL_MUTED COTAL_MODEL COTAL_VARIANT \
-           COTAL_MANAGER_INSTANCE COTAL_BACKFILL_FLOOR COTAL_ENVIRONMENT COTAL_EVENTS COTAL_OPENCODE_PROMPT \
+           COTAL_MANAGER_INSTANCE COTAL_BACKFILL_FLOOR COTAL_ENVIRONMENT COTAL_OPENCODE_PROMPT \
            COTAL_OPENCODE_SERVER_URL COTAL_OPENCODE_LINE COTAL_CONTROL_SOCKET \
            OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD; do
     [ -z "${!v:-}" ] || setenv "$v" "${!v}"
@@ -720,8 +737,8 @@ unit="opencode-sandbox-$$-$(date +%s)"
 setsid -f bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 5; done; systemctl --user stop "$2.scope" 2>/dev/null
   [ -z "$3" ] || rm -rf -- "$3"' \
   _ "$$" "$unit" "$seatdir" </dev/null >/dev/null 2>&1
-net=(-t none -T none)
-[ -z "$seat" ] || net=(-t "127.0.0.1/$sport" -T "$bport")
+net=(-t none -T "${extra_ports:-none}")
+[ -z "$seat" ] || net=(-t "127.0.0.1/$sport" -T "$bport${extra_ports:+,$extra_ports}")
 # outbound rules for the namespace; bwrap then runs without any capability, so the lane cannot change them
 { printf 'table inet lane_out {\nchain out {\ntype filter hook output priority 0; policy accept;\n'
   echo 'oifname "lo" accept'

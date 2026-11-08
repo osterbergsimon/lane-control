@@ -870,7 +870,31 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(list((clone / "lib").iterdir()), [])
         self.assertIn("Read(/.git/**)", load().private_rules(clone))
 
+    def test_files_in_a_submodule_folder_without_its_git_are_denied_as_a_whole(self):
+        r = self.private_repo()
+        sub = self.e.home / "subsrc3"
+        sub.mkdir()
+        git("init", "-q", "-b", "main", cwd=sub)
+        (sub / "a.txt").write_text("a\n")
+        git("add", ".", cwd=sub)
+        git("commit", "-q", "-m", "s", cwd=sub)
+        git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "lib", cwd=r)
+        git("commit", "-q", "-m", "sm", cwd=r)
+        clone = self.e.home / "clone3"
+        git("clone", "-q", str(r), str(clone), cwd=self.e.home)
+        self.assertEqual(list((clone / "lib").iterdir()), [])
+        self.assertNotIn("Read(/lib/**)", load().private_rules(clone))  # really empty: nothing to deny
+        (clone / "lib" / ".env").write_text("SENTINEL\n")
+        self.assertIn("Read(/lib/**)", load().private_rules(clone))
+
     def test_failure_message_shows_the_agents_last_line(self):
+        self.e.script_agents(sonnet=[{"say": "stdout noise", "err": "the real reason", "exit": 1}])
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the real reason", r.stderr)
+        self.assertNotIn("stdout noise", r.stderr)
+
+    def test_failure_message_falls_back_to_stdout(self):
         self.e.script_agents(sonnet=[{"say": "stdout noise", "exit": 1}])
         r = self.e.run(str(self.repo), adapt=True)
         self.assertEqual(r.returncode, 1)

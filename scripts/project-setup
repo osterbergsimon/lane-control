@@ -1251,8 +1251,10 @@ def repo_private_names(repo: Path, prefix: str, depth: int = 0) -> list:
     if nested and depth >= NESTED_DEPTH:
         raise Fail(f"repos nested more than {NESTED_DEPTH} deep: their private files cannot all be denied")
     for sub in nested:
-        if (repo / sub / ".git").exists():  # an unpopulated submodule is an empty folder: nothing in it to deny
+        if (repo / sub / ".git").exists():
             out += repo_private_names(repo / sub, f"{prefix}{sub}/", depth + 1)
+        elif any((repo / sub).iterdir()):  # files in a gitlink without its .git: git does not list them, so deny them all
+            out.append(f"{prefix}{sub}/")
     return out
 
 
