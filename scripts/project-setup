@@ -452,6 +452,21 @@ def sandbox_note(tier_text: str):
               "launch wrapper, so that work goes one tier up or to Rove (docs/orca.md).", file=sys.stderr, flush=True)
 
 
+def table_rows(text: str, drop_sandbox: bool = False) -> list:
+    """The cells of a tier table's header and rows, without comments or blank lines."""
+    rows = [l.split("\t") for l in text.splitlines() if l.strip() and not l.startswith("#")]
+    if drop_sandbox and rows and "sandbox" in rows[0]:
+        i = rows[0].index("sandbox")
+        rows = [r[:i] + r[i + 1:] for r in rows]
+    return rows
+
+
+def is_older_default_table(text: str, default_text: str) -> bool:
+    """An unedited table from before the sandbox column: the defaults, minus that column and its comment."""
+    rows = table_rows(text)
+    return bool(rows) and "sandbox" not in rows[0] and rows == table_rows(default_text, drop_sandbox=True)
+
+
 def answered_table(default_text: str, was: dict) -> str:
     """The default table with the answer in a project's record (no recorded answer: the defaults)."""
     return tiers_for_answer(default_text, was["opencode"], was.get("opencode_model", "")) \
@@ -553,9 +568,11 @@ def choose_tiers(repo: Path, a, default_table: Path) -> str:
             return default_text
         if not a.opencode and table.exists():
             return table.read_text()
-        if a.opencode and table.exists() and table.read_text() != answered_table(default_text, record(repo)):
-            raise Fail(f"{table} has edits of its own, and --opencode would replace them with the defaults. Edit that "
-                       "file instead, or delete it first to start again from the defaults")
+        if a.opencode and table.exists():
+            current = table.read_text()
+            if current != answered_table(default_text, record(repo)) and not is_older_default_table(current, default_text):
+                raise Fail(f"{table} differs from the current defaults, and --opencode would replace it with them. Edit "
+                           "that file instead, or delete it first to start again from the defaults")
     except (OSError, UnicodeDecodeError) as e:
         raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
     if a.opencode:

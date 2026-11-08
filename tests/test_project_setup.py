@@ -2091,7 +2091,25 @@ class OpencodeChoiceTests(unittest.TestCase):
         self.table.write_text(edited)
         r = self.e.run(str(self.repo), "--opencode", "none")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("edits of its own", r.stderr)
+        self.assertIn("differs from the current defaults", r.stderr)
+        self.assertEqual(self.table.read_text(), edited)
+
+    def test_opencode_flag_takes_an_unedited_table_from_before_the_sandbox_column(self):
+        self.assertEqual(self.e.run(str(self.repo), "--opencode", "hosted").returncode, 0)
+        rows = [l.split("\t")[:-1] for l in self.table.read_text().splitlines() if l and not l.startswith("#")]
+        self.table.write_text("# an older comment\n" + "\n".join("\t".join(r) for r in rows) + "\n")
+        self.assertEqual(self.e.run(str(self.repo), "--opencode", "none").returncode, 0)
+        self.assertEqual(self.row(), "swift\tnone\t-\t-\tnone")
+
+    def test_opencode_flag_still_refuses_an_edited_table_without_the_column(self):
+        self.assertEqual(self.e.run(str(self.repo), "--opencode", "hosted").returncode, 0)
+        rows = [l.split("\t")[:-1] for l in self.table.read_text().splitlines() if l and not l.startswith("#")]
+        rows[1][2] = "opencode/another"
+        edited = "\n".join("\t".join(r) for r in rows) + "\n"
+        self.table.write_text(edited)
+        r = self.e.run(str(self.repo), "--opencode", "none")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("differs from the current defaults", r.stderr)
         self.assertEqual(self.table.read_text(), edited)
 
     def test_opencode_flag_can_change_an_unedited_answer(self):
