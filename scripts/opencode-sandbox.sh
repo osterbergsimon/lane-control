@@ -68,8 +68,10 @@
 #   absent      everything else: the rest of $HOME (private data, other worktrees, the main checkout,
 #               ~/.rove, ~/.config/gh, ~/.ssh, other projects' caches, beads), /run (user bus, rove.sock,
 #               Claude sockets, docker.sock, nix daemon), the shared repo's refs, config and hooks
-#   network     own namespace through pasta: the internet only; host loopback ports (rove, sccache,
-#               dev servers), abstract sockets (X11) and the host through the gateway are unreachable
+#   network     own namespace through pasta: the internet only. Host loopback ports (rove, sccache, dev servers), abstract
+#               sockets (X11), every private, link-local and multicast address (the LAN, the router, container bridges), and
+#               every global address of this host are refused by an nftables rule set in the namespace before bwrap, which
+#               the lane has no capability to change. DNS goes to a fixed address that pasta forwards to the host's resolver.
 #   processes   own pid namespace (no /proc of other processes), own session, dies with its parent,
 #               one systemd scope (MemoryMax, no swap) around all of it
 # A Cotal seat (OPENCODE_SANDBOX_SEAT=1) is the same sandbox with exactly this added, because the model must work under
@@ -120,7 +122,9 @@ nixpkg() { # the first output path; read whole (a pipe into head -n 1 can break 
 bwrap=$(nixpkg bubblewrap)/bin/bwrap
 pasta=$(nixpkg passt)/bin/pasta
 curl=$(nixpkg curl)/bin/curl
-[ -x "$bwrap" ] && [ -x "$pasta" ] && [ -x "$curl" ] || die "no bwrap/pasta/curl from nixpkgs"
+nft=$(nixpkg nftables)/bin/nft
+ipcmd=$(nixpkg iproute2)/bin/ip
+[ -x "$bwrap" ] && [ -x "$pasta" ] && [ -x "$curl" ] && [ -x "$nft" ] && [ -x "$ipcmd" ] || die "no bwrap/pasta/curl/nft/ip from nixpkgs"
 seat=${OPENCODE_SANDBOX_SEAT:-}
 case "$seat" in ""|1) ;; *) die "OPENCODE_SANDBOX_SEAT must be 1 or unset" ;; esac
 free=${OPENCODE_SANDBOX_PROOF_FREE:-}
@@ -260,9 +264,13 @@ if [ -n "$seat" ]; then
   bport=${BASH_REMATCH[1]}
   creds=$("$jq" -er '.creds | strings | select(length > 0)' "$mat" 2>/dev/null) || die "no credential path in the launch material"
   [ -r "$creds" ] || die "cannot read the seat's credential"
-  mkdir -p -- "$lane/seat/$name" "$lane/oc/db/$name"
-  seatdir=$lane/seat/$name
-  chmod 700 -- "$lane/seat" "$seatdir"
+  # one directory per launch: the watchdog of a seat that just ended must not take the files of its restart
+  seatdir=$lane/seat/$name/$$
+  mkdir -p -- "$seatdir" "$lane/oc/db/$name"
+  chmod 700 -- "$lane/seat" "$lane/seat/$name" "$seatdir"
+  for d in "$lane/seat/$name"/*; do   # left by a launcher and watchdog that were both killed
+    [ -d "$d" ] && [ "$d" != "$seatdir" ] && ! kill -0 "${d##*/}" 2>/dev/null && rm -rf -- "$d"
+  done
   (umask 077
    cp -- "$creds" "$seatdir/creds.new" && chmod 600 -- "$seatdir/creds.new" && mv -f -- "$seatdir/creds.new" "$seatdir/creds"
    "$jq" -c '.creds = "/run/sandbox/seat/creds"' "$mat" >"$seatdir/material.json"
@@ -532,7 +540,7 @@ relay() { # $1 = the launcher's pid
 args=(--tmpfs / --dev /dev --proc /proc --tmpfs /tmp --perms 0700 --dir "$HOME"
       --ro-bind /nix/store /nix/store
       --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
-      --die-with-parent)
+      --cap-drop ALL --die-with-parent)
 # --new-session (setsid) blocks TIOCSTI input injection into the terminal, but it also detaches the
 # TUI from its tty (no SIGWINCH: garbled in Rove's terminal). Keep it only where TIOCSTI still works.
 [ "$(cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || echo 1)" = 0 ] || args+=(--new-session)
@@ -544,7 +552,9 @@ for p in /etc/static /etc/ssl /etc/passwd /etc/group /etc/hosts /etc/nsswitch.co
 done
 resolv=$(readlink -f /etc/resolv.conf)
 ! grep -qE '^nameserver +(127\.|::1)' "$resolv" || die "/etc/resolv.conf names a loopback resolver (unreachable from the lane)"
-ro "$resolv" /etc/resolv.conf
+dnsaddr=198.51.100.53  # a documentation address: only pasta answers it, by forwarding DNS to the host's resolver
+printf 'nameserver %s\n' "$dnsaddr" >"$lane/resolv.conf"
+ro "$lane/resolv.conf" /etc/resolv.conf
 [ ! -L "$HOME/.nix-profile" ] || args+=(--symlink "$(readlink -f "$HOME/.nix-profile")" "$HOME/.nix-profile")
 
 # opencode: its binary, the global config file and the Rove badge plugin only (read-only; the rest
@@ -708,12 +718,21 @@ rc=0
 # session stops the named scope as soon as this launcher is gone.
 unit="opencode-sandbox-$$-$(date +%s)"
 setsid -f bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 5; done; systemctl --user stop "$2.scope" 2>/dev/null
-  [ -z "$3" ] || rm -f -- "$3/creds" "$3/creds.new" "$3/material.json" "$3/agent-file"' \
+  [ -z "$3" ] || rm -rf -- "$3"' \
   _ "$$" "$unit" "$seatdir" </dev/null >/dev/null 2>&1
 net=(-t none -T none)
 [ -z "$seat" ] || net=(-t "127.0.0.1/$sport" -T "$bport")
+# outbound rules for the namespace; bwrap then runs without any capability, so the lane cannot change them
+{ printf 'table inet lane_out {\nchain out {\ntype filter hook output priority 0; policy accept;\n'
+  echo 'oifname "lo" accept'
+  echo 'ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } reject'
+  echo 'ip6 daddr { ::/128, fc00::/7, fe80::/10, ff00::/8 } reject'
+  "$ipcmd" -o -4 addr show scope global | awk '{ sub(/\/.*/, "", $4); print "ip daddr " $4 " reject" }'
+  "$ipcmd" -o -6 addr show scope global | awk '{ sub(/\/.*/, "", $4); print "ip6 daddr " $4 " reject" }'
+  printf '}\n}\n'; } >"$lane/net.nft"
 systemd-run --user --scope -q --expand-environment=no --unit="$unit" \
   -p MemoryMax="${OPENCODE_SANDBOX_MEM:-4G}" -p MemorySwapMax=0 -- \
-  "$pasta" --config-net -q "${net[@]}" -U none -u none --no-map-gw -- \
-  "$bwrap" "${args[@]}" -- "${cmd[@]}" || rc=$?
+  "$pasta" --config-net -q "${net[@]}" -U none -u none --no-map-gw --dns-forward "$dnsaddr" -- \
+  /bin/sh -c '"$1" -f "$2" || { echo "opencode-sandbox: could not set the network rules; not starting" >&2; exit 99; }
+    shift 2; exec "$@"' sh "$nft" "$lane/net.nft" "$bwrap" "${args[@]}" -- "${cmd[@]}" || rc=$?
 exit "$rc"

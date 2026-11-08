@@ -2136,6 +2136,21 @@ class SeatWrapperTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertEqual(self.ran(), "")
 
+    def test_an_agent_on_another_model_is_refused_even_for_an_own_model(self):
+        (self.home / ".cotal" / "lane-control.json").write_text('{"own_models":["gateway/mine"]}')
+        for config in ({"model": "gateway/mine", "default_agent": "cotal", "agent": {"cotal": {"model": "opencode/deepseek-v4.1-flash"}}},
+                       {"model": "gateway/mine", "agent": {"other": {"model": "gateway/not-mine"}}}):
+            r = self.seat(*self.SERVE, config=json.dumps(config))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("another model", r.stderr)
+            self.assertEqual(self.ran(), "")
+
+    def test_an_agent_on_the_checked_model_runs(self):
+        (self.home / ".cotal" / "lane-control.json").write_text('{"own_models":["gateway/mine"]}')
+        config = {"model": "gateway/mine", "default_agent": "cotal", "agent": {"cotal": {"model": "gateway/mine", "mode": "primary"}}}
+        self.assertEqual(self.seat(*self.SERVE, config=json.dumps(config)).returncode, 0)
+        self.assertRegex(self.ran(), r"^opencode serve")
+
     def test_no_or_broken_config_is_refused_and_nothing_runs(self):
         for config in (None, "not json", "{}"):
             r = self.seat(*self.SERVE, config=config)

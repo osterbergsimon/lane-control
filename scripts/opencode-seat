@@ -39,6 +39,9 @@ esac
 
 model=$(printf '%s' "${OPENCODE_CONFIG_CONTENT:-}" | jq -r '.model // empty' 2>/dev/null) || model=""
 [ -n "$model" ] || die "no model pinned for this seat (spawn with an explicit model): it could fall back to a hosted one"
+# Cotal runs the seat on its agent's model, and launchOptions can change that one: only the checked model may be named.
+printf '%s' "$OPENCODE_CONFIG_CONTENT" | jq -e --arg m "$model" '[(.agent // {}) | .. | objects | select(has("model")) | .model] | all(. == $m)' >/dev/null 2>&1 \
+  || die "an agent in this seat's config names another model than $model: not starting it"
 case $model in
   opencode/*|opencode-go/*) OPENCODE_SANDBOX_SEAT=1 exec "$here/opencode-sandbox.sh" "$@" ;;
 esac
