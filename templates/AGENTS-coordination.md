@@ -11,7 +11,7 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
 
 - **Routing** (common rules in `model-routing.md`, results in `lane-ledger.tsv`): correctness first, do
   not over-optimize on token cost. Tier by the paths a task touches, decided when the issue gets its
-  `<KEY_PREFIX>` key (`lane:deep|standard|swift`), highest tier wins, in doubt one tier up; budget limits
+  `<KEY_PREFIX>` key (deep, standard or swift), highest tier wins, in doubt one tier up; budget limits
   how many lanes run, never the tier. **Path map** (fill in):
   **deep** `<specs, parsers of untrusted input, security, data formats, fuzz targets>`; also any
   diagnosis, cross-cutting refactor, open design question or follow-up of a silent-loss finding.

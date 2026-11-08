@@ -36,7 +36,7 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 The Rove main task on the project's main checkout. It is the planning lane and the only gate to main.
 
 ### Jobs
-1. **Queue:** turn issues into ready-to-launch briefs (`templates/worker-brief.md`), assign a task key and a `lane:` tier from the path map, raise owner questions up front.
+1. **Queue:** turn issues into ready-to-launch briefs (`templates/worker-brief.md`), assign a task key and a tier (deep, standard or swift) from the path map, raise owner questions up front.
 2. **Launch:** one task per issue (`rove api add`, title and branch per AGENTS.md); respect the caps and allowance from the machine coordinator and the budget thresholds; the budget decides how many lanes, never the tier.
 3. **Handle every report** (the hook injects task state each turn): verify the claims, rerun the gates in every workspace, review by tier, decide, follow up, record the outcome on the issue.
 4. **Merge** on the owner's yes, or on a clean, fully evidenced gate when authorized. Then close the issue, delete the task, sync beads.

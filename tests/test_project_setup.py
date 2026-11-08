@@ -884,12 +884,16 @@ class RunTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("`bd` is not on PATH", r.stderr)
         bd = self.e.bin / "bd"
-        bd.write_text("#!/bin/sh\nexit 0\n")
+        bd.write_text("#!/bin/sh\n[ -d .beads ]\n")
         bd.chmod(0o755)
         r = self.e.run(str(repo), "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("has no .beads", r.stderr)
+        self.assertIn("no beads workspace", r.stderr)
         self.assertFalse((repo / ".beads").exists())
+        (repo / ".beads").mkdir()
+        r = self.e.run(str(repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("beads", r.stderr)
 
     def test_preflight_fails_when_harness_missing(self):
         repo = self.e.repo()
