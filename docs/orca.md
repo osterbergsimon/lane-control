@@ -224,6 +224,11 @@ The model can read the credential and use the mesh as its own identity, with the
 branch is the worktree's branch at its first launch, and the model is the one Cotal was asked for. The seat's database
 lives in the lane, so a resumed sandboxed seat keeps it only if the same worktree stays.
 
+What has been proven (Cotal 0.145.1, on a throwaway mesh with the wrapper first on the manager's PATH): a hosted seat
+launched through the wrapper, its `opencode serve` ran only under bubblewrap, on the pinned model's provider and the key
+file, and it joined the mesh from inside the sandbox [tested]. Not yet observed: a DM reaching the model, and the model
+acting on it over the mesh. A stored DM is not delivery. Treat the first `required` lane as a test until that is seen.
+
 Limits: static-auth meshes with one broker on host loopback only; a user-auth mesh or remote broker is refused. Marking
 a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`) `none` or
 `--own-model`.
