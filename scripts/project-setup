@@ -13,7 +13,9 @@ re-run reports `exists` for each.
 
 Before the Orca steps, a headless adapting agent writes the project's files into .lane-control/ and a reviewer on
 another model checks them. They are committed, by explicit path, only on the owner's yes in a terminal; on no, or
-without a terminal, they stay uncommitted, no Orca step runs and it exits 3. After that commit it asks once more, in a terminal: to commit a
+without a terminal, they stay uncommitted, no Orca step runs and it exits 3. The repo's visibility is read with gh
+(unknown when it cannot be); questions still open after the review are shown and may be answered before the file list
+(one more adapter run, not reviewed). After that commit it asks once more, in a terminal: to commit a
 drafted orca.yaml (from the lockfiles; Orca reads its setup script from the worktree) and to push the default branch,
 since Orca makes lane worktrees from origin/<branch>. A no, no terminal or a failed push commits and pushes nothing more
 and the agents still start. Nothing else is ever committed or pushed.
@@ -33,6 +35,7 @@ the store and a run without them reuses it; --show prints it. A project set up b
 once, automatically, and the run says what moved. Only the rendered personas stay in .cotal/agents/. No secret goes in.
 """
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -972,10 +975,41 @@ def setup_steps(repo: Path) -> list:
             tool = cmd.split()[0]
             line = cmd if str(rel) == "." else f"(cd {shlex.quote(str(rel))} && {cmd})"
             steps.append(f'{line} || echo "setup: {tool} in {rel} failed" >&2')
+    direnv = direnv_step(repo)
+    if direnv:
+        steps.insert(0, direnv)
     beads = repo / ".beads"
     if beads.is_symlink():
         steps.insert(0, f"[ -e .beads ] || ln -s {shlex.quote(os.readlink(beads))} .beads")
     return steps
+
+
+DIRENV_NOTED: set = set()  # repos whose "not approved" note was printed: a draft is built more than once per run
+
+
+def direnv_step(repo: Path):
+    """The setup line that approves a tracked .envrc in the new worktree (direnv approves per path, so a fresh worktree
+    opens with "is blocked"), only when direnv reports it allowed in this checkout: the owner approved it here. Guarded
+    so a machine without direnv is fine and a failure never stops the setup script. None, with a note, when .envrc is
+    tracked but not approved here; None, silently, when it is not tracked or direnv is not here."""
+    if subprocess.run(["git", "ls-files", "--error-unmatch", ".envrc"], cwd=repo, capture_output=True).returncode != 0:
+        return None
+    allowed = False
+    if shutil.which("direnv"):
+        try:
+            out = run(["direnv", "status"], cwd=repo, check=False, timeout=30, stdin=subprocess.DEVNULL).stdout
+        except Fail:
+            out = ""
+        m = re.search(r"Found RC allowed (\S+)", out)
+        allowed = bool(m) and m.group(1) in ("0", "true")
+    if allowed:
+        return ('if command -v direnv >/dev/null 2>&1; then direnv allow .envrc || '
+                'echo "setup: direnv allow failed" >&2; fi')
+    if str(repo) not in DIRENV_NOTED:
+        DIRENV_NOTED.add(str(repo))
+        say("setup-script", "no direnv line", ".envrc is tracked but direnv does not report it allowed in this checkout; "
+            "run `direnv allow` here and run again, or approve it in each worktree yourself")
+    return None
 
 
 def orca_yaml_tracked(repo: Path) -> bool:
@@ -1247,6 +1281,7 @@ SECTION_END = "<!-- lane-control:end -->"
 SECTION = (f"{SECTION_BEGIN}\n## lane-control\n\nThis project is run with lane-control. Its adapted files are in "
            f"`{ADAPTED}/`: read them before you start work.\n{SECTION_END}")
 MAX_FIX_ROUNDS = 2
+GH_TIMEOUT = 20  # seconds for the read-only visibility lookup
 AGENT_TIMEOUT = 1800  # seconds per headless agent run
 MAX_TURNS = {True: 80, False: 60}  # per headless agent run, by write: the adapter, then the reviewer
 DIFF_LIMIT = 60000  # bytes of diff in a prompt; one argument may hold at most 128 KiB
@@ -1254,7 +1289,7 @@ FINDINGS_LIMIT = 30000  # bytes of reviewer findings in a prompt
 STOPPED = 3  # exit status: the owner's answer is needed, and no Orca step ran
 READ_TOOLS = ("Read", "Glob", "Grep")
 TEMPLATES = HERE / "templates" / "adapt"
-PROMPTS = ("prompt.md", "review-prompt.md", "check-prompt.md")  # the prompts; every other file there is a template to adapt
+PROMPTS = ("prompt.md", "review-prompt.md", "check-prompt.md", "answers-prompt.md")  # the prompts; every other file there is a template to adapt
 ADAPT_RULES = f"""
 Rules for this run:
 - Write only inside {ADAPTED}/. Never edit AGENTS.md or anything else in the project.
@@ -1507,6 +1542,20 @@ def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
     return p.stdout
 
 
+def repo_visibility(repo: Path) -> str:
+    """public, private or internal, read from the git host with `gh repo view` (read-only); "unknown" when gh is
+    missing, not logged in, offline, slow or unclear. Never stops a run."""
+    if not shutil.which("gh"):
+        return "unknown"
+    try:
+        p = run(["gh", "repo", "view", "--json", "visibility", "-q", ".visibility"], cwd=repo, check=False,
+                timeout=GH_TIMEOUT, stdin=subprocess.DEVNULL)
+    except Fail:
+        return "unknown"
+    seen = p.stdout.strip().lower() if p.returncode == 0 else ""
+    return seen if seen in ("public", "private", "internal") else "unknown"
+
+
 def kept_suggestions(repo: Path) -> Path:
     """Where SUGGESTIONS.md waits for the owner: in the git dir, so it is neither reviewed nor committed."""
     return repo / run(["git", "rev-parse", "--git-path", "lane-control-suggestions.md"], cwd=repo).stdout.strip()
@@ -1530,17 +1579,16 @@ def forget_adapter(repo: Path) -> None:
 
 
 def adapt(repo: Path, who: tuple, prompt: str, before: dict):
-    """One run of the adapting agent. Its suggestions leave the repo before anything reviews the result; a fix round's
-    are added to the earlier ones. A run that gets to its end is recorded as finished (adapter_finished)."""
+    """One run of the adapting agent. Its suggestions leave the repo before anything reviews the result; a fix round
+    got the earlier list and writes it whole, so its file replaces the kept one (no file: the earlier list stays). A
+    run that gets to its end is recorded as finished (adapter_finished)."""
     forget_adapter(repo)
     try:
         run_agent(repo, who, prompt, write=True)
     finally:  # also when the run failed: the suggestions are never left where a later run could commit them
         new = repo / SUGGESTIONS
         if new.is_file():
-            kept = kept_suggestions(repo)
-            old = kept.read_bytes() if kept.exists() else b""
-            kept.write_bytes(old + (b"" if not old or old.endswith(b"\n") else b"\n") + new.read_bytes())
+            kept_suggestions(repo).write_bytes(new.read_bytes())
             new.unlink()
     check_scope(repo, before)
     d = store_dir(repo)
@@ -1549,7 +1597,8 @@ def adapt(repo: Path, who: tuple, prompt: str, before: dict):
     write_atomic(adapter_record(repo), b"{}\n", 0o600)
 
 
-def fill(name: str, project: str, design_lead: bool, findings: str = "") -> str:
+def fill(name: str, project: str, design_lead: bool, findings: str = "", visibility: str = "unknown",
+         earlier: str = "") -> str:
     """A prompt template with its machine values, so its wording can change without touching this script."""
     text = (TEMPLATES / name).read_text()
     inlined = "\n\n".join(f"--- {t.name} ---\n{t.read_text().rstrip()}" for t in sorted(TEMPLATES.glob("*.md"))
@@ -1557,10 +1606,12 @@ def fill(name: str, project: str, design_lead: bool, findings: str = "") -> str:
     if findings and "{{REVIEW_FINDINGS}}" not in text:
         text += "\n{{REVIEW_FINDINGS}}\n"
     return (text.replace("{{PROJECT}}", project).replace("{{DESIGN_LEAD}}", "yes" if design_lead else "no")
-            .replace("{{TEMPLATES}}", inlined).replace("{{REVIEW_FINDINGS}}", findings).rstrip() + "\n")
+            .replace("{{TEMPLATES}}", inlined).replace("{{VISIBILITY}}", visibility)
+            .replace("{{SUGGESTIONS_SO_FAR}}", earlier.strip() or "(none)")
+            .replace("{{REVIEW_FINDINGS}}", findings).rstrip() + "\n")
 
 
-def review_prompt(repo: Path, project: str, design_lead: bool, earlier: str = "") -> str:
+def review_prompt(repo: Path, project: str, design_lead: bool, earlier: str = "", visibility: str = "unknown") -> str:
     """Built from git and the project alone, so the reviewer never reads the adapting agent's account of its work.
     The first review is the full audit; with `earlier` (the findings the last fix answered) it only checks those."""
     changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
@@ -1568,8 +1619,8 @@ def review_prompt(repo: Path, project: str, design_lead: bool, earlier: str = ""
     tracked = [p for p, m in changes if m != "added"]
     diff = run(["git", "diff", "HEAD", "--", *tracked], cwd=repo, check=False).stdout if tracked else ""
     diff = clip(diff, DIFF_LIMIT)
-    head = (fill("check-prompt.md", project, design_lead, clip(earlier, FINDINGS_LIMIT)) if earlier
-            else fill("review-prompt.md", project, design_lead))
+    head = (fill("check-prompt.md", project, design_lead, clip(earlier, FINDINGS_LIMIT), visibility) if earlier
+            else fill("review-prompt.md", project, design_lead, visibility=visibility))
     return (head + f"\nUncommitted files to review:\n{files}\n"
             + (f"\nDiff of the files already tracked:\n{diff}" if diff else "") + (CHECK_RULES if earlier else REVIEW_RULES))
 
@@ -1590,7 +1641,8 @@ def has_safety(findings: str) -> bool:
     return bool(SAFETY_FINDING.search(findings))
 
 
-def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple, before: dict, design_lead: bool):
+def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple, before: dict, design_lead: bool,
+                      visibility: str = "unknown"):
     """The first review is the full audit; every later one only checks the earlier findings. At most MAX_FIX_ROUNDS
     fix rounds, and the findings of the last review always get theirs. Returns (stop, notes): stop is None unless a
     safety finding is still open (or unverified), else the full stop message; notes are lines for
@@ -1600,7 +1652,7 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
     def review(earlier: str = "") -> str:
         say("review", "running", "/".join(reviewer) + (" (checks the fixes only)" if earlier else ""))
         try:
-            out = run_agent(repo, reviewer, review_prompt(repo, project, design_lead, earlier), write=False)
+            out = run_agent(repo, reviewer, review_prompt(repo, project, design_lead, earlier, visibility), write=False)
         except Fail as e:
             if not earlier:  # a first review that crashes stops the run
                 raise
@@ -1628,7 +1680,9 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
         fixes += 1
         say("adapt", "fixing", f"round {fixes} of {MAX_FIX_ROUNDS}")
         found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(findings, FINDINGS_LIMIT)}"
-        adapt(repo, adapter, fill("prompt.md", project, design_lead, found) + ADAPT_RULES, before)
+        kept = kept_suggestions(repo)
+        adapt(repo, adapter, fill("prompt.md", project, design_lead, found, visibility,
+                                  kept.read_text(errors="replace") if kept.is_file() else "") + ADAPT_RULES, before)
         if fixes == MAX_FIX_ROUNDS:
             break
         out = review(findings)
@@ -1853,6 +1907,86 @@ def refresh_section(repo: Path) -> bool:
     return True
 
 
+QUESTIONS_HEAD = re.compile(r"questions for the owner", re.I)
+LIST_HEAD = re.compile(r"^\s*(#+\s|\*\*[^*]+\*\*:?\s*$)")
+NONE_ONLY = re.compile(r"[\s\-*]*none\.?[\s*]*", re.I)
+
+
+def split_questions(text: str):
+    """(before, questions, after) around the "Questions for the owner" list of the suggestions; questions is "" when
+    there is no such list or it says none."""
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, l in enumerate(lines) if LIST_HEAD.match(l) and QUESTIONS_HEAD.search(l)), None)
+    if start is None:
+        return text, "", ""
+    end = next((i for i in range(start + 1, len(lines)) if LIST_HEAD.match(lines[i])), len(lines))
+    body = "".join(lines[start + 1:end])
+    if not body.strip() or NONE_ONLY.fullmatch(body.strip()):
+        return text, "", ""
+    return "".join(lines[:start + 1]), body.strip(), "".join(lines[end:])
+
+
+def lane_files(repo: Path) -> dict:
+    return {str(f.relative_to(repo)): f.read_bytes() for f in sorted((repo / ADAPTED).rglob("*")) if f.is_file()}
+
+
+def restore_lane_files(repo: Path, was: dict) -> None:
+    for f in sorted((repo / ADAPTED).rglob("*")):
+        if f.is_file() and str(f.relative_to(repo)) not in was:
+            f.unlink()
+    for rel, data in was.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_bytes(data)
+
+
+def changed_text(was: dict, now: dict) -> str:
+    out = []
+    for rel in sorted(set(was) | set(now)):
+        if was.get(rel) != now.get(rel):
+            out += difflib.unified_diff(was.get(rel, b"").decode(errors="replace").splitlines(),
+                                        now.get(rel, b"").decode(errors="replace").splitlines(),
+                                        f"a/{rel}", f"b/{rel}", lineterm="")
+    return "\n".join(out)
+
+
+def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict) -> list:
+    """After the review loop: the questions still open are shown and the owner may answer them in plain text (Enter
+    keeps the agent's choices). Answers go to one more adapter run, with its own rules, that is not reviewed: the file
+    list says so and shows what it changed. No terminal: nothing is asked. A run that fails puts the files back as
+    they were and goes on to the file list (the owner can still say no there, and run again to answer): a stop would
+    throw away a finished, reviewed result for a failure that touched nothing. A scope violation stops the run as
+    after every agent run. Returns notes for the file list."""
+    kept = kept_suggestions(repo)
+    if not has_terminal() or not kept.is_file():
+        return []
+    head, questions, tail = split_questions(kept.read_text(errors="replace"))
+    if not questions:
+        return []
+    print(f"\nQuestions the adapting agent could not settle:\n{questions}\n", flush=True)
+    try:
+        answers = input("Your answers in plain text, or Enter to keep the agent's choices: ").strip()
+    except EOFError:
+        answers = ""
+    if not answers:
+        return []
+    was = lane_files(repo)
+    say("adapt", "running", "/".join(adapter) + " (applies your answers)")
+    text = (fill("answers-prompt.md", project, False).replace("{{QUESTIONS}}", questions)
+            .replace("{{ANSWERS}}", answers))
+    try:
+        run_agent(repo, adapter, text, write=True)
+    except Fail as e:
+        restore_lane_files(repo, was)
+        (repo / SUGGESTIONS).unlink(missing_ok=True)
+        check_scope(repo, before)
+        return [f"Your answers were not applied: the run failed ({e}). The files are as they were; run again to "
+                "answer."]
+    (repo / SUGGESTIONS).unlink(missing_ok=True)  # no new questions
+    check_scope(repo, before)
+    kept.write_text(head + "- none\n" + tail)
+    return ["Changed by your answers, not re-checked:\n" + (changed_text(was, lane_files(repo)) or "(no change)")]
+
+
 def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
     """The steps in front of the Orca setup; True when that setup may run. A re-run is safe: committed files are left
     alone unless `again`, and uncommitted ones (an earlier run, a hand edit) go back to review instead of being
@@ -1870,6 +2004,8 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     # Before the agent starts, so nothing in .cotal/ can pass for its work; committed with its files.
     say("gitignore", ignore_cotal(repo), ".cotal/")
     before = snapshot(repo)
+    visibility = repo_visibility(repo)
+    say("visibility", visibility, "from the git host" if visibility != "unknown" else "gh could not say; the adapter treats it as public")
     left = any(p.startswith(ADAPTED + "/") for p in before)
     if left and not again and adapter_finished(repo):
         say("adapt", "exists", f"uncommitted {ADAPTED}/ from an earlier run; reviewing it again")
@@ -1879,7 +2015,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
                 "the adapter runs again over it")
         say("adapt", "running", "/".join(adapter))
         kept_suggestions(repo).unlink(missing_ok=True)
-        adapt(repo, adapter, fill("prompt.md", project, design_lead) + ADAPT_RULES, before)
+        adapt(repo, adapter, fill("prompt.md", project, design_lead, visibility=visibility) + ADAPT_RULES, before)
     if not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
         show_suggestions(repo)
         kept_suggestions(repo).unlink(missing_ok=True)
@@ -1888,11 +2024,12 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
             return refresh_section(repo)
         raise Fail(f"the adapting agent wrote nothing under {ADAPTED}/ (is it gitignored?)")
     write_section(repo)
-    unresolved, notes = review_with_fixes(repo, project, adapter, reviewer, before, design_lead)
+    unresolved, notes = review_with_fixes(repo, project, adapter, reviewer, before, design_lead, visibility)
     if unresolved is not None:
         print(f"\n{unresolved}\n")
         say("adapt", "stopped", f"nothing committed, no Orca setup. Owner: fix {ADAPTED}/ and run again, or remove it")
         return False
+    notes += ask_and_apply_answers(repo, project, adapter, before)
     changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
     show_changes(repo, changes, notes)
     if not owner_says_yes():

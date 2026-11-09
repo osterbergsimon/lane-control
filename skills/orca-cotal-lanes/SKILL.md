@@ -136,3 +136,10 @@ Never automatic, ask the owner instead: a lane whose work did not merge, uncommi
 check above that fails. Closing a lane never deletes its branch: merged branches stay unless the owner says to
 delete them. If `worktree rm` prints a warning about an older host's branch policy, check the branch and tell
 the owner. A reviewer is stopped after its last round (section 5), not left to idle.
+
+## A lane that lost the mesh
+A Claude lane that shows "Cotal incoming auto-wake is unavailable", or whose Cotal tools became the personal
+`cotal_connect` set, has lost the mesh, though the roster may still show it idle. Switching back does not restore it.
+On the owner's word: `cotal_despawn` it, spawn a new agent under a new name in the same worktree, and give it the
+lane's state (branch, commits, what is done and open). Possible cause, not proven: the owner used Claude's built-in
+agent switcher. The "← opens agents" option in `/config` (machine-wide) removes that key.

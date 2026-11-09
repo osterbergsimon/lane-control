@@ -131,12 +131,13 @@ class BypassOptionTests(unittest.TestCase):
 
 ADAPT = ROOT / "templates" / "adapt"
 TEMPLATE_FILES = ("project.md", "routing.md", "coordinator.md", "reviewer.md", "design-lead.md")
-MACHINE_VALUES = ("{{PROJECT}}", "{{DESIGN_LEAD}}", "{{TEMPLATES}}", "{{REVIEW_FINDINGS}}")
+MACHINE_VALUES = ("{{PROJECT}}", "{{DESIGN_LEAD}}", "{{TEMPLATES}}", "{{REVIEW_FINDINGS}}", "{{VISIBILITY}}")
 
 
 class AdaptTemplateTests(unittest.TestCase):
     def test_files_exist(self):
-        for name in TEMPLATE_FILES + ("prompt.md", "review-prompt.md", "check-prompt.md"):
+        for name in TEMPLATE_FILES + ("prompt.md", "review-prompt.md", "check-prompt.md",
+                     "answers-prompt.md"):
             self.assertTrue((ADAPT / name).is_file(), name)
 
     def test_templates_have_front_matter_and_balanced_fixed_blocks(self):
@@ -235,10 +236,40 @@ class AdaptTemplateTests(unittest.TestCase):
     def test_rerun_and_suggestions_wording_on_fix_rounds(self):
         text = (ADAPT / "prompt.md").read_text()
         self.assertIn("Only when there are no review findings below", text)
-        self.assertIn("write only entries that are new this", text)
+        self.assertNotIn("write only entries that are new this", text)
+        flat = " ".join(text.split())
+        self.assertIn("write the whole list again: still-open entries kept, settled ones dropped, each once", flat)
+
+    def test_questions_only_for_what_cannot_be_looked_up(self):
+        flat = " ".join((ADAPT / "prompt.md").read_text().lower().split())
+        for needle in ("open a file before asking about it", "use the repo and the machine (read-only)",
+                       "never ask the owner how a lane-control template rule works"):
+            self.assertIn(needle, flat)
+
+    def test_counting_rules_are_stated_once_in_each_prompt(self):
+        for name in ("prompt.md", "review-prompt.md"):
+            flat = " ".join((ADAPT / name).read_text().split())
+            self.assertEqual(flat.count("max_lines counts every line of the file, front matter included"), 1, name)
+            self.assertEqual(flat.count("max_rows counts table rows without the header and separator"), 1, name)
+
+    def test_visibility_is_a_machine_value_in_both_prompts(self):
+        for name in ("prompt.md", "review-prompt.md"):
+            text = (ADAPT / name).read_text()
+            self.assertRegex(text, r"(?m)^Repo visibility[^\n]*\{\{VISIBILITY\}\}", name)
+        flat = " ".join((ADAPT / "prompt.md").read_text().split())
+        self.assertIn("unknown", flat)
+        self.assertIn("Exposure", flat)
+        self.assertIn("Exposure", (ADAPT / "review-prompt.md").read_text())
+
+    def test_answers_prompt_has_its_own_short_rules(self):
+        text = " ".join((ADAPT / "answers-prompt.md").read_text().lower().split())
+        for needle in ("apply only the owner's answers", "change nothing else", "an answer is the owner's word",
+                       "no new questions", "write only inside `.lane-control/`", "{{answers}}", "{{questions}}"):
+            self.assertIn(needle, text)
+        self.assertLess(len((ADAPT / "answers-prompt.md").read_text().splitlines()), 40)
 
     def test_review_prompt_has_no_literal_double_braces_but_its_placeholders(self):
-        left = re.sub(r"\{\{(PROJECT|DESIGN_LEAD|TEMPLATES)\}\}", "", (ADAPT / "review-prompt.md").read_text())
+        left = re.sub(r"\{\{(PROJECT|DESIGN_LEAD|TEMPLATES|VISIBILITY)\}\}", "", (ADAPT / "review-prompt.md").read_text())
         self.assertNotIn("{{", left)
         self.assertNotIn("}}", left)
 
@@ -469,6 +500,14 @@ class CleanupSteeringTests(unittest.TestCase):
             self.assertIn(needle, sec, needle)
         self.assertTrue(sec.index("-review") < sec.index("<lane name>") < sec.index("worktree rm"))
         self.assertNotIn("worktree rm --worktree path:<worktree> --force", sec)
+
+    def test_skill_names_the_lost_mesh_and_its_recovery(self):
+        t = self.flat(SKILL)
+        for needle in ("cotal incoming auto-wake is unavailable", "cotal_connect", "has lost the mesh",
+                       "the roster may still show it idle", "switching back does not restore it",
+                       "on the owner's word", "despawn", "new name", "same worktree", "give it the lane's state",
+                       "built-in agent switcher", "not proven", "opens agents"):
+            self.assertIn(needle, t, needle)
 
     def test_issues_doctrine_names_the_close_rule(self):
         t = self.flat(ROOT / "issues.md")
