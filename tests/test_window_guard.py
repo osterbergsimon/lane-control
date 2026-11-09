@@ -176,6 +176,59 @@ class FailedSendTests(unittest.TestCase):
         self.g.poll()
         self.assertEqual(self.g.sends(), [])
 
+    def pause(self, space):
+        m = self.g.d / "paused" / space  # next to the state file
+        m.parent.mkdir(exist_ok=True)
+        m.touch()
+        return m
+
+    def test_a_paused_space_gets_nothing_and_no_notice_while_others_still_do(self):
+        self.pause("space-p")
+        self.g.fail.write_text("space-p\n")  # as a stopped coordinator would refuse
+        self.g.usage(34, 10)
+        self.g.poll()
+        self.assertEqual({s.split()[2] for s in self.g.sends()}, {"space-q"})
+        self.assertFalse(Path(str(self.g.d / "state") + ".pending").exists())
+        self.g.clear()
+        self.g.poll(GUARD_RETRY_SECS="0")
+        self.assertEqual(self.g.sends(), [])
+
+    def test_marking_a_space_drops_its_waiting_orders_and_unmarking_resumes_orders(self):
+        self.g.fail.write_text("space-p\n")
+        self.g.usage(34, 10)
+        self.g.poll()
+        m = self.pause("space-p")
+        self.g.clear()
+        self.g.poll(GUARD_RETRY_SECS="0")
+        self.assertEqual(self.g.sends(), [])  # dropped: no retry, no GUARD notice
+        m.unlink()
+        self.g.fail.write_text("")
+        self.g.usage(37, 10)
+        self.g.poll()
+        p = [s for s in self.g.sends() if "space-p" in s]
+        self.assertEqual(len(p), 1, p)
+        self.assertIn("commit and push WIP", p[0])
+
+    def test_a_woken_space_gets_the_current_budget_standing_on_the_next_poll(self):
+        m = self.pause("space-p")
+        self.g.usage(37, 10)  # past the ceiling steps while resting
+        self.g.poll()
+        self.assertEqual({s.split()[2] for s in self.g.sends()}, {"space-q"})
+        m.unlink()
+        self.g.clear()
+        self.g.poll()
+        p = [s for s in self.g.sends() if "space-p" in s]
+        self.assertEqual(len(p), 1, p)
+        self.assertIn("commit and push WIP", p[0])
+
+    def test_a_space_without_a_marker_still_warns(self):
+        self.g.fail.write_text("space-p\n")
+        self.g.usage(34, 10)
+        self.g.poll()
+        self.g.clear()
+        self.g.poll(GUARD_RETRY_SECS="0")
+        self.assertEqual(len(self.g.sends()), 1)
+
     def test_a_hanging_send_cannot_stall_the_guard(self):
         self.g.exe("cotal", "exec sleep 30\n")
         self.g.usage(34, 10)

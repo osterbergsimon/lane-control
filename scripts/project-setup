@@ -99,7 +99,7 @@ def render_persona(text: str, harness: str, model: str, mode: str, project: str,
               f'launchOptions: {{ "permission-mode": "{mode}", "allow-dangerously-skip-permissions": "" }}')
     return (text.replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
             .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
-            .replace("{{REVIEWER}}", reviewer)
+            .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(HERE))
             .replace("{{DESIGN_ROUTE}}", DESIGN_ROUTE if design_lead else NO_DESIGN_ROUTE)
             .replace("{{DESIGN_REVIEW}}", DESIGN_REVIEW if design_lead else ""))
 
@@ -1135,6 +1135,13 @@ def start_stack(repo: Path, space: str, port_flag) -> bool:
     run(["cotal", "svc", "start", "mgr", "-s", space], cwd=repo)
     say("manager", "created", "mgr (runtime orca)")
     return True
+
+
+def guard_marker(space: str) -> Path:
+    """The window guard's marker for a rested or paused space, next to its state file (as in scripts/window-guard.sh)."""
+    f = os.environ.get("GUARD_STATE_FILE") or Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") \
+        / "lane-control" / "window-guard.state"
+    return Path(f).parent / "paused" / space
 
 
 def live_agents(repo: Path, space: str) -> dict:
@@ -2589,6 +2596,8 @@ def main(argv=None) -> int:
             seat_wrapper_note(project_table)
         global LEFTOVER_DELIVERED
         LEFTOVER_DELIVERED = spawn(repo, space, "coordinator", *coord, modes["coordinator"], repo, coordinator_kickoff())
+        if LEFTOVER_DELIVERED:  # a coordinator that was just started is awake: the guard sends it orders again
+            guard_marker(space).unlink(missing_ok=True)
         wt = None
         if lead:
             wt, created = design_worktree(repo, repo_id)

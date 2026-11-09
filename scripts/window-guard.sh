@@ -18,7 +18,10 @@
 # Memory: below MEM_LOW_GB two polls in a row, or swap at SWAP_HIGH_GB, opens a low-memory episode: one notice to
 # the machine coordinator. The episode ends after two good polls in a row.
 # A send that fails waits in <state file>.pending and is retried each poll, in order, for GUARD_RETRY_SECS (1 hour);
-# then the machine coordinator is told if its space answers, and the journal has it either way. GUARD_POLLS=<n> stops after n polls (tests).
+# then the machine coordinator is told if its space answers, and the journal has it either way. A space paused by
+# `project-pause stop` has a marker <state dir>/paused/<space>: nothing is sent or queued for it, and waiting orders
+# are dropped; its weekly stage is not advanced, so the first poll after the marker is removed sends the weekly
+# standing (window orders are not replayed). A crashed coordinator has no marker, so it still warns. GUARD_POLLS=<n> stops after n polls (tests).
 here=$(dirname "$0"); . "$here/lib.sh"
 declare -A wstage stage reset_at handled checked mem   # handled: last reset acted on (a stale feed repeats it)
 STATE_FILE="${GUARD_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/lane-control/window-guard.state}"
@@ -53,7 +56,9 @@ load_state
 send() {  # send <space> <agent> <message>: true once the broker stored it
   timeout "${GUARD_SEND_TIMEOUT:-30}" cotal send -s "$1" -t "$2" "$3" >/dev/null 2>&1
 }
+paused() { [ -e "$(dirname "$STATE_FILE")/paused/$1" ]; }
 deliver() {  # deliver <space> <agent> <message>: a space with messages waiting keeps them in order
+  paused "$1" && return 0
   if ! grep -qF -- "$(printf '\t%s\t' "$1")" "$PENDING_FILE" 2>/dev/null && send "$1" "$2" "$3"; then return 0; fi
   printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" >> "$PENDING_FILE"
   echo "$(date +%H:%M) send to $1 failed, will retry"
@@ -63,6 +68,7 @@ flush_pending() {  # each waiting message, oldest first; one failure ends that s
   local when sp ag msg now keep="" failed=" "
   now=$(date +%s)
   while IFS=$'\t' read -r when sp ag msg; do
+    paused "$sp" && continue
     if [ $(( now - when )) -ge "$RETRY_SECS" ]; then
       echo "$(date +%H:%M) gave up sending to $sp: $msg"
       [ "$sp" = "$MACHINE_SPACE" ] || send "$MACHINE_SPACE" "$MACHINE_AGENT" "GUARD: could not reach space $sp for ${RETRY_SECS}s, this was not delivered: $msg" \
@@ -118,6 +124,7 @@ while true; do
     [ "$ss" -ge 100 ] && [ "$rs" = 0 ] && continue   # failed feed reads 100: never act on it
     tiers=$(budget_tiers "$b")
     for p in "${!COORD_SPACE[@]}"; do   # per project: COORD_CEILING_ADD raises one project's ceiling
+      paused "${COORD_SPACE[$p]}" && continue   # its weekly stage stays, so the first poll after the marker goes sends the weekly standing
       ceil=$(( $(budget_ceiling "$b") + ${COORD_CEILING_ADD[$p]:-0} )); k="$b:$p"; ws=${wstage[$k]:-0}
       if   [ "$wk" -ge $((ceil-STEP_STOP_ALL)) ]  && [ "$ws" -lt 4 ]; then wstage[$k]=4; tell_one "$p" "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_STOP_ALL} (${ceil}%). Stop all work on tiers ${tiers}now: lanes commit and push WIP and stop; coordinators too. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."
       elif [ "$wk" -ge $((ceil-STEP_WIP_STOP)) ]  && [ "$ws" -lt 3 ]; then wstage[$k]=3; tell_one "$p" "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_WIP_STOP} (${ceil}%). Lanes on tiers ${tiers}commit and push WIP and stop; coordinators only review and merge. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."

@@ -133,6 +133,10 @@ def cotal():
     if args[:1] == ["ps"]:
         items = [{"name": a["name"], "status": "running", "cwd": a["cwd"], "mesh": "idle", "role": a.get("role")} for a in state["agents"]]
         out({"outcome": "ok", "result": {"kind": "seats", "items": items}})
+    if args[:1] == ["stop"]:
+        state["agents"] = [a for a in state["agents"] if a["name"] != args[1]]
+        state["terminals"] = [t for t in state["terminals"] if t["handle"] != f"agent_{args[1]}"]
+        out({"outcome": "ok"})
     if args[:1] == ["spawn"]:
         name = args[1]
         state["agents"].append({"name": name, "cwd": opt("--cwd"), "role": opt("--role")})

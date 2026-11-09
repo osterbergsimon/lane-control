@@ -38,6 +38,7 @@ get past it; route the work one tier up, or to Rove if the project has it, and t
 your persona names; pass that value.
 
 ## 2. Open the lane
+If the project was rested, wake it first (your persona says how): a rested project gets no guard orders.
 First check that the machine has room: run `~/.agents/bin/lane-room`. If it exits non-zero (too busy, or not installed),
 hold the lane and tell the owner what it printed, instead of starting it. The coordinator then runs `git fetch origin`,
 `git status -sb` and `git rev-list --count HEAD..origin/<default>` in its own checkout: if it is detached, on a branch
