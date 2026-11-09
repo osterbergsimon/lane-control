@@ -391,11 +391,17 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.in_terminal("y", "--readapt")[0], 1)
         self.assertNotEqual(self.in_terminal("y", "--skip-adapt")[0], 1)
 
-    def test_skip_adapt_runs_on_a_detached_head(self):
+    def test_skip_adapt_and_refresh_run_on_a_detached_head_with_a_warning(self):
         self.with_origin()
         git("checkout", "-q", "--detach", cwd=self.repo)
         status, out, ask = self.in_terminal("n", "--skip-adapt")
         self.assertEqual(status, 0, self.err)
+        self.assertIn("warning: the checkout is on a detached HEAD", self.err)
+        err = io.StringIO()  # --refresh takes no --opencode, which in_terminal adds
+        with mock.patch.dict(os.environ, self.e.env, clear=True), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(err):
+            load().main([str(self.repo), "--refresh"])
+        self.assertIn("warning: the checkout is on a detached HEAD", err.getvalue())
         self.assertTrue(self.orca_setup_ran())
 
     # --- one run: orca.yaml and the push, asked after the file-list commit -------------------------------------
@@ -511,20 +517,20 @@ class OnboardingTests(unittest.TestCase):
         self.assertNotIn("No orca.yaml", out)
         self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))
 
-    def test_another_branch_is_not_pushed_and_nothing_is_asked(self):
+    def test_another_branch_is_refused_before_anything_is_adapted(self):
         bare = self.with_origin()
         self.with_lockfile()
         old = self.origin_main(bare)
         git("checkout", "-q", "-b", "feature", cwd=self.repo)
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         status, out, ask = self.in_terminal(["y", "y"])
-        self.assertEqual(status, 0, out)
-        ask.assert_called_once()
+        self.assertEqual(status, 1)
+        self.assertIn("on feature", self.err)
+        self.assertIn("git switch main", self.err)
+        ask.assert_not_called()
+        self.assertEqual(self.models(), [])
         self.assertEqual(self.origin_main(bare), old)
-        self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
-        self.assertIn("feature", out)
-        self.assertIn("will not get", out)
-        self.assertTrue(self.started())
+        self.assertFalse(self.started())
 
     def test_a_failed_push_still_starts_and_warns(self):
         bare = self.with_origin(reject_push=True)
@@ -578,17 +584,14 @@ class OnboardingTests(unittest.TestCase):
         ask.assert_called_once()
         self.assertNotIn("will not get", out)
 
-    def test_another_branch_that_origin_already_has_everything_on_says_nothing(self):
-        bare = self.with_origin()
+    def test_a_rerun_on_another_branch_is_refused_too(self):
+        self.with_origin()
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal("y")[0], 0)  # asks the push on main
-        git("push", "-q", "origin", "main", cwd=self.repo)
-        git("fetch", "-q", "origin", cwd=self.repo)
         git("checkout", "-q", "-b", "feature", cwd=self.repo)
         status, out, ask = self.in_terminal("y")
-        self.assertEqual(status, 0, out)
+        self.assertEqual(status, 1)
         ask.assert_not_called()
-        self.assertNotIn("will not get", out)
 
     def test_no_start_still_opts_out_of_starting(self):
         self.with_origin()
@@ -753,21 +756,25 @@ class OnboardingTests(unittest.TestCase):
         git("push", "-q", "origin", "main", cwd=other)
         git("fetch", "-q", "origin", cwd=self.repo)
 
-    def test_a_checkout_behind_origin_asks_and_warns_nothing(self):
+    def test_a_rerun_behind_origin_is_refused_before_anything_is_written(self):
         bare = self.committed_lockfile_origin()
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal(["y", "y"])[0], 0)
         self.other_clone_pushes(bare, "AGENTS.md", "# changed elsewhere\n", "agents change")
-        head, remote = git("rev-parse", "HEAD", cwd=self.repo), self.origin_main(bare)
+        head = git("rev-parse", "HEAD", cwd=self.repo)
         status, out, ask = self.in_terminal("y")
-        self.assertEqual(status, 0, out)
+        self.assertEqual(status, 1)
+        self.assertIn("behind origin/main", self.err)
         ask.assert_not_called()
-        self.assertNotIn("will not get", out)
-        self.assertNotIn("does not have", out)
-        r = self.e.run(str(self.repo), adapt=True)  # and without a terminal
-        self.assertNotIn("will not get", r.stdout)
         self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
-        self.assertEqual(self.origin_main(bare), remote)
+
+    def test_a_detached_head_is_refused_without_an_origin_too(self):
+        git("checkout", "-q", "--detach", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn("detached HEAD", self.err)
+        self.assertEqual(self.models(), [])
 
     def test_an_orca_yaml_only_on_origin_is_not_committed_again(self):
         bare = self.with_origin()
@@ -777,10 +784,10 @@ class OnboardingTests(unittest.TestCase):
         self.other_clone_pushes(bare, "orca.yaml", "scripts:\n  setup: |\n    make deps\n", "orca from elsewhere")
         head, remote = git("rev-parse", "HEAD", cwd=self.repo), self.origin_main(bare)
         status, out, ask = self.in_terminal("y")
-        self.assertEqual(status, 0, out)
+        self.assertEqual(status, 1)  # behind: refused, so no second orca.yaml is ever committed
+        self.assertIn("behind origin/main", self.err)
         ask.assert_not_called()
-        self.assertIn("behind", out)
-        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)  # no commit made
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
         self.assertEqual(self.origin_main(bare), remote)
 
     def test_with_only_orca_yaml_open_the_text_names_no_onboarding_commit_and_no_empty_list(self):

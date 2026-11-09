@@ -39,7 +39,9 @@ your persona names; pass that value.
 
 ## 2. Open the lane
 First check that the machine has room: run `~/.agents/bin/lane-room`. If it exits non-zero (too busy, or not installed),
-hold the lane and tell the owner what it printed, instead of starting it.
+hold the lane and tell the owner what it printed, instead of starting it. Then run `git status -sb` in the main
+checkout: if it is detached, on a branch other than the default, or behind origin, hold the lane and tell the owner
+(behind only and clean: `git merge --ff-only origin/<default>` is fine).
 
 From your own worktree (its cwd makes the new task your child):
 

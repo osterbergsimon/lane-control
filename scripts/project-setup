@@ -2129,17 +2129,18 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
 
 
 def stale_checkout(repo: Path):
-    """Why the adapting must not start here, or None: HEAD is detached, or behind origin's default branch (lanes
-    branch from origin, so files adapted from stale ones, or committed on no branch, never reach them). Checked
-    against a fresh fetch; no origin, or a fetch that fails, leaves nothing to compare with."""
-    if run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode != 0:
-        return None
-    try:
-        run(["git", "fetch", "-q", "origin"], cwd=repo, check=False, timeout=120)
-    except Fail:
-        pass
+    """Why nothing may be adapted or committed here, or None: HEAD is detached, on a branch other than origin's
+    default, or behind it (lanes branch from origin's default branch, so a commit anywhere else never reaches them).
+    Checked against a fresh fetch; with no origin only the detached HEAD can be told."""
     branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo, check=False).stdout.strip()
-    lanes = default_branch(repo, branch)
+    has_origin = run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode == 0
+    lanes = None
+    if has_origin:
+        try:
+            run(["git", "fetch", "-q", "origin"], cwd=repo, check=False, timeout=120)
+        except Fail:
+            pass
+        lanes = default_branch(repo, branch)
     ref = f"refs/remotes/origin/{lanes}"
     behind = 0
     if lanes and run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode == 0:
@@ -2147,9 +2148,11 @@ def stale_checkout(repo: Path):
     if not branch:
         return ("the checkout is on a detached HEAD" + (f", {behind} commit(s) behind origin/{lanes}" if behind else "")
                 + f". Run `git switch {lanes or '<default branch>'}` and `git pull`, then run again")
+    if lanes and branch != lanes:
+        return (f"the checkout is on {branch}, but lanes branch from origin/{lanes}, so a commit here never reaches "
+                f"them. Run `git switch {lanes}` and `git pull`, then run again")
     if behind:
-        return (f"{branch} is {behind} commit(s) behind origin/{lanes}. Run `git pull` "
-                f"{'' if branch == lanes else f'(or switch to {lanes}) '}and run again")
+        return f"{branch} is {behind} commit(s) behind origin/{lanes}. Run `git pull` and run again"
     return None
 
 
@@ -2478,6 +2481,9 @@ def main(argv=None) -> int:
                 raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
             say("repo", "exists", top.stdout.strip())
             repo = Path(top.stdout.strip())
+            why = stale_checkout(repo)
+            if why:  # a refresh works on any checkout, but says so
+                print(f"project-setup: warning: {why}", file=sys.stderr)
             bad = own_check(flag_pins, own_models | known_own_models(repo))  # before anything is moved
             if bad:
                 return bad
@@ -2505,10 +2511,11 @@ def main(argv=None) -> int:
         preflight(set())  # the agents' harnesses are checked once the project's settings are known
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
-        if not a.skip_adapt and (a.readapt or not onboarded(repo)):  # --skip-adapt (project-pause start) and a rerun work on any checkout
-            why = stale_checkout(repo)
-            if why:
-                raise Fail(f"{why}. Nothing was changed")
+        why = stale_checkout(repo)
+        if why and a.skip_adapt:  # works on any checkout (project-pause start), but says so
+            print(f"project-setup: warning: {why}", file=sys.stderr)
+        elif why:  # anything that may commit does not
+            raise Fail(f"{why}. Nothing was changed")
         beads_note(repo)
         migrate(repo)
         validate_settings(repo, settings(repo))

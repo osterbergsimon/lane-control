@@ -214,10 +214,10 @@ and the answers' changes and asks only the questions still on the list.)
    the repo, which a later run offers to commit); it never commits by itself. The draft ends by writing `orca-setup-done` in the worktree's git dir;
    agents start only after it. Each tool line is guarded (`command -v`): a tool not on PATH during setup (a cargo reached
    only through a project script, say) is skipped with a note, and no failing step stops the marker.
-   Before adapting, a real onboarding or `--readapt` refuses a checkout on a detached HEAD or behind origin's default
-   branch (after a fetch): it says which, by how many commits, and what to run (`git switch <default>`, `git pull`),
-   and changes nothing. A rerun of an onboarded project, `--refresh` and `--skip-adapt` (project-pause start) are not
-   checked.
+   Every run that may commit (an onboarding, `--readapt`, a rerun of an onboarded project) first refuses a checkout
+   on a detached HEAD, on a branch other than origin's default, or behind it (after a fetch): it says which, by how
+   many commits, and what to run (`git switch <default>`, `git pull`), and changes nothing. A detached HEAD is refused
+   without an origin too. `--refresh` and `--skip-adapt` (project-pause start) are not checked.
    When the repo tracks `.envrc` and `direnv status` reports it allowed in the source checkout (the owner approved it
    there), the generated script first runs `direnv allow .envrc` in the worktree, guarded: a machine without direnv is
    fine and a failure only prints a line. direnv approves per path, so without it each new worktree opens with
