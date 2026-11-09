@@ -148,7 +148,23 @@ checks never ran); a later review that gave none or crashed is listed beside the
 (Repo visibility is a fact, not a guess. Before the adapter runs, project-setup reads it with `gh repo view` (read-only,
 20 seconds at most) and gives it to the adapter and every reviewer as public, private or internal; when gh is missing,
 logged out, offline or unclear it is `unknown`, and the adapter writes the safer value (treat as public) and a question.
-The review checks the Exposure slot against the same value. A gh failure never stops the run.)
+The review checks the Exposure slot against the same value. A gh failure never stops the run. With visibility
+`unknown`, a hand edit of Exposure needs the "(owner's answer)" mark, or a re-run's review flags it.)
+(Review tiers. Review C (the owner approves spec statements before merge) is for paths where a mistake really hurts:
+secrets, auth, data loss, the check that keeps bad input out, sandbox and host settings. Ordinary code in a sensitive
+package is B, even at deep tier. "In doubt one tier up" is for the model tier, not for the review letter. The adapter
+names the harm in the why of every C row, and the full review makes a C row without a named harm a major finding.)
+(Overall time limit. `AGENT_LIMIT` in `scripts/project-setup`, next to `AGENT_TIMEOUT`, caps the agent time of one run
+at 90 minutes, all agents together. It is checked before an agent starts: reaching it stops the run there, never kills
+an agent, leaves the files under `.lane-control/` as they are, commits nothing, runs no Orca step and says to run
+again. A re-run counts from zero. If the limit is reached before the answers are asked, they are not asked and the
+questions stay on the list. There is no token or dollar cap (`--max-budget-usd` is API only). The run prints
+`agent time used` at the end, also when it stopped.)
+(Leftovers. Pressing Enter at a question means "ask me later". At the commit, the questions still open and the suggested
+AGENTS.md edits are added to the coordinator's first message, labelled as information from the adapter. The coordinator
+asks the owner about them in its tab, one at a time with its recommendation, opens a lane for any answer that changes a
+file, and changes nothing on the strength of the list alone. Nothing left over: the message is unchanged. The list is
+only given when this run starts the coordinator; otherwise the run prints what was left, so it is not lost.)
 (Suggestions are one current list. A fix round is given the earlier list and writes the whole list again, still-open
 entries kept and settled ones dropped, each once; its file replaces the kept one, and a round that writes none leaves
 it. The adapter asks only what cannot be looked up: it opens a file before asking about it, reads the repo read-only (it
@@ -162,7 +178,8 @@ question, so a line typed early never answers it. The answers go to one more ada
 new questions, no suggestions file), followed by the same scope check as every agent run. That run is not reviewed: the
 file list says "Changed by your answers, not re-checked" and shows its diff. It adds at most one agent run to an
 onboarding. Only the answered questions leave the list, and only when the run changed a file; if it changed nothing,
-the list says the answers were not applied and the questions stay. If the run fails, the files are put back as they
+the note says the run "changed no file: the files already matched, or an answer was not applied" and the questions
+stay. If the run fails, the files are put back as they
 were before it, the file list comes with a note that the answers were not applied, and the owner can say no there and
 run again to answer: a stop would throw away a reviewed result for a failure that changed nothing. A change outside
 `.lane-control/` stops the run, as after any agent run. Without a terminal nothing is asked. A re-run keeps hand edits

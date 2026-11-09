@@ -170,6 +170,29 @@ class AdaptTemplateTests(unittest.TestCase):
         for needle in ("highest tier wins", "in doubt one tier up", "never the tier", "fails review", "`**`"):
             self.assertIn(needle, text)
 
+    def test_review_c_is_for_real_harm_in_all_three_templates(self):
+        for name in ("routing.md", "prompt.md", "review-prompt.md"):
+            text = " ".join((ADAPT / name).read_text().split())
+            self.assertIn("a mistake really hurts", text, name)
+            for harm in ("secrets", "auth", "data loss", "sandbox and host settings"):
+                self.assertIn(harm, text, name)
+        routing = " ".join((ADAPT / "routing.md").read_text().split())
+        self.assertIn("ordinary code in a sensitive package is B", routing)
+        self.assertIn("not for the review letter", routing)
+        prompt = " ".join((ADAPT / "prompt.md").read_text().split())
+        self.assertIn("Ordinary code in a sensitive package is B", prompt)
+        self.assertNotIn("Deep and review C:", prompt)
+        review = " ".join((ADAPT / "review-prompt.md").read_text().split())
+        self.assertIn("without a named harm", review)
+        self.assertIn("Never raise a row to C for \"in doubt\"", review)
+
+    def test_docs_describe_the_time_limit_and_leftovers(self):
+        text = " ".join((ROOT / "docs" / "orca.md").read_text().split())
+        for needle in ("AGENT_LIMIT", "90 minutes", "never kills", "agent time used", "ask me later",
+                       "changed no file: the files already matched, or an answer was not applied",
+                       "needs the \"(owner's answer)\" mark"):
+            self.assertIn(needle, text)
+
     def test_additions_never_relax(self):
         for name in ("coordinator.md", "reviewer.md", "design-lead.md"):
             self.assertRegex((ADAPT / name).read_text(), r"never (relax|lower)", name)

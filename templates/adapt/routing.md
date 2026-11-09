@@ -12,7 +12,10 @@ tests but never adds expectations, and never takes a task that needs private dat
 lane's tier fails review.
 
 Review tiers, by what a PR touches, not by who wrote it. A: the coordinator's own checks only. B: plus an independent
-review by a different model. C: plus a deep-tier review, and spec statements approved by the owner before merge.
+review by a different model. C: plus a deep-tier review, and spec statements approved by the owner before merge. Keep C for paths where a
+mistake really hurts (secrets, auth, data loss, the check that keeps bad input out, sandbox and host settings) and
+name that harm in the row's why; ordinary code in a sensitive package is B. The "in doubt one tier up" rule is for the
+model tier, not for the review letter.
 <!-- /fixed -->
 
 ## Path map

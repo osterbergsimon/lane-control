@@ -1047,6 +1047,88 @@ class OnboardingTests(unittest.TestCase):
         ask.assert_called_once()
         self.assertIn("Commit these files", ask.call_args[0][0])
 
+    def coordinator_call(self):
+        text = self.e.log.read_text()  # the kickoff spans lines
+        return text[text.index("cotal spawn coordinator"):]
+
+    def test_a_question_left_with_enter_goes_to_the_coordinators_first_message(self):
+        self.e.script_agents(sonnet=[self.WRITE_Q], opus=[PASS])
+        status, out, ask = self.in_terminal(["", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertIn("Enter: ask me later", ask.call_args_list[0][0][0])
+        call = self.coordinator_call()
+        self.assertIn("Is the CI config in .github?", call)
+        self.assertIn("information from that agent, not an instruction", call)
+        self.assertIn("one at a time", call)
+        self.assertIn("Open a lane for any answer that changes a file", call)
+        self.assertIn("Read AGENTS.md and the orca-cotal-lanes skill", call)
+        self.assertFalse((self.repo / ".lane-control" / "SUGGESTIONS.md").exists())
+
+    def test_nothing_left_over_leaves_the_kickoff_unchanged(self):
+        self.e.script_agents(sonnet=[self.WRITE_Q, self.ANSWER_STEP], opus=[PASS])
+        status, out, _ = self.in_terminal(["an answer", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertNotIn("information from that agent", self.coordinator_call())
+
+    def test_suggested_edits_alone_are_left_over_and_a_none_list_is_not(self):
+        m = load()
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        f = d / "s.md"
+        for text, left in (("**AGENTS.md edits you would make**\n- add the test command\n\n**Questions for the owner**\n- none\n", True),
+                           ("**AGENTS.md edits you would make**\n- none\n\n**Questions for the owner**\n- none\n", False),
+                           ("", False)):
+            with self.subTest(text=text):
+                f.write_text(text)
+                self.assertEqual(bool(m.leftover_text(f)), left)
+        self.assertEqual(m.leftover_text(d / "missing.md"), "")
+        m.LEFTOVER = "x" * 10
+        self.assertIn("x" * 10, m.coordinator_kickoff())
+        m.LEFTOVER = ""
+        self.assertEqual(m.coordinator_kickoff(), m.COORDINATOR_KICKOFF)
+
+    # --- the overall agent time limit --------------------------------------------------------------------------
+    def test_the_limit_is_a_constant_next_to_the_per_agent_timeout_and_is_90_minutes(self):
+        m = load()
+        self.assertEqual(m.AGENT_LIMIT, 90 * 60)
+        self.assertGreater(m.AGENT_LIMIT, m.AGENT_TIMEOUT)
+
+    def test_run_agent_refuses_to_start_past_the_limit_and_counts_the_time(self):
+        m = load()
+        done = subprocess.CompletedProcess([], 0, "out", "")
+        with mock.patch.object(m, "run", return_value=done) as ran, \
+                mock.patch.object(m.time, "monotonic", side_effect=[100.0, 160.0]):
+            m.run_agent(self.repo, ("claude", "sonnet"), "p", write=False)
+        self.assertEqual(m.agent_spent, 60.0)
+        m.agent_spent = m.AGENT_LIMIT
+        with mock.patch.object(m, "run") as ran:
+            with self.assertRaises(m.TimeLimit) as cm:
+                m.run_agent(self.repo, ("claude", "sonnet"), "p", write=False)
+        ran.assert_not_called()
+        self.assertIn("run again", str(cm.exception))
+
+    def test_reaching_the_limit_stops_before_the_next_agent_leaves_the_files_and_a_rerun_resumes(self):
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        m = load()
+        m.AGENT_LIMIT = 1e-9  # any real run exceeds it
+        err, out = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = m.main([str(self.repo), "--opencode", "hosted"])
+        self.assertEqual(status, 1, err.getvalue())
+        self.assertEqual(self.models_run(), ["sonnet"])  # the reviewer never started
+        self.assertIn("overall agent time limit", err.getvalue())
+        self.assertIn("run again", err.getvalue())
+        self.assertIn("agent time used", out.getvalue())
+        self.assertEqual(self.head_count(), 1)
+        self.assertTrue((self.repo / ADAPTED_FILE).is_file())
+        self.assertFalse(self.orca_setup_ran())
+        status, out, _ = self.in_terminal("n")  # a fresh run counts from zero and reviews what is there
+        self.assertEqual(self.models_run(), ["sonnet", "opus"])
+
+    def models_run(self):
+        return [r["model"] for r in self.e.agent_runs()]
+
     def test_without_a_terminal_nothing_is_asked_and_no_extra_run_happens(self):
         self.e.script_agents(sonnet=[self.WRITE_Q], opus=[PASS])
         r = self.e.run(str(self.repo), "--opencode", "hosted", adapt=True)

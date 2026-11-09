@@ -62,10 +62,14 @@ Commands must be copied from where the repo writes them, and the Checks table sa
 3. Ask only what cannot be looked up. Open a file before asking about it. Use the repo (read-only) for what
    it can answer; you cannot look at the machine, so ask about that. Never ask the owner how a lane-control template
    rule works: the templates say.
-4. For the path map, judge from names and a sample before you call it low-risk. Deep and review C: parsers of
+4. For the path map, judge from names and a sample before you call it low-risk. Deep: parsers of
    untrusted input, formats and migrations, authentication and permissions, sandboxes, anything acting on a host or
    deleting data, anything that holds secrets, and prompts that steer other agents. Swift: only prose docs, scripts
    without private data, CI.
+   Review C (the owner approves spec statements before merge) only where a mistake really hurts: secrets, auth,
+   data loss, the check that keeps bad input out, sandbox and host settings. Ordinary code in a sensitive package is
+   B, even at deep tier: in doubt one tier up is for the model tier, not for the review letter. Name the harm in the
+   why of every C row.
    Everything else defaults to standard, B. Give the reason in a few words. Every file must match a row; the last row
    is `**`. Never put a path lower to save budget; in doubt, one tier up.
 5. Write the files. Reread each against the rules above.
