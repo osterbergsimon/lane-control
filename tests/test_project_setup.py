@@ -365,6 +365,39 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("?? wip.txt", status)
         self.assertIn("A  staged.txt", status)
 
+    # --- a detached or stale checkout is refused before anything is adapted ------------------------------------
+    def test_a_detached_head_is_refused_and_nothing_changes(self):
+        self.with_origin()
+        git("checkout", "-q", "--detach", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn("detached HEAD", self.err)
+        self.assertIn("git switch main", self.err)
+        ask.assert_not_called()
+        self.assertEqual(self.models(), [])
+        self.assertEqual(self.head_count(), 1)
+
+    def test_a_checkout_behind_origin_is_refused_with_the_count(self):
+        bare = self.with_origin()
+        self.other_clone_pushes(bare, "new.txt", "x", "one")
+        self.other_clone_pushes(bare, "new2.txt", "x", "two")
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn("2 commit(s) behind origin/main", self.err)
+        self.assertIn("git pull", self.err)
+        self.assertEqual(self.models(), [])
+        # --readapt is refused too; --skip-adapt (project-pause start) is not
+        self.assertEqual(self.in_terminal("y", "--readapt")[0], 1)
+        self.assertNotEqual(self.in_terminal("y", "--skip-adapt")[0], 1)
+
+    def test_skip_adapt_runs_on_a_detached_head(self):
+        self.with_origin()
+        git("checkout", "-q", "--detach", cwd=self.repo)
+        status, out, ask = self.in_terminal("n", "--skip-adapt")
+        self.assertEqual(status, 0, self.err)
+        self.assertTrue(self.orca_setup_ran())
+
     # --- one run: orca.yaml and the push, asked after the file-list commit -------------------------------------
     def with_origin(self, reject_push=False):
         """A local bare origin that holds the repo's main, with origin/HEAD set."""
@@ -2040,6 +2073,23 @@ class DirenvLineTests(unittest.TestCase):
             env = {"PATH": path, "STUB_DIRENV": "allowfail"}
             r = subprocess.run([shutil.which("sh"), "-c", line.strip()], cwd=self.repo, env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, (stubbed, r.stderr))
+
+    def test_a_tool_not_on_path_is_skipped_and_the_marker_is_still_written(self):
+        text, _ = self.draft()
+        body = text.split("setup: |\n", 1)[1]
+        script = "\n".join(l[4:] for l in body.splitlines())
+        work = self.e.home / "wt"
+        work.mkdir()
+        tools = self.e.home / "only-git"
+        tools.mkdir()
+        for tool in ("git", "touch"):
+            (tools / tool).symlink_to(shutil.which(tool))
+        subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+        r = subprocess.run([shutil.which("sh"), "-e", "-c", script], cwd=work, env={"PATH": str(tools)},
+                           capture_output=True, text=True)  # -e: a failing step must still not stop the marker
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("uv not on PATH, skipped", r.stderr)
+        self.assertTrue((work / ".git" / "orca-setup-done").exists())
 
     def test_an_envrc_not_approved_here_gets_no_line_and_the_output_says_so(self):
         text, out = self.draft("notallowed")

@@ -979,7 +979,8 @@ def setup_steps(repo: Path) -> list:
                 cmd = cmd.replace("uv sync", "uv sync --all-packages")
             tool = cmd.split()[0]
             line = cmd if str(rel) == "." else f"(cd {shlex.quote(str(rel))} && {cmd})"
-            steps.append(f'{line} || echo "setup: {tool} in {rel} failed" >&2')
+            steps.append(f'if command -v {tool} >/dev/null 2>&1; then {line} || echo "setup: {tool} in {rel} failed" >&2; '
+                         f'else echo "setup: {tool} not on PATH, skipped" >&2; fi')
     direnv = direnv_step(repo)
     if direnv:
         steps.insert(0, direnv)
@@ -2127,6 +2128,31 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
     return ["Changed by your answers, not re-checked:\n" + diff]
 
 
+def stale_checkout(repo: Path):
+    """Why the adapting must not start here, or None: HEAD is detached, or behind origin's default branch (lanes
+    branch from origin, so files adapted from stale ones, or committed on no branch, never reach them). Checked
+    against a fresh fetch; no origin, or a fetch that fails, leaves nothing to compare with."""
+    if run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode != 0:
+        return None
+    try:
+        run(["git", "fetch", "-q", "origin"], cwd=repo, check=False, timeout=120)
+    except Fail:
+        pass
+    branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo, check=False).stdout.strip()
+    lanes = default_branch(repo, branch)
+    ref = f"refs/remotes/origin/{lanes}"
+    behind = 0
+    if lanes and run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode == 0:
+        behind = int(run(["git", "rev-list", "--count", f"HEAD..{ref}"], cwd=repo, check=False).stdout.strip() or 0)
+    if not branch:
+        return ("the checkout is on a detached HEAD" + (f", {behind} commit(s) behind origin/{lanes}" if behind else "")
+                + f". Run `git switch {lanes or '<default branch>'}` and `git pull`, then run again")
+    if behind:
+        return (f"{branch} is {behind} commit(s) behind origin/{lanes}. Run `git pull` "
+                f"{'' if branch == lanes else f'(or switch to {lanes}) '}and run again")
+    return None
+
+
 def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
     """The steps in front of the Orca setup; True when that setup may run. A re-run is safe: committed files are left
     alone unless `again`, and uncommitted ones (an earlier run, a hand edit) go back to review instead of being
@@ -2479,6 +2505,10 @@ def main(argv=None) -> int:
         preflight(set())  # the agents' harnesses are checked once the project's settings are known
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
+        if not a.skip_adapt and (a.readapt or not onboarded(repo)):  # --skip-adapt (project-pause start) and a rerun work on any checkout
+            why = stale_checkout(repo)
+            if why:
+                raise Fail(f"{why}. Nothing was changed")
         beads_note(repo)
         migrate(repo)
         validate_settings(repo, settings(repo))
