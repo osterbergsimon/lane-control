@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Pause and resume a project's standing agents (coordinator and design lead); see docs/orca.md.
+
+  project-pause stop|start|status <project-dir | project-name>
+
+stop    stops the coordinator and design lead with `cotal stop`. Refuses, naming them, while any other agent (a lane or
+        reviewer) runs in the project's space. The broker and manager stay up; nothing is torn down.
+start   starts the standing agents that are missing: project-setup --skip-adapt (no adapting, no commit, no questions),
+        with a kickoff that resumes from handover-latest. It picks up the current personas.
+status  running or paused, and what else runs in the space.
+
+A paused project keeps its space in the window guard's COORD_SPACE; the guard config is not touched. Reruns are
+harmless. cotal refuses stop and spawn from inside a managed agent shell: run this from a plain shell.
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+_path = Path(__file__).resolve().parent / "project-setup"
+_loader = importlib.machinery.SourceFileLoader("project_setup", str(_path))
+_spec = importlib.util.spec_from_loader("project_setup", _loader)
+ps = importlib.util.module_from_spec(_spec)
+_loader.exec_module(ps)
+
+STANDING = ("coordinator", "design-lead")
+RESUME = ("You are restarting as a fresh session. Read AGENTS.md and the orca-cotal-lanes skill, then resume from "
+          "`bd recall handover-latest`, `cotal who` and `orca worktree list`, and tell the owner in one line that you "
+          "are back.")
+
+
+def find_repo(arg: str) -> Path:
+    d = Path(arg).expanduser()
+    if d.is_dir():
+        top = ps.run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False)
+        if top.returncode != 0:
+            raise ps.Fail(f"{d} is not a git repository")
+        return Path(top.stdout.strip())
+    found = []
+    for f in sorted((ps.config_home() / "lane-control" / "projects").glob("*/settings.json")):
+        try:
+            st = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(st, dict) and arg in (Path(st.get("root", "")).name, st.get("name")):
+            found.append(st["root"])
+    if len(found) != 1:
+        raise ps.Fail(f"{arg} is not a directory, and " + (f"matches {len(found)} projects: " + ", ".join(found)
+                      if found else "is no project set up here"))
+    return Path(found[0])
+
+
+def space_of(repo: Path) -> str:
+    if not (ps.store_dir(repo) / "settings.json").is_file():
+        raise ps.Fail(f"{repo} has not been set up: run project-setup first")
+    return ps.slug(ps.settings(repo).get("name") or repo.name)
+
+
+def stop(repo: Path, space: str) -> int:
+    live = ps.live_agents(repo, space)
+    others = sorted(n for n in live if n not in STANDING)
+    if others:
+        raise ps.Fail(f"not pausing {space}: {', '.join(others)} still running; finish or stop them first")
+    for name in STANDING:
+        if name in live:
+            ps.run(["cotal", "stop", name, "-s", space], cwd=repo)
+            ps.say(f"agent {name}", "stopped")
+        else:
+            ps.say(f"agent {name}", "exists", "not running")
+    print(f"{space} paused. `project-pause start` restarts them as a fresh session that resumes from handover-latest.")
+    return 0
+
+
+def start(repo: Path) -> int:
+    ps.COORDINATOR_KICKOFF = RESUME  # the one thing different from a first setup
+    return ps.main([str(repo), "--skip-adapt"])
+
+
+def status(repo: Path, space: str) -> int:
+    live = ps.live_agents(repo, space)
+    names = [n for n in STANDING if n in live]
+    print(f"{space}: " + (f"running ({', '.join(names)})" if names else "paused"))
+    others = sorted(n for n in live if n not in STANDING)
+    print("  also running: " + (", ".join(others) if others else "none"))
+    return 0
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) != 2 or argv[0] not in ("stop", "start", "status"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    cmd, target = argv
+    if os.geteuid() == 0:
+        print("project-pause: refusing to run as root; agents run as a normal user", file=sys.stderr)
+        return 2
+    if cmd != "status" and os.environ.get("COTAL_NAME"):
+        print(f"project-pause: {cmd} cannot run from inside an agent's shell: cotal refuses it there. "
+              "Run it from a plain shell instead.", file=sys.stderr)
+        return 1
+    try:
+        repo = find_repo(target)
+        space = space_of(repo)
+        if cmd == "start":
+            return start(repo)
+        ps.add_orca_cli_to_path()
+        return stop(repo, space) if cmd == "stop" else status(repo, space)
+    except ps.Fail as e:
+        print(f"project-pause: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

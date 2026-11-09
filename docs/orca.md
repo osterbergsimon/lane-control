@@ -298,6 +298,18 @@ written. Changing an agent's harness or model is not a refresh: `--coordinator`,
 `--permission-mode` are refused with `--refresh`.
 
 
+### Pause and resume: a project not being worked on
+```bash
+scripts/project-pause stop|start|status <project-dir | project-name>
+```
+`stop` stops the coordinator and design lead with `cotal stop`, so a project that is idle holds no agent that every
+window guard order wakes. It refuses, naming them, while a lane or reviewer still runs in the project's space. The
+broker and manager stay up (never `cotal down`), and the space stays in `COORD_SPACE`: the guard config is untouched.
+`start` runs project-setup `--skip-adapt` (no adapting, no commit, no questions) and starts only the agents that are
+missing; a restart is a fresh session, told to resume from `bd recall handover-latest`, `cotal who` and
+`orca worktree list`, on the current persona. `status` says running or paused and what else runs. Reruns are
+harmless. cotal refuses stop and spawn from inside an agent's shell: run it from a plain shell.
+
 ### Lanes
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
 1. Pick the tier per `model-routing.md`, then run `~/.agents/bin/lane-tier <the table your persona names> <tier>` for its harness and model. It refuses a `sandbox required` tier until the running manager uses the launch wrapper (below).
