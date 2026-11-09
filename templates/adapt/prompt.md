@@ -37,7 +37,7 @@ and suggest
 - Keep the front matter. Keep within the `max_lines` (and `max_rows`) in each template's front matter. max_lines
   counts every line of the file, front matter included. max_rows counts table rows without the header and separator.
 - Exposure: state the repo visibility above as it is. When it is "unknown", write "Treat as public" and ask the
-  owner. A value the owner stated stays.
+  owner. A value marked `(owner's answer)` stays.
 
 Plain short sentences. Project facts only: never repeat general good practice, and never restate a rule a persona
 would have. Test each line by asking whether a new agent would act differently for having read it; if not, delete it.

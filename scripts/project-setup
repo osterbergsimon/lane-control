@@ -1944,10 +1944,15 @@ def split_questions(text: str):
         if EDITS_HEAD.match(lines[i]) or (level and h and len(h.group(1)) <= level):
             end = i
             break
-    body = (m.group(2) + "\n" + "".join(lines[start + 1:end])).strip()
-    if not body or NONE_ONLY.fullmatch(body):
+    rest = "".join(lines[start + 1:end]).strip("\n")
+    inline = m.group(2).strip()
+    if inline and any(ITEM_START.match(l) or re.match(r"\s*#{3,}\s", l) for l in rest.splitlines()):
+        head_end, body = m.group(1) + m.group(2) + "\n", rest  # the text after the heading is not a question
+    else:
+        head_end, body = m.group(1) + "\n", (inline + "\n" + rest).strip("\n")
+    if not body.strip() or NONE_ONLY.fullmatch(body.strip()):
         return text, "", ""
-    return "".join(lines[:start]) + m.group(1) + "\n", body, "".join(lines[end:])
+    return "".join(lines[:start]) + head_end, body, "".join(lines[end:])
 
 
 def question_items(questions: str) -> list:
@@ -1961,10 +1966,10 @@ def question_items(questions: str) -> list:
             indent = min(w for _, w in bullets)
             heads = [i for i, w in bullets if w == indent]
     if not heads:
-        return [questions.strip()]
+        return [questions.strip("\n")]
     heads = [0] + [h for h in heads if h > 0] if heads[0] > 0 and "".join(lines[:heads[0]]).strip() else heads
     cuts = sorted(set(heads)) + [len(lines)]
-    return ["\n".join(lines[x:y]).strip() for x, y in zip(cuts, cuts[1:]) if "\n".join(lines[x:y]).strip()]
+    return ["\n".join(lines[x:y]).strip("\n") for x, y in zip(cuts, cuts[1:]) if "\n".join(lines[x:y]).strip()]
 
 
 def lane_files(repo: Path) -> dict:
@@ -2005,6 +2010,7 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
     if not questions:
         return []
     items = question_items(questions)
+    flush_input()  # what was typed while the agents ran is not an answer
     print("\nQuestions the adapting agent could not settle. Answer in plain text; Enter keeps its choice:", flush=True)
     given = []
     for n, item in enumerate(items, 1):
@@ -2035,8 +2041,8 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
     check_scope(repo, before)
     diff = changed_text(was, lane_files(repo))
     if not diff:
-        return ["Your answers were not applied: the run changed no file. The questions stay open; edit the files "
-                f"in {ADAPTED}/ yourself, or run again."]
+        return ["The run applying your answers changed no file: the files already matched, or an answer was not "
+                f"applied. The questions stay on the list; edit the files in {ADAPTED}/ yourself if one was not."]
     answered = {n for n, _, _ in given}
     left = [q for n, q in enumerate(items, 1) if n not in answered]
     kept.write_text(head + ("\n".join(left) + "\n" if left else "- none\n") + tail)

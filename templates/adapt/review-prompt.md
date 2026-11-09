@@ -57,7 +57,7 @@ Majors:
 15. False or unsupported claims. Verify a sample of about three facts per file at their source, starting with
     those a lane would act on. A check command must appear where the table says. The Exposure slot must state the repo
     visibility above: a mismatch is a major, and a blocker when it says private while
-    the fact is public or unknown. With "unknown", "Treat as public" or a value the owner stated both pass.
+    the fact is public or unknown. With "unknown", "Treat as public" or a value marked "(owner's answer)" both pass.
 16. A slot marked "none found" whose answer you can find.
 17. A re-run changing lines the project has not moved past: the owner's edits must survive.
 

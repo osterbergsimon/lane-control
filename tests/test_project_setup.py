@@ -299,7 +299,8 @@ class OnboardingTests(unittest.TestCase):
         """main() as if the owner sat at a terminal and answered `answer`; returns (status, stdout, input mock)."""
         m = load()
         out = Tty()
-        answers = {"side_effect": answer} if isinstance(answer, list) else {"return_value": answer}
+        answers = ({"side_effect": answer} if isinstance(answer, list) or callable(answer)
+                   else {"return_value": answer})
         with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
                 mock.patch("builtins.input", **answers) as ask, contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -983,7 +984,7 @@ class OnboardingTests(unittest.TestCase):
         self.setUp()
         self.e.script_agents(sonnet=[step, {}], opus=[PASS])
         _, out, _ = self.in_terminal(["an answer", "", "n"])
-        self.assertIn("answers were not applied", out)
+        self.assertIn("changed no file", out)
         self.assertIn("First one?", out)
         self.e.set_state(agent_steps={"opus": [PASS]})
         _, out, ask = self.in_terminal(["", "", "n"])
@@ -1004,12 +1005,39 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(m.question_items("- A?\n  more\n- B?"), ["- A?\n  more", "- B?"])
         self.assertEqual(m.split_questions("## Questions for the owner\n- none\n")[1], "")
 
-    def test_typed_ahead_input_is_flushed_before_the_commit_question(self):
-        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
-        with mock.patch("termios.tcflush") as flush, mock.patch.object(Tty, "fileno", create=True, return_value=0):
-            status, out, _ = self.in_terminal("y")
+    def test_typed_ahead_input_is_flushed_before_the_first_question_and_before_the_commit_question(self):
+        events = []
+
+        def typed(prompt):
+            events.append("input")
+            return "" if len(events) < 3 else "y"
+
+        self.e.script_agents(sonnet=[self.WRITE_Q], opus=[PASS])
+        with mock.patch("termios.tcflush", side_effect=lambda *a: events.append("flush")), \
+                mock.patch.object(Tty, "fileno", create=True, return_value=0):
+            status, out, _ = self.in_terminal(typed)
         self.assertEqual(status, 0, out)
-        flush.assert_called()
+        self.assertEqual(events[0], "flush")  # before question 1: what was typed while the agents ran
+        self.assertEqual(events[events.index("input") - 1], "flush")
+        self.assertEqual(events[-2:], ["flush", "input"])  # right before the commit question
+
+    def test_an_exposure_answer_is_marked_and_a_confirming_answer_keeps_the_list(self):
+        self.assertIn("(owner's answer)", (ROOT / "templates" / "adapt" / "answers-prompt.md").read_text())
+        self.e.script_agents(sonnet=[self.WRITE_Q, {}], opus=[PASS])
+        _, out, _ = self.in_terminal(["yes, as you chose", "n"])
+        self.assertIn("files already matched", out)
+        self.assertIn("The questions stay on the list", out)
+
+    def test_question_items_keep_indented_lists_apart_and_skip_the_text_after_a_heading(self):
+        m = load()
+        for text in ("- **Questions for the owner**:\n  - Q1?\n  - Q2?\n",
+                     "**Questions for the owner**: each one below\n- Q1?\n- Q2?\n",
+                     "## Questions for the owner (2)\n- Q1?\n- Q2?\n"):
+            with self.subTest(text=text):
+                head, questions, tail = m.split_questions(text)
+                items = m.question_items(questions)
+                self.assertEqual([i.strip() for i in items], ["- Q1?", "- Q2?"])
+        self.assertEqual(m.question_items(m.split_questions("Questions for the owner: Is it X?\n")[1]), ["Is it X?"])
 
     def test_questions_saying_none_are_not_asked(self):
         none = ("**AGENTS.md edits you would make**\n- one edit\n\n**Questions for the owner**\n- none\n")

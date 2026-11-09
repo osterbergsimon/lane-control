@@ -11,6 +11,7 @@ The owner's answers, in their words:
 Rules:
 - Apply only the owner's answers: edit the lines in `.lane-control/` they settle. Change nothing else.
 - An answer is the owner's word. Do not doubt it or look it up.
+- An answer that settles the Exposure slot is written as the value followed by `(owner's answer)`.
 - Ask no new questions and write no suggestions file.
 - Write only inside `.lane-control/`. Nothing else. Never commit or stage. You have no shell.
 - Keep the front matter and the size limits of the files. max_lines counts every line of the file, front matter
