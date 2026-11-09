@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Creates the machine coordinator: its own private folder, the Cotal space `machine`, its persona, its agent.
+
+The folder is a local git repo for private notes and is never pushed to a public remote. Reruns change only what is
+missing, and keep the notes. Builds on project-setup's steps; see docs/orca.md for the order of the install.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+SPACE = "machine"
+NAME = "machine-coordinator"
+_ps_path = Path(__file__).resolve().parent / "project-setup"
+_loader = importlib.machinery.SourceFileLoader("project_setup", str(_ps_path))
+_spec = importlib.util.spec_from_loader("project_setup", _loader)
+ps = importlib.util.module_from_spec(_spec)
+_loader.exec_module(ps)
+
+KICKOFF = "Read your persona's notes file and the config it names, then tell the owner in one line that you are ready."
+NOTES_STUB = "# Machine coordinator notes\n\nPrivate: owner decisions, caps, priorities. Never push this folder to a public remote.\n"
+
+
+def git(folder: Path, *args):
+    subprocess.run(["git", *args], cwd=folder, check=True, capture_output=True, text=True)
+
+
+def ensure_folder(folder: Path):
+    folder.mkdir(parents=True, exist_ok=True)
+    if (folder / ".git").exists():
+        ps.say("folder", "exists", str(folder))
+    else:
+        git(folder, "init", "-q")
+        git(folder, "commit", "-q", "--allow-empty", "-m", "Machine coordinator notes")
+        ps.say("folder", "created", str(folder))
+    notes = folder / "notes.md"
+    if not notes.exists():
+        notes.write_text(NOTES_STUB)
+
+
+def render(harness: str, model: str, mode: str, folder: Path) -> str:
+    text = (ps.HERE / "personas" / f"{NAME}.md").read_text()
+    return (ps.render_persona(text, harness, model, mode, "this machine")
+            .replace("{{LANE_CONTROL}}", str(ps.HERE)).replace("{{NOTES}}", str(folder / "notes.md")))
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--folder", default=str(Path.home() / "code" / "machine-coordinator"),
+                    help="its private folder (default ~/code/machine-coordinator)")
+    ap.add_argument("--model", default="claude/opus", help="harness/model (default claude/opus)")
+    ap.add_argument("--permission-mode", default="auto", help="Claude permission mode (default auto)")
+    ap.add_argument("--port", type=int)
+    ap.add_argument("--trust-folder", action="store_true", help="answer Claude's first-start trust question with yes")
+    ap.add_argument("--no-start", action="store_true", help="make the folder, space and persona only")
+    a = ap.parse_args(argv)
+    harness, model = ps.harness_model(a.model)
+    folder = Path(a.folder).expanduser().resolve()
+    ps.add_orca_cli_to_path()
+    ps.ORCA = ps.orca_cli()
+    os.environ.setdefault("COTAL_ORCA_BIN", ps.ORCA)
+    try:
+        ps.preflight({harness})
+        ensure_folder(folder)
+        ps.orca_repo(folder)
+        ps.cotal_space(folder, SPACE)
+        if harness == "claude":
+            ps.claude_wiring(folder, SPACE)
+        state = ps.write_if_changed(folder / ".cotal" / "agents" / f"{NAME}.md", render(harness, model, a.permission_mode, folder))
+        ps.say(f"persona {NAME}", state, f"{harness}/{model}")
+        ps.say("gitignore", ps.ignore_cotal(folder), ".cotal/")
+        if a.no_start:
+            ps.say("start", "skipped", "--no-start")
+            return 0
+        if harness == "claude":
+            ps.ensure_claude_trust(folder, record=a.trust_folder)
+        ps.start_stack(folder, SPACE, a.port)
+        ps.spawn(folder, SPACE, NAME, harness, model, a.permission_mode, folder, KICKOFF)
+        print(f"summary: machine coordinator · space {SPACE} · folder {folder}")
+        return 0
+    except ps.Fail as e:
+        print(f"machine-coordinator-setup: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

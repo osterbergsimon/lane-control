@@ -15,7 +15,7 @@ The ergonomic layer is a single **global coordinator** on `<main>` that can see 
 Each machine is a complete, standalone lane-control install:
 - its project coordinators, lanes, beads databases and checkouts;
 - its own copy of the config (`playbook.conf.sh`) listing only the coordinators that run there;
-- its own scripts: `window-guard.sh` (messages only its local coordinators), `machine-watch.sh` (its own memory and swap), `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh` as Rove routines in its own daemon, and the sandbox if it runs third-party lanes;
+- its own scripts: `window-guard.sh` (messages only its local coordinators, and watches its own memory and swap), `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh` as Rove routines in its own daemon, and the sandbox if it runs third-party lanes;
 - its own mode file (day or night).
 
 Lanes are always local to their coordinator: Rove refuses a lane parent on another machine (`REMOTE_PARENT_UNSUPPORTED`) and a multi-repo task across machines (`REMOTE_EXTRA_UNSUPPORTED`).
@@ -117,7 +117,7 @@ Pinned does not mean stuck. When the owner decides "run this project on that mac
 ## 9. Minimal first step
 1. Pick one small, data-free project and one SSH host. Prepare the host per section 6 (without sandbox first).
 2. `rove machine add <ssh-target> --alias <alias>` on `<main>`; `rove machine list` and `rove machine doctor`.
-3. On the host: config with its one coordinator, the guard, machine-watch and the three routines; create the project's coordinator there.
+3. On the host: config with its one coordinator, the guard and the three routines; create the project's coordinator there.
 4. From `<main>`, address it: `rove api list --machine <alias>`, `rove api context --machine <alias> --repo <path>`, `send` one FYI, ask for a reply.
 5. Check the test list in 3.3: send and reply round trip, `report --delivery`, a gate raised on the host seen from `<main>`, the merged usage feed, the owner report including the host, and behaviour with the host stopped and the network cut.
 6. Add the sandbox on the host only after the above passes, with `test-opencode-sandbox.sh`.

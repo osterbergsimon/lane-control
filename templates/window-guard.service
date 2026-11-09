@@ -1,0 +1,13 @@
+# Rendered and installed by scripts/window-guard-install. Do not edit the installed copy: rerun the script.
+[Unit]
+Description=lane-control window guard (budget orders and the low-memory notice; spends no tokens)
+StartLimitIntervalSec=0
+
+[Service]
+Environment="PATH=@PATH@"
+ExecStart=/usr/bin/env bash "@REPO@/scripts/window-guard.sh"
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

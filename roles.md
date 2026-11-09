@@ -1,7 +1,7 @@
 # Roles
 
 ## Machine coordinator
-The Rove main task on the playbook repo. It acts **for judgment only**. It does not run project work, review PRs or launch lanes in projects; project coordinators own their queues, briefs, reviews and merges.
+On Rove, the main task on the playbook repo; under Orca + Cotal, its own agent (below). It acts **for judgment only**. It does not run project work, review PRs or launch lanes in projects; project coordinators own their queues, briefs, reviews and merges.
 
 Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the config.
 
@@ -31,6 +31,12 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 - Public posts (`rove api feedback`, which becomes a public discussion under the owner's account; issues, discussions, PRs or comments on other people's repos) need the owner's approval first and generic wording (no project, host, customer, path or task-key names). Later edits stay in the public history.
 
 - Identity (the owner's choice; the templates default to no AI attribution, see README "Commit identity and AI attribution"): everything an agent commits or posts is authored as the owner; AI-authored PR commits are squash-merged with the owner as author.
+
+### Under Orca + Cotal
+- One agent, `machine-coordinator`, in the Cotal space `machine`, in its own private folder (`scripts/machine-coordinator-setup`). Its notes stay in that folder because this repo is public. It sleeps until something needs judgment.
+- Each project keeps its own space and Cotal has no messages between spaces, so everything crosses by shell: `cotal send -s <space> -t coordinator "machine coordinator: <order>"` to a project, `cotal send -s machine -t machine-coordinator "<project>: <line>"` back.
+- An order that starts `machine coordinator:` and does not come from an agent in the coordinator's roster counts like the owner's own words, with no limit on the kind; a quoted one does not count. A decision the coordinator's persona keeps for the owner is always confirmed by the owner in that coordinator's own tab before it is acted on; a budget or window guard order is not such a decision.
+- `scripts/window-guard.sh` sends the budget orders without waking this agent and sends it one notice per low-memory episode. The steps in Jobs that name `rove api` are the Rove path; under Orca + Cotal it asks each coordinator for its open owner decisions.
 
 ## Project coordinator
 The Rove main task on the project's main checkout. It is the planning lane and the only gate to main.

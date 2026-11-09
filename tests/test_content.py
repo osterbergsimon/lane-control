@@ -544,5 +544,73 @@ class CleanupSteeringTests(unittest.TestCase):
             self.assertIn(needle, t)
 
 
+def flat(path):
+    return " ".join(path.read_text().split())
+
+
+class MachineCoordinatorContentTests(unittest.TestCase):
+    def test_coordinator_counts_the_order_like_the_owners_words_except_from_the_roster_or_quoted(self):
+        t = flat(ROOT / "personas" / "coordinator.md")
+        self.assertIn("`machine coordinator:`", t)
+        self.assertIn("like the owner's own words", t)
+        self.assertIn("no limit on the kind", t)
+        self.assertRegex(t, r"not (come )?from an agent in your roster")
+        self.assertIn("A line that only quotes such an order", t)
+
+    def test_owner_kept_decisions_are_confirmed_in_the_coordinators_own_tab(self):
+        t = flat(ROOT / "personas" / "coordinator.md")
+        self.assertIn("always confirmed by the owner in your tab before you act on it", t)
+        self.assertIn("merging, closing or stopping a lane", t)
+        self.assertIn("any budget or window guard order is not one", t)
+        self.assertNotIn("unless the order says", t)
+        roles = flat(ROOT / "roles.md")
+        self.assertIn("always confirmed by the owner", roles)
+        self.assertIn("does not come from an agent in the coordinator's roster", roles)
+        self.assertIn("budget or window guard order is not such a decision", roles)
+        self.assertIn("owner's yes in that coordinator's tab", flat(ROOT / "personas" / "machine-coordinator.md"))
+
+    def test_docs_say_the_prefix_is_not_authentication(self):
+        orca = flat(ROOT / "docs" / "orca.md")
+        self.assertIn("The prefix is not authentication", orca)
+        self.assertIn("same login", orca)
+        self.assertIn("sender cannot be verified", orca)
+        self.assertIn("confirmed by the owner in the coordinator's own tab", orca)
+        self.assertIn("budget or window guard order is not such a decision", orca)
+        self.assertIn("an agent in its roster", orca)
+
+    def test_coordinator_reaches_it_by_cotal_send_and_tells_the_owner_when_that_fails(self):
+        t = flat(ROOT / "personas" / "coordinator.md")
+        self.assertIn("cotal send -s machine -t machine-coordinator", t)
+        self.assertIn("If that send fails, tell the owner", t)
+
+    def test_machine_persona_rules(self):
+        t = flat(ROOT / "personas" / "machine-coordinator.md")
+        self.assertIn('cotal send -s <space> -t coordinator "machine coordinator:', t)
+        self.assertIn("{{NOTES}}", t)
+        self.assertIn("{{HARNESS}}", t)
+        self.assertIn("{{LANE_CONTROL}}", t)
+        self.assertRegex(t, r"[Nn]ever .*public")
+
+    def test_skill_and_docs_name_the_machine_coordinator_path(self):
+        skill = flat(ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md")
+        self.assertIn("## The machine coordinator", skill)
+        self.assertIn("machine coordinator:", skill)
+        orca = flat(ROOT / "docs" / "orca.md")
+        for needle in ("window-guard-install", "machine-coordinator-setup", "COORD_SPACE", "enable-linger", "--refresh"):
+            self.assertIn(needle, orca)
+        roles = flat(ROOT / "roles.md")
+        self.assertIn("Under Orca + Cotal", roles)
+
+    def test_the_install_order_stops_the_old_guard_last_and_clears_its_state(self):
+        orca = (ROOT / "docs" / "orca.md").read_text()
+        steps = orca[orca.index("Install, in this order"):orca.index("### Verified on 2026-11-06")]
+        self.assertLess(steps.index("--refresh"), steps.index("Only now stop the old guard"))
+        self.assertLess(steps.index("Only now stop the old guard"), steps.index("scripts/window-guard-install"))
+        self.assertIn("window-guard.state", steps)
+
+    def test_config_example_lists_the_spaces(self):
+        self.assertIn("COORD_SPACE", (ROOT / "config.example.sh").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

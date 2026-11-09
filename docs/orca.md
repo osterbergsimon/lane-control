@@ -403,6 +403,43 @@ earlier on a gateway model needs `--own-model` or a `sandbox none` row before th
 - `bypassPermissions` is an option (non-root only, after accepting its warning once).
 - The project's mode is written into the personas, and lanes inherit it (tier table `inherit`).
 
+### The machine coordinator and the window guard
+One agent per machine, `machine-coordinator` in the Cotal space `machine`, in its own private folder; `roles.md` has its
+job. Projects keep their own spaces and Cotal has no messages between spaces, so orders cross by shell with
+`cotal send -s <space> -t coordinator "machine coordinator: ..."`. That works from a shell on this machine under the
+space's own signer; it has not been exercised live yet, so step 4 is the first real test. An order that starts
+`machine coordinator:` counts like the owner's own words (`personas/coordinator.md`).
+
+The prefix is not authentication. The guard, the machine coordinator, the owner and any agent with a shell on this
+machine send under the same login, so the sender cannot be verified. That is why a decision the owner keeps (merging,
+closing or stopping a lane, and the like) is always confirmed by the owner in the coordinator's own tab first; a budget
+or window guard order is not such a decision. A coordinator also ignores the prefix on a DM from an agent in its roster
+and in quoted text. That stops accidents and a plain `cotal_dm`, not a shell `cotal send`.
+
+`scripts/window-guard.sh` spends no tokens and runs as a systemd user service. It sends the budget steps to every
+project in `COORD_SPACE` and one notice per low-memory episode to the machine coordinator. `COORD_TASK` is no longer
+read by it, so a project on Rove, or an old Rove entry for a project that moved, gets no orders. A failed send waits and
+is retried each poll for an hour, then the machine coordinator is told if its space answers. A low-memory notice that
+cannot be delivered is not repeated while the episode lasts. The journal is the one record that always has it
+(`journalctl --user -u lane-control-window-guard.service`), so if Cotal is down for the whole service, nobody is told.
+
+Install, in this order, from the main checkout of lane-control (the unit runs the script where it finds it):
+1. Add `COORD_SPACE` to the config (`config.example.sh`): one line per project, with the project's space from
+   `cotal space`. Remove nothing else; the Rove scripts still read `COORD_TASK`.
+2. Run `scripts/project-setup <project> --refresh` for each project, and restart its coordinator at a natural stop. Until
+   it restarts, a running coordinator treats the orders as information.
+3. `scripts/machine-coordinator-setup` (`--no-start` to look first; `--folder` for another place than
+   `~/code/machine-coordinator`).
+4. Test the path once by hand: `cotal send -s <space> -t coordinator "machine coordinator: FYI test, no reply"`, and
+   check the coordinator sees it.
+5. Only now stop the old guard and the old machine watch loop, and any routine that starts them, so the machine is
+   not left without a guard. All of them must be stopped before step 6, because two guards send every order twice.
+   Delete the old state file,
+   `~/.local/state/lane-control/window-guard.state`: an order the old guard sent only to Rove would count as already
+   sent.
+6. `scripts/window-guard-install`, right after. It refuses while another guard runs or `COORD_SPACE` is empty. For a
+   machine that runs with nobody logged in: `loginctl enable-linger $USER`.
+
 ### Verified on 2026-11-06 [tested]
 - A manager-launched agent opens as one tab `cotal-<name>` inside an *existing* Orca worktree (next to the shell Orca
   opens with every worktree), and joins the roster. Tested with OpenCode and with Claude.

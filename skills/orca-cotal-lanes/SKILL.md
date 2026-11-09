@@ -137,6 +137,13 @@ check above that fails. Closing a lane never deletes its branch: merged branches
 delete them. If `worktree rm` prints a warning about an older host's branch policy, check the branch and tell
 the owner. A reviewer is stopped after its last round (section 5), not left to idle.
 
+## The machine coordinator
+Each project is its own Cotal space, and one agent per machine, `machine-coordinator` in the space `machine`, works
+across them; the window guard sends budget orders the same way. Both use `cotal send -s <space> -t coordinator`, and
+an order starts `machine coordinator:`. Your persona says what such an order counts as; when one tells lanes to stop
+or push WIP, pass it to them by `cotal_dm`. Reach the machine coordinator with
+`cotal send -s machine -t machine-coordinator "<project>: <one line>"`.
+
 ## A lane that lost the mesh
 A Claude lane that shows "Cotal incoming auto-wake is unavailable", or whose Cotal tools became the personal
 `cotal_connect` set, has lost the mesh, though the roster may still show it idle. Switching back does not restore it.

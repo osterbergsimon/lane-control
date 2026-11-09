@@ -35,9 +35,8 @@ STEP_NO_NEW=7           # weekly >= ceiling-7: no new work on the budget
 STEP_WIP_STOP=4         # weekly >= ceiling-4: lanes push WIP and stop; coordinators write their handover
 STEP_STOP_ALL=2         # weekly >= ceiling-2: everything on the budget stops
 PRESSURE_MARGIN=15      # weekly >= ceiling-15: pressure notice only
-MEM_LOW_GB=4            # watch wakes the machine coordinator below this (2 polls in a row)
+MEM_LOW_GB=4            # window guard notifies the machine coordinator below this (2 polls in a row), once per episode
 SWAP_HIGH_GB=12         # ... or above this much swap used
-WINDOW_WATCH_PCT=90     # watch wakes at this window use of a metered budget
 WINDOW_NIGHT_PCT=80     # night: no new lanes on a budget at this window use
 NIGHT_MEM_MIN_GB=8      # night: no launches below this much available memory
 HANDOVER_HINT="done, open, decisions for the owner, how to resume; in your handover memory, detailed enough for a new session"
@@ -45,7 +44,13 @@ WINDOW_WARN_PCT=95      # window guard: coordinators start nothing new
 WINDOW_STOP_PCT=98      # window guard: limit imminent, lanes push WIP
 POLL_SECS=30
 
-# --- Project coordinators: name -> Rove main task id; one engine tab for all ---
+# --- Project coordinators under Orca + Cotal: name -> the project's Cotal space (the slug of its name, `cotal space`).
+# The window guard sends orders to these only, with `cotal send -s <space> -t coordinator`. ---
+declare -A COORD_SPACE=(
+  ["<PROJECT_A>"]="<project_a>"
+)
+# --- Rove coordinators: name -> Rove main task id; one engine tab for all. Read by the Rove-only scripts
+# (night watch, stale-claim and park checks, docs review), never by the window guard. ---
 declare -A COORD_TASK=(
   ["<PROJECT_A>"]="<COORDINATOR_TASK_ID_A>"
   ["<PROJECT_B>"]="<COORDINATOR_TASK_ID_B>"
