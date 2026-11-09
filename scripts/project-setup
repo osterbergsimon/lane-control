@@ -986,7 +986,8 @@ def setup_steps(repo: Path) -> list:
         steps.insert(0, direnv)
     beads = repo / ".beads"
     if beads.is_symlink():
-        steps.insert(0, f"[ -e .beads ] || ln -s {shlex.quote(os.readlink(beads))} .beads")
+        steps.insert(0, f"[ -e .beads ] || ln -s {shlex.quote(os.readlink(beads))} .beads "
+                     '|| echo "setup: the .beads link failed" >&2')
     return steps
 
 
@@ -1917,6 +1918,7 @@ def publish_onboarding(repo: Path) -> None:
         say("publish", "skipped", "could not tell which branch lanes branch from, so nothing is pushed; make sure "
             "the onboarding files and orca.yaml are on origin's default branch")
         return
+    # The next two cases cannot happen after stale_checkout passed; they stay for a run whose fetch failed.
     if text is not None and lanes_base_has(repo, lanes, "orca.yaml"):
         say("setup-script", "kept", f"origin/{lanes} already has an orca.yaml and this checkout is behind it "
             "(git pull): not committing another")
@@ -2128,19 +2130,32 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
     return ["Changed by your answers, not re-checked:\n" + diff]
 
 
-def stale_checkout(repo: Path):
+def stale_checkout(repo: Path, quick: bool = False):
     """Why nothing may be adapted or committed here, or None: HEAD is detached, on a branch other than origin's
     default, or behind it (lanes branch from origin's default branch, so a commit anywhere else never reaches them).
-    Checked against a fresh fetch; with no origin only the detached HEAD can be told."""
+    Fetches first and asks origin for its default branch; if origin cannot be reached it says so on stderr and
+    compares with what was fetched last. With no origin only the detached HEAD can be told. `quick`: short timeouts,
+    for runs that only warn."""
     branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo, check=False).stdout.strip()
     has_origin = run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode == 0
     lanes = None
     if has_origin:
+        wait = 10 if quick else 60
         try:
-            run(["git", "fetch", "-q", "origin"], cwd=repo, check=False, timeout=120)
+            fetched = run(["git", "fetch", "-q", "origin"], cwd=repo, check=False, timeout=wait).returncode == 0
+            r = run(["git", "ls-remote", "--symref", "origin", "HEAD"], cwd=repo, check=False, timeout=wait)
         except Fail:
-            pass
-        lanes = default_branch(repo, branch)
+            fetched, r = False, None
+        if not fetched:
+            print("project-setup: note: could not reach origin, so the checkout check used what was fetched last "
+                  "and may be out of date", file=sys.stderr)
+        m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD", r.stdout, re.M) if r is not None else None
+        if m:
+            lanes = m.group(1)
+        else:  # origin did not say (empty, or unreachable): the local origin/HEAD
+            local = run(["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd=repo,
+                        check=False).stdout.strip()
+            lanes = local[len("origin/"):] if local.startswith("origin/") else None
     ref = f"refs/remotes/origin/{lanes}"
     behind = 0
     if lanes and run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode == 0:
@@ -2481,7 +2496,7 @@ def main(argv=None) -> int:
                 raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
             say("repo", "exists", top.stdout.strip())
             repo = Path(top.stdout.strip())
-            why = stale_checkout(repo)
+            why = stale_checkout(repo, quick=True)
             if why:  # a refresh works on any checkout, but says so
                 print(f"project-setup: warning: {why}", file=sys.stderr)
             bad = own_check(flag_pins, own_models | known_own_models(repo))  # before anything is moved
@@ -2511,7 +2526,7 @@ def main(argv=None) -> int:
         preflight(set())  # the agents' harnesses are checked once the project's settings are known
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
-        why = stale_checkout(repo)
+        why = stale_checkout(repo, quick=a.skip_adapt)
         if why and a.skip_adapt:  # works on any checkout (project-pause start), but says so
             print(f"project-setup: warning: {why}", file=sys.stderr)
         elif why:  # anything that may commit does not

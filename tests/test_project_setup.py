@@ -391,6 +391,25 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.in_terminal("y", "--readapt")[0], 1)
         self.assertNotEqual(self.in_terminal("y", "--skip-adapt")[0], 1)
 
+    def test_a_renamed_default_branch_is_read_from_origin_not_the_old_origin_head(self):
+        bare = self.with_origin()
+        git("branch", "-m", "main", "trunk", cwd=self.repo)
+        git("push", "-q", "origin", "trunk", cwd=self.repo)
+        git("symbolic-ref", "HEAD", "refs/heads/trunk", cwd=bare)  # origin's default is now trunk; origin/HEAD here still says main
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "n"])
+        self.assertEqual(status, 0, self.err)
+        self.assertNotIn("lanes branch from", self.err)
+
+    def test_an_unreachable_origin_is_said_and_the_old_refs_are_used(self):
+        self.with_origin()
+        git("remote", "set-url", "origin", str(self.e.home / "gone.git"), cwd=self.repo)
+        git("checkout", "-q", "--detach", cwd=self.repo)
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn("could not reach origin", self.err)
+        self.assertIn("detached HEAD", self.err)
+
     def test_skip_adapt_and_refresh_run_on_a_detached_head_with_a_warning(self):
         self.with_origin()
         git("checkout", "-q", "--detach", cwd=self.repo)
@@ -2096,6 +2115,21 @@ class DirenvLineTests(unittest.TestCase):
                            capture_output=True, text=True)  # -e: a failing step must still not stop the marker
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("uv not on PATH, skipped", r.stderr)
+        self.assertTrue((work / ".git" / "orca-setup-done").exists())
+
+    def test_a_failing_beads_link_does_not_stop_the_marker(self):
+        (self.repo / ".beads").symlink_to("/nonexistent-beads")
+        text, _ = self.draft()
+        script = "\n".join(l[4:] for l in text.split("setup: |\n", 1)[1].splitlines())
+        work = self.e.home / "wt2"
+        work.mkdir()
+        (work / ".beads").mkdir()
+        (work / ".beads").rmdir()
+        (work / ".beads").symlink_to("/dangling")  # [ -e ] false, ln -s then fails: File exists
+        subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+        r = subprocess.run([shutil.which("sh"), "-e", "-c", script], cwd=work,
+                           env={"PATH": os.environ["PATH"]}, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((work / ".git" / "orca-setup-done").exists())
 
     def test_an_envrc_not_approved_here_gets_no_line_and_the_output_says_so(self):

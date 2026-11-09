@@ -205,8 +205,7 @@ and the answers' changes and asks only the questions still on the list.)
    push alone, only when origin's default branch lacks the onboarding files or `orca.yaml`; the question lists the
    commits the push carries. An already onboarded project is asked too on a re-run (that is how a declined, failed or
    interrupted answer is asked again), also with `--write-orca-yaml`. An untracked `orca.yaml` that differs from the draft is never
-   overwritten or committed. The push is asked only on the branch origin's HEAD names; on another branch nothing is
-   asked, and the run says lanes will not get the files only when origin's default branch really lacks them. With no
+   overwritten or committed. The push is asked only on the branch origin's HEAD names (another branch is refused earlier, see below). With no
    origin Orca makes worktrees from the local branch, so the question is only to commit `orca.yaml`. A no, no terminal or a failed push commits
    and pushes nothing more, and the agents still start, with that warning. Only a no to the file list stops the run.
    A run without onboarding (`--skip-adapt`) asks nothing and never commits: it drafts into

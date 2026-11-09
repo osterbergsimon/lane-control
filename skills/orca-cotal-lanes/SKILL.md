@@ -39,9 +39,10 @@ your persona names; pass that value.
 
 ## 2. Open the lane
 First check that the machine has room: run `~/.agents/bin/lane-room`. If it exits non-zero (too busy, or not installed),
-hold the lane and tell the owner what it printed, instead of starting it. Then run `git status -sb` in the main
-checkout: if it is detached, on a branch other than the default, or behind origin, hold the lane and tell the owner
-(behind only and clean: `git merge --ff-only origin/<default>` is fine).
+hold the lane and tell the owner what it printed, instead of starting it. The coordinator then runs `git fetch origin`,
+`git status -sb` and `git rev-list --count HEAD..origin/<default>` in its own checkout: if it is detached, on a branch
+other than the default, or behind origin, it holds the lane and tells the owner (behind only and clean:
+`git merge --ff-only origin/<default>` is fine). A design lead skips this: its lanes branch from its own branch.
 
 From your own worktree (its cwd makes the new task your child):
 
