@@ -8,6 +8,9 @@ This is not a new audit. An earlier review already ran the full checks. For each
 names and decide: fixed, not fixed, or the fix broke what it touched (a line it changed, or a fact that line states).
 Raise nothing new outside that: a problem you notice elsewhere, however real, is not yours to report here. Open at most
 about 10 files; get names from Glob first, and never read a tree. A design lead was asked for: {{DESIGN_LEAD}}.
+Repo visibility (read by the script from the git host, a fact): {{VISIBILITY}}
+An earlier finding about the Exposure slot is fixed only when the slot states that value (with "unknown":
+"Treat as public" or a value marked "(owner's answer)").
 
 Earlier findings:
 {{REVIEW_FINDINGS}}

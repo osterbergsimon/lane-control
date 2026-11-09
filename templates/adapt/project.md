@@ -33,7 +33,7 @@ them. Where this file and AGENTS.md disagree, AGENTS.md wins: say so in your rep
 <!-- slot host: required. Routes, scripts or buttons that reboot, delete, or change network or services. Workers stub them. -->
 
 ## Exposure
-<!-- slot exposure: required. Public or private repo, and what agents must keep out of commits because of it. -->
+<!-- slot exposure: required. The repo visibility you were given (public, private, internal or unknown), and what agents must keep out of commits because of it. -->
 
 ## Where decisions live
 <!-- slot decisions: required. Files that record owner decisions, and which must not change without an issue saying so. -->

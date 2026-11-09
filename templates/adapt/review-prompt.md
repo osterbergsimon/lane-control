@@ -9,8 +9,10 @@ the adapted files and the project's top-level docs, manifests, CI and test scrip
 read a tree. Check a sample of facts, not every one. Always open code behind anything rated low (check 13), and never
 lower a rating to save budget.
 
-A design lead was asked for: {{DESIGN_LEAD}}. The files to review, and the diff of those already tracked, follow the
-checks. Print one line per finding, then the verdict as the very last line:
+A design lead was asked for: {{DESIGN_LEAD}}.
+Repo visibility (read by the script from the git host, a fact): {{VISIBILITY}}
+The files to review, and the diff of those already tracked, follow the checks.
+Print one line per finding, then the verdict as the very last line:
 - blocker <file>:<line> <what is wrong> -> <what to do> (proof: <one line>)
 - major ...
 - minor ...
@@ -31,7 +33,8 @@ FIX if there is any blocker or major. Never inflate a level to be heard or drop 
    `**`, and tiers and review letters are valid.
 8. Every path named in the files exists in the repo (use Glob), except names under "Private data" and other
    gitignored names, which may be absent from a fresh checkout. Each file keeps the `max_lines` (and `max_rows`) of its
-   template's front matter.
+   template's front matter. max_lines counts every line of the file, front matter included. max_rows counts table rows
+   without the header and separator.
 
 **Judgment checks.**
 
@@ -52,7 +55,9 @@ Majors:
 14. Review letters. C for formats, validators, spec statements, limits, hostile input, vendored parsers and security;
     A only where no product behaviour can change.
 15. False or unsupported claims. Verify a sample of about three facts per file at their source, starting with
-    those a lane would act on. A check command must appear where the table says.
+    those a lane would act on. A check command must appear where the table says. The Exposure slot must state the repo
+    visibility above: a mismatch is a major, and a blocker when it says private while
+    the fact is public or unknown. With "unknown", "Treat as public" or a value marked "(owner's answer)" both pass.
 16. A slot marked "none found" whose answer you can find.
 17. A re-run changing lines the project has not moved past: the owner's edits must survive.
 

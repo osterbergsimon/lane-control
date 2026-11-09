@@ -58,6 +58,16 @@ class Env:
             p.chmod(0o755)
         self.log = self.home / "stub.log"
         self.state = self.home / "stub.json"
+        # gh: prints $STUB_GH (e.g. PRIVATE); fails when it is unset, like a machine with no login or network.
+        # direnv: $STUB_DIRENV allowed | notallowed | allowfail (status says allowed, `allow` fails) | fail.
+        for name, body in (("gh", 'echo "$@" >> "$STUB_LOG.gh"\n[ -n "$STUB_GH" ] || exit 1\necho "$STUB_GH"\n'),
+                           ("direnv", 'case "$STUB_DIRENV:$1" in\n'
+                                      '  fail:*) exit 1;;\n  allowfail:allow) exit 1;;\n'
+                                      '  allowed:status|allowfail:status) echo "Found RC allowed 0";;\n'
+                                      '  *:status) echo "Found RC allowed 1";;\nesac\n')):
+            p = self.bin / name
+            p.write_text("#!/bin/sh\n" + body)
+            p.chmod(0o755)
         # Only the stub bin plus the dirs of git and python, so a real orca/cotal/claude/opencode never leaks in.
         tools = {str(Path(shutil.which(t)).parent) for t in ("git", "python3", "env", "sh")}
         self.env = {**os.environ, "HOME": str(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
@@ -289,7 +299,8 @@ class OnboardingTests(unittest.TestCase):
         """main() as if the owner sat at a terminal and answered `answer`; returns (status, stdout, input mock)."""
         m = load()
         out = Tty()
-        answers = {"side_effect": answer} if isinstance(answer, list) else {"return_value": answer}
+        answers = ({"side_effect": answer} if isinstance(answer, list) or callable(answer)
+                   else {"return_value": answer})
         with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
                 mock.patch("builtins.input", **answers) as ask, contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -818,14 +829,6 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("Do y.", out)
         self.assertNotIn("SUGGESTIONS", git("status", "--porcelain", "-uall", cwd=self.repo))
 
-    def test_fix_round_suggestions_are_added_to_the_earlier_ones(self):
-        first = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "First question"}}
-        fixed = {"write": {ADAPTED_FILE: "y\n", ".lane-control/SUGGESTIONS.md": "Second question\n"}}
-        self.e.script_agents(sonnet=[first, fixed], opus=[FIX, PASS])
-        _, out, _ = self.in_terminal("n")
-        self.assertIn("First question\n  Second question", out)
-        self.assertEqual(self.e.agent_runs()[3]["lane_files"], ["commands.md"])
-
     def test_a_new_adapting_run_starts_with_no_old_suggestions(self):
         write = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "Old question\n"}}
         self.e.script_agents(sonnet=[write], opus=[PASS])
@@ -848,6 +851,218 @@ class OnboardingTests(unittest.TestCase):
         self.in_terminal("n")
         self.e.set_state(agent_steps={"opus": [PASS]})
         self.assertIn("Do y.", self.in_terminal("n")[1])
+
+    # --- repo visibility is a fact ---------------------------------------------------------------------------
+    def visibility_line(self, prompt):
+        m = re.search(r"(?m)^Repo visibility[^\n]*$", prompt)
+        self.assertIsNotNone(m, "no visibility line in the prompt")
+        return m.group(0)
+
+    def test_visibility_from_gh_goes_to_the_adapter_the_fix_round_and_the_reviewer(self):
+        for gh, shown in (("PRIVATE", "private"), ("PUBLIC", "public"), ("INTERNAL", "internal")):
+            with self.subTest(gh=gh):
+                self.e.close()
+                self.setUp()
+                self.e.env["STUB_GH"] = gh
+                self.e.script_agents(sonnet=[WRITE, {"write": {ADAPTED_FILE: "y\n"}}], opus=[FIX, PASS])
+                self.in_terminal("n")
+                runs = self.e.agent_runs()
+                self.assertEqual(len(runs), 4)
+                for r in runs:
+                    self.assertTrue(self.visibility_line(r["prompt"]).endswith(": " + shown), r["prompt"][:300])
+                self.assertIn("view", Path(str(self.e.log) + ".gh").read_text())
+
+    def test_visibility_unknown_when_gh_cannot_say_and_the_run_goes_on(self):
+        for env in ({}, {"STUB_GH": "something else entirely"}):
+            with self.subTest(env=env):
+                self.e.close()
+                self.setUp()
+                self.e.env.update(env)
+                self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+                status, out, _ = self.in_terminal("y")
+                self.assertEqual(status, 0, out)
+                for r in self.e.agent_runs():
+                    self.assertTrue(self.visibility_line(r["prompt"]).endswith(": unknown"))
+
+    def test_a_gh_that_hangs_is_unknown_not_a_stop(self):
+        m = load()
+        (self.e.bin / "gh").write_text("#!/bin/sh\nsleep 5\n")
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch.object(m, "GH_TIMEOUT", 1):
+            self.assertEqual(m.repo_visibility(self.repo), "unknown")
+
+    # --- one current list of suggestions -----------------------------------------------------------------------
+    def test_a_fix_round_gets_the_earlier_suggestions_and_its_list_replaces_them(self):
+        first = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "First question"}}
+        fixed = {"write": {ADAPTED_FILE: "y\n", ".lane-control/SUGGESTIONS.md": "Second question\n"}}
+        self.e.script_agents(sonnet=[first, fixed], opus=[FIX, PASS])
+        _, out, _ = self.in_terminal("n")
+        self.assertIn("First question", self.e.agent_runs()[2]["prompt"])
+        self.assertIn("Second question", out)
+        self.assertNotIn("First question", out)
+        self.assertEqual(out.count("Suggested AGENTS.md edits"), 1)
+
+    def test_a_round_that_writes_no_list_leaves_the_earlier_one(self):
+        first = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": "First question"}}
+        self.e.script_agents(sonnet=[first, {"write": {ADAPTED_FILE: "y\n"}}], opus=[FIX, PASS])
+        _, out, _ = self.in_terminal("n")
+        self.assertIn("First question", out)
+        self.assertEqual(out.count("Suggested AGENTS.md edits"), 1)
+
+    # --- answers before the commit -----------------------------------------------------------------------------
+    SUG = ("**AGENTS.md edits you would make**\n- none\n\n**Questions for the owner**\n"
+           "- Is the CI config in .github? I chose yes.\n")
+    WRITE_Q = {"write": {ADAPTED_FILE: "run the tests\n", ".lane-control/SUGGESTIONS.md": SUG}}
+    ANSWER_STEP = {"write": {ADAPTED_FILE: "changed by the answer\n"}}
+
+    def test_questions_are_asked_before_the_file_list_and_enter_keeps_the_agents_choices(self):
+        self.e.script_agents(sonnet=[self.WRITE_Q], opus=[PASS])
+        status, out, ask = self.in_terminal(["", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual(ask.call_count, 2)
+        self.assertIn("answer", ask.call_args_list[0][0][0].lower())
+        self.assertLess(out.index("Is the CI config in .github?"), out.index("Files added or changed"))
+        self.assertEqual(len(self.e.agent_runs()), 2)
+        self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "run the tests\n")
+
+    def test_answers_go_to_one_more_adapter_run_that_is_not_reviewed_and_is_shown(self):
+        self.e.script_agents(sonnet=[self.WRITE_Q, self.ANSWER_STEP], opus=[PASS])
+        status, out, ask = self.in_terminal(["Yes, it is in .github", "y"])
+        self.assertEqual(status, 0, out)
+        runs = self.e.agent_runs()
+        self.assertEqual([r["model"] for r in runs], ["sonnet", "opus", "sonnet"])
+        last = runs[2]["prompt"]
+        for needle in ("Yes, it is in .github", "Is the CI config in .github?", "apply only the owner's answers",
+                       "an answer is the owner's word"):
+            self.assertIn(needle.lower(), last.lower())
+        listing = out[out.index("Files added or changed"):]
+        self.assertIn("Changed by your answers, not re-checked", listing)
+        self.assertIn("+changed by the answer", listing)
+        self.assertNotIn("Is the CI config in .github?", listing)  # settled
+        self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "changed by the answer\n")
+        self.assertNotIn(".lane-control/SUGGESTIONS.md", self.committed_paths())
+
+    def test_the_answer_run_is_scope_checked_and_its_new_suggestions_are_dropped(self):
+        step = {"write": {ADAPTED_FILE: "z\n", ".lane-control/SUGGESTIONS.md": "A brand new question\n"}}
+        self.e.script_agents(sonnet=[self.WRITE_Q, step], opus=[PASS])
+        status, out, _ = self.in_terminal(["an answer", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertNotIn("A brand new question", out)
+        self.assertFalse((self.repo / ".lane-control" / "SUGGESTIONS.md").exists())
+        stray = {"write": {"stray.txt": "x\n"}}
+        self.e.close()
+        self.setUp()
+        self.e.script_agents(sonnet=[self.WRITE_Q, stray], opus=[PASS])
+        status, out, _ = self.in_terminal(["an answer", "y"])
+        self.assertNotEqual(status, 0)
+        self.assertEqual(self.head_count(), 1)
+
+    def test_a_crashed_answer_run_leaves_the_files_as_they_were_and_says_so(self):
+        crash = {"write": {ADAPTED_FILE: "half\n", ".lane-control/other.md": "new\n"}, "err": "boom", "exit": 1}
+        self.e.script_agents(sonnet=[self.WRITE_Q, crash], opus=[PASS])
+        status, out, _ = self.in_terminal(["an answer", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertIn("answers were not applied", out)
+        self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "run the tests\n")
+        self.assertFalse((self.repo / ".lane-control" / "other.md").exists())
+        self.assertNotIn("Changed by your answers", out)
+
+    def test_a_partial_answer_keeps_the_other_questions_and_a_no_change_keeps_all(self):
+        two = ("## AGENTS.md edits you would make\n- none\n\n## Questions for the owner\n- First one?\n- Second one?\n")
+        step = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": two}}
+        self.e.script_agents(sonnet=[step, self.ANSWER_STEP], opus=[PASS])
+        self.assertEqual(self.in_terminal(["", "to the second", "n"])[0], 3)
+        prompt = self.e.agent_runs()[2]["prompt"]
+        self.assertIn("to the second", prompt)
+        self.assertIn("Second one?", prompt)
+        self.e.set_state(agent_steps={"opus": [PASS]})
+        status, out, ask = self.in_terminal(["", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertIn("First one?", ask.call_args_list[0][0][0] + out)
+        self.assertNotIn("Second one?", out)
+        # an answer that changes nothing leaves everything open
+        self.e.close()
+        self.setUp()
+        self.e.script_agents(sonnet=[step, {}], opus=[PASS])
+        _, out, _ = self.in_terminal(["an answer", "", "n"])
+        self.assertIn("changed no file", out)
+        self.assertIn("First one?", out)
+        self.e.set_state(agent_steps={"opus": [PASS]})
+        _, out, ask = self.in_terminal(["", "", "n"])
+        self.assertEqual(ask.call_count, 3)  # two questions and the commit
+
+    def test_questions_are_found_in_other_list_shapes(self):
+        m = load()
+        for text in ("- **Questions for the owner**:\n  - Q1?\n", "**Questions for the owner**: each one below\n- Q1?\n",
+                     "Questions for the owner:\n- Q1?\n", "## Questions for the owner\n\n### Exposure\nIs it private?\n",
+                     "## Questions for the owner\n\n**Exposure**\nIs it private?\n",
+                     "## Questions for the owner\n- Q1?\n\n## AGENTS.md edits you would make\n- none\n"):
+            with self.subTest(text=text):
+                head, questions, tail = m.split_questions(text)
+                self.assertIn("?", questions)
+                self.assertNotIn("AGENTS.md edits", questions)
+        head, questions, tail = m.split_questions("## Questions for the owner\n- Q1?\n\n## AGENTS.md edits you would make\n- x\n")
+        self.assertIn("AGENTS.md edits", tail)
+        self.assertEqual(m.question_items("- A?\n  more\n- B?"), ["- A?\n  more", "- B?"])
+        self.assertEqual(m.split_questions("## Questions for the owner\n- none\n")[1], "")
+
+    def test_typed_ahead_input_is_flushed_before_the_first_question_and_before_the_commit_question(self):
+        events = []
+
+        def typed(prompt):
+            events.append("input")
+            return "" if len(events) < 3 else "y"
+
+        self.e.script_agents(sonnet=[self.WRITE_Q], opus=[PASS])
+        with mock.patch("termios.tcflush", side_effect=lambda *a: events.append("flush")), \
+                mock.patch.object(Tty, "fileno", create=True, return_value=0):
+            status, out, _ = self.in_terminal(typed)
+        self.assertEqual(status, 0, out)
+        self.assertEqual(events[0], "flush")  # before question 1: what was typed while the agents ran
+        self.assertEqual(events[events.index("input") - 1], "flush")
+        self.assertEqual(events[-2:], ["flush", "input"])  # right before the commit question
+
+    def test_an_exposure_answer_is_marked_and_a_confirming_answer_keeps_the_list(self):
+        self.assertIn("(owner's answer)", (ROOT / "templates" / "adapt" / "answers-prompt.md").read_text())
+        self.e.script_agents(sonnet=[self.WRITE_Q, {}], opus=[PASS])
+        _, out, _ = self.in_terminal(["yes, as you chose", "n"])
+        self.assertIn("files already matched", out)
+        self.assertIn("The questions stay on the list", out)
+
+    def test_question_items_keep_indented_lists_apart_and_skip_the_text_after_a_heading(self):
+        m = load()
+        for text in ("- **Questions for the owner**:\n  - Q1?\n  - Q2?\n",
+                     "**Questions for the owner**: each one below\n- Q1?\n- Q2?\n",
+                     "## Questions for the owner (2)\n- Q1?\n- Q2?\n"):
+            with self.subTest(text=text):
+                head, questions, tail = m.split_questions(text)
+                items = m.question_items(questions)
+                self.assertEqual([i.strip() for i in items], ["- Q1?", "- Q2?"])
+        self.assertEqual(m.question_items(m.split_questions("Questions for the owner: Is it X?\n")[1]), ["Is it X?"])
+
+    def test_questions_saying_none_are_not_asked(self):
+        none = ("**AGENTS.md edits you would make**\n- one edit\n\n**Questions for the owner**\n- none\n")
+        self.e.script_agents(sonnet=[{"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": none}}], opus=[PASS])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        ask.assert_called_once()
+        self.assertIn("Commit these files", ask.call_args[0][0])
+
+    def test_without_a_terminal_nothing_is_asked_and_no_extra_run_happens(self):
+        self.e.script_agents(sonnet=[self.WRITE_Q], opus=[PASS])
+        r = self.e.run(str(self.repo), "--opencode", "hosted", adapt=True)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(len(self.e.agent_runs()), 2)
+        self.assertNotIn("Your answer", r.stdout)
+
+    def test_a_rerun_neither_replays_the_answers_nor_loses_the_change(self):
+        self.e.script_agents(sonnet=[self.WRITE_Q, self.ANSWER_STEP], opus=[PASS])
+        self.assertEqual(self.in_terminal(["an answer", "n"])[0], 3)
+        self.e.set_state(agent_steps={"opus": [PASS]})
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        ask.assert_called_once()  # only the commit
+        self.assertEqual(len(self.e.agent_runs()), 4)  # one more review, no adapter run
+        self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "changed by the answer\n")
 
     # --- the reviewer ----------------------------------------------------------------------------------------
     def test_reviewer_never_sees_the_adapting_agents_account(self):
@@ -1657,6 +1872,64 @@ class OnboardingTests(unittest.TestCase):
     def test_host_mode_carries_the_machine_tools(self):
         for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
             self.assertIn(f"scripts/{name}", load().HOST_FILES)
+
+
+
+class DirenvLineTests(unittest.TestCase):
+    """The generated orca.yaml approves a tracked .envrc in the worktree when the source checkout approved it."""
+
+    def setUp(self):
+        self.e = Env()
+        self.addCleanup(self.e.close)
+        self.repo = self.e.repo()
+        (self.repo / "uv.lock").write_text("")
+        (self.repo / ".envrc").write_text("export A=1\n")
+
+    def draft(self, direnv=None, track=True):
+        if track:
+            git("add", ".envrc", "uv.lock", cwd=self.repo)
+            git("commit", "-q", "--allow-empty", "-m", "files", cwd=self.repo)
+        env = dict(self.e.env)
+        if direnv:
+            env["STUB_DIRENV"] = direnv
+        m = load()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
+            text = m.draft_text(self.repo)
+        return text, out.getvalue()
+
+    def test_an_allowed_envrc_is_approved_in_the_worktree_guarded(self):
+        text, _ = self.draft("allowed")
+        line = next(l for l in text.splitlines() if "direnv allow" in l)
+        self.assertIn("command -v direnv", line)
+        self.assertLess(text.index("direnv allow"), text.index("uv sync"))
+        for path, stubbed in (("", False), (str(self.e.bin), True)):  # no direnv at all; one whose allow fails
+            env = {"PATH": path, "STUB_DIRENV": "allowfail"}
+            r = subprocess.run([shutil.which("sh"), "-c", line.strip()], cwd=self.repo, env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, (stubbed, r.stderr))
+
+    def test_an_envrc_not_approved_here_gets_no_line_and_the_output_says_so(self):
+        text, out = self.draft("notallowed")
+        self.assertNotIn("direnv", text)
+        self.assertIn(".envrc", out)
+        self.assertIn("direnv allow", out)
+        text, out = self.draft("fail")
+        self.assertNotIn("direnv", text)
+
+    def test_no_tracked_envrc_no_line_and_no_note(self):
+        text, out = self.draft("allowed", track=False)
+        self.assertNotIn("direnv", text)
+        self.assertNotIn(".envrc", out)
+
+    def test_an_existing_orca_yaml_is_not_edited(self):
+        (self.repo / "orca.yaml").write_text("scripts:\n  setup: |\n    make\n")
+        git("add", ".", cwd=self.repo)
+        git("commit", "-q", "-m", "files", cwd=self.repo)
+        m = load()
+        with mock.patch.dict(os.environ, {**self.e.env, "STUB_DIRENV": "allowed"}, clear=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            m.setup_script(self.repo, write=True)
+        self.assertEqual((self.repo / "orca.yaml").read_text(), "scripts:\n  setup: |\n    make\n")
 
 
 class RunTests(unittest.TestCase):

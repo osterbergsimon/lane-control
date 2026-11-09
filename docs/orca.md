@@ -145,6 +145,28 @@ after the last fix, wherever the reviewer wrote the mark and whatever its verdic
 no verdict or crashed, the run stops with nothing committed. A first review that gave no verdict stops it too (the safety
 checks never ran); a later review that gave none or crashed is listed beside the file list. A file written outside
 `.lane-control/` stops it as well.)
+(Repo visibility is a fact, not a guess. Before the adapter runs, project-setup reads it with `gh repo view` (read-only,
+20 seconds at most) and gives it to the adapter and every reviewer as public, private or internal; when gh is missing,
+logged out, offline or unclear it is `unknown`, and the adapter writes the safer value (treat as public) and a question.
+The review checks the Exposure slot against the same value. A gh failure never stops the run.)
+(Suggestions are one current list. A fix round is given the earlier list and writes the whole list again, still-open
+entries kept and settled ones dropped, each once; its file replaces the kept one, and a round that writes none leaves
+it. The adapter asks only what cannot be looked up: it opens a file before asking about it, reads the repo read-only (it
+cannot look at the machine, so what only the machine knows is still asked), and never asks how a lane-control
+template rule works. The suggestions file has two fixed headings, `## AGENTS.md edits you would make` and
+`## Questions for the owner`, but the reader also finds other shapes.)
+(Answers before the commit. After the review loop, in a terminal, each question still open is shown in turn and the owner
+may answer it in plain text; Enter keeps the agent's choice for that question. Type-ahead is flushed before the commit
+question, so a line typed early never answers it. The answers go to one more adapter run with its own short rules
+(`templates/adapt/answers-prompt.md`: apply only the answers, change nothing else, an answer is the owner's word, no
+new questions, no suggestions file), followed by the same scope check as every agent run. That run is not reviewed: the
+file list says "Changed by your answers, not re-checked" and shows its diff. It adds at most one agent run to an
+onboarding. Only the answered questions leave the list, and only when the run changed a file; if it changed nothing,
+the list says the answers were not applied and the questions stay. If the run fails, the files are put back as they
+were before it, the file list comes with a note that the answers were not applied, and the owner can say no there and
+run again to answer: a stop would throw away a reviewed result for a failure that changed nothing. A change outside
+`.lane-control/` stops the run, as after any agent run. Without a terminal nothing is asked. A re-run keeps hand edits
+and the answers' changes and asks only the questions still on the list.)
 1. Clones the repo, or uses the folder (`git init` only when it is not a repo). It never commits.
 2. Runs `orca repo add`.
 3. Installs the skills for the agent user (`~/.agents/skills/`, linked into `~/.claude/skills/` and
@@ -174,6 +196,13 @@ checks never ran); a later review that gave none or crashed is listed beside the
    `.cotal/orca.yaml.proposed`. `--write-orca-yaml` only changes where an uncommitted draft is left (as `orca.yaml` in
    the repo, which a later run offers to commit); it never commits by itself. The draft ends by writing `orca-setup-done` in the worktree's git dir;
    agents start only after it.
+   When the repo tracks `.envrc` and `direnv status` reports it allowed in the source checkout (the owner approved it
+   there), the generated script first runs `direnv allow .envrc` in the worktree, guarded: a machine without direnv is
+   fine and a failure only prints a line. direnv approves per path, so without it each new worktree opens with
+   "direnv: error ... is blocked". With the `.envrc` not approved here no line is written and the output says so. An
+   existing `orca.yaml` is never edited. The line approves whatever `.envrc` the worktree holds, not the content the
+   owner approved in the source checkout, and it stays in the committed `orca.yaml`: direnv's per-content check is
+   bypassed in every lane worktree. The owner chose this.
 6. Starts the broker (`cotal up --no-manager`, on a per-project port recorded in the settings store) and a
    manager service `mgr` on the Orca runtime.
    `mgr` carries `envRefs` for the proxy variables, because `cotal up` gives its manager a fixed environment without

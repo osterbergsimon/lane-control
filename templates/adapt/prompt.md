@@ -5,6 +5,9 @@ This is one unattended run. No coordinator is above you, you are not in a lane, 
 answer a question, so never wait for one. When you cannot settle something, write the safer value (for a tier, one up)
 and add a question to the suggestions file.
 
+Repo visibility (read by the script from the git host, a fact): {{VISIBILITY}}
+Public, private or internal is certain. "unknown" means it could not be read.
+
 ## What you may touch
 Write only inside `.lane-control/`. Nothing else: not AGENTS.md, not CLAUDE.md, not .gitignore. The AGENTS.md section
 is added for you.
@@ -31,7 +34,10 @@ and suggest
 - `<!-- fixed -->` blocks: copy their text exactly, drop the marker lines.
 - `<!-- slot NAME: guidance -->` lines: replace with what you found. Nothing to say: `none found (looked in: <paths>)`.
   Already stated in AGENTS.md: `see AGENTS.md "<heading>"`, no copy.
-- Keep the front matter. Keep within the `max_lines` (and `max_rows`) in each template's front matter.
+- Keep the front matter. Keep within the `max_lines` (and `max_rows`) in each template's front matter. max_lines
+  counts every line of the file, front matter included. max_rows counts table rows without the header and separator.
+- Exposure: state the repo visibility above as it is. When it is "unknown", write "Treat as public" and ask the
+  owner. A value marked `(owner's answer)` stays.
 
 Plain short sentences. Project facts only: never repeat general good practice, and never restate a rule a persona
 would have. Test each line by asking whether a new agent would act differently for having read it; if not, delete it.
@@ -53,13 +59,16 @@ Commands must be copied from where the repo writes them, and the Checks table sa
    goes one tier up.
 2. Read what the test and tool scripts do before you list them as checks. Anything that deletes, reaches a real host
    or account, or needs special setup goes under "Do not run".
-3. For the path map, judge from names and a sample before you call it low-risk. Deep and review C: parsers of
+3. Ask only what cannot be looked up. Open a file before asking about it. Use the repo (read-only) for what
+   it can answer; you cannot look at the machine, so ask about that. Never ask the owner how a lane-control template
+   rule works: the templates say.
+4. For the path map, judge from names and a sample before you call it low-risk. Deep and review C: parsers of
    untrusted input, formats and migrations, authentication and permissions, sandboxes, anything acting on a host or
    deleting data, anything that holds secrets, and prompts that steer other agents. Swift: only prose docs, scripts
    without private data, CI.
    Everything else defaults to standard, B. Give the reason in a few words. Every file must match a row; the last row
    is `**`. Never put a path lower to save budget; in doubt, one tier up.
-4. Write the files. Reread each against the rules above.
+5. Write the files. Reread each against the rules above.
 
 ## Re-run
 Only when there are no review findings below: if `.lane-control/` already exists from an earlier run, it was
@@ -67,12 +76,16 @@ reviewed, and may hold the owner's edits. Change a line only when the
 project has moved on or a template changed. Keep the rest exactly as it is. Update `lane_control_template`.
 
 ## Suggestions file
-Write `.lane-control/SUGGESTIONS.md` (on a round that fixes review findings, write only entries that are new this
-round: earlier ones are kept for you; it is taken away before anything is reviewed or committed; never refer to it in
-other files) with two lists:
-- **AGENTS.md edits you would make**: each with what and why. You do not make them; the owner decides.
-- **Questions for the owner**: each saying what you chose meanwhile and why it needs them.
+Write `.lane-control/SUGGESTIONS.md` (it is taken away before anything is reviewed or committed; never refer to it in
+other files) with two lists, under exactly these headings, one bullet per entry:
+- `## AGENTS.md edits you would make`: each with what and why. You do not make them; the owner decides.
+- `## Questions for the owner`: each saying what you chose meanwhile and why it needs them.
 Empty lists say "none".
+On a round that fixes review findings you get the earlier list below: write the whole list again: still-open entries
+kept, settled ones dropped, each once. Write no file when the list is unchanged.
+
+Earlier suggestions:
+{{SUGGESTIONS_SO_FAR}}
 
 ## Review findings to fix
 {{REVIEW_FINDINGS}}
