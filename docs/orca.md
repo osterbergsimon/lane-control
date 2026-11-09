@@ -172,7 +172,7 @@ cannot look at the machine, so what only the machine knows is still asked), and 
 template rule works. The suggestions file has two fixed headings, `## AGENTS.md edits you would make` and
 `## Questions for the owner`, but the reader also finds other shapes.)
 (Answers before the commit. After the review loop, in a terminal, each question still open is shown in turn and the owner
-may answer it in plain text; Enter keeps the agent's choice for that question. Type-ahead is flushed before the commit
+may answer it in plain text; Enter leaves that question for later (the agent's choice stays, and the coordinator asks, see Leftovers). Type-ahead is flushed before the commit
 question, so a line typed early never answers it. The answers go to one more adapter run with its own short rules
 (`templates/adapt/answers-prompt.md`: apply only the answers, change nothing else, an answer is the owner's word, no
 new questions, no suggestions file), followed by the same scope check as every agent run. That run is not reviewed: the
