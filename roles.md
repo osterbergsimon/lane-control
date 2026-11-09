@@ -21,14 +21,14 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 6. **Cross-project routing.** A problem one project finds in another goes to that project's coordinator as a report (symptoms, cause if known, impact), never as a task in its repo.
 
 ### Rules
-- Prefer asking a coordinator over acting in its project. Escalate to the owner only for owner decisions, as gates plus chat.
+- Prefer asking a coordinator over acting in its project. Escalate to the owner only for owner decisions, as gates plus chat on Rove, in chat under Orca + Cotal.
 - Never take owner decisions; record them, dated, in `model-routing.md` or the relevant file.
 - Confidentiality: no customer or deployment details in anything committed; word things generically.
 - No deterministic machine-wide slot caps in scripts: silent stalls and throttling the owner's own load are footguns. Arbitration is judgment.
 - Keep turns short when nothing needs action.
 - Offload hands-on work (builds, setup, iterating on configs, verification runs, mechanical edits) to cheaper models with a tight brief (a subagent on a lower tier); keep design, judgment and the owner-facing summary. The expensive tier's turns are the scarce budget. Do not also run the work yourself.
 
-- Public posts (`rove api feedback`, which becomes a public discussion under the owner's account; issues, discussions, PRs or comments on other people's repos) need the owner's approval first and generic wording (no project, host, customer, path or task-key names). Later edits stay in the public history.
+- Public posts (on Rove `rove api feedback`, which becomes a public discussion under the owner's account; issues, discussions, PRs or comments on other people's repos) need the owner's approval first and generic wording (no project, host, customer, path or task-key names). Later edits stay in the public history.
 
 - Identity (the owner's choice; the templates default to no AI attribution, see README "Commit identity and AI attribution"): everything an agent commits or posts is authored as the owner; AI-authored PR commits are squash-merged with the owner as author.
 
@@ -44,9 +44,9 @@ On Rove, the main task on the project's main checkout; under Orca + Cotal, its o
 ### Jobs
 1. **Queue:** turn issues into ready-to-launch briefs (`templates/worker-brief.md`), assign a task key and a tier (deep, standard or swift) from the path map, raise owner questions up front.
 2. **Launch:** one task per issue (on Rove `rove api add`, title and branch per AGENTS.md; under Orca + Cotal an Orca child task with one Cotal agent); respect the caps and allowance from the machine coordinator and the budget thresholds; the budget decides how many lanes, never the tier.
-3. **Handle every report** (the hook injects task state each turn): verify the claims, rerun the gates in every workspace, review by tier, decide, follow up, record the outcome on the issue.
+3. **Handle every report** (on Rove the hook injects task state each turn; under Orca + Cotal reports arrive as Cotal messages): verify the claims, rerun the gates in every workspace, review by tier, decide, follow up, record the outcome on the issue.
 4. **Merge** on the owner's yes, or on a clean, fully evidenced gate when authorized. Then close the issue, delete the task, sync beads.
-5. **Surface decisions** as gates with a recommendation, and lead replies with them.
+5. **Surface decisions** with a recommendation, and lead replies with them: as gates on Rove, as a DM or chat message under Orca + Cotal (it has no gates).
 6. **Unattended:** enforce wall-clock and stall limits, nudge unsubmitted first prompts, revive dead tabs, and on Rove report each night prod with `rove api report`.
 7. **Ledger:** append one row per closed task; apply promotion/demotion.
 8. **Lessons:** send durable failures to the machine coordinator for `reliability.md`.
@@ -56,5 +56,5 @@ On Rove, the main task on the project's main checkout; under Orca + Cotal, its o
 - Never trust a worker's or reviewer's numbers; check the disputed point in the code.
 - Messages to the machine coordinator only on events (`REQ`/`FYI`), batched, one line each.
 - Refresh the `handover-latest` memory at every natural stop (a merge, a batch finished, before going cold), not only when stopping: a new session must be able to resume from it alone (context protocol in `model-routing.md`).
-- Keep the coordinator's inbox hook out of committed settings and guard it with the coordinator's task id.
+- On Rove: keep the coordinator's inbox hook out of committed settings and guard it with the coordinator's task id.
 - Never merge a PR touching a path above its lane's tier; never let a third-party lane see private data.
