@@ -36,7 +36,8 @@ and suggest
   Already stated in AGENTS.md: `see AGENTS.md "<heading>"`, no copy.
 - Keep the front matter. Keep within the `max_lines` (and `max_rows`) in each template's front matter. max_lines
   counts every line of the file, front matter included. max_rows counts table rows without the header and separator.
-- Exposure: state the repo visibility above as it is. When it is "unknown", write "Treat as public" and ask the owner.
+- Exposure: state the repo visibility above as it is. When it is "unknown", write "Treat as public" and ask the
+  owner. A value the owner stated stays.
 
 Plain short sentences. Project facts only: never repeat general good practice, and never restate a rule a persona
 would have. Test each line by asking whether a new agent would act differently for having read it; if not, delete it.
@@ -58,8 +59,9 @@ Commands must be copied from where the repo writes them, and the Checks table sa
    goes one tier up.
 2. Read what the test and tool scripts do before you list them as checks. Anything that deletes, reaches a real host
    or account, or needs special setup goes under "Do not run".
-3. Ask only what cannot be looked up. Open a file before asking about it. Use the repo and the machine (read-only)
-   for what they can answer. Never ask the owner how a lane-control template rule works: the templates say.
+3. Ask only what cannot be looked up. Open a file before asking about it. Use the repo (read-only) for what
+   it can answer; you cannot look at the machine, so ask about that. Never ask the owner how a lane-control template
+   rule works: the templates say.
 4. For the path map, judge from names and a sample before you call it low-risk. Deep and review C: parsers of
    untrusted input, formats and migrations, authentication and permissions, sandboxes, anything acting on a host or
    deleting data, anything that holds secrets, and prompts that steer other agents. Swift: only prose docs, scripts
@@ -75,9 +77,9 @@ project has moved on or a template changed. Keep the rest exactly as it is. Upda
 
 ## Suggestions file
 Write `.lane-control/SUGGESTIONS.md` (it is taken away before anything is reviewed or committed; never refer to it in
-other files) with two lists:
-- **AGENTS.md edits you would make**: each with what and why. You do not make them; the owner decides.
-- **Questions for the owner**: each saying what you chose meanwhile and why it needs them.
+other files) with two lists, under exactly these headings, one bullet per entry:
+- `## AGENTS.md edits you would make`: each with what and why. You do not make them; the owner decides.
+- `## Questions for the owner`: each saying what you chose meanwhile and why it needs them.
 Empty lists say "none".
 On a round that fixes review findings you get the earlier list below: write the whole list again: still-open entries
 kept, settled ones dropped, each once. Write no file when the list is unchanged.

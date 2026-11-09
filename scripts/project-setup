@@ -991,17 +991,17 @@ def direnv_step(repo: Path):
     """The setup line that approves a tracked .envrc in the new worktree (direnv approves per path, so a fresh worktree
     opens with "is blocked"), only when direnv reports it allowed in this checkout: the owner approved it here. Guarded
     so a machine without direnv is fine and a failure never stops the setup script. None, with a note, when .envrc is
-    tracked but not approved here; None, silently, when it is not tracked or direnv is not here."""
+    tracked but not approved here; None, silently, when it is not tracked or direnv is not on this machine."""
     if subprocess.run(["git", "ls-files", "--error-unmatch", ".envrc"], cwd=repo, capture_output=True).returncode != 0:
         return None
-    allowed = False
-    if shutil.which("direnv"):
-        try:
-            out = run(["direnv", "status"], cwd=repo, check=False, timeout=30, stdin=subprocess.DEVNULL).stdout
-        except Fail:
-            out = ""
-        m = re.search(r"Found RC allowed (\S+)", out)
-        allowed = bool(m) and m.group(1) in ("0", "true")
+    if not shutil.which("direnv"):
+        return None
+    try:
+        out = run(["direnv", "status"], cwd=repo, check=False, timeout=30, stdin=subprocess.DEVNULL).stdout
+    except Fail:
+        out = ""
+    m = re.search(r"Found RC allowed (\S+)", out)
+    allowed = bool(m) and m.group(1) in ("0", "true")
     if allowed:
         return ('if command -v direnv >/dev/null 2>&1; then direnv allow .envrc || '
                 'echo "setup: direnv allow failed" >&2; fi')
@@ -1682,7 +1682,7 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
         found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(findings, FINDINGS_LIMIT)}"
         kept = kept_suggestions(repo)
         adapt(repo, adapter, fill("prompt.md", project, design_lead, found, visibility,
-                                  kept.read_text(errors="replace") if kept.is_file() else "") + ADAPT_RULES, before)
+                                  clip(kept.read_text(errors="replace"), FINDINGS_LIMIT) if kept.is_file() else "") + ADAPT_RULES, before)
         if fixes == MAX_FIX_ROUNDS:
             break
         out = review(findings)
@@ -1726,10 +1726,20 @@ def has_terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+def flush_input() -> None:
+    """Drop what the owner typed ahead, so a line meant for an earlier prompt never answers the next one."""
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:  # no terminal, or not a real one
+        pass
+
+
 def owner_says_yes(question: str = "Commit these files and run the Orca setup? [y/N] ", step: str = "commit") -> bool:
     if not has_terminal():
         say(step, "skipped", "no terminal to ask the owner in")
         return False
+    flush_input()
     try:
         return input(question).strip().lower() in ("y", "yes")
     except EOFError:
@@ -1907,23 +1917,54 @@ def refresh_section(repo: Path) -> bool:
     return True
 
 
-QUESTIONS_HEAD = re.compile(r"questions for the owner", re.I)
-LIST_HEAD = re.compile(r"^\s*(#+\s|\*\*[^*]+\*\*:?\s*$)")
+QUESTIONS_HEAD = re.compile(r"^(\s*(?:#+\s*|[-*]\s+)?\**questions for the owner\**\s*:?\**)(.*)$", re.I)
+EDITS_HEAD = re.compile(r"^\s*(?:#+\s*|[-*]\s+)?\**agents\.md edits", re.I)
 NONE_ONLY = re.compile(r"[\s\-*]*none\.?[\s*]*", re.I)
+ITEM_START = re.compile(r"^(\s*)([-*]|\d+[.)])\s")
 
 
 def split_questions(text: str):
-    """(before, questions, after) around the "Questions for the owner" list of the suggestions; questions is "" when
-    there is no such list or it says none."""
+    """(before, questions, after) around the "Questions for the owner" list of the suggestions. Any heading shape is
+    found (`## `, bold, a bullet with bold, a plain line, with or without a colon and text after it); the list runs to
+    the "AGENTS.md edits" heading or a `#` heading of the same or a higher level, or the end, so sub-headings and bold
+    lines inside it stay in it. questions is "" when there is no such list or it says none."""
     lines = text.splitlines(keepends=True)
-    start = next((i for i, l in enumerate(lines) if LIST_HEAD.match(l) and QUESTIONS_HEAD.search(l)), None)
+    start = m = None
+    for i, l in enumerate(lines):
+        m = QUESTIONS_HEAD.match(l.rstrip("\n"))
+        if m:
+            start = i
+            break
     if start is None:
         return text, "", ""
-    end = next((i for i in range(start + 1, len(lines)) if LIST_HEAD.match(lines[i])), len(lines))
-    body = "".join(lines[start + 1:end])
-    if not body.strip() or NONE_ONLY.fullmatch(body.strip()):
+    level = len(re.match(r"\s*(#*)", m.group(1)).group(1))
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        h = re.match(r"\s*(#+)\s", lines[i])
+        if EDITS_HEAD.match(lines[i]) or (level and h and len(h.group(1)) <= level):
+            end = i
+            break
+    body = (m.group(2) + "\n" + "".join(lines[start + 1:end])).strip()
+    if not body or NONE_ONLY.fullmatch(body):
         return text, "", ""
-    return "".join(lines[:start + 1]), body.strip(), "".join(lines[end:])
+    return "".join(lines[:start]) + m.group(1) + "\n", body, "".join(lines[end:])
+
+
+def question_items(questions: str) -> list:
+    """The questions one by one: a bullet or number at the list's own indent (or a `###` heading) starts one; a list
+    with neither is a single item."""
+    lines = questions.splitlines()
+    heads = [i for i, l in enumerate(lines) if re.match(r"\s*#{3,}\s", l)]
+    if not heads:
+        bullets = [(i, len(ITEM_START.match(l).group(1))) for i, l in enumerate(lines) if ITEM_START.match(l)]
+        if bullets:
+            indent = min(w for _, w in bullets)
+            heads = [i for i, w in bullets if w == indent]
+    if not heads:
+        return [questions.strip()]
+    heads = [0] + [h for h in heads if h > 0] if heads[0] > 0 and "".join(lines[:heads[0]]).strip() else heads
+    cuts = sorted(set(heads)) + [len(lines)]
+    return ["\n".join(lines[x:y]).strip() for x, y in zip(cuts, cuts[1:]) if "\n".join(lines[x:y]).strip()]
 
 
 def lane_files(repo: Path) -> dict:
@@ -1950,41 +1991,56 @@ def changed_text(was: dict, now: dict) -> str:
 
 
 def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict) -> list:
-    """After the review loop: the questions still open are shown and the owner may answer them in plain text (Enter
-    keeps the agent's choices). Answers go to one more adapter run, with its own rules, that is not reviewed: the file
-    list says so and shows what it changed. No terminal: nothing is asked. A run that fails puts the files back as
-    they were and goes on to the file list (the owner can still say no there, and run again to answer): a stop would
-    throw away a finished, reviewed result for a failure that touched nothing. A scope violation stops the run as
-    after every agent run. Returns notes for the file list."""
+    """After the review loop: each question still open is shown and the owner may answer it in plain text (Enter keeps
+    the agent's choice for that one). Answers go to one more adapter run, with its own rules, that is not reviewed: the
+    file list says so and shows what it changed. Only the answered questions leave the list, and only when that run
+    changed something. No terminal: nothing is asked. A run that fails puts the files back as they were and goes on to
+    the file list (the owner can still say no there, and run again to answer): a stop would throw away a finished,
+    reviewed result for a failure that touched nothing. A scope violation stops the run as after every agent run.
+    Returns notes for the file list."""
     kept = kept_suggestions(repo)
     if not has_terminal() or not kept.is_file():
         return []
     head, questions, tail = split_questions(kept.read_text(errors="replace"))
     if not questions:
         return []
-    print(f"\nQuestions the adapting agent could not settle:\n{questions}\n", flush=True)
-    try:
-        answers = input("Your answers in plain text, or Enter to keep the agent's choices: ").strip()
-    except EOFError:
-        answers = ""
-    if not answers:
+    items = question_items(questions)
+    print("\nQuestions the adapting agent could not settle. Answer in plain text; Enter keeps its choice:", flush=True)
+    given = []
+    for n, item in enumerate(items, 1):
+        print(f"\n{n}. {item}", flush=True)
+        try:
+            answer = input("   Your answer: ").strip()
+        except EOFError:
+            answer = ""
+        if answer:
+            given.append((n, item, answer))
+    flush_input()  # what was typed ahead must not answer the commit question
+    if not given:
         return []
     was = lane_files(repo)
     say("adapt", "running", "/".join(adapter) + " (applies your answers)")
-    text = (fill("answers-prompt.md", project, False).replace("{{QUESTIONS}}", questions)
-            .replace("{{ANSWERS}}", answers))
+    text = (fill("answers-prompt.md", project, False)
+            .replace("{{QUESTIONS}}", clip("\n".join(f"{n}. {q}" for n, q, _ in given), FINDINGS_LIMIT))
+            .replace("{{ANSWERS}}", clip("\n".join(f"{n}. {a}" for n, _, a in given), FINDINGS_LIMIT)))
     try:
         run_agent(repo, adapter, text, write=True)
     except Fail as e:
         restore_lane_files(repo, was)
-        (repo / SUGGESTIONS).unlink(missing_ok=True)
         check_scope(repo, before)
         return [f"Your answers were not applied: the run failed ({e}). The files are as they were; run again to "
                 "answer."]
-    (repo / SUGGESTIONS).unlink(missing_ok=True)  # no new questions
+    finally:  # no new questions: a list it wrote anyway never stays under .lane-control/
+        (repo / SUGGESTIONS).unlink(missing_ok=True)
     check_scope(repo, before)
-    kept.write_text(head + "- none\n" + tail)
-    return ["Changed by your answers, not re-checked:\n" + (changed_text(was, lane_files(repo)) or "(no change)")]
+    diff = changed_text(was, lane_files(repo))
+    if not diff:
+        return ["Your answers were not applied: the run changed no file. The questions stay open; edit the files "
+                f"in {ADAPTED}/ yourself, or run again."]
+    answered = {n for n, _, _ in given}
+    left = [q for n, q in enumerate(items, 1) if n not in answered]
+    kept.write_text(head + ("\n".join(left) + "\n" if left else "- none\n") + tail)
+    return ["Changed by your answers, not re-checked:\n" + diff]
 
 
 def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:

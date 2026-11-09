@@ -918,7 +918,7 @@ class OnboardingTests(unittest.TestCase):
         status, out, ask = self.in_terminal(["", "y"])
         self.assertEqual(status, 0, out)
         self.assertEqual(ask.call_count, 2)
-        self.assertIn("plain text", ask.call_args_list[0][0][0])
+        self.assertIn("answer", ask.call_args_list[0][0][0].lower())
         self.assertLess(out.index("Is the CI config in .github?"), out.index("Files added or changed"))
         self.assertEqual(len(self.e.agent_runs()), 2)
         self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "run the tests\n")
@@ -965,6 +965,52 @@ class OnboardingTests(unittest.TestCase):
         self.assertFalse((self.repo / ".lane-control" / "other.md").exists())
         self.assertNotIn("Changed by your answers", out)
 
+    def test_a_partial_answer_keeps_the_other_questions_and_a_no_change_keeps_all(self):
+        two = ("## AGENTS.md edits you would make\n- none\n\n## Questions for the owner\n- First one?\n- Second one?\n")
+        step = {"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": two}}
+        self.e.script_agents(sonnet=[step, self.ANSWER_STEP], opus=[PASS])
+        self.assertEqual(self.in_terminal(["", "to the second", "n"])[0], 3)
+        prompt = self.e.agent_runs()[2]["prompt"]
+        self.assertIn("to the second", prompt)
+        self.assertIn("Second one?", prompt)
+        self.e.set_state(agent_steps={"opus": [PASS]})
+        status, out, ask = self.in_terminal(["", "y"])
+        self.assertEqual(status, 0, out)
+        self.assertIn("First one?", ask.call_args_list[0][0][0] + out)
+        self.assertNotIn("Second one?", out)
+        # an answer that changes nothing leaves everything open
+        self.e.close()
+        self.setUp()
+        self.e.script_agents(sonnet=[step, {}], opus=[PASS])
+        _, out, _ = self.in_terminal(["an answer", "", "n"])
+        self.assertIn("answers were not applied", out)
+        self.assertIn("First one?", out)
+        self.e.set_state(agent_steps={"opus": [PASS]})
+        _, out, ask = self.in_terminal(["", "", "n"])
+        self.assertEqual(ask.call_count, 3)  # two questions and the commit
+
+    def test_questions_are_found_in_other_list_shapes(self):
+        m = load()
+        for text in ("- **Questions for the owner**:\n  - Q1?\n", "**Questions for the owner**: each one below\n- Q1?\n",
+                     "Questions for the owner:\n- Q1?\n", "## Questions for the owner\n\n### Exposure\nIs it private?\n",
+                     "## Questions for the owner\n\n**Exposure**\nIs it private?\n",
+                     "## Questions for the owner\n- Q1?\n\n## AGENTS.md edits you would make\n- none\n"):
+            with self.subTest(text=text):
+                head, questions, tail = m.split_questions(text)
+                self.assertIn("?", questions)
+                self.assertNotIn("AGENTS.md edits", questions)
+        head, questions, tail = m.split_questions("## Questions for the owner\n- Q1?\n\n## AGENTS.md edits you would make\n- x\n")
+        self.assertIn("AGENTS.md edits", tail)
+        self.assertEqual(m.question_items("- A?\n  more\n- B?"), ["- A?\n  more", "- B?"])
+        self.assertEqual(m.split_questions("## Questions for the owner\n- none\n")[1], "")
+
+    def test_typed_ahead_input_is_flushed_before_the_commit_question(self):
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        with mock.patch("termios.tcflush") as flush, mock.patch.object(Tty, "fileno", create=True, return_value=0):
+            status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        flush.assert_called()
+
     def test_questions_saying_none_are_not_asked(self):
         none = ("**AGENTS.md edits you would make**\n- one edit\n\n**Questions for the owner**\n- none\n")
         self.e.script_agents(sonnet=[{"write": {ADAPTED_FILE: "x\n", ".lane-control/SUGGESTIONS.md": none}}], opus=[PASS])
@@ -978,7 +1024,7 @@ class OnboardingTests(unittest.TestCase):
         r = self.e.run(str(self.repo), "--opencode", "hosted", adapt=True)
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertEqual(len(self.e.agent_runs()), 2)
-        self.assertNotIn("plain text", r.stdout)
+        self.assertNotIn("Your answer", r.stdout)
 
     def test_a_rerun_neither_replays_the_answers_nor_loses_the_change(self):
         self.e.script_agents(sonnet=[self.WRITE_Q, self.ANSWER_STEP], opus=[PASS])

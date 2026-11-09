@@ -242,7 +242,7 @@ class AdaptTemplateTests(unittest.TestCase):
 
     def test_questions_only_for_what_cannot_be_looked_up(self):
         flat = " ".join((ADAPT / "prompt.md").read_text().lower().split())
-        for needle in ("open a file before asking about it", "use the repo and the machine (read-only)",
+        for needle in ("open a file before asking about it", "use the repo (read-only)", "you cannot look at the machine",
                        "never ask the owner how a lane-control template rule works"):
             self.assertIn(needle, flat)
 
@@ -267,6 +267,12 @@ class AdaptTemplateTests(unittest.TestCase):
                        "no new questions", "write only inside `.lane-control/`", "{{answers}}", "{{questions}}"):
             self.assertIn(needle, text)
         self.assertLess(len((ADAPT / "answers-prompt.md").read_text().splitlines()), 40)
+        self.assertNotIn("cannot widen", text)  # an answer is the owner's word: no guard the issue did not ask for
+
+    def test_suggestion_headings_are_fixed_in_the_prompt(self):
+        flat = " ".join((ADAPT / "prompt.md").read_text().split())
+        self.assertIn("`## AGENTS.md edits you would make`", flat)
+        self.assertIn("`## Questions for the owner`", flat)
 
     def test_review_prompt_has_no_literal_double_braces_but_its_placeholders(self):
         left = re.sub(r"\{\{(PROJECT|DESIGN_LEAD|TEMPLATES|VISIBILITY)\}\}", "", (ADAPT / "review-prompt.md").read_text())
