@@ -60,12 +60,34 @@ class PauseTest(unittest.TestCase):
         self.assertIn("lane-1", r.stderr)
         self.assertFalse(self.marker().exists())
 
-    def test_wake_of_a_stopped_project_says_start_is_needed(self):
+    def test_wake_of_a_stopped_project_keeps_the_marker_for_start(self):
         self.pause("stop", str(self.repo))
         r = self.pause("wake", str(self.repo))
         self.assertEqual(r.returncode, 0)
         self.assertIn("project-pause start", r.stdout)
+        self.assertTrue(self.marker().exists())
+        self.pause("start", str(self.repo))
         self.assertFalse(self.marker().exists())
+
+    def test_project_setup_clears_the_marker_when_it_starts_a_coordinator(self):
+        self.pause("stop", str(self.repo))
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
+        self.assertFalse(self.marker().exists())
+        self.pause("rest", str(self.repo))
+        self.assertEqual(self.e.run(str(self.repo)).returncode, 0)  # nothing started: a resting project stays resting
+        self.assertTrue(self.marker().exists())
+
+    def test_status_warns_when_a_resting_project_has_a_lane(self):
+        self.pause("rest", str(self.repo))
+        self.e.set_state(agents=[*json.loads(self.e.state.read_text())["agents"], {"name": "lane-1", "cwd": "/x"}])
+        out = self.pause("status", str(self.repo)).stdout
+        self.assertIn("resting", out)
+        self.assertIn("WARNING", out)
+
+    def test_the_guards_slug_of_the_name_finds_the_project(self):
+        self.assertEqual(self.pause("status", "shop").returncode, 0)  # set up with --name Shop
+        self.assertEqual(self.pause("status", "Shop").returncode, 0)
 
     def test_a_refused_stop_leaves_no_marker(self):
         self.e.set_state(agents=[*json.loads(self.e.state.read_text())["agents"], {"name": "lane-1", "cwd": "/x"}])

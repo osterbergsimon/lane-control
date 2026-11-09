@@ -20,8 +20,8 @@
 # A send that fails waits in <state file>.pending and is retried each poll, in order, for GUARD_RETRY_SECS (1 hour);
 # then the machine coordinator is told if its space answers, and the journal has it either way. A space paused by
 # `project-pause stop` has a marker <state dir>/paused/<space>: nothing is sent or queued for it, and waiting orders
-# are dropped; its budget stage is not advanced, so the first poll after the marker is removed sends the
-# standing. A crashed coordinator has no marker, so it still warns. GUARD_POLLS=<n> stops after n polls (tests).
+# are dropped; its weekly stage is not advanced, so the first poll after the marker is removed sends the weekly
+# standing (window orders are not replayed). A crashed coordinator has no marker, so it still warns. GUARD_POLLS=<n> stops after n polls (tests).
 here=$(dirname "$0"); . "$here/lib.sh"
 declare -A wstage stage reset_at handled checked mem   # handled: last reset acted on (a stale feed repeats it)
 STATE_FILE="${GUARD_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/lane-control/window-guard.state}"
@@ -124,7 +124,7 @@ while true; do
     [ "$ss" -ge 100 ] && [ "$rs" = 0 ] && continue   # failed feed reads 100: never act on it
     tiers=$(budget_tiers "$b")
     for p in "${!COORD_SPACE[@]}"; do   # per project: COORD_CEILING_ADD raises one project's ceiling
-      paused "${COORD_SPACE[$p]}" && continue   # its stage stays, so the first poll after the marker goes sends the standing
+      paused "${COORD_SPACE[$p]}" && continue   # its weekly stage stays, so the first poll after the marker goes sends the weekly standing
       ceil=$(( $(budget_ceiling "$b") + ${COORD_CEILING_ADD[$p]:-0} )); k="$b:$p"; ws=${wstage[$k]:-0}
       if   [ "$wk" -ge $((ceil-STEP_STOP_ALL)) ]  && [ "$ws" -lt 4 ]; then wstage[$k]=4; tell_one "$p" "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_STOP_ALL} (${ceil}%). Stop all work on tiers ${tiers}now: lanes commit and push WIP and stop; coordinators too. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."
       elif [ "$wk" -ge $((ceil-STEP_WIP_STOP)) ]  && [ "$ws" -lt 3 ]; then wstage[$k]=3; tell_one "$p" "ORDER (budget guard): budget $b weekly ${wk}% >= ceiling-${STEP_WIP_STOP} (${ceil}%). Lanes on tiers ${tiers}commit and push WIP and stop; coordinators only review and merge. Your last act before the limit: write your handover summary (${HANDOVER_HINT:-done, open, decisions for the owner, how to resume; detailed enough for a new session}). No reply."

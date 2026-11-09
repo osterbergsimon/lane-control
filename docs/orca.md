@@ -306,14 +306,18 @@ scripts/project-pause rest|wake|stop|start|status <project-dir | project-name>
 `GUARD_STATE_FILE`) and stops no agent: the guard then sends nothing to that space, queues nothing and drops what was
 waiting, so no "could not reach" notice reaches the machine coordinator, and the project stays in `COORD_SPACE`
 (the guard config is untouched). It refuses, naming them, while a lane or reviewer still runs in the space. `wake`
-removes the marker, and the guard sends the project the current budget standing on its next poll. The owner says
+removes the marker, and the guard sends the project the current weekly budget standing on its next poll (window orders
+missed while resting are not replayed). The owner says
 "resume" to the coordinator or machine coordinator, who runs `project-pause wake`. `rest` and `wake` call no
 `cotal stop` or spawn, so they work from inside an agent's shell.
 
 `stop` is for freeing memory: it does `rest`, and also stops the coordinator and design lead with `cotal stop` (broker and
 manager stay up, never `cotal down`). A stopped coordinator cannot be told to resume: `start` brings back the missing
 agents with project-setup `--skip-adapt` (no adapting, no commit, no questions), as a fresh session told to resume from
-`bd recall handover-latest`, `cotal who` and `orca worktree list`, on the current persona, and removes the marker. A
+`bd recall handover-latest`, `cotal who` and `orca worktree list`, on the current persona, and removes the marker (so
+does project-setup whenever it starts a coordinator). `wake` keeps the marker while no coordinator runs, and says to
+run `start`. The coordinator wakes a rested project before opening a lane, and `status` warns when a rested project
+has a lane running. A
 coordinator that crashed has no marker and still warns. `status` says running, resting or paused and what else runs.
 Reruns are harmless. cotal refuses `stop` and `start` from inside an agent's shell: run them from a plain shell.
 

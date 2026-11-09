@@ -5,7 +5,8 @@
 
 rest    the normal way to leave a project alone for a while: writes the guard marker only and stops no agent, so the
         window guard stops waking it. Refuses, naming them, while a lane or reviewer runs. wake undoes it.
-wake    removes the marker; the guard then sends the project the current budget standing on its next poll. rest and wake
+wake    removes the marker; the guard then sends the project the current weekly budget standing on its next poll (missed window
+        orders are not replayed); with no coordinator running it keeps the marker for start. rest and wake
         run no cotal stop or spawn, so they work from inside an agent's shell.
 stop    rest, and also stops the coordinator and design lead with `cotal stop` to free memory. Refuses, naming them, while
         any other agent (a lane or reviewer) runs in the project's space. The broker and manager stay up; nothing is torn down.
@@ -36,11 +37,7 @@ RESUME = ("You are restarting as a fresh session. Read AGENTS.md and the orca-co
           "are back.")
 
 
-def marker(space: str) -> Path:
-    """Where the window guard looks: next to its state file (same default as scripts/window-guard.sh)."""
-    f = os.environ.get("GUARD_STATE_FILE") or Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") \
-        / "lane-control" / "window-guard.state"
-    return Path(f).parent / "paused" / space
+marker = ps.guard_marker
 
 
 def find_repo(arg: str) -> Path:
@@ -56,7 +53,7 @@ def find_repo(arg: str) -> Path:
             st = json.loads(f.read_text())
         except (OSError, ValueError):
             continue
-        if isinstance(st, dict) and arg in (Path(st.get("root", "")).name, st.get("name")):
+        if isinstance(st, dict) and ps.slug(arg) in (ps.slug(Path(st.get("root", "")).name), ps.slug(st.get("name") or "")):
             found.append(st["root"])
     if len(found) != 1:
         raise ps.Fail(f"{arg} is not a directory, and " + (f"matches {len(found)} projects: " + ", ".join(found)
@@ -92,19 +89,18 @@ def rest(repo: Path, space: str, stopping: bool = False) -> int:
 
 
 def wake(repo: Path, space: str) -> int:
-    marker(space).unlink(missing_ok=True)
-    print(f"{space} woke: the window guard sends it the current budget standing on its next poll.")
     if "coordinator" not in ps.live_agents(repo, space):
-        print("  its coordinator is not running: run `project-pause start` from a plain shell.")
+        print(f"{space}: its coordinator is not running, so the marker stays until `project-pause start` "
+              "(run it from a plain shell).")
+        return 0
+    marker(space).unlink(missing_ok=True)
+    print(f"{space} woke: the window guard sends it the current weekly budget standing on its next poll.")
     return 0
 
 
 def start(repo: Path, space: str) -> int:
     ps.COORDINATOR_KICKOFF = RESUME  # the one thing different from a first setup
-    rc = ps.main([str(repo), "--skip-adapt"])
-    if rc == 0:
-        marker(space).unlink(missing_ok=True)
-    return rc
+    return ps.main([str(repo), "--skip-adapt"])  # clears the marker when it starts a coordinator
 
 
 def status(repo: Path, space: str) -> int:
@@ -117,6 +113,8 @@ def status(repo: Path, space: str) -> int:
     print(f"{space}: {state}")
     others = sorted(n for n in live if n not in STANDING)
     print("  also running: " + (", ".join(others) if others else "none"))
+    if names and others and marker(space).exists():
+        print("  WARNING: resting with a lane running, so the guard sends it no orders: run `project-pause wake`.")
     return 0
 
 

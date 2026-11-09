@@ -594,6 +594,8 @@ class MachineCoordinatorContentTests(unittest.TestCase):
     def test_personas_know_how_to_wake_a_rested_project(self):
         coord = flat(ROOT / "personas" / "coordinator.md")
         self.assertIn("scripts/project-pause wake", coord)
+        self.assertRegex(coord, r"Before you open a lane.*project-pause wake")
+        self.assertIn("wake it first", flat(ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md"))
         self.assertIn("{{LANE_CONTROL}}", coord)
         machine = flat(ROOT / "personas" / "machine-coordinator.md")
         self.assertIn("project-pause wake <project>", machine)

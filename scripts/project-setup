@@ -1135,6 +1135,13 @@ def start_stack(repo: Path, space: str, port_flag) -> bool:
     return True
 
 
+def guard_marker(space: str) -> Path:
+    """The window guard's marker for a rested or paused space, next to its state file (as in scripts/window-guard.sh)."""
+    f = os.environ.get("GUARD_STATE_FILE") or Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") \
+        / "lane-control" / "window-guard.state"
+    return Path(f).parent / "paused" / space
+
+
 def live_agents(repo: Path, space: str) -> dict:
     items = jrun(["cotal", "ps", "--json", "-s", space], cwd=repo)["result"]["items"]
     return {a["name"]: a for a in items if a.get("status") == "running"}
@@ -2537,6 +2544,8 @@ def main(argv=None) -> int:
             seat_wrapper_note(project_table)
         global LEFTOVER_DELIVERED
         LEFTOVER_DELIVERED = spawn(repo, space, "coordinator", *coord, modes["coordinator"], repo, coordinator_kickoff())
+        if LEFTOVER_DELIVERED:  # a coordinator that was just started is awake: the guard sends it orders again
+            guard_marker(space).unlink(missing_ok=True)
         wt = None
         if lead:
             wt, created = design_worktree(repo, repo_id)
