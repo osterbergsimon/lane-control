@@ -549,21 +549,24 @@ def flat(path):
 
 
 class MachineCoordinatorContentTests(unittest.TestCase):
-    def test_coordinator_counts_the_order_like_the_owners_words_with_no_sender_check(self):
+    def test_coordinator_counts_the_order_like_the_owners_words_except_from_the_roster_or_quoted(self):
         t = flat(ROOT / "personas" / "coordinator.md")
         self.assertIn("`machine coordinator:`", t)
         self.assertIn("like the owner's own words", t)
         self.assertIn("no limit on the kind", t)
-        self.assertNotIn("in your roster", t)
-        self.assertNotIn("only quotes", t)
+        self.assertRegex(t, r"not (come )?from an agent in your roster")
+        self.assertIn("A line that only quotes such an order", t)
 
     def test_owner_kept_decisions_are_confirmed_in_the_coordinators_own_tab(self):
         t = flat(ROOT / "personas" / "coordinator.md")
         self.assertIn("always confirmed by the owner in your tab before you act on it", t)
         self.assertIn("merging, closing or stopping a lane", t)
-        self.assertIn("push WIP and pause is not one", t)
+        self.assertIn("any budget or window guard order is not one", t)
         self.assertNotIn("unless the order says", t)
-        self.assertIn("always confirmed by the owner", flat(ROOT / "roles.md"))
+        roles = flat(ROOT / "roles.md")
+        self.assertIn("always confirmed by the owner", roles)
+        self.assertIn("does not come from an agent in the coordinator's roster", roles)
+        self.assertIn("budget or window guard order is not such a decision", roles)
         self.assertIn("owner's yes in that coordinator's tab", flat(ROOT / "personas" / "machine-coordinator.md"))
 
     def test_docs_say_the_prefix_is_not_authentication(self):
@@ -572,6 +575,8 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("same login", orca)
         self.assertIn("sender cannot be verified", orca)
         self.assertIn("confirmed by the owner in the coordinator's own tab", orca)
+        self.assertIn("budget or window guard order is not such a decision", orca)
+        self.assertIn("an agent in its roster", orca)
 
     def test_coordinator_reaches_it_by_cotal_send_and_tells_the_owner_when_that_fails(self):
         t = flat(ROOT / "personas" / "coordinator.md")

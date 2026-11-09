@@ -412,7 +412,9 @@ space's own signer; it has not been exercised live yet, so step 4 is the first r
 
 The prefix is not authentication. The guard, the machine coordinator, the owner and any agent with a shell on this
 machine send under the same login, so the sender cannot be verified. That is why a decision the owner keeps (merging,
-closing or stopping a lane, and the like) is always confirmed by the owner in the coordinator's own tab first.
+closing or stopping a lane, and the like) is always confirmed by the owner in the coordinator's own tab first; a budget
+or window guard order is not such a decision. A coordinator also ignores the prefix on a DM from an agent in its roster
+and in quoted text. That stops accidents and a plain `cotal_dm`, not a shell `cotal send`.
 
 `scripts/window-guard.sh` spends no tokens and runs as a systemd user service. It sends the budget steps to every
 project in `COORD_SPACE` and one notice per low-memory episode to the machine coordinator. `COORD_TASK` is no longer
