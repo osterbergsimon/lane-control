@@ -386,6 +386,33 @@ earlier on a gateway model needs `--own-model` or a `sandbox none` row before th
 - `bypassPermissions` is an option (non-root only, after accepting its warning once).
 - The project's mode is written into the personas, and lanes inherit it (tier table `inherit`).
 
+### The machine coordinator and the window guard
+One agent per machine, `machine-coordinator` in the Cotal space `machine`, in its own private folder; `roles.md` has its
+job. Projects keep their own spaces and Cotal has no messages between spaces, so orders cross by shell with
+`cotal send -s <space> -t coordinator "machine coordinator: ..."`. That works from a shell on this machine under the
+space's own signer; it has not been exercised live yet, so step 5 is the first real test. An order that starts
+`machine coordinator:` counts like the owner's own words (`personas/coordinator.md`).
+
+`scripts/window-guard.sh` spends no tokens and runs as a systemd user service. It sends the budget steps to every
+project in `COORD_SPACE` and one notice per low-memory episode to the machine coordinator. `COORD_TASK` is no longer
+read by it, so a project on Rove, or an old Rove entry for a project that moved, gets no orders. A failed send waits and
+is retried each poll for an hour, then the machine coordinator is told; the journal has every order
+(`journalctl --user -u lane-control-window-guard.service`).
+
+Install, in this order, from the main checkout of lane-control (the unit runs the script where it finds it):
+1. Stop the old guard and the old machine watch loop, and any routine that starts them: two guards send every order
+   twice.
+2. Add `COORD_SPACE` to the config (`config.example.sh`): one line per project, with the project's space from
+   `cotal space`. Remove nothing else; the Rove scripts still read `COORD_TASK`.
+3. Run `scripts/project-setup <project> --refresh` for each project, and restart its coordinator at a natural stop. Until
+   it restarts, a running coordinator treats the orders as information.
+4. `scripts/machine-coordinator-setup` (`--no-start` to look first; `--folder` for another place than
+   `~/code/machine-coordinator`).
+5. Test the path once by hand: `cotal send -s <space> -t coordinator "machine coordinator: FYI test, no reply"`, and
+   check the coordinator sees it.
+6. `scripts/window-guard-install`. It refuses while another guard runs or `COORD_SPACE` is empty. For a machine that
+   runs with nobody logged in: `loginctl enable-linger $USER`.
+
 ### Verified on 2026-11-06 [tested]
 - A manager-launched agent opens as one tab `cotal-<name>` inside an *existing* Orca worktree (next to the shell Orca
   opens with every worktree), and joins the roster. Tested with OpenCode and with Claude.

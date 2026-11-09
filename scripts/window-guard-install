@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Installs the window guard as a systemd user service, from this checkout: run it from the main checkout, not a lane
+# worktree, because the unit runs the script where it finds it. docs/orca.md has the order of the steps around it.
+# Captures the current PATH for the unit, because cotal, node and jq are usually outside systemd's default PATH.
+here=$(cd "$(dirname "$0")" && pwd); repo=$(dirname "$here")
+. "$here/lib.sh"   # sourced before set -u: the config is the owner's
+set -u
+unit=lane-control-window-guard.service
+die() { echo "window-guard-install: $1" >&2; exit 1; }
+[ "${#COORD_SPACE[@]}" -gt 0 ] || die "no COORD_SPACE in $CONF: add each project's Cotal space first (config.example.sh)"
+for tool in cotal jq timeout systemctl; do command -v "$tool" >/dev/null || die "$tool is not on PATH"; done
+running=false; systemctl --user is-active --quiet "$unit" && running=true
+if [ "$running" = false ]; then   # another guard would send every order twice and fight over the state file
+  old=$(pgrep -f 'window-guard\.sh|machine-watch\.sh' || true)
+  [ -z "$old" ] || die "a guard or machine watch is still running (pid: $(echo $old)). Stop it first, then rerun."
+fi
+dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"; mkdir -p "$dir"
+path=${PATH//%/%%}
+text=$(cat "$repo/templates/window-guard.service")
+text=${text//@PATH@/"$path"}; text=${text//@REPO@/"$repo"}
+printf '%s\n' "$text" > "$dir/$unit"
+systemctl --user daemon-reload || die "systemctl daemon-reload failed"
+if [ "$running" = true ]; then systemctl --user restart "$unit"; else systemctl --user enable --now "$unit"; fi || die "could not start $unit"
+echo "installed $unit: runs $repo/scripts/window-guard.sh"
+echo "log: journalctl --user -u $unit -f"
+echo "to keep it running without a login session: loginctl enable-linger \$USER"

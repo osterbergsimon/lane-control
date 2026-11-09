@@ -1,7 +1,7 @@
 # Roles
 
 ## Machine coordinator
-The Rove main task on the playbook repo. It acts **for judgment only**. It does not run project work, review PRs or launch lanes in projects; project coordinators own their queues, briefs, reviews and merges.
+On Rove, the main task on the playbook repo; under Orca + Cotal, its own agent (below). It acts **for judgment only**. It does not run project work, review PRs or launch lanes in projects; project coordinators own their queues, briefs, reviews and merges.
 
 Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the config.
 
@@ -26,6 +26,12 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 - Confidentiality: no customer or deployment details in anything committed; word things generically.
 - No deterministic machine-wide slot caps in scripts: silent stalls and throttling the owner's own load are footguns. Arbitration is judgment.
 - Keep turns short when nothing needs action.
+
+### Under Orca + Cotal
+- One agent, `machine-coordinator`, in the Cotal space `machine`, in its own private folder (`scripts/machine-coordinator-setup`). Its notes stay in that folder because this repo is public. It sleeps until something needs judgment.
+- Each project keeps its own space and Cotal has no messages between spaces, so everything crosses by shell: `cotal send -s <space> -t coordinator "machine coordinator: <order>"` to a project, `cotal send -s machine -t machine-coordinator "<project>: <line>"` back.
+- An order that starts `machine coordinator:` counts like the owner's own words, with no limit on the kind. Decisions the coordinator's persona keeps for the owner stay the owner's unless the order says the owner decided otherwise.
+- `scripts/window-guard.sh` sends the budget orders without waking this agent and sends it one notice per low-memory episode. The steps in Jobs that name `rove api` are the Rove path; under Orca + Cotal it asks each coordinator for its open owner decisions.
 - Offload hands-on work (builds, setup, iterating on configs, verification runs, mechanical edits) to cheaper models with a tight brief (a subagent on a lower tier); keep design, judgment and the owner-facing summary. The expensive tier's turns are the scarce budget. Do not also run the work yourself.
 
 - Public posts (`rove api feedback`, which becomes a public discussion under the owner's account; issues, discussions, PRs or comments on other people's repos) need the owner's approval first and generic wording (no project, host, customer, path or task-key names). Later edits stay in the public history.
