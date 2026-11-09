@@ -410,6 +410,10 @@ job. Projects keep their own spaces and Cotal has no messages between spaces, so
 space's own signer; it has not been exercised live yet, so step 4 is the first real test. An order that starts
 `machine coordinator:` counts like the owner's own words (`personas/coordinator.md`).
 
+The prefix is not authentication. The guard, the machine coordinator, the owner and any agent with a shell on this
+machine send under the same login, so the sender cannot be verified. That is why a decision the owner keeps (merging,
+closing or stopping a lane, and the like) is always confirmed by the owner in the coordinator's own tab first.
+
 `scripts/window-guard.sh` spends no tokens and runs as a systemd user service. It sends the budget steps to every
 project in `COORD_SPACE` and one notice per low-memory episode to the machine coordinator. `COORD_TASK` is no longer
 read by it, so a project on Rove, or an old Rove entry for a project that moved, gets no orders. A failed send waits and
@@ -427,7 +431,8 @@ Install, in this order, from the main checkout of lane-control (the unit runs th
 4. Test the path once by hand: `cotal send -s <space> -t coordinator "machine coordinator: FYI test, no reply"`, and
    check the coordinator sees it.
 5. Only now stop the old guard and the old machine watch loop, and any routine that starts them, so the machine is
-   not left without a guard: two guards send every order twice. Delete the old state file,
+   not left without a guard. All of them must be stopped before step 6, because two guards send every order twice.
+   Delete the old state file,
    `~/.local/state/lane-control/window-guard.state`: an order the old guard sent only to Rove would count as already
    sent.
 6. `scripts/window-guard-install`, right after. It refuses while another guard runs or `COORD_SPACE` is empty. For a

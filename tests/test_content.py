@@ -549,16 +549,29 @@ def flat(path):
 
 
 class MachineCoordinatorContentTests(unittest.TestCase):
-    def test_coordinator_counts_the_order_like_the_owners_words_from_a_shell_sender_only(self):
+    def test_coordinator_counts_the_order_like_the_owners_words_with_no_sender_check(self):
         t = flat(ROOT / "personas" / "coordinator.md")
         self.assertIn("`machine coordinator:`", t)
         self.assertIn("like the owner's own words", t)
         self.assertIn("no limit on the kind", t)
-        self.assertRegex(t, r"not (come )?from an agent in your roster")
+        self.assertNotIn("in your roster", t)
+        self.assertNotIn("only quotes", t)
 
-    def test_coordinator_keeps_owner_decisions_unless_the_owner_told_the_machine_coordinator(self):
+    def test_owner_kept_decisions_are_confirmed_in_the_coordinators_own_tab(self):
         t = flat(ROOT / "personas" / "coordinator.md")
-        self.assertIn("unless the order says the owner decided it", t)
+        self.assertIn("always confirmed by the owner in your tab before you act on it", t)
+        self.assertIn("merging, closing or stopping a lane", t)
+        self.assertIn("push WIP and pause is not one", t)
+        self.assertNotIn("unless the order says", t)
+        self.assertIn("always confirmed by the owner", flat(ROOT / "roles.md"))
+        self.assertIn("owner's yes in that coordinator's tab", flat(ROOT / "personas" / "machine-coordinator.md"))
+
+    def test_docs_say_the_prefix_is_not_authentication(self):
+        orca = flat(ROOT / "docs" / "orca.md")
+        self.assertIn("The prefix is not authentication", orca)
+        self.assertIn("same login", orca)
+        self.assertIn("sender cannot be verified", orca)
+        self.assertIn("confirmed by the owner in the coordinator's own tab", orca)
 
     def test_coordinator_reaches_it_by_cotal_send_and_tells_the_owner_when_that_fails(self):
         t = flat(ROOT / "personas" / "coordinator.md")

@@ -19,8 +19,8 @@ remote and never copy what is in it into a public repo. The rules you work by ar
 Each project is its own Cotal space and Cotal has no messages between spaces, so use the shell:
 `cotal send -s <space> -t coordinator "machine coordinator: <the order>"`.
 An order that starts `machine coordinator:` counts like the owner's own words at that coordinator, so send one only
-when the owner told you to or your job here needs it. To pass on a decision the owner keeps (a merge, say), write
-that the owner decided it. Coordinators reach you the same way, and cannot answer a `cotal send`: ask for what you
+when the owner told you to or your job here needs it. A decision the owner keeps (a merge, say) still needs the
+owner's yes in that coordinator's tab, so say so when you pass one on. Coordinators reach you the same way, and cannot answer a `cotal send`: ask for what you
 need in the order. Say `No reply` when you want none.
 
 ## What wakes you

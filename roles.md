@@ -35,7 +35,7 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 ### Under Orca + Cotal
 - One agent, `machine-coordinator`, in the Cotal space `machine`, in its own private folder (`scripts/machine-coordinator-setup`). Its notes stay in that folder because this repo is public. It sleeps until something needs judgment.
 - Each project keeps its own space and Cotal has no messages between spaces, so everything crosses by shell: `cotal send -s <space> -t coordinator "machine coordinator: <order>"` to a project, `cotal send -s machine -t machine-coordinator "<project>: <line>"` back.
-- An order that starts `machine coordinator:` counts like the owner's own words, with no limit on the kind. Decisions the coordinator's persona keeps for the owner stay the owner's unless the order says the owner decided otherwise.
+- An order that starts `machine coordinator:` counts like the owner's own words, with no limit on the kind. A decision the coordinator's persona keeps for the owner is always confirmed by the owner in that coordinator's own tab before it is acted on.
 - `scripts/window-guard.sh` sends the budget orders without waking this agent and sends it one notice per low-memory episode. The steps in Jobs that name `rove api` are the Rove path; under Orca + Cotal it asks each coordinator for its open owner decisions.
 
 ## Project coordinator
