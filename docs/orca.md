@@ -205,14 +205,18 @@ and the answers' changes and asks only the questions still on the list.)
    push alone, only when origin's default branch lacks the onboarding files or `orca.yaml`; the question lists the
    commits the push carries. An already onboarded project is asked too on a re-run (that is how a declined, failed or
    interrupted answer is asked again), also with `--write-orca-yaml`. An untracked `orca.yaml` that differs from the draft is never
-   overwritten or committed. The push is asked only on the branch origin's HEAD names; on another branch nothing is
-   asked, and the run says lanes will not get the files only when origin's default branch really lacks them. With no
+   overwritten or committed. The push is asked only on the branch origin's HEAD names (another branch is refused earlier, see below). With no
    origin Orca makes worktrees from the local branch, so the question is only to commit `orca.yaml`. A no, no terminal or a failed push commits
    and pushes nothing more, and the agents still start, with that warning. Only a no to the file list stops the run.
    A run without onboarding (`--skip-adapt`) asks nothing and never commits: it drafts into
    `.cotal/orca.yaml.proposed`. `--write-orca-yaml` only changes where an uncommitted draft is left (as `orca.yaml` in
    the repo, which a later run offers to commit); it never commits by itself. The draft ends by writing `orca-setup-done` in the worktree's git dir;
-   agents start only after it.
+   agents start only after it. Each tool line is guarded (`command -v`): a tool not on PATH during setup (a cargo reached
+   only through a project script, say) is skipped with a note, and no failing step stops the marker.
+   Every run that may commit (an onboarding, `--readapt`, a rerun of an onboarded project) first refuses a checkout
+   on a detached HEAD, on a branch other than origin's default, or behind it (after a fetch): it says which, by how
+   many commits, and what to run (`git switch <default>`, `git pull`), and changes nothing. A detached HEAD is refused
+   without an origin too. `--refresh` and `--skip-adapt` (project-pause start) are not checked.
    When the repo tracks `.envrc` and `direnv status` reports it allowed in the source checkout (the owner approved it
    there), the generated script first runs `direnv allow .envrc` in the worktree, guarded: a machine without direnv is
    fine and a failure only prints a line. direnv approves per path, so without it each new worktree opens with

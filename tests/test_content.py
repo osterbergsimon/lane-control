@@ -66,6 +66,19 @@ class PersonaTests(unittest.TestCase):
             self.assertIn("~/.agents/bin/lane-room", text, name)
             self.assertIn("hold the lane and tell the owner", " ".join(text.split()), name)
 
+    def test_coordinator_keeps_its_checkout_on_the_default_branch(self):
+        text = " ".join((PERSONAS / "coordinator.md").read_text().split())
+        self.assertIn("checkout stays on the default branch", text)
+        self.assertIn("git status -sb", text)
+        self.assertIn("git fetch origin", text)
+        self.assertIn("git rev-list --count HEAD..origin/<default>", text)
+        self.assertIn("detached, on another branch or behind origin", text)
+        skill = " ".join(SKILL.read_text().split())
+        self.assertIn("git status -sb", skill)
+        self.assertIn("git fetch origin", skill)
+        self.assertIn("holds the lane and tells the owner", skill)
+        self.assertIn("A design lead skips this", skill)
+
     def test_personas_carry_placeholders(self):
         for name in ("coordinator.md", "design-lead.md"):
             text = (PERSONAS / name).read_text()

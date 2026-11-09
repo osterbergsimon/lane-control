@@ -365,6 +365,64 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("?? wip.txt", status)
         self.assertIn("A  staged.txt", status)
 
+    # --- a detached or stale checkout is refused before anything is adapted ------------------------------------
+    def test_a_detached_head_is_refused_and_nothing_changes(self):
+        self.with_origin()
+        git("checkout", "-q", "--detach", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn("detached HEAD", self.err)
+        self.assertIn("git switch main", self.err)
+        ask.assert_not_called()
+        self.assertEqual(self.models(), [])
+        self.assertEqual(self.head_count(), 1)
+
+    def test_a_checkout_behind_origin_is_refused_with_the_count(self):
+        bare = self.with_origin()
+        self.other_clone_pushes(bare, "new.txt", "x", "one")
+        self.other_clone_pushes(bare, "new2.txt", "x", "two")
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn("2 commit(s) behind origin/main", self.err)
+        self.assertIn("git pull", self.err)
+        self.assertEqual(self.models(), [])
+        # --readapt is refused too; --skip-adapt (project-pause start) is not
+        self.assertEqual(self.in_terminal("y", "--readapt")[0], 1)
+        self.assertNotEqual(self.in_terminal("y", "--skip-adapt")[0], 1)
+
+    def test_a_renamed_default_branch_is_read_from_origin_not_the_old_origin_head(self):
+        bare = self.with_origin()
+        git("branch", "-m", "main", "trunk", cwd=self.repo)
+        git("push", "-q", "origin", "trunk", cwd=self.repo)
+        git("symbolic-ref", "HEAD", "refs/heads/trunk", cwd=bare)  # origin's default is now trunk; origin/HEAD here still says main
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal(["y", "n"])
+        self.assertEqual(status, 0, self.err)
+        self.assertNotIn("lanes branch from", self.err)
+
+    def test_an_unreachable_origin_is_said_and_the_old_refs_are_used(self):
+        self.with_origin()
+        git("remote", "set-url", "origin", str(self.e.home / "gone.git"), cwd=self.repo)
+        git("checkout", "-q", "--detach", cwd=self.repo)
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn("could not reach origin", self.err)
+        self.assertIn("detached HEAD", self.err)
+
+    def test_skip_adapt_and_refresh_run_on_a_detached_head_with_a_warning(self):
+        self.with_origin()
+        git("checkout", "-q", "--detach", cwd=self.repo)
+        status, out, ask = self.in_terminal("n", "--skip-adapt")
+        self.assertEqual(status, 0, self.err)
+        self.assertIn("warning: the checkout is on a detached HEAD", self.err)
+        err = io.StringIO()  # --refresh takes no --opencode, which in_terminal adds
+        with mock.patch.dict(os.environ, self.e.env, clear=True), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(err):
+            load().main([str(self.repo), "--refresh"])
+        self.assertIn("warning: the checkout is on a detached HEAD", err.getvalue())
+        self.assertTrue(self.orca_setup_ran())
+
     # --- one run: orca.yaml and the push, asked after the file-list commit -------------------------------------
     def with_origin(self, reject_push=False):
         """A local bare origin that holds the repo's main, with origin/HEAD set."""
@@ -478,20 +536,20 @@ class OnboardingTests(unittest.TestCase):
         self.assertNotIn("No orca.yaml", out)
         self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))
 
-    def test_another_branch_is_not_pushed_and_nothing_is_asked(self):
+    def test_another_branch_is_refused_before_anything_is_adapted(self):
         bare = self.with_origin()
         self.with_lockfile()
         old = self.origin_main(bare)
         git("checkout", "-q", "-b", "feature", cwd=self.repo)
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         status, out, ask = self.in_terminal(["y", "y"])
-        self.assertEqual(status, 0, out)
-        ask.assert_called_once()
+        self.assertEqual(status, 1)
+        self.assertIn("on feature", self.err)
+        self.assertIn("git switch main", self.err)
+        ask.assert_not_called()
+        self.assertEqual(self.models(), [])
         self.assertEqual(self.origin_main(bare), old)
-        self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
-        self.assertIn("feature", out)
-        self.assertIn("will not get", out)
-        self.assertTrue(self.started())
+        self.assertFalse(self.started())
 
     def test_a_failed_push_still_starts_and_warns(self):
         bare = self.with_origin(reject_push=True)
@@ -545,17 +603,14 @@ class OnboardingTests(unittest.TestCase):
         ask.assert_called_once()
         self.assertNotIn("will not get", out)
 
-    def test_another_branch_that_origin_already_has_everything_on_says_nothing(self):
-        bare = self.with_origin()
+    def test_a_rerun_on_another_branch_is_refused_too(self):
+        self.with_origin()
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal("y")[0], 0)  # asks the push on main
-        git("push", "-q", "origin", "main", cwd=self.repo)
-        git("fetch", "-q", "origin", cwd=self.repo)
         git("checkout", "-q", "-b", "feature", cwd=self.repo)
         status, out, ask = self.in_terminal("y")
-        self.assertEqual(status, 0, out)
+        self.assertEqual(status, 1)
         ask.assert_not_called()
-        self.assertNotIn("will not get", out)
 
     def test_no_start_still_opts_out_of_starting(self):
         self.with_origin()
@@ -720,21 +775,25 @@ class OnboardingTests(unittest.TestCase):
         git("push", "-q", "origin", "main", cwd=other)
         git("fetch", "-q", "origin", cwd=self.repo)
 
-    def test_a_checkout_behind_origin_asks_and_warns_nothing(self):
+    def test_a_rerun_behind_origin_is_refused_before_anything_is_written(self):
         bare = self.committed_lockfile_origin()
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal(["y", "y"])[0], 0)
         self.other_clone_pushes(bare, "AGENTS.md", "# changed elsewhere\n", "agents change")
-        head, remote = git("rev-parse", "HEAD", cwd=self.repo), self.origin_main(bare)
+        head = git("rev-parse", "HEAD", cwd=self.repo)
         status, out, ask = self.in_terminal("y")
-        self.assertEqual(status, 0, out)
+        self.assertEqual(status, 1)
+        self.assertIn("behind origin/main", self.err)
         ask.assert_not_called()
-        self.assertNotIn("will not get", out)
-        self.assertNotIn("does not have", out)
-        r = self.e.run(str(self.repo), adapt=True)  # and without a terminal
-        self.assertNotIn("will not get", r.stdout)
         self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
-        self.assertEqual(self.origin_main(bare), remote)
+
+    def test_a_detached_head_is_refused_without_an_origin_too(self):
+        git("checkout", "-q", "--detach", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn("detached HEAD", self.err)
+        self.assertEqual(self.models(), [])
 
     def test_an_orca_yaml_only_on_origin_is_not_committed_again(self):
         bare = self.with_origin()
@@ -744,10 +803,10 @@ class OnboardingTests(unittest.TestCase):
         self.other_clone_pushes(bare, "orca.yaml", "scripts:\n  setup: |\n    make deps\n", "orca from elsewhere")
         head, remote = git("rev-parse", "HEAD", cwd=self.repo), self.origin_main(bare)
         status, out, ask = self.in_terminal("y")
-        self.assertEqual(status, 0, out)
+        self.assertEqual(status, 1)  # behind: refused, so no second orca.yaml is ever committed
+        self.assertIn("behind origin/main", self.err)
         ask.assert_not_called()
-        self.assertIn("behind", out)
-        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)  # no commit made
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
         self.assertEqual(self.origin_main(bare), remote)
 
     def test_with_only_orca_yaml_open_the_text_names_no_onboarding_commit_and_no_empty_list(self):
@@ -2040,6 +2099,38 @@ class DirenvLineTests(unittest.TestCase):
             env = {"PATH": path, "STUB_DIRENV": "allowfail"}
             r = subprocess.run([shutil.which("sh"), "-c", line.strip()], cwd=self.repo, env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, (stubbed, r.stderr))
+
+    def test_a_tool_not_on_path_is_skipped_and_the_marker_is_still_written(self):
+        text, _ = self.draft()
+        body = text.split("setup: |\n", 1)[1]
+        script = "\n".join(l[4:] for l in body.splitlines())
+        work = self.e.home / "wt"
+        work.mkdir()
+        tools = self.e.home / "only-git"
+        tools.mkdir()
+        for tool in ("git", "touch"):
+            (tools / tool).symlink_to(shutil.which(tool))
+        subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+        r = subprocess.run([shutil.which("sh"), "-e", "-c", script], cwd=work, env={"PATH": str(tools)},
+                           capture_output=True, text=True)  # -e: a failing step must still not stop the marker
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("uv not on PATH, skipped", r.stderr)
+        self.assertTrue((work / ".git" / "orca-setup-done").exists())
+
+    def test_a_failing_beads_link_does_not_stop_the_marker(self):
+        (self.repo / ".beads").symlink_to("/nonexistent-beads")
+        text, _ = self.draft()
+        script = "\n".join(l[4:] for l in text.split("setup: |\n", 1)[1].splitlines())
+        work = self.e.home / "wt2"
+        work.mkdir()
+        (work / ".beads").mkdir()
+        (work / ".beads").rmdir()
+        (work / ".beads").symlink_to("/dangling")  # [ -e ] false, ln -s then fails: File exists
+        subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+        r = subprocess.run([shutil.which("sh"), "-e", "-c", script], cwd=work,
+                           env={"PATH": os.environ["PATH"]}, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((work / ".git" / "orca-setup-done").exists())
 
     def test_an_envrc_not_approved_here_gets_no_line_and_the_output_says_so(self):
         text, out = self.draft("notallowed")

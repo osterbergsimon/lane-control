@@ -979,13 +979,15 @@ def setup_steps(repo: Path) -> list:
                 cmd = cmd.replace("uv sync", "uv sync --all-packages")
             tool = cmd.split()[0]
             line = cmd if str(rel) == "." else f"(cd {shlex.quote(str(rel))} && {cmd})"
-            steps.append(f'{line} || echo "setup: {tool} in {rel} failed" >&2')
+            steps.append(f'if command -v {tool} >/dev/null 2>&1; then {line} || echo "setup: {tool} in {rel} failed" >&2; '
+                         f'else echo "setup: {tool} not on PATH, skipped" >&2; fi')
     direnv = direnv_step(repo)
     if direnv:
         steps.insert(0, direnv)
     beads = repo / ".beads"
     if beads.is_symlink():
-        steps.insert(0, f"[ -e .beads ] || ln -s {shlex.quote(os.readlink(beads))} .beads")
+        steps.insert(0, f"[ -e .beads ] || ln -s {shlex.quote(os.readlink(beads))} .beads "
+                     '|| echo "setup: the .beads link failed" >&2')
     return steps
 
 
@@ -1916,6 +1918,7 @@ def publish_onboarding(repo: Path) -> None:
         say("publish", "skipped", "could not tell which branch lanes branch from, so nothing is pushed; make sure "
             "the onboarding files and orca.yaml are on origin's default branch")
         return
+    # The next two cases cannot happen after stale_checkout passed; they stay for a run whose fetch failed.
     if text is not None and lanes_base_has(repo, lanes, "orca.yaml"):
         say("setup-script", "kept", f"origin/{lanes} already has an orca.yaml and this checkout is behind it "
             "(git pull): not committing another")
@@ -2125,6 +2128,47 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
     left = [q for n, q in enumerate(items, 1) if n not in answered]
     kept.write_text(head + ("\n".join(left) + "\n" if left else "- none\n") + tail)
     return ["Changed by your answers, not re-checked:\n" + diff]
+
+
+def stale_checkout(repo: Path, quick: bool = False):
+    """Why nothing may be adapted or committed here, or None: HEAD is detached, on a branch other than origin's
+    default, or behind it (lanes branch from origin's default branch, so a commit anywhere else never reaches them).
+    Fetches first and asks origin for its default branch; if origin cannot be reached it says so on stderr and
+    compares with what was fetched last. With no origin only the detached HEAD can be told. `quick`: short timeouts,
+    for runs that only warn."""
+    branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo, check=False).stdout.strip()
+    has_origin = run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode == 0
+    lanes = None
+    if has_origin:
+        wait = 10 if quick else 60
+        try:
+            fetched = run(["git", "fetch", "-q", "origin"], cwd=repo, check=False, timeout=wait).returncode == 0
+            r = run(["git", "ls-remote", "--symref", "origin", "HEAD"], cwd=repo, check=False, timeout=wait)
+        except Fail:
+            fetched, r = False, None
+        if not fetched:
+            print("project-setup: note: could not reach origin, so the checkout check used what was fetched last "
+                  "and may be out of date", file=sys.stderr)
+        m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD", r.stdout, re.M) if r is not None else None
+        if m:
+            lanes = m.group(1)
+        else:  # origin did not say (empty, or unreachable): the local origin/HEAD
+            local = run(["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd=repo,
+                        check=False).stdout.strip()
+            lanes = local[len("origin/"):] if local.startswith("origin/") else None
+    ref = f"refs/remotes/origin/{lanes}"
+    behind = 0
+    if lanes and run(["git", "rev-parse", "-q", "--verify", ref], cwd=repo, check=False).returncode == 0:
+        behind = int(run(["git", "rev-list", "--count", f"HEAD..{ref}"], cwd=repo, check=False).stdout.strip() or 0)
+    if not branch:
+        return ("the checkout is on a detached HEAD" + (f", {behind} commit(s) behind origin/{lanes}" if behind else "")
+                + f". Run `git switch {lanes or '<default branch>'}` and `git pull`, then run again")
+    if lanes and branch != lanes:
+        return (f"the checkout is on {branch}, but lanes branch from origin/{lanes}, so a commit here never reaches "
+                f"them. Run `git switch {lanes}` and `git pull`, then run again")
+    if behind:
+        return f"{branch} is {behind} commit(s) behind origin/{lanes}. Run `git pull` and run again"
+    return None
 
 
 def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
@@ -2452,6 +2496,9 @@ def main(argv=None) -> int:
                 raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
             say("repo", "exists", top.stdout.strip())
             repo = Path(top.stdout.strip())
+            why = stale_checkout(repo, quick=True)
+            if why:  # a refresh works on any checkout, but says so
+                print(f"project-setup: warning: {why}", file=sys.stderr)
             bad = own_check(flag_pins, own_models | known_own_models(repo))  # before anything is moved
             if bad:
                 return bad
@@ -2479,6 +2526,11 @@ def main(argv=None) -> int:
         preflight(set())  # the agents' harnesses are checked once the project's settings are known
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
+        why = stale_checkout(repo, quick=a.skip_adapt)
+        if why and a.skip_adapt:  # works on any checkout (project-pause start), but says so
+            print(f"project-setup: warning: {why}", file=sys.stderr)
+        elif why:  # anything that may commit does not
+            raise Fail(f"{why}. Nothing was changed")
         beads_note(repo)
         migrate(repo)
         validate_settings(repo, settings(repo))
