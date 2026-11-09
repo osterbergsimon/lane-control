@@ -232,6 +232,16 @@ class MemoryNoticeTests(unittest.TestCase):
         self.g.poll(polls=2)  # new process, episode still open
         self.assertEqual(self.notices(), [])
 
+    def state(self):
+        return (self.g.d / "state").read_text()
+
+    def test_the_counters_stop_growing_so_the_state_file_settles(self):
+        self.g.poll(polls=5)
+        self.assertIn("mem good 2", self.state())
+        self.g.memory(avail_gb=3, swap_gb=0)
+        self.g.poll(polls=5)
+        self.assertIn("mem low 2", self.state())
+
     def test_the_memory_notice_goes_only_to_the_machine_coordinator(self):
         self.g.memory(avail_gb=3, swap_gb=13)
         self.g.poll(polls=2)
@@ -283,6 +293,24 @@ class InstallTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("COORD_SPACE", r.stderr)
         self.assertFalse(self.unit().exists())
+
+    def procs(self, *lines):
+        (self.g.d / "procs").write_text("".join(f"{l}\n" for l in lines))
+        self.g.exe("pgrep", f'grep -E "$(printf %s "$2" | sed "s/\\^(/^[0-9]+ (/")" "{self.g.d}/procs" | cut -d" " -f1\n')
+
+    def test_a_process_that_only_mentions_the_script_does_not_block_the_install(self):
+        self.procs("11 claude --prompt read scripts/window-guard.sh first", "12 vim scripts/machine-watch.sh",
+                   "13 bash -c tail -f window-guard.sh")
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_real_guard_or_watch_blocks_the_install(self):
+        for line in ("21 bash /home/u/code/lane-control/scripts/window-guard.sh",
+                     "22 /nix/store/x-bash/bin/bash ./scripts/machine-watch.sh"):
+            self.procs(line)
+            r = self.install()
+            self.assertNotEqual(r.returncode, 0, line)
+            self.assertIn(line.split()[0], r.stderr)
 
     def test_reinstall_restarts_the_running_unit(self):
         self.g.exe("systemctl", f'printf \'%s\\n\' "$*" >> "{self.calls}"\n')
@@ -369,49 +397,6 @@ class RetiredWatchTests(unittest.TestCase):
 
     def test_guard_has_no_rove_call(self):
         self.assertNotIn("rove api", GUARD.read_text())
-
-
-def flat(path):
-    return " ".join(path.read_text().split())
-
-
-class MachineCoordinatorContentTests(unittest.TestCase):
-    def test_coordinator_counts_the_order_like_the_owners_words_from_a_shell_sender_only(self):
-        t = flat(ROOT / "personas" / "coordinator.md")
-        self.assertIn("`machine coordinator:`", t)
-        self.assertIn("like the owner's own words", t)
-        self.assertIn("no limit on the kind", t)
-        self.assertRegex(t, r"not (come )?from an agent in your roster")
-
-    def test_coordinator_keeps_owner_decisions_unless_the_owner_told_the_machine_coordinator(self):
-        t = flat(ROOT / "personas" / "coordinator.md")
-        self.assertIn("unless the order says the owner decided it", t)
-
-    def test_coordinator_reaches_it_by_cotal_send_and_tells_the_owner_when_that_fails(self):
-        t = flat(ROOT / "personas" / "coordinator.md")
-        self.assertIn("cotal send -s machine -t machine-coordinator", t)
-        self.assertIn("If that send fails, tell the owner", t)
-
-    def test_machine_persona_rules(self):
-        t = flat(ROOT / "personas" / "machine-coordinator.md")
-        self.assertIn('cotal send -s <space> -t coordinator "machine coordinator:', t)
-        self.assertIn("{{NOTES}}", t)
-        self.assertIn("{{HARNESS}}", t)
-        self.assertIn("{{LANE_CONTROL}}", t)
-        self.assertRegex(t, r"[Nn]ever .*public")
-
-    def test_skill_and_docs_name_the_machine_coordinator_path(self):
-        skill = flat(ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md")
-        self.assertIn("## The machine coordinator", skill)
-        self.assertIn("machine coordinator:", skill)
-        orca = flat(ROOT / "docs" / "orca.md")
-        for needle in ("window-guard-install", "machine-coordinator-setup", "COORD_SPACE", "enable-linger", "--refresh"):
-            self.assertIn(needle, orca)
-        roles = flat(ROOT / "roles.md")
-        self.assertIn("Under Orca + Cotal", roles)
-
-    def test_config_example_lists_the_spaces(self):
-        self.assertIn("COORD_SPACE", (ROOT / "config.example.sh").read_text())
 
 
 if __name__ == "__main__":

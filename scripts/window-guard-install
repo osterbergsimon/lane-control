@@ -11,7 +11,7 @@ die() { echo "window-guard-install: $1" >&2; exit 1; }
 for tool in cotal jq timeout systemctl; do command -v "$tool" >/dev/null || die "$tool is not on PATH"; done
 running=false; systemctl --user is-active --quiet "$unit" && running=true
 if [ "$running" = false ]; then   # another guard would send every order twice and fight over the state file
-  old=$(pgrep -f 'window-guard\.sh|machine-watch\.sh' || true)
+  old=$(pgrep -f '^([^ ]*/)?bash( -[^ ]+)* ([^ ]*/)?(window-guard|machine-watch)\.sh( |$)' || true)   # only bash running the scripts
   [ -z "$old" ] || die "a guard or machine watch is still running (pid: $(echo $old)). Stop it first, then rerun."
 fi
 dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"; mkdir -p "$dir"

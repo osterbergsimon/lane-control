@@ -521,5 +521,55 @@ class CleanupSteeringTests(unittest.TestCase):
             self.assertIn(needle, t)
 
 
+def flat(path):
+    return " ".join(path.read_text().split())
+
+
+class MachineCoordinatorContentTests(unittest.TestCase):
+    def test_coordinator_counts_the_order_like_the_owners_words_from_a_shell_sender_only(self):
+        t = flat(ROOT / "personas" / "coordinator.md")
+        self.assertIn("`machine coordinator:`", t)
+        self.assertIn("like the owner's own words", t)
+        self.assertIn("no limit on the kind", t)
+        self.assertRegex(t, r"not (come )?from an agent in your roster")
+
+    def test_coordinator_keeps_owner_decisions_unless_the_owner_told_the_machine_coordinator(self):
+        t = flat(ROOT / "personas" / "coordinator.md")
+        self.assertIn("unless the order says the owner decided it", t)
+
+    def test_coordinator_reaches_it_by_cotal_send_and_tells_the_owner_when_that_fails(self):
+        t = flat(ROOT / "personas" / "coordinator.md")
+        self.assertIn("cotal send -s machine -t machine-coordinator", t)
+        self.assertIn("If that send fails, tell the owner", t)
+
+    def test_machine_persona_rules(self):
+        t = flat(ROOT / "personas" / "machine-coordinator.md")
+        self.assertIn('cotal send -s <space> -t coordinator "machine coordinator:', t)
+        self.assertIn("{{NOTES}}", t)
+        self.assertIn("{{HARNESS}}", t)
+        self.assertIn("{{LANE_CONTROL}}", t)
+        self.assertRegex(t, r"[Nn]ever .*public")
+
+    def test_skill_and_docs_name_the_machine_coordinator_path(self):
+        skill = flat(ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md")
+        self.assertIn("## The machine coordinator", skill)
+        self.assertIn("machine coordinator:", skill)
+        orca = flat(ROOT / "docs" / "orca.md")
+        for needle in ("window-guard-install", "machine-coordinator-setup", "COORD_SPACE", "enable-linger", "--refresh"):
+            self.assertIn(needle, orca)
+        roles = flat(ROOT / "roles.md")
+        self.assertIn("Under Orca + Cotal", roles)
+
+    def test_the_install_order_stops_the_old_guard_last_and_clears_its_state(self):
+        orca = (ROOT / "docs" / "orca.md").read_text()
+        steps = orca[orca.index("Install, in this order"):orca.index("### Verified on 2026-11-06")]
+        self.assertLess(steps.index("--refresh"), steps.index("Only now stop the old guard"))
+        self.assertLess(steps.index("Only now stop the old guard"), steps.index("scripts/window-guard-install"))
+        self.assertIn("window-guard.state", steps)
+
+    def test_config_example_lists_the_spaces(self):
+        self.assertIn("COORD_SPACE", (ROOT / "config.example.sh").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

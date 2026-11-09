@@ -18,7 +18,7 @@
 # Memory: below MEM_LOW_GB two polls in a row, or swap at SWAP_HIGH_GB, opens a low-memory episode: one notice to
 # the machine coordinator. The episode ends after two good polls in a row.
 # A send that fails waits in <state file>.pending and is retried each poll, in order, for GUARD_RETRY_SECS (1 hour);
-# then the machine coordinator is told. GUARD_POLLS=<n> stops after n polls (tests).
+# then the machine coordinator is told if its space answers, and the journal has it either way. GUARD_POLLS=<n> stops after n polls (tests).
 here=$(dirname "$0"); . "$here/lib.sh"
 declare -A wstage stage reset_at handled checked mem   # handled: last reset acted on (a stale feed repeats it)
 STATE_FILE="${GUARD_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/lane-control/window-guard.state}"
@@ -65,7 +65,8 @@ flush_pending() {  # each waiting message, oldest first; one failure ends that s
   while IFS=$'\t' read -r when sp ag msg; do
     if [ $(( now - when )) -ge "$RETRY_SECS" ]; then
       echo "$(date +%H:%M) gave up sending to $sp: $msg"
-      [ "$sp" = "$MACHINE_SPACE" ] || send "$MACHINE_SPACE" "$MACHINE_AGENT" "GUARD: could not reach space $sp for ${RETRY_SECS}s, this was not delivered: $msg" || true
+      [ "$sp" = "$MACHINE_SPACE" ] || send "$MACHINE_SPACE" "$MACHINE_AGENT" "GUARD: could not reach space $sp for ${RETRY_SECS}s, this was not delivered: $msg" \
+        || echo "$(date +%H:%M) the machine coordinator could not be told either"
       continue
     fi
     if [[ "$failed" != *" $sp "* ]] && send "$sp" "$ag" "$msg"; then continue; fi
@@ -86,9 +87,9 @@ tell_one() {  # tell_one <project> <message>
 check_memory() {  # one notice to the machine coordinator per low-memory episode
   local avail swap healthy=1
   avail=$(mem_avail_gb); swap=$(swap_used_gb)
-  if [ "$avail" -lt "$MEM_LOW_GB" ]; then mem[low]=$(( ${mem[low]:-0} + 1 )); healthy=0; else mem[low]=0; fi
+  if [ "$avail" -lt "$MEM_LOW_GB" ]; then mem[low]=$(( ${mem[low]:-0} < 2 ? ${mem[low]:-0} + 1 : 2 )); healthy=0; else mem[low]=0; fi   # capped: the state file changes only when a value does
   [ "$swap" -ge "$SWAP_HIGH_GB" ] && healthy=0
-  if [ "$healthy" = 1 ]; then mem[good]=$(( ${mem[good]:-0} + 1 )); else mem[good]=0; fi
+  if [ "$healthy" = 1 ]; then mem[good]=$(( ${mem[good]:-0} < 2 ? ${mem[good]:-0} + 1 : 2 )); else mem[good]=0; fi
   if [ "${mem[episode]:-0}" = 1 ]; then
     [ "${mem[good]}" -ge 2 ] && mem[episode]=0
   elif [ "${mem[low]}" -ge 2 ] || [ "$swap" -ge "$SWAP_HIGH_GB" ]; then
