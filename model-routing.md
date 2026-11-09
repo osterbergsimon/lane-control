@@ -66,7 +66,7 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 - **Wall clock per lane:** swift 2 h, standard 4 h, deep 8 h, checked by the project coordinator (on Rove, also the night routine).
 - **Stall:** no push for 2 h while running gets one ping, then the lane is stopped, its WIP committed, and it is requeued one tier up.
 - **In flight:** per-project caps set by the owner (machine coordinator records them).
-- **A blocked lane parks** instead of idling or guessing.
+- **A blocked lane parks** instead of idling or guessing: on Rove on a gate (needs owner); under Orca + Cotal it asks through its coordinator (a DM).
 
 ## Night mode
 This section is the Rove path (routines in the Rove daemon); there is no Orca + Cotal night routine yet.
@@ -101,7 +101,7 @@ One line per task, appended when the coordinator closes the issue.
 - Per metered budget the owner sets a weekly ceiling (config). The steps are offsets below it, set in the config (`STEP_*`, `PRESSURE_MARGIN`): ceiling-15 pressure notice (no restriction); ceiling-`STEP_NO_NEW` no new work on the budget; ceiling-`STEP_WIP_STOP` lanes commit and push WIP and stop, and each coordinator writes its handover; ceiling-`STEP_STOP_ALL` everything on the budget stops. Never past the ceiling.
 - The steps are the only budget limit: no per-day or per-night share, day or night alike (caps still apply).
 - A project that mostly draws on a cheaper or separate allowance gets a higher ceiling with `COORD_CEILING_ADD[<project>]=<points>`; the guard applies the steps to that project's ceiling. Raise it only on the owner's decision, recorded in the instance.
-- The short window (e.g. 5 hours) is a brief outage, not a stop: at `WINDOW_WARN_PCT` coordinators start nothing new; at `WINDOW_STOP_PCT` the limit is imminent and lanes push WIP and update Resume notes (no handover); after the reset coordinators rebuild from their handover (on Rove also `rove api context`) and resume. Read the reset time from the feed (`BUDGET_RESET`); never assume a fixed time.
+- The short window (e.g. 5 hours) is a brief outage, not a stop: at `WINDOW_WARN_PCT` coordinators start nothing new; at `WINDOW_STOP_PCT` the limit is imminent and lanes push WIP and update Resume notes (no handover); after the reset coordinators rebuild from live state (on Rove `rove api context`; under Orca + Cotal the Cotal inbox and roster, `orca worktree list` and `bd`) and resume. Read the reset time from the feed (`BUDGET_RESET`); never assume a fixed time.
 - The guard sends each step once per climb and keeps its state in a persistent file (not the temp dir), so a restart does not repeat orders; the file is ignored when old or after the weekly reset.
 - Token-free: the window guard (which also checks memory) and the night and stale-claim routines are scripts, not model turns.
 
@@ -127,7 +127,7 @@ A `required` tier never runs as a bare engine command. Under Rove it launches th
 ## Context protocol (avoid re-reading old uncached context, keep recall)
 1. After a reboot or more than about an hour cold, a coordinator starts fresh from its handover (`bd recall handover-latest`, plus `rove api context` on Rove) unless its session was compacted.
 2. The handover is refreshed at every natural stop.
-3. Before a planned cold period (night, owner away, budget stop, shutdown) the coordinator refreshes the handover and compacts while the cache is warm; the night watch triggers it at night start.
+3. Before a planned cold period (night, owner away, budget stop, shutdown) the coordinator refreshes the handover and compacts while the cache is warm; on Rove the night watch triggers it at night start.
 4. On Rove, the night watch prods a coordinator only when Rove shows something for it.
 5. Messages to stopped coordinators wait for their next real wake.
 6. A coordinator past about half its context window compacts at its next natural stop.

@@ -14,7 +14,7 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
    - Check load (`/proc/loadavg`), memory (`free -g`) and heavy processes (`ps`).
    - When oversaturated, decide which lane yields: ask that project's coordinator to pause or serialize a lane. Never kill another project's process yourself.
    - The load includes the owner's own work: never throttle the owner.
-   - Day vs night: the mode file (`day`/`night`), set when the owner leaves or returns.
+   - Day vs night (Rove): the mode file (`day`/`night`), set when the owner leaves or returns.
 3. **Top-tier requests.** Answer each `REQ <project>: top — ...` once with `ORDER: top yes|no — <why>`; no follow-up questions; no if it does not say what the deep tier already tried.
 4. **Playbook upkeep.** Merge lessons from all coordinators into `reliability.md`, keep `model-routing.md` consistent, review the ledger weekly, propose routing changes (owner approves). Commit and push.
 5. **One report for the owner**, when woken at the start of the owner's day and when asked: merged, blocked, failing, budget and machine use, plus every project's open owner decisions (on Rove `rove api gates --repo <path>` per project; under Orca + Cotal ask each coordinator). Decisions go first, each with a recommendation. Repeat decisions in chat if the web inbox does not render gates.
@@ -46,7 +46,7 @@ On Rove, the main task on the project's main checkout; under Orca + Cotal, its o
 2. **Launch:** one task per issue (on Rove `rove api add`, title and branch per AGENTS.md; under Orca + Cotal an Orca child task with one Cotal agent); respect the caps and allowance from the machine coordinator and the budget thresholds; the budget decides how many lanes, never the tier.
 3. **Handle every report** (on Rove the hook injects task state each turn; under Orca + Cotal reports arrive as Cotal messages): verify the claims, rerun the gates in every workspace, review by tier, decide, follow up, record the outcome on the issue.
 4. **Merge** on the owner's yes, or on a clean, fully evidenced gate when authorized. Then close the issue, delete the task, sync beads.
-5. **Surface decisions** with a recommendation, and lead replies with them: as gates on Rove, as a DM or chat message under Orca + Cotal (it has no gates).
+5. **Surface decisions** with a recommendation, and lead replies with them: as gates on Rove, in the coordinator's tab under Orca + Cotal (gates are not used).
 6. **Unattended:** enforce wall-clock and stall limits, nudge unsubmitted first prompts, revive dead tabs, and on Rove report each night prod with `rove api report`.
 7. **Ledger:** append one row per closed task; apply promotion/demotion.
 8. **Lessons:** send durable failures to the machine coordinator for `reliability.md`.
