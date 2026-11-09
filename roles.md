@@ -9,7 +9,7 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 1. **Budget across projects.**
    - Per metered budget, read its usage feed and ceiling (config). Budgets without a feed (manual, unlimited) are managed by caps and by what the owner reports.
    - Set each project's allowance per tier from the owner's priorities in `model-routing.md`; adjust when a project idles or is blocked.
-   - Tell coordinators with `rove api send --task-id <their main> --tab <engine tab> --prompt-file -`. Send "PRESSURE on/off <budget>" at ceiling-15; at ceiling-10 no new work on that budget anywhere.
+   - Tell coordinators with `rove api send --task-id <their main> --tab <engine tab> --prompt-file -` on Rove, or `cotal send` under Orca + Cotal (below). Send "PRESSURE on/off <budget>" at ceiling-15; at ceiling-10 no new work on that budget anywhere.
 2. **Machine resources.** The machine is shared with the owner.
    - Check load (`/proc/loadavg`), memory (`free -g`) and heavy processes (`ps`).
    - When oversaturated, decide which lane yields: ask that project's coordinator to pause or serialize a lane. Never kill another project's process yourself.
@@ -17,7 +17,7 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
    - Day vs night: the mode file (`day`/`night`), set when the owner leaves or returns.
 3. **Top-tier requests.** Answer each `REQ <project>: top — ...` once with `ORDER: top yes|no — <why>`; no follow-up questions; no if it does not say what the deep tier already tried.
 4. **Playbook upkeep.** Merge lessons from all coordinators into `reliability.md`, keep `model-routing.md` consistent, review the ledger weekly, propose routing changes (owner approves). Commit and push.
-5. **One report for the owner**, when woken at the start of the owner's day and when asked: merged, blocked, failing, budget and machine use, plus every project's open owner decisions (`rove api gates --repo <path>` per project). Decisions go first, each with a recommendation. Repeat decisions in chat if the web inbox does not render gates.
+5. **One report for the owner**, when woken at the start of the owner's day and when asked: merged, blocked, failing, budget and machine use, plus every project's open owner decisions (on Rove `rove api gates --repo <path>` per project; under Orca + Cotal ask each coordinator). Decisions go first, each with a recommendation. Repeat decisions in chat if the web inbox does not render gates.
 6. **Cross-project routing.** A problem one project finds in another goes to that project's coordinator as a report (symptoms, cause if known, impact), never as a task in its repo.
 
 ### Rules
@@ -39,15 +39,15 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 - `scripts/window-guard.sh` sends the budget orders without waking this agent and sends it one notice per low-memory episode. The steps in Jobs that name `rove api` are the Rove path; under Orca + Cotal it asks each coordinator for its open owner decisions.
 
 ## Project coordinator
-The Rove main task on the project's main checkout. It is the planning lane and the only gate to main.
+On Rove, the main task on the project's main checkout; under Orca + Cotal, its own agent in the project's Cotal space. It is the planning lane and the only gate to main.
 
 ### Jobs
 1. **Queue:** turn issues into ready-to-launch briefs (`templates/worker-brief.md`), assign a task key and a tier (deep, standard or swift) from the path map, raise owner questions up front.
-2. **Launch:** one task per issue (`rove api add`, title and branch per AGENTS.md); respect the caps and allowance from the machine coordinator and the budget thresholds; the budget decides how many lanes, never the tier.
+2. **Launch:** one task per issue (on Rove `rove api add`, title and branch per AGENTS.md; under Orca + Cotal an Orca child task with one Cotal agent); respect the caps and allowance from the machine coordinator and the budget thresholds; the budget decides how many lanes, never the tier.
 3. **Handle every report** (the hook injects task state each turn): verify the claims, rerun the gates in every workspace, review by tier, decide, follow up, record the outcome on the issue.
 4. **Merge** on the owner's yes, or on a clean, fully evidenced gate when authorized. Then close the issue, delete the task, sync beads.
 5. **Surface decisions** as gates with a recommendation, and lead replies with them.
-6. **Unattended:** enforce wall-clock and stall limits, nudge unsubmitted first prompts, revive dead tabs, report each night prod with `rove api report`.
+6. **Unattended:** enforce wall-clock and stall limits, nudge unsubmitted first prompts, revive dead tabs, and on Rove report each night prod with `rove api report`.
 7. **Ledger:** append one row per closed task; apply promotion/demotion.
 8. **Lessons:** send durable failures to the machine coordinator for `reliability.md`.
 

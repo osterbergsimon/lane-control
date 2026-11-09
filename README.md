@@ -40,7 +40,7 @@ git clone https://github.com/osterbergsimon/lane-control ~/code/lane-control
 It does each step only if it is not done yet. For a repo it has not onboarded, an agent adapts the lane files to the project (`.lane-control/`, a section in `AGENTS.md`) and a second agent reviews them (a full audit first, then only checks that the fixes held; a safety finding still open after the last fix stops the run). It reads the repo's visibility (public, private or internal) from the git host rather than guessing it. If questions are still open it shows them and lets you answer each in plain text before anything is committed (Enter leaves a question for later: the agent's choice stays and the coordinator asks you; answers go to one more adapter run that is not reviewed, and the list says so). It then lists the files and asks you once; on yes it commits them, by explicit path. A second question follows: if the repo has no `orca.yaml` it shows the setup script it drafted from the lockfiles (with a `direnv allow` line when a tracked `.envrc` is approved in your checkout) and offers to commit it and push, because Orca makes lane worktrees from `origin/<branch>`. Whatever you answer there, the coordinator (and the design lead) start after, with no flag; only a no to the file list stops the run. Interrupting is safe: an unfinished adapter run is run again, and a re-run asks only what is still open. `--no-start` skips starting the agents. Run `scripts/project-setup --help` and see `docs/orca.md` for host setup, `--host`, models and permission modes.
 
 ### Rove
-About half an hour for one project. Everything marked **planned** is manual today.
+About half an hour for one project. Everything marked **planned** is manual today. This section is the Rove path; on Orca + Cotal, `project-setup` (above) does the project steps, and only step 2 (the window guard) is shared.
 
 1. **Clone and configure.**
    ```bash
@@ -66,12 +66,12 @@ About half an hour for one project. Everything marked **planned** is manual toda
    ```
    The night watch runs only while the mode file (`MODE_FILE` in the config) says `night`: write `night` when you leave and `day` when you return. Run a supervised pilot night before leaving it unattended. An optional weekly docs review: `scripts/docs-review-launch.sh <PROJECT>` with a brief from `templates/docs-review-brief.md`.
 4. **Set up a project.**
-   - `rove add <path>`: the repo's main task is its coordinator. Put its task id in `COORD_TASK` and the checkout in `COORD_REPO` in the config.
+   - On Rove: `rove add <path>`: the repo's main task is its coordinator. Put its task id in `COORD_TASK` and the checkout in `COORD_REPO` in the config.
    - `bd init` in the checkout; no bd git hooks (`issues.md`).
-   - Write the project's **path map** (which paths need which tier, and which review tier) in `.lane-control/routing.md`, from `templates/adapt/routing.md`; gate commands, private data directories and the other project facts go in `.lane-control/project.md`. The Rove flow pasted `templates/AGENTS-coordination.md` into AGENTS.md instead; the Orca flow does not.
-   - Install `templates/project-settings.json` as the project's agent settings, `templates/coordinator-settings.local.json` as the coordinator's gitignored local settings, and `templates/rove-init.sh` as `.rove/init.sh`.
+   - Write the project's **path map** (which paths need which tier, and which review tier) in `.lane-control/routing.md`, from `templates/adapt/routing.md`; gate commands, private data directories and the other project facts go in `.lane-control/project.md`. On Rove the flow pastes `templates/AGENTS-coordination.md` into AGENTS.md instead; the Orca flow does not.
+   - Install `templates/project-settings.json` as the project's agent settings and `templates/coordinator-settings.local.json` as the coordinator's gitignored local settings (`project-setup` does both under Orca + Cotal); on Rove also `templates/rove-init.sh` as `.rove/init.sh`.
    - For third-party lanes: pin the model in `templates/opencode.json`, list private paths in `SANDBOX_PRIVATE_PATHS`, run `scripts/test-opencode-sandbox.sh` once.
-5. **Start the coordinators.** Open the machine coordinator's main task on a repo holding your instance notes (owner decisions, caps, priorities) and have it read `README.md`, `roles.md`, `model-routing.md`, `reliability.md` and the config. Open each project coordinator on its repo, pointing at its `AGENTS.md`. Queue issues, then tell it to go.
+5. **Start the coordinators (Rove).** Open the machine coordinator's main task on a repo holding your instance notes (owner decisions, caps, priorities) and have it read `README.md`, `roles.md`, `model-routing.md`, `reliability.md` and the config. Open each project coordinator on its repo, pointing at its `AGENTS.md`. Queue issues, then tell it to go.
 
 **Planned:** a bootstrap script for steps 1 to 3 and the per-project files of step 4, and a doctor command that checks an install against `machine.md`.
 

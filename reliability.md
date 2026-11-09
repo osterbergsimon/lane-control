@@ -21,7 +21,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Failure:** worker-reported numbers were taken on trust; a check was skipped on a code PR; a "regression test" passed on main too, so it proved nothing; a cheap-tier worker added a normative spec rule unasked.
 - **Fixes:**
   - The coordinator reruns the gates itself; deterministic checks cost CPU, not tokens.
-  - Review tiers by what a PR touches: A docs/tests, gates only; B code, plus an independent review by the standard tier of the diff and the issue only; C formats/security/hostile input, plus an independent deep-tier review.
+  - Review tiers by what a PR touches: A docs/tests, gates only; B code, plus an independent review by the standard tier of the diff and the issue only; C paths where a mistake really hurts (secrets, auth, data loss, hostile input), plus an independent deep-tier review.
   - Spec changes go to the owner.
   - Recurring review findings become CI checks.
 - **Evidence:** a deep-tier review found silent content loss in a crash "fix" that all tests passed; the recheck found a second instance.

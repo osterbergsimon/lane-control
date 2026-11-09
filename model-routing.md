@@ -63,7 +63,7 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 - The ceiling steps are the only budget limit: no per-day or per-night share. Day or night, caps apply.
 
 ## Unattended limits
-- **Wall clock per lane:** swift 2 h, standard 4 h, deep 8 h, checked by the watch routine.
+- **Wall clock per lane:** swift 2 h, standard 4 h, deep 8 h, checked by the project coordinator (on Rove, also the night routine).
 - **Stall:** no push for 2 h while running gets one ping, then the lane is stopped, its WIP committed, and it is requeued one tier up.
 - **In flight:** per-project caps set by the owner (machine coordinator records them).
 - **A blocked lane parks** on a Rove gate (needs owner) instead of idling or guessing.
@@ -102,7 +102,7 @@ One line per task, appended when the coordinator closes the issue.
 - A project that mostly draws on a cheaper or separate allowance gets a higher ceiling with `COORD_CEILING_ADD[<project>]=<points>`; the guard applies the steps to that project's ceiling. Raise it only on the owner's decision, recorded in the instance.
 - The short window (e.g. 5 hours) is a brief outage, not a stop: at `WINDOW_WARN_PCT` coordinators start nothing new; at `WINDOW_STOP_PCT` the limit is imminent and lanes push WIP and update Resume notes (no handover); after the reset coordinators rebuild from `rove api context` and resume. Read the reset time from the feed (`BUDGET_RESET`); never assume a fixed time.
 - The guard sends each step once per climb and keeps its state in a persistent file (not the temp dir), so a restart does not repeat orders; the file is ignored when old or after the weekly reset.
-- Token-free: the guard and the watches are scripts, not model turns.
+- Token-free: the window guard (which also checks memory) and the night and stale-claim routines are scripts, not model turns.
 
 ## Only owner-decided limits are enforced
 A script, brief or message enforces a limit only if the owner decided it (dated in the instance's routing file). Any other limit (a per-day share, a lane count, a throttle) needs the owner's yes first; until then it is, at most, a recommendation. Same for deterministic machine-wide slot caps: the machine coordinator arbitrates by judgment.
