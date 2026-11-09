@@ -52,8 +52,10 @@ Majors:
 13. Under-tiered paths. Open code behind every swift row and any row that looks low (a sample of files per row):
     parsers of untrusted input, formats, migrations, auth, sandboxes, host-acting code, secrets and agent prompts
     must be deep. In doubt, one up.
-14. Review letters. C for formats, validators, spec statements, limits, hostile input, vendored parsers and security;
-    A only where no product behaviour can change.
+14. Review letters. C only where a mistake really hurts: secrets, auth, data loss, the check that keeps bad input
+    out, sandbox and host settings, and the why of the row names that harm. A C row without a named harm, or for
+    ordinary code in a sensitive package, is a major: it belongs at B. Never raise a row to C for "in doubt". A only
+    where no product behaviour can change; a row at A that can change product behaviour is a major.
 15. False or unsupported claims. Verify a sample of about three facts per file at their source, starting with
     those a lane would act on. A check command must appear where the table says. The Exposure slot must state the repo
     visibility above: a mismatch is a major, and a blocker when it says private while
