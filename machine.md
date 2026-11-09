@@ -3,16 +3,16 @@
 Check each item on a new box before adopting the playbook.
 
 ## Resources
-- [ ] Cores and memory (`nproc`, `free -g`). Set `MEM_LOW_GB`, `SWAP_HIGH_GB` and `NIGHT_MEM_MIN_GB` in the config from them; the owner's own work shares the machine, so leave headroom.
+- [ ] Cores and memory (`nproc`, `free -g`). Set `MEM_LOW_GB` and `SWAP_HIGH_GB` in the config from them (and, on Rove, `NIGHT_MEM_MIN_GB`); the owner's own work shares the machine, so leave headroom.
 - [ ] Machine caps (see below): check the limits `~/.agents/bin/lane-room` prints; a wrapper script per project if builds are large.
-- [ ] Swap size and whether the OS kills on OOM or freezes; the watch fires on available memory, not on crashes.
-- [ ] Temp directory for the mode file and night-start snapshots (default `$TMPDIR` or `/tmp`); it must survive between routine runs, not reboots.
+- [ ] Swap size and whether the OS kills on OOM or freezes; the window guard's memory check fires on available memory, not on crashes.
+- [ ] On Rove: temp directory for the mode file and night-start snapshots (default `$TMPDIR` or `/tmp`); it must survive between routine runs, not reboots.
 
 ## Machine caps
 The limit on heavy work is per machine, across every project and lane, not per project: several lanes building at once overwhelm a machine (load 23 on 12 cores with four lanes).
 - **Heavy work:** every build or full test suite runs through `~/.agents/bin/lane-heavy <command>`, the per-machine install of `scripts/lane-heavy` (a lane in another project has no `scripts/` of ours). A fixed number run at once; the rest wait, at low priority, with a memory limit where the host supports one.
 - **Opening a lane:** `~/.agents/bin/lane-room` first. If it exits non-zero, hold the lane and tell the owner. Its limit is looser than the heavy-work gate: idle agents cost little.
-- **Settings:** one per-machine file outside any repo, `~/.config/lane-control/limits.sh` (`limits.example.sh`); without it the defaults follow cores and memory. The `MEM_LOW_GB` family in the config is the machine coordinator's watch, a separate thing.
+- **Settings:** one per-machine file outside any repo, `~/.config/lane-control/limits.sh` (`limits.example.sh`); without it the defaults follow cores and memory. `MEM_LOW_GB` and `SWAP_HIGH_GB` in the config are the window guard's memory check, a separate thing.
 
 ## Usage feeds (per metered budget)
 - [ ] Each metered budget needs a feed: a command that prints `<weekly%> <window%>` as integers (`BUDGET_USAGE` in the config) and a ceiling (`BUDGET_CEILING`).
@@ -24,12 +24,13 @@ The limit on heavy work is per machine, across every project and lane, not per p
 - [ ] Shebangs: use `#!/usr/bin/env bash`; some systems (NixOS) have no `/bin/bash`.
 - [ ] Dynamic binaries downloaded by tools (browser builds, language runtimes) may need a compatibility layer on non-FHS systems.
 - [ ] Browser-automation MCP: if the default browser channel is absent, set its executable path env var (e.g. `PLAYWRIGHT_MCP_EXECUTABLE_PATH`) to an installed browser, plus headless and isolated-profile settings, in the harness env settings; restart sessions. Test once from a fresh session.
-- [ ] Tools: `jq`, `awk`, `gh`, `bd`, `rove`, the engine CLIs for every configured tier. `bd` DB location and remote; off-machine backup of issues and memories.
+- [ ] Claude Code `/config`: turn off "← opens agents" on each machine that runs Claude lanes (machine-wide; the built-in agent switcher can drop a spawned lane off the Cotal mesh; cause not proven).
+- [ ] Tools: `jq`, `awk`, `gh`, `bd`, `rove` (Rove runner), `orca` and `cotal` (Orca + Cotal runner), the engine CLIs for every configured tier. `bd` DB location and remote; off-machine backup of issues and memories.
 - [ ] Containers: run as the invoking user, or caches become root-owned and block worktree deletion.
 - [ ] CI runner: self-hosted if gates need local data; pin image versions.
 - [ ] Persistent background jobs (watches, dev servers) die with the session; use approved user services if they must survive.
 - [ ] Host-acting software (anything that can reboot, shut down or reconfigure the machine) must be guarded or stubbed in worker environments.
-- [ ] Clock and timezone: night mode and routine times assume the owner's local time.
+- [ ] Clock and timezone: on Rove, night mode and routine times assume the owner's local time.
 
 ## CI runners (patterns)
 Gates that need local data or minutes the hosted CI does not have run on self-hosted runners. Two patterns; choose by how much the owner uses the machine.
