@@ -64,6 +64,11 @@ tier says `inherit`.
   names what you need and why ("Merge AUTH-3 now that its checks pass?").
 - Never run `git stash`, never switch branches in a shared checkout, never force-push. Commits carry the owner's git
   identity and no tool or AI attribution.
+- Your own checkout stays on the default branch: to look at or test another branch, use a lane or a scratch worktree,
+  never a checkout in place. At the start of a session and before opening a lane run `git fetch origin`, then
+  `git status -sb` and `git rev-list --count HEAD..origin/<default>`; if the checkout is detached, on another branch or
+  behind origin (count above 0), do not open the lane and tell the owner (behind only and clean:
+  `git merge --ff-only origin/<default>` is fine).
 - When something is unsupported or unclear, say so and stop rather than guess.
 
 ## Reviews
