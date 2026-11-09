@@ -99,7 +99,7 @@ def render_persona(text: str, harness: str, model: str, mode: str, project: str,
               f'launchOptions: {{ "permission-mode": "{mode}", "allow-dangerously-skip-permissions": "" }}')
     return (text.replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
             .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
-            .replace("{{REVIEWER}}", reviewer)
+            .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(HERE))
             .replace("{{DESIGN_ROUTE}}", DESIGN_ROUTE if design_lead else NO_DESIGN_ROUTE)
             .replace("{{DESIGN_REVIEW}}", DESIGN_REVIEW if design_lead else ""))
 

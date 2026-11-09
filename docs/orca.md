@@ -298,17 +298,24 @@ written. Changing an agent's harness or model is not a refresh: `--coordinator`,
 `--permission-mode` are refused with `--refresh`.
 
 
-### Pause and resume: a project not being worked on
+### Rest a project: leave it alone for a day or a week
 ```bash
-scripts/project-pause stop|start|status <project-dir | project-name>
+scripts/project-pause rest|wake|stop|start|status <project-dir | project-name>
 ```
-`stop` stops the coordinator and design lead with `cotal stop`, so a project that is idle holds no agent that every
-window guard order wakes. It refuses, naming them, while a lane or reviewer still runs in the project's space. The
-broker and manager stay up (never `cotal down`), and the space stays in `COORD_SPACE`: the guard config is untouched.
-`start` runs project-setup `--skip-adapt` (no adapting, no commit, no questions) and starts only the agents that are
-missing; a restart is a fresh session, told to resume from `bd recall handover-latest`, `cotal who` and
-`orca worktree list`, on the current persona. `status` says running or paused and what else runs. Reruns are
-harmless. cotal refuses stop and spawn from inside an agent's shell: run it from a plain shell.
+`rest` is the normal way. It writes a marker `paused/<space>` in the window guard's state directory (next to
+`GUARD_STATE_FILE`) and stops no agent: the guard then sends nothing to that space, queues nothing and drops what was
+waiting, so no "could not reach" notice reaches the machine coordinator, and the project stays in `COORD_SPACE`
+(the guard config is untouched). It refuses, naming them, while a lane or reviewer still runs in the space. `wake`
+removes the marker, and the guard sends the project the current budget standing on its next poll. The owner says
+"resume" to the coordinator or machine coordinator, who runs `project-pause wake`. `rest` and `wake` call no
+`cotal stop` or spawn, so they work from inside an agent's shell.
+
+`stop` is for freeing memory: it does `rest`, and also stops the coordinator and design lead with `cotal stop` (broker and
+manager stay up, never `cotal down`). A stopped coordinator cannot be told to resume: `start` brings back the missing
+agents with project-setup `--skip-adapt` (no adapting, no commit, no questions), as a fresh session told to resume from
+`bd recall handover-latest`, `cotal who` and `orca worktree list`, on the current persona, and removes the marker. A
+coordinator that crashed has no marker and still warns. `status` says running, resting or paused and what else runs.
+Reruns are harmless. cotal refuses `stop` and `start` from inside an agent's shell: run them from a plain shell.
 
 ### Lanes
 The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:

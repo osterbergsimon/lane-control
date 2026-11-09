@@ -591,6 +591,15 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("{{LANE_CONTROL}}", t)
         self.assertRegex(t, r"[Nn]ever .*public")
 
+    def test_personas_know_how_to_wake_a_rested_project(self):
+        coord = flat(ROOT / "personas" / "coordinator.md")
+        self.assertIn("scripts/project-pause wake", coord)
+        self.assertIn("{{LANE_CONTROL}}", coord)
+        machine = flat(ROOT / "personas" / "machine-coordinator.md")
+        self.assertIn("project-pause wake <project>", machine)
+        self.assertRegex(machine, r"rested project .* expected, not a fault")
+        self.assertIn("project-pause start", machine)
+
     def test_skill_and_docs_name_the_machine_coordinator_path(self):
         skill = flat(ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md")
         self.assertIn("## The machine coordinator", skill)

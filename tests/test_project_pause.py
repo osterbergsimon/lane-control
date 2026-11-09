@@ -24,8 +24,53 @@ class PauseTest(unittest.TestCase):
         return subprocess.run([sys.executable, str(PAUSE), *args], env={**self.e.env, **(env_extra or {})},
                               capture_output=True, text=True)
 
+    def marker(self):
+        return self.e.home / ".local" / "state" / "lane-control" / "paused" / "shop"
+
     def agents(self):
         return sorted(a["name"] for a in json.loads(self.e.state.read_text())["agents"])
+
+    def test_stop_leaves_the_guard_marker_and_start_removes_it(self):
+        self.assertFalse(self.marker().exists())
+        self.pause("stop", str(self.repo))
+        self.assertTrue(self.marker().exists())
+        self.assertNotIn("no guard marker", self.pause("status", str(self.repo)).stdout)
+        self.pause("start", str(self.repo))
+        self.assertFalse(self.marker().exists())
+
+    def test_rest_and_wake_stop_and_start_nothing_and_work_inside_an_agent_shell(self):
+        inside = {"COTAL_NAME": "coordinator"}
+        self.e.log.write_text("")
+        r = self.pause("rest", str(self.repo), env_extra=inside)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.agents(), ["coordinator", "design-lead"])
+        self.assertIn("resting", self.pause("status", str(self.repo)).stdout)
+        r = self.pause("wake", str(self.repo), env_extra=inside)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("not running", r.stdout)
+        self.assertFalse(self.marker().exists())
+        self.assertIn("running", self.pause("status", str(self.repo)).stdout)
+        self.assertFalse([c for c in self.e.calls() if c.startswith(("cotal stop", "cotal spawn", "cotal down"))])
+
+    def test_rest_refuses_while_a_lane_runs(self):
+        self.e.set_state(agents=[*json.loads(self.e.state.read_text())["agents"], {"name": "lane-1", "cwd": "/x"}])
+        r = self.pause("rest", str(self.repo))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("lane-1", r.stderr)
+        self.assertFalse(self.marker().exists())
+
+    def test_wake_of_a_stopped_project_says_start_is_needed(self):
+        self.pause("stop", str(self.repo))
+        r = self.pause("wake", str(self.repo))
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("project-pause start", r.stdout)
+        self.assertFalse(self.marker().exists())
+
+    def test_a_refused_stop_leaves_no_marker(self):
+        self.e.set_state(agents=[*json.loads(self.e.state.read_text())["agents"], {"name": "lane-1", "cwd": "/x"}])
+        self.pause("stop", str(self.repo))
+        self.assertFalse(self.marker().exists())
 
     def test_status_running_then_paused(self):
         self.assertIn("running (coordinator, design-lead)", self.pause("status", str(self.repo)).stdout)
