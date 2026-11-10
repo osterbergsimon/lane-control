@@ -32,7 +32,7 @@ Optional for either runner:
 
 ## Quickstart
 ### Orca + Cotal
-One run of `project-setup` per project; the rest is in `docs/orca.md` §5b.
+One run of `project-setup` per project; the rest is in `docs/orca.md` §5b, and the parts, bring-up checks and failure modes are in `docs/orca-cotal-setup.md`.
 ```bash
 git clone https://github.com/osterbergsimon/lane-control ~/code/lane-control
 ~/code/lane-control/scripts/project-setup <git-url | /abs/dir>
@@ -94,6 +94,7 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 | `scripts/` | `window-guard.sh` with `window-guard-install`, `machine-coordinator-setup`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared); machine caps, installed to `~/.agents/bin` by `project-setup`: `lane-heavy` (the machine-wide gate for builds and full test suites), `lane-room` (the check before opening a lane), `lane-tier` (looks up a tier and refuses a `sandbox required` tier under Orca + Cotal), `lane-limits.sh` (their shared limits; a machine's own in a copy of `limits.example.sh`); for Orca + Cotal (`docs/orca.md` §5b): `project-setup` (an Orca project with a Cotal coordinator and frontend design lead, here or on an SSH host; one run onboards the repo: an agent adapts the lane files, the owner says yes once to commit them, a second question offers to commit a drafted `orca.yaml` and push, since Orca makes lane worktrees from `origin/<branch>`, and the agents start after, with no flag; safe to re-run or interrupt), `project-pause` (`rest` and `wake` leave a project alone so the window guard stops waking it, `stop` and `start` also free its agents' memory; `docs/orca.md` §5b) and `orca-host-install` (Orca's server on a host without downloads, optional scripted pairing); superseded trial scripts `cotal-agent`, `orca-cotal-task`; for wsp (`docs/wsp.md`): `wsp-owner-code.mjs`. Each header is its contract |
 | `templates/` | AGENTS sections, project and coordinator settings, init script, worker and review briefs, budget ceiling, opencode config |
 | `docs/multi-machine.md` | design (not implemented): projects pinned to machines, one global coordinator over SSH |
+| `docs/orca-cotal-setup.md` | Orca + Cotal: every part and how they connect, bring-up order with a check per step, known failure modes, the diagnosis of workers losing the mesh |
 | `docs/orca.md` | the Orca + Cotal runner (`scripts/project-setup`), with what was tested on a trial box: Orca for SSH remote agents and OpenCode 2, plus Cotal for coordinator-to-lane messaging that never disturbs a half-typed prompt; setup, what was verified, gotchas, Rove verb map, evaluation checklist |
 | `personas/`, `skills/orca-cotal-lanes/`, `templates/lanes.tsv`, `templates/lane-brief.md` | what project-setup installs: Cotal personas (coordinator, design lead), the lane skill (Orca child task + Cotal agent per lane), the tier table (harness and model per tier), the lane brief |
 | `tests/` | `test_content.py`, `test_project_setup.py` (stub orca/cotal), `test-orca-host-install.sh` (against a real host) |
