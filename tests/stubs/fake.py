@@ -56,10 +56,10 @@ def orca():
     if cmd == "worktree create":
         repo = opt("--repo").split(":", 1)[1]
         name = opt("--name")
-        parent_path = opt("--parent-worktree").split(":", 1)[1]
+        parent_path = opt("--parent-worktree", "").split(":", 1)[-1]  # none with --no-parent (a lane in another repo)
         path = str(Path(os.environ["HOME"]) / "orca" / "workspaces" / name)
         Path(path).mkdir(parents=True, exist_ok=True)
-        w = {"repo": repo, "name": name, "path": path, "parent": f"{repo}::{parent_path}"}
+        w = {"repo": repo, "name": name, "path": path, "parent": f"{repo}::{parent_path}" if parent_path else None}
         state["worktrees"].append(w)
         if state.get("setup_tab"):
             # A repo setup script: Orca runs it in a "Setup" tab; our scripts end by writing the marker.

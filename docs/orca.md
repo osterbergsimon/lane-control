@@ -288,6 +288,19 @@ first version, which held `sandbox-ports`) is renamed to the new key, unless its
 the old files, so a machine tool updated first does not break a project not yet moved. `--show` moves nothing and says
 what is not moved yet.
 
+### Two repos, one coordinator: `--with`
+For two repos that belong together (an app and its plugins repo), run project-setup on the main repo and attach the
+other: `project-setup ~/code/<project> --with ~/code/<project>-plugins` (a git URL is cloned like the main repo;
+repeat the flag for more). There is still one space, one manager and one coordinator, rooted at the main repo. The
+attached repo gets the per-repo work (Orca registration, the stale-checkout refusal, the private-file deny, the adapted
+files and AGENTS.md section, orca.yaml, the owner's yes before any commit) and nothing else: no space, personas or
+agents of its own. The store lists it under `attached`; later runs, `--refresh` and `--show` on the main repo cover it,
+and `project-pause` works on the one space (pointing it at the attached repo says to use the main one). A repo that is
+already its own project, or attached to another, is refused. Lanes branch from each repo's own default branch. The
+coordinator opens a lane there with `orca worktree create --repo path:<repo> --no-parent` (a parent worktree in another
+repo was not tested, so these lanes are not nested under the coordinator's card) and its beads issue lives in that
+repo's own beads workspace; nothing moves between trackers.
+
 ### Refresh: after lane-control's personas, skill or tier defaults change
 ```bash
 scripts/project-setup <dir> --refresh [--name Shop]
