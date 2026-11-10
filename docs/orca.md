@@ -4,6 +4,8 @@ Status: Orca + Cotal is a supported runner next to Rove; `scripts/project-setup`
 runs below were on 2026-11-05 with Orca 1.4.250 (desktop on a NixOS workstation), Cotal 0.145.1, OpenCode 2.2.1,
 against a Debian box reached only over SSH, whose internet was limited by an allowlisting proxy.
 Tags: **[tested]** ran it, **[docs]** read in the project's docs but not run, **[none]** no equivalent.
+How the parts connect, the bring-up order with a check per step, a failure-mode table and the diagnosis of lost
+meshes: `docs/orca-cotal-setup.md`.
 
 lane-control's Rove scripts call `rove api` and do **not** run unchanged on Orca or Cotal. What carries over is the doctrine
 (roles, tiers, path map, beads, review by risk) and the shape: one coordinator per project launching worker lanes.
