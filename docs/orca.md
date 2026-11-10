@@ -296,7 +296,7 @@ attached repo gets the per-repo work (Orca registration, the stale-checkout refu
 files and AGENTS.md section, orca.yaml, the owner's yes before any commit) and nothing else: no space, personas or
 agents of its own. The store lists it under `attached`; later runs, `--refresh` and `--show` on the main repo cover it,
 and `project-pause` works on the one space (pointing it at the attached repo says to use the main one). A repo that is
-already its own project, or attached to another, is refused. Lanes branch from each repo's own default branch. The
+already its own project, or attached to another (or a linked worktree of the main repo), is refused. `--private` globs apply to every repo of the project, each relative to its own root; there are no per-repo globs. Lanes branch from each repo's own default branch. The
 coordinator opens a lane there with `orca worktree create --repo path:<repo> --no-parent` (a parent worktree in another
 repo was not tested, so these lanes are not nested under the coordinator's card) and its beads issue lives in that
 repo's own beads workspace; nothing moves between trackers.

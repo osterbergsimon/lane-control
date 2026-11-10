@@ -4251,3 +4251,26 @@ class AttachedRepoTests(unittest.TestCase):
             self.assertIn("lane-control", (d / "AGENTS.md").read_text())
         self.assertFalse((self.plugins / ".cotal" / "agents").exists())
         self.assertEqual(len(self.e.agent_runs()), 4)
+
+    def test_a_gone_stored_repo_is_skipped_on_skip_adapt_and_named_otherwise(self):
+        self.assertEqual(self.setup("--with", str(self.plugins)).returncode, 0)
+        shutil.rmtree(self.plugins)
+        r = self.setup()  # --skip-adapt: what project-pause start runs
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("warning: stored attached repo", r.stderr)
+        self.assertNotIn("--with", r.stderr)
+        self.assertEqual(self.e.settings(self.repo)["attached"], [str(self.plugins)])  # kept, not dropped
+        r = self.setup(adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("stored attached repo", r.stderr)
+        self.assertIn("settings.json", r.stderr)
+        self.assertIn("`attached`", r.stderr)
+        self.assertNotIn("--with", r.stderr)
+
+    def test_a_linked_worktree_of_the_primary_is_refused(self):
+        wt = self.e.home / "src" / "app-wt"
+        git("worktree", "add", "-q", "-b", "other", str(wt), cwd=self.repo)
+        r = self.setup("--with", str(wt))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("same repository", r.stderr)
+        self.assertEqual(self.calls("orca repo add"), [])

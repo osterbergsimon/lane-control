@@ -24,7 +24,7 @@ and the agents still start. Nothing else is ever committed or pushed.
 coordinator, rooted at the first repo; the attached one gets lanes from that coordinator and nothing else of its own. It
 gets the per-repo work the first one gets (Orca registration, the stale-checkout refusal, the private-file deny, the
 adapted files and short AGENTS.md section, orca.yaml, the same commit rules) but no space, manager, coordinator or
-design lead. The attached repos are kept in the project's settings store and covered by later runs, --refresh and --show.
+design lead. --private globs apply to every repo of the project, each relative to its own root. The attached repos are kept in the project's settings store and covered by later runs, --refresh and --show.
 A repo that is its own project, or attached to another, is refused. Lanes branch from each repo's own default branch.
 
 --refresh is for a project set up earlier, after lane-control's personas or skill changed: it re-renders the personas
@@ -2282,6 +2282,10 @@ def attach_refusal(primary: Path, d: Path):
     """Why `d` cannot be attached to the project at `primary`, or None."""
     if d.resolve() == primary.resolve():
         return f"{d} is the project's own repo"
+    common = lambda r: run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=r,
+                           check=False).stdout.strip()
+    if common(d) and common(d) == common(primary):  # a linked worktree of the project's own repo
+        return f"{d} is the same repository as the project's own repo (a linked worktree of it)"
     root = attached_to(d)
     if root is not None and root.resolve() != primary.resolve():  # attached to this very project: a re-run
         return f"{d} is already attached to the project at {root}"
@@ -2308,12 +2312,19 @@ def resolve_attached(target: str, dest: Path) -> Path:
     return Path(top.stdout.strip())
 
 
-def prepare_attached(repo: Path, targets: list, dest: Path, quick: bool) -> list:
-    """The project's attached repos (stored ones, then the new --with ones), each refused for what cannot be attached
-    and for a stale checkout like the first repo's, before anything is changed. `quick`: a run that commits nothing
-    only warns about the checkout."""
+def prepare_attached(repo: Path, stored: list, targets: list, dest: Path, quick: bool) -> list:
+    """The project's attached repos (the stored ones, then the new --with ones), each refused for what cannot be
+    attached and for a stale checkout like the first repo's, before anything is changed. `quick`: a run that commits
+    nothing only warns about the checkout, and skips a stored repo that is gone."""
     found = []
-    for t in targets:
+    for t, is_stored in [(t, True) for t in stored] + [(t, False) for t in targets]:
+        if is_stored and not Path(t).expanduser().is_dir():
+            gone = (f"stored attached repo {t} is gone; remove it from {store_dir(repo) / 'settings.json'} "
+                    "(`attached`) if it was moved or deleted for good")
+            if quick:
+                print(f"project-setup: warning: {gone}; skipped", file=sys.stderr)
+                continue
+            raise Fail(f"{gone}. Nothing was changed")
         d = resolve_attached(t, dest)
         if d in found:
             continue
@@ -2520,7 +2531,7 @@ def main(argv=None) -> int:
                          "space, manager or coordinator of its own. Kept in the settings store; later runs cover it")
     ap.add_argument("--private", action="append", default=[], metavar="GLOB",
                     help="a tracked file or folder the onboarding agents must not read, relative to the repo root "
-                         "(repeatable, e.g. 'shot*.png' or 'private/**'); git-ignored paths are always denied. Kept in "
+                         "(repeatable, e.g. 'shot*.png' or 'private/**'; applies to every repo of the project, attached ones too); git-ignored paths are always denied. Kept in "
                          "the settings store: a later run adds to the list, it never drops one")
     ap.add_argument("--adapter", default="claude/sonnet",
                     help="harness/model of the agent that adapts the project's files")
@@ -2679,11 +2690,12 @@ def main(argv=None) -> int:
         if root is not None:  # before a project of its own is made out of it
             raise Fail(f"{repo} is attached to the project at {root}, so it is not a project of its own: it gets its "
                        "lanes from that project's coordinator. Nothing was changed")
-        attached = prepare_attached(repo, [*attached_of(settings(repo)), *a.with_repos], Path(a.dest).expanduser(),
-                                    a.skip_adapt)
+        stored_attached = attached_of(settings(repo))
+        attached = prepare_attached(repo, stored_attached, a.with_repos, Path(a.dest).expanduser(), a.skip_adapt)
         cfg = resolve_settings(repo, a)
         if attached:
-            settings(repo, attached=[str(d) for d in attached])
+            # a stored repo that is gone stays listed: only the owner takes it out
+            settings(repo, attached=list(dict.fromkeys([*stored_attached, *(str(d) for d in attached)])))
         coord, reviewer = cfg["pins"]["coordinator"], cfg["pins"]["reviewer"]
         lead = cfg["pins"]["design-lead"] if cfg["lead"] else None
         PRIVATE_GLOBS[:] = cfg["private"]
