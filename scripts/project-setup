@@ -5,7 +5,7 @@
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE | --opencode hosted|own|none [--opencode-model M]] [--own-model M]... [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
-                [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml]
+                [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
@@ -19,6 +19,13 @@ without a terminal, they stay uncommitted, no Orca step runs and it exits 3. The
 drafted orca.yaml (from the lockfiles; Orca reads its setup script from the worktree) and to push the default branch,
 since Orca makes lane worktrees from origin/<branch>. A no, no terminal or a failed push commits and pushes nothing more
 and the agents still start. Nothing else is ever committed or pushed.
+
+--with attaches a second repo to the project (e.g. an app and its plugins repo): one space, one manager, one
+coordinator, rooted at the first repo; the attached one gets lanes from that coordinator and nothing else of its own. It
+gets the per-repo work the first one gets (Orca registration, the stale-checkout refusal, the private-file deny, the
+adapted files and short AGENTS.md section, orca.yaml, the same commit rules) but no space, manager, coordinator or
+design lead. --private globs apply to every repo of the project, each relative to its own root. The attached repos are kept in the project's settings store and covered by later runs, --refresh and --show.
+A repo that is its own project, or attached to another, is refused. Lanes branch from each repo's own default branch.
 
 --refresh is for a project set up earlier, after lane-control's personas or skill changed: it re-renders the personas
 in .cotal/agents/ (keeping each one's harness, model and permission mode), reinstalls the skill, leaves the project's
@@ -92,12 +99,17 @@ NO_DESIGN_ROUTE = "This project has no design lead: you route any UI work yourse
 DESIGN_REVIEW = "Frontend\nlanes also get the design lead's review of how it looks and works. "
 
 
+ATTACHED_RULE = ("- This project also has attached repos, which you open lanes in (the skill's section \"A lane in an "
+                 "attached repo\"): {paths}. Each keeps its own beads workspace and default branch.\n")
+
+
 def render_persona(text: str, harness: str, model: str, mode: str, project: str, tiers: str = "",
-                   reviewer: str = "", design_lead: bool = True) -> str:
+                   reviewer: str = "", design_lead: bool = True, attached: tuple = ()) -> str:
     # allow-dangerously-skip-permissions puts bypass in Claude's Shift+Tab mode cycle, without starting in it.
     launch = ("events: false" if harness == "opencode" else
               f'launchOptions: {{ "permission-mode": "{mode}", "allow-dangerously-skip-permissions": "" }}')
-    return (text.replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
+    rule = ATTACHED_RULE.format(paths=", ".join(f"`{a}`" for a in attached)) if attached else ""
+    return (text.replace("{{ATTACHED}}\n", rule).replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
             .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
             .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(HERE))
             .replace("{{DESIGN_ROUTE}}", DESIGN_ROUTE if design_lead else NO_DESIGN_ROUTE)
@@ -130,7 +142,7 @@ def free_port(start: int) -> int:
 
 
 SETTING_KEYS = ("root", "name", "models", "design_lead", "permission_mode", "private", "opencode", "opencode_model",
-                "own_models", "port", "claude_setup")  # all that is ever written: names and choices, never a secret
+                "own_models", "port", "claude_setup", "attached")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "design-lead": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -818,7 +830,8 @@ def choose_tiers(repo: Path, a, default_table: Path) -> str:
     return tiers_for_answer(default_text, answer, model)
 
 
-def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tier_text: str) -> list:
+def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tier_text: str,
+                       attached: tuple = ()) -> list:
     """lead None: the project has no design lead. tier_text: the project's table, from choose_tiers."""
     table = str(store_table(repo))
     review_persona = str(repo / ".cotal" / "agents" / "reviewer.md")
@@ -827,7 +840,7 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
     for name, (h, m) in roles:
         text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m,
                               mode.get(name, "default") if isinstance(mode, dict) else mode, project, table,
-                              review_persona, design_lead=lead is not None)
+                              review_persona, design_lead=lead is not None, attached=attached)
         state = write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text)
         say(f"persona {name}", state, f"{h}/{m}")
         if state == "updated" and not (h == "opencode" and m.startswith(HOSTED_OPENCODE)):
@@ -899,7 +912,8 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             harness, model = harness_model(pin) if isinstance(pin, str) and name != "reviewer" else reviewer
         texts[name] = (harness, model, render_persona((HERE / "personas" / f"{name}.md").read_text(), harness, model,
                                                       modes.get(name) or others, project, str(table),
-                                                      str(agents / "reviewer.md"), design_lead=design_lead))
+                                                      str(agents / "reviewer.md"), design_lead=design_lead,
+                                                      attached=tuple(attached_of(stored))))
     try:
         check_tier_table(tiers.read_text())
         default_text = answered_table(tiers.read_text(), settings(repo))
@@ -2236,6 +2250,110 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     return True
 
 
+# --- attached repos: a second repo run by the project's one coordinator ------------------------------------------------
+
+def attached_of(st: dict) -> list:
+    v = st.get("attached") if isinstance(st, dict) else None
+    return [a for a in v if isinstance(a, str)] if isinstance(v, list) else []
+
+
+def known_projects() -> list:
+    """(root, settings) of every project in the settings store; unreadable ones are skipped."""
+    out = []
+    for f in sorted((config_home() / "lane-control" / "projects").glob("*/settings.json")):
+        try:
+            st = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(st, dict) and isinstance(st.get("root"), str):
+            out.append((Path(st["root"]), st))
+    return out
+
+
+def attached_to(repo: Path):
+    """The root of the project that has `repo` attached, or None. An attached repo is never a project of its own."""
+    for root, st in known_projects():
+        if root.resolve() != repo.resolve() and str(repo.resolve()) in [str(Path(a).resolve()) for a in attached_of(st)]:
+            return root
+    return None
+
+
+def attach_refusal(primary: Path, d: Path):
+    """Why `d` cannot be attached to the project at `primary`, or None."""
+    if d.resolve() == primary.resolve():
+        return f"{d} is the project's own repo"
+    common = lambda r: run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=r,
+                           check=False).stdout.strip()
+    if common(d) and common(d) == common(primary):  # a linked worktree of the project's own repo
+        return f"{d} is the same repository as the project's own repo (a linked worktree of it)"
+    root = attached_to(d)
+    if root is not None and root.resolve() != primary.resolve():  # attached to this very project: a re-run
+        return f"{d} is already attached to the project at {root}"
+    if (store_dir(d) / "settings.json").is_file() or (d / ".cotal" / "agents" / "coordinator.md").is_file():
+        return (f"{d} is already a lane-control project of its own: it has its own space and coordinator, so it "
+                "cannot be attached to another")
+    root = attached_to(primary)
+    if root is not None:
+        return f"{primary} is attached to the project at {root}, so it cannot have repos attached itself"
+    return None
+
+
+def resolve_attached(target: str, dest: Path) -> Path:
+    """An attached repo: an existing git repository, or a git URL cloned like the first repo. Never a git init."""
+    if re.match(r"^(https?|ssh|git|file)://|^[\w.-]+@[\w.-]+:", target):
+        return resolve_repo(target, dest, slug(re.sub(r"\.git$", "", target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])))
+    d = Path(target).expanduser().resolve()
+    if not d.is_dir():
+        raise Fail(f"--with {target}: {d} is not a directory")
+    top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False)
+    if top.returncode != 0:
+        raise Fail(f"--with {target}: {d} is not a git repository (an attached repo must already be one)")
+    say("attached", "exists", top.stdout.strip())
+    return Path(top.stdout.strip())
+
+
+def prepare_attached(repo: Path, stored: list, targets: list, dest: Path, quick: bool) -> list:
+    """The project's attached repos (the stored ones, then the new --with ones), each refused for what cannot be
+    attached and for a stale checkout like the first repo's, before anything is changed. `quick`: a run that commits
+    nothing only warns about the checkout, and skips a stored repo that is gone."""
+    found = []
+    for t, is_stored in [(t, True) for t in stored] + [(t, False) for t in targets]:
+        if is_stored and not Path(t).expanduser().is_dir():
+            gone = (f"stored attached repo {t} is gone; remove it from {store_dir(repo) / 'settings.json'} "
+                    "(`attached`) if it was moved or deleted for good")
+            if quick:
+                print(f"project-setup: warning: {gone}; skipped", file=sys.stderr)
+                continue
+            raise Fail(f"{gone}. Nothing was changed")
+        d = resolve_attached(t, dest)
+        if d in found:
+            continue
+        bad = attach_refusal(repo, d)
+        if bad:
+            raise Fail(f"{bad}. Nothing was changed")
+        why = stale_checkout(d, quick=quick)
+        if why and quick:
+            print(f"project-setup: warning: attached repo {d}: {why}", file=sys.stderr)
+        elif why:
+            raise Fail(f"attached repo {d}: {why}. Nothing was changed")
+        found.append(d)
+    return found
+
+
+def onboard_attached(d: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
+    """The first repo's onboarding for an attached one. Its open questions are added to the coordinator's kickoff."""
+    global LEFTOVER
+    before, LEFTOVER = LEFTOVER, ""
+    try:
+        ok = onboard(d, project, adapter, reviewer, again, design_lead)
+        mine = LEFTOVER
+    finally:
+        LEFTOVER = before
+    if mine:
+        LEFTOVER = (before + "\n\n" if before else "") + f"In the attached repo {d}:\n" + mine
+    return ok
+
+
 def bad_glob(g) -> bool:
     return not isinstance(g, str) or not g or g.startswith(("/", "~", "!")) or ".." in Path(g).parts \
         or bool(RULE_UNSAFE & set(g) - set("*?[]"))
@@ -2244,13 +2362,13 @@ def bad_glob(g) -> bool:
 def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
-    want = {"private": list, "own_models": list, "models": dict, "design_lead": bool, "name": str, "root": str,
+    want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
             "permission_mode": str, "port": int}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
                        f"not {json.dumps(st[k])[:40]}")
-    for k in ("private", "own_models"):
+    for k in ("private", "own_models", "attached"):
         if any(not isinstance(x, str) for x in st.get(k, [])):
             raise Fail(f"{f}: {k} must be a list of strings")
     if any(not isinstance(v, str) for v in (st.get("models") or {}).values()):
@@ -2362,6 +2480,10 @@ def show(repo: Path) -> int:
         print(f"sandbox-ports: {ports} ({', '.join(n) or 'none'})")
     except OSError:
         print(f"sandbox-ports: {ports} (none)")
+    for d in attached_of(st):
+        dp = Path(d)
+        state = "missing" if not dp.is_dir() else "adapted" if onboarded(dp) else "not adapted yet"
+        print(f"attached repo: {d} ({state}; no space or coordinator of its own)")
     old = [f".cotal/{n}" for n in ("lane-control.json", "lanes.tsv") if (repo / ".cotal" / n).is_file()]
     if keyed_by_name_only(repo).is_dir() and not d.exists():
         old.append(str(keyed_by_name_only(repo)))
@@ -2404,9 +2526,12 @@ def main(argv=None) -> int:
     ap.add_argument("--opencode-model", help="with --opencode own: the provider/model for OpenCode tiers. Writes no "
                                              "sandbox: only for a gateway you run yourself")
     ap.add_argument("--no-start", action="store_true")
+    ap.add_argument("--with", action="append", default=[], dest="with_repos", metavar="DIR|GIT-URL",
+                    help="attach a second repo to the project (repeatable): lanes from this project's coordinator, no "
+                         "space, manager or coordinator of its own. Kept in the settings store; later runs cover it")
     ap.add_argument("--private", action="append", default=[], metavar="GLOB",
                     help="a tracked file or folder the onboarding agents must not read, relative to the repo root "
-                         "(repeatable, e.g. 'shot*.png' or 'private/**'); git-ignored paths are always denied. Kept in "
+                         "(repeatable, e.g. 'shot*.png' or 'private/**'; applies to every repo of the project, attached ones too); git-ignored paths are always denied. Kept in "
                          "the settings store: a later run adds to the list, it never drops one")
     ap.add_argument("--adapter", default="claude/sonnet",
                     help="harness/model of the agent that adapts the project's files")
@@ -2468,6 +2593,10 @@ def main(argv=None) -> int:
         print("project-setup: --opencode own without a terminal needs --opencode-model", file=sys.stderr)
         return 2
     tiers = Path(a.tiers or HERE / "templates" / "lanes.tsv").expanduser()
+    if a.with_repos and (a.refresh or a.show):
+        print("project-setup: --with attaches a repo and cannot go with --refresh or --show (they cover the repos "
+              "already attached; run without them to attach another)", file=sys.stderr)
+        return 2
     if a.refresh:
         ignored = [f for f in ("--coordinator", "--design-lead", "--no-design-lead", "--permission-mode", "--opencode",
                                "--opencode-model", "--own-model")
@@ -2488,6 +2617,10 @@ def main(argv=None) -> int:
             top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
             if top is None or top.returncode != 0:
                 raise Fail(f"{d} is not an existing git repository; --show only works on a set-up project")
+            root = attached_to(Path(top.stdout.strip()))
+            if root is not None:
+                raise Fail(f"{top.stdout.strip()} is attached to the project at {root}, not a project of its own: "
+                           f"run --show on {root}")
             return show(Path(top.stdout.strip()))
         except Fail as e:
             print(f"project-setup: {e}", file=sys.stderr)
@@ -2503,6 +2636,9 @@ def main(argv=None) -> int:
                 raise Fail(f"{d} is not an existing git repository; --refresh only works on a set-up project")
             say("repo", "exists", top.stdout.strip())
             repo = Path(top.stdout.strip())
+            root = attached_to(repo)
+            if root is not None:
+                raise Fail(f"{repo} is attached to the project at {root}, not a project of its own: run --refresh on {root}")
             why = stale_checkout(repo, quick=True)
             if why:  # a refresh works on any checkout, but says so
                 print(f"project-setup: warning: {why}", file=sys.stderr)
@@ -2515,6 +2651,15 @@ def main(argv=None) -> int:
             stored_reviewer = (st.get("models") or {}).get("reviewer") if isinstance(st.get("models"), dict) else None
             rc = refresh(repo, a.name or "", st.get("permission_mode") or "auto", tiers,
                            harness_model(a.reviewer or stored_reviewer or DEFAULT_PINS["reviewer"]))
+            for d in attached_of(st):  # the attached repos: looked at, never changed
+                dp = Path(d)
+                if not dp.is_dir():
+                    print(f"project-setup: warning: attached repo {d} is not there any more", file=sys.stderr)
+                    continue
+                why = stale_checkout(dp, quick=True)
+                say("attached", "exists", f"{d}" + (" (adapted)" if onboarded(dp) else " (not adapted: run project-setup without --refresh)"))
+                if why:
+                    print(f"project-setup: warning: attached repo {d}: {why}", file=sys.stderr)
             if rc == 0 and a.name:  # only once refresh has accepted the project
                 settings(repo, name=a.name)
             return rc
@@ -2541,7 +2686,16 @@ def main(argv=None) -> int:
         beads_note(repo)
         migrate(repo)
         validate_settings(repo, settings(repo))
+        root = attached_to(repo)
+        if root is not None:  # before a project of its own is made out of it
+            raise Fail(f"{repo} is attached to the project at {root}, so it is not a project of its own: it gets its "
+                       "lanes from that project's coordinator. Nothing was changed")
+        stored_attached = attached_of(settings(repo))
+        attached = prepare_attached(repo, stored_attached, a.with_repos, Path(a.dest).expanduser(), a.skip_adapt)
         cfg = resolve_settings(repo, a)
+        if attached:
+            # a stored repo that is gone stays listed: only the owner takes it out
+            settings(repo, attached=list(dict.fromkeys([*stored_attached, *(str(d) for d in attached)])))
         coord, reviewer = cfg["pins"]["coordinator"], cfg["pins"]["reviewer"]
         lead = cfg["pins"]["design-lead"] if cfg["lead"] else None
         PRIVATE_GLOBS[:] = cfg["private"]
@@ -2567,15 +2721,23 @@ def main(argv=None) -> int:
             return STOPPED
         if not a.skip_adapt:  # also on a re-run: a declined or failed push is offered again
             publish_onboarding(repo)
+        for d in attached:  # the same per-repo work; no space, personas or agents of their own
+            if not a.skip_adapt:
+                if not onboard_attached(d, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+                    return STOPPED
+                publish_onboarding(d)
         space = slug(project)
         repo_id = orca_repo(repo)
+        for d in attached:
+            orca_repo(d)
+            setup_script(d, a.write_orca_yaml)
         skill = skills()
         cotal_space(repo, space)
         if "claude" in needed | tier_harnesses:
             claude_wiring(repo, space)
         if own_models:  # outside every lane's reach: opencode-seat starts only models named here or `none` in the table
             settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
-        changed = personas_and_tiers(repo, project, coord, lead, reviewer, modes, tier_text)
+        changed = personas_and_tiers(repo, project, coord, lead, reviewer, modes, tier_text, tuple(str(d) for d in attached))
         needs = {n: "persona changed" for n in changed}
         if skill == "updated":
             for n in ("coordinator", "design-lead") if lead else ("coordinator",):

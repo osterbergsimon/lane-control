@@ -62,6 +62,10 @@ def find_repo(arg: str) -> Path:
 
 
 def space_of(repo: Path) -> str:
+    root = ps.attached_to(repo)
+    if root is not None:  # an attached repo has no space of its own: its project's one space is the root repo's
+        raise ps.Fail(f"{repo} is attached to the project at {root} and has no space of its own: "
+                      f"run project-pause on {root}")
     if not (ps.store_dir(repo) / "settings.json").is_file():
         raise ps.Fail(f"{repo} has not been set up: run project-setup first")
     return ps.slug(ps.settings(repo).get("name") or repo.name)

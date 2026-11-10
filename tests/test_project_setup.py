@@ -4129,3 +4129,148 @@ class OpencodeChoiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttachedRepoTests(unittest.TestCase):
+    """--with: one project, one space, one coordinator, a second repo that only gets lanes (ONE-5)."""
+    def setUp(self):
+        self.e = Env()
+        self.addCleanup(self.e.close)
+        self.repo = self.e.repo("app")
+        self.plugins = self.e.repo("app-plugins")
+        (self.plugins / "package-lock.json").write_text("{}")
+        git("add", "package-lock.json", cwd=self.plugins)
+        git("commit", "-q", "-m", "lock", cwd=self.plugins)
+
+    def setup(self, *args, **kw):
+        return self.e.run(str(self.repo), "--name", "Shop", *args, **kw)
+
+    def calls(self, prefix):
+        return [c for c in self.e.calls() if c.startswith(prefix)]
+
+    def test_the_attached_repo_gets_the_repo_steps_and_no_space_or_agents(self):
+        r = self.setup("--with", str(self.plugins))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        added = " ".join(self.calls("orca repo add"))
+        self.assertIn(str(self.repo), added)
+        self.assertIn(str(self.plugins), added)
+        self.assertEqual(len(self.calls("cotal space create")), 1)
+        self.assertEqual(len(self.calls("cotal spawn coordinator")), 1)
+        self.assertEqual(len(self.calls("cotal spawn")), 2)  # coordinator and design lead, none for the plugins repo
+        self.assertFalse((self.plugins / ".cotal" / "agents").exists())
+        self.assertTrue((self.plugins / ".cotal" / "orca.yaml.proposed").exists())  # drafted from its lockfile
+        self.assertEqual(self.e.settings(self.repo)["attached"], [str(self.plugins)])
+        self.assertFalse((self.e.store(self.plugins) / "settings.json").exists())
+
+    def test_the_coordinator_persona_names_the_attached_repo_and_one_without_has_no_placeholder(self):
+        self.setup("--with", str(self.plugins))
+        text = (self.repo / ".cotal" / "agents" / "coordinator.md").read_text()
+        self.assertIn(f"`{self.plugins}`", text)
+        self.assertNotIn("{{", text)
+        other = self.e.repo("solo")
+        r = self.e.run(str(other), "--no-design-lead")  # the stub's design-lead worktree is named per HOME, not per repo
+        self.assertEqual(r.returncode, 0, r.stderr)
+        solo = (other / ".cotal" / "agents" / "coordinator.md").read_text()
+        self.assertNotIn("attached repos", solo)
+        self.assertNotIn("{{", solo)
+
+    def test_a_rerun_without_the_flag_keeps_the_attached_repo(self):
+        self.setup("--with", str(self.plugins))
+        self.e.log.write_text("")
+        r = self.setup()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(str(self.plugins), " ".join(self.calls("orca repo list")) + r.stdout)
+        self.assertIn("orca-repo: exists", r.stdout)
+        self.assertEqual(self.e.settings(self.repo)["attached"], [str(self.plugins)])
+
+    def test_show_and_refresh_on_the_primary_cover_it_and_on_the_attached_repo_refuse(self):
+        self.setup("--with", str(self.plugins))
+        shown = self.e.run(str(self.repo), "--show", adapt=True)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(f"attached repo: {self.plugins}", shown.stdout)
+        refreshed = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+        self.assertIn(str(self.plugins), refreshed.stdout)
+        for flag in ("--show", "--refresh"):
+            r = self.e.run(str(self.plugins), flag, adapt=True)
+            self.assertEqual(r.returncode, 1, flag)
+            self.assertIn(f"attached to the project at {self.repo}", r.stderr)
+
+    def test_a_stale_attached_checkout_is_refused_before_anything_changes(self):
+        git("checkout", "-q", "--detach", cwd=self.plugins)
+        r = self.setup("--with", str(self.plugins), adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"attached repo {self.plugins}", r.stderr)
+        self.assertIn("detached HEAD", r.stderr)
+        self.assertIn("Nothing was changed", r.stderr)
+        self.assertEqual(self.calls("orca repo add"), [])
+        self.assertEqual(self.e.agent_runs(), [])
+        self.assertFalse((self.e.store(self.repo) / "settings.json").exists())
+        warned = self.setup("--with", str(self.plugins))  # --skip-adapt only warns, like for the first repo
+        self.assertEqual(warned.returncode, 0, warned.stderr)
+        self.assertIn("warning: attached repo", warned.stderr)
+
+    def test_a_repo_that_is_its_own_project_or_attached_elsewhere_is_refused(self):
+        solo = self.e.repo("solo")
+        self.assertEqual(self.e.run(str(solo), "--no-design-lead").returncode, 0)
+        r = self.setup("--with", str(solo))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("already a lane-control project of its own", r.stderr)
+        self.assertEqual(self.setup("--with", str(self.plugins)).returncode, 0)
+        third = self.e.repo("third")
+        r = self.e.run(str(third), "--with", str(self.plugins))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"already attached to the project at {self.repo}", r.stderr)
+        r = self.e.run(str(self.plugins))  # and the attached repo is not made a project of its own
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("attached to the project at", r.stderr)
+        self.assertFalse((self.plugins / ".cotal" / "agents").exists())
+
+    def test_the_repo_itself_a_non_repo_and_a_mixed_flag_are_refused(self):
+        self.assertIn("project's own repo", self.setup("--with", str(self.repo)).stderr)
+        plain = self.e.home / "plain"
+        plain.mkdir()
+        r = self.setup("--with", str(plain))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not a git repository", r.stderr)
+        self.assertFalse(any((plain / n).exists() for n in (".git", ".cotal")))
+        r = self.e.run(str(self.repo), "--show", "--with", str(self.plugins), adapt=True)
+        self.assertEqual(r.returncode, 2)
+
+    def test_onboarding_covers_the_attached_repo_with_its_own_yes_and_commit(self):
+        self.e.script_agents(sonnet=[WRITE, WRITE], opus=[PASS, PASS])
+        m = load()
+        out = Tty()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", return_value="y"), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            status = m.main([str(self.repo), "--opencode", "hosted", "--with", str(self.plugins)])
+        self.assertEqual(status, 0, err.getvalue())
+        for d in (self.repo, self.plugins):
+            self.assertIn(ADAPTED_FILE, git("ls-tree", "-r", "--name-only", "HEAD", cwd=d))
+            self.assertIn("lane-control", (d / "AGENTS.md").read_text())
+        self.assertFalse((self.plugins / ".cotal" / "agents").exists())
+        self.assertEqual(len(self.e.agent_runs()), 4)
+
+    def test_a_gone_stored_repo_is_skipped_on_skip_adapt_and_named_otherwise(self):
+        self.assertEqual(self.setup("--with", str(self.plugins)).returncode, 0)
+        shutil.rmtree(self.plugins)
+        r = self.setup()  # --skip-adapt: what project-pause start runs
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("warning: stored attached repo", r.stderr)
+        self.assertNotIn("--with", r.stderr)
+        self.assertEqual(self.e.settings(self.repo)["attached"], [str(self.plugins)])  # kept, not dropped
+        r = self.setup(adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("stored attached repo", r.stderr)
+        self.assertIn("settings.json", r.stderr)
+        self.assertIn("`attached`", r.stderr)
+        self.assertNotIn("--with", r.stderr)
+
+    def test_a_linked_worktree_of_the_primary_is_refused(self):
+        wt = self.e.home / "src" / "app-wt"
+        git("worktree", "add", "-q", "-b", "other", str(wt), cwd=self.repo)
+        r = self.setup("--with", str(wt))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("same repository", r.stderr)
+        self.assertEqual(self.calls("orca repo add"), [])

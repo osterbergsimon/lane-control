@@ -102,6 +102,22 @@ class SkillTests(unittest.TestCase):
             self.assertIn(needle, body)
 
 
+class AttachedRepoContentTests(unittest.TestCase):
+    def test_the_coordinator_persona_carries_the_attached_repos_line(self):
+        text = (PERSONAS / "coordinator.md").read_text()
+        self.assertIn("\n{{ATTACHED}}\n", text)
+
+    def test_the_skill_says_how_a_lane_opens_in_an_attached_repo(self):
+        skill = " ".join(SKILL.read_text().split())
+        self.assertIn("### A lane in an attached repo", skill)
+        section = skill.split("### A lane in an attached repo", 1)[1].split("## 3.", 1)[0]
+        for needle in ("--repo path:<repo> --no-parent", "not `--parent-worktree active`", "own default branch",
+                       "never pass `--base-branch`", "git -C <repo> fetch origin", "git -C <repo> status -sb",
+                       "git -C <repo> rev-list --count HEAD..origin/<default>", "hold the lane and tell the owner",
+                       "`cwd` that worktree", "own beads workspace", "Never move an issue between repos"):
+            self.assertIn(needle, section)
+
+
 class SettingsStoreContentTests(unittest.TestCase):
     def test_lanes_are_pointed_at_the_store_not_at_cotal(self):
         for f in (SKILL, PERSONAS / "coordinator.md", PERSONAS / "design-lead.md"):

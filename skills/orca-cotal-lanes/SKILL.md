@@ -90,6 +90,18 @@ worktree may refuse the spawn and strand the agent's name. Do these in order:
    With no marker in `orca.yaml` nothing says the script finished, so keep the Setup tab.
 4. Give the owner a shell after the agent's tab: `$ORCA terminal create --worktree path:<worktree> --json`.
 
+### A lane in an attached repo
+Your persona lists the project's attached repos when it has any. A lane there runs like any other, with these changes:
+- First run the checkout check of section 2 in that repo: `git -C <repo> fetch origin`, `git -C <repo> status -sb`,
+  `git -C <repo> rev-list --count HEAD..origin/<default>`. Detached, on another branch or behind: hold the lane and
+  tell the owner, as for your own checkout.
+- Create it with `--repo path:<repo> --no-parent`, not `--parent-worktree active`: a parent in another repo was not
+  tested, so these lanes sit beside yours in the Orca GUI. It branches from that repo's own default branch (origin
+  HEAD); never pass `--base-branch`.
+- Start the agent with `cwd` that worktree, and brief it with that repo's AGENTS.md; all other steps are the same.
+- The lane's issue lives in that repo's own beads workspace: run `bd` for it from that repo's folder. Never move an
+  issue between repos.
+
 ## 3. Mirror the lane in the GUI
 Keep the task card honest so the owner sees state at a glance:
 

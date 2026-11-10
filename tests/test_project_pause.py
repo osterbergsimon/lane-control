@@ -164,3 +164,40 @@ class PauseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttachedRepoPauseTest(unittest.TestCase):
+    """A project with an attached repo still has one space; the attached repo is not a project of its own (ONE-5)."""
+    def setUp(self):
+        self.e = Env()
+        self.addCleanup(self.e.close)
+        self.e.env.pop("COTAL_NAME", None)
+        self.repo = self.e.repo("shop")
+        self.plugins = self.e.repo("shop-plugins")
+        r = self.e.run(str(self.repo), "--name", "Shop", "--with", str(self.plugins))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def pause(self, *args):
+        return subprocess.run([sys.executable, str(PAUSE), *args], env=self.e.env, capture_output=True, text=True)
+
+    def test_the_project_is_found_by_name_and_the_attached_repo_is_not_a_project(self):
+        r = self.pause("status", "Shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("shop: running", r.stdout)
+        by_name = self.pause("status", "shop-plugins")
+        self.assertEqual(by_name.returncode, 1)
+        self.assertIn("is no project set up here", by_name.stderr)
+        by_path = self.pause("status", str(self.plugins))
+        self.assertEqual(by_path.returncode, 1)
+        self.assertIn(f"attached to the project at {self.repo}", by_path.stderr)
+
+    def test_rest_and_start_work_on_the_one_space_and_keep_the_attached_repo(self):
+        self.assertEqual(self.pause("rest", str(self.repo)).returncode, 0)
+        marker = self.e.home / ".local" / "state" / "lane-control" / "paused" / "shop"
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.pause("stop", str(self.repo)).returncode, 0)
+        r = self.pause("start", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.e.settings(self.repo)["attached"], [str(self.plugins)])
+        self.assertEqual(len([c for c in self.e.calls() if c.startswith("cotal space create")]), 1)

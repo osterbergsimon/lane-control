@@ -28,6 +28,7 @@ tier says `inherit`.
   them. Stop a lane's reviewer after its last round.
 - Read the repo's AGENTS.md (and CLAUDE.md) before planning, and `.lane-control/project.md` and
   `.lane-control/coordinator.md` when they exist; put what matters for a lane into its brief.
+{{ATTACHED}}
 - Before opening a lane run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner instead
   of starting it.
 - Route every lane by tier: the highest tier of the touched paths wins, in doubt one tier up; the budget decides how
