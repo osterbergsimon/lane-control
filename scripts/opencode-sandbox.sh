@@ -30,6 +30,9 @@
 # Instance paths are not hardcoded here: private paths the test checks are SANDBOX_TEST_* in the playbook config.
 #
 # Changes (newest first):
+#   2026-11-10  seats: a shell.nix that imports <nixpkgs> no longer stops every seat (Cotal passes no NIX_PATH: the flake
+#               registry's nixpkgs stands in); the launcher's errors are kept in the lane's seat-launch.log; the server
+#               password and the Cotal connection variables reach the sandbox from a file, not from bwrap's arguments
 #   2026-11-08  seat mode: a Cotal OpenCode seat runs here, started by scripts/opencode-seat. The model comes from Cotal's
 #               config and may also be opencode/; the branch is the worktree's at first launch, remembered in the lane
 #   2026-11-08  the machine-wide heavy-work gate works inside: lane-heavy, lane-room, the machine's slot files and
@@ -89,8 +92,11 @@
 #               only, never the other seats'; removed when the seat ends); its persona file. The model can read them.
 #   read-write  the seat's database, in the lane (Cotal's per-agent directory in the project stays out)
 #   absent      unlike a Rove lane, the owner's global OpenCode config (opencode.jsonc, its MCP servers) and the Rove plugin
-#   env         the Cotal connection variables, OPENCODE_DB, the server password, Cotal's config merged under the provider
-#               and key fixed here. A user-auth mesh and a broker that is not on host loopback are refused.
+#   env         the Cotal connection variables and the server password, from a file of this seat's (never an argument of
+#               pasta or bwrap: those are readable by every local user through /proc), OPENCODE_DB, Cotal's config merged under
+#               the provider and key fixed here. A user-auth mesh and a broker that is not on host loopback are refused.
+#   errors      the launcher's own, in the lane: ~/.cache/opencode-lanes/wt-<hash>/seat-launch.log (the seat's tab closes
+#               with them, and Cotal reports only "exited on launch")
 # The lane leaves the sandbox only through a relay run by this launcher, with fixed meanings:
 #   git push      pushes the lane branch (from the Rove task, never main) to origin, no force; with
 #                 OPENCODE_SANDBOX_PR_BRANCH to that existing branch instead, fast-forward only
@@ -112,7 +118,18 @@ set -euo pipefail
 no_ask=$(readlink -f "$(command -v false)")
 export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$no_ask" SSH_ASKPASS="$no_ask" GCM_INTERACTIVE=never GH_PROMPT_DISABLED=1
 
-die() { echo "opencode-sandbox: $*" >&2; exit 2; }
+# A seat's Orca tab closes when this launcher exits, and Cotal reports only "exited on launch": a seat keeps its launcher's
+# errors in the lane (outside the sandbox), set below once the lane is known. A Rove lane prints them in its terminal.
+# What the log holds: every die and unexpected failure of the launcher itself from the point the lane is known (an error
+# before that, such as a missing tool or a bad branch, is in the tab only), and the exit code of the sandbox when it is
+# not 0. The sandbox's own output (systemd-run, pasta, nft, bwrap, opencode) goes to the tab only. There is no set -E:
+# the relay and the watchdogs expect failing commands, and an inherited ERR trap would end them.
+launch_log=""
+lognote() { [ -z "$launch_log" ] || printf '%s %s opencode-sandbox: %s\n' "$(date -u +%FT%TZ)" "${COTAL_NAME:-?}" "$*" >>"$launch_log" 2>/dev/null || true; }
+die() { echo "opencode-sandbox: $*" >&2; lognote "$*"; exit 2; }
+# an unexpected failure (set -e) at the top level names the command that failed, in the terminal and in the launch log;
+# the command's text, never its expanded values
+trap 'die "stopped: \"$BASH_COMMAND\" failed (line $LINENO)"' ERR
 # the day/night file: env wins (empty = none), else MODE_FILE of the playbook config (read in a subshell: only that value)
 conf=${PLAYBOOK_CONFIG:-$HOME/.config/rove/playbook.conf.sh}
 if [ -n "${OPENCODE_SANDBOX_MODE_FILE+x}" ]; then mode_file=$OPENCODE_SANDBOX_MODE_FILE
@@ -173,6 +190,12 @@ fi
 "$git" check-ref-format --branch "$branch" >/dev/null || die "bad branch $branch"
 case "$branch" in main|master|HEAD|gh-pages|release*) die "refusing lane branch $branch" ;; esac
 if [ -n "$seat" ] && [ ! -e "$seatbr" ]; then mkdir -p -- "$lane"; printf '%s\n' "$branch" >"$seatbr"; fi
+if [ -n "$seat" ]; then # from here a seat's errors are kept in its lane, the last 64 KB
+  mkdir -p -- "$lane"; launch_log=$lane/seat-launch.log
+  if [ "$(stat -c %s -- "$launch_log" 2>/dev/null || echo 0)" -gt 65536 ]; then
+    tail -c 32768 -- "$launch_log" >"$launch_log.new" && mv -f -- "$launch_log.new" "$launch_log"
+  fi
+fi
 # optional: an existing PR branch the lane continues; set by the coordinator in the launch command (the lane
 # cannot set it: it is read here, outside). Same guards as the lane branch, and it must exist on origin
 # (so a typo cannot create a stray branch). $phead is the branch the PR, its CI and `gh pr create` are about.
@@ -335,8 +358,15 @@ printf '%s\n' "$lg" >"$lane/commondir"                    # bound over the workt
 # --- the dev environment of the main checkout's shell.nix, made outside (no nix daemon inside) ---
 devenv=""
 if [ -f "$(dirname "$common")/shell.nix" ]; then
-  nix --extra-experimental-features 'nix-command flakes' print-dev-env \
-    --file "$(dirname "$common")/shell.nix" >"$lane/dev-env.sh"
+  # A Cotal seat's environment is Cotal's allow-list, which has no NIX_PATH: a shell.nix that imports <nixpkgs> then
+  # failed and stopped every seat of the project. Without NIX_PATH, <nixpkgs> is the flake registry's nixpkgs, the one
+  # the sandbox's own tools come from. A lane that has NIX_PATH keeps it. Without NIX_PATH this -I also wins over a
+  # nix-path in nix.conf: a machine whose nix.conf points nixpkgs at a channel gets the registry's nixpkgs here.
+  nixp=(); [ -n "${NIX_PATH:-}" ] || nixp=(-I nixpkgs=flake:nixpkgs)
+  nixerr=$(nix --extra-experimental-features 'nix-command flakes' print-dev-env "${nixp[@]}" \
+    --file "$(dirname "$common")/shell.nix" 2>&1 >"$lane/dev-env.sh") \
+    || die "the dev environment of $(dirname "$common")/shell.nix failed: $(printf '%s' "$nixerr" | tail -n 5)"
+  [ -z "$nixerr" ] || printf '%s\n' "$nixerr" >&2   # nix's warnings still reach the terminal
   devenv=$lane/dev-env.sh
 fi
 
@@ -631,14 +661,19 @@ setenv SSL_CERT_FILE /etc/ssl/certs/ca-certificates.crt; setenv NIX_SSL_CERT_FIL
 setenv OPENCODE_SANDBOX 1; setenv OPENCODE_SANDBOX_DEVENV "$devenv"
 [ -z "$task" ] || setenv ROVE_TASK_ID "$task"
 if [ -n "$seat" ]; then
-  # the connector's variables by name: no other COTAL_* setting (feedback keys, the operator's) comes in
-  for v in COTAL_NAME COTAL_ROLE COTAL_SPACE COTAL_ID COTAL_KIND COTAL_LIFECYCLE_UID COTAL_ACCEPTED_TOKEN COTAL_SUBSCRIBE \
-           COTAL_ALLOW_SUBSCRIBE COTAL_ALLOW_PUBLISH COTAL_CAPABILITIES COTAL_QUIET COTAL_MUTED COTAL_MODEL COTAL_VARIANT \
-           COTAL_MANAGER_INSTANCE COTAL_BACKFILL_FLOOR COTAL_ENVIRONMENT COTAL_OPENCODE_PROMPT \
-           COTAL_OPENCODE_SERVER_URL COTAL_OPENCODE_LINE COTAL_CONTROL_SOCKET \
-           OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD; do
-    [ -z "${!v:-}" ] || setenv "$v" "${!v}"
-  done
+  # The connector's variables by name: no other COTAL_* setting (feedback keys, the operator's) comes in. They go in a
+  # file of this seat's (mode 600, bound read-only with the seat's other files, sourced by the command below), not on
+  # bwrap's command line: every argument of pasta and bwrap is readable by any local user through /proc, and the
+  # server password and the accepted token are secrets. Inside, the server holds them in its environment as before.
+  (umask 077
+   for v in COTAL_NAME COTAL_ROLE COTAL_SPACE COTAL_ID COTAL_KIND COTAL_LIFECYCLE_UID COTAL_ACCEPTED_TOKEN COTAL_SUBSCRIBE \
+            COTAL_ALLOW_SUBSCRIBE COTAL_ALLOW_PUBLISH COTAL_CAPABILITIES COTAL_QUIET COTAL_MUTED COTAL_MODEL COTAL_VARIANT \
+            COTAL_MANAGER_INSTANCE COTAL_BACKFILL_FLOOR COTAL_ENVIRONMENT COTAL_OPENCODE_PROMPT \
+            COTAL_OPENCODE_SERVER_URL COTAL_OPENCODE_LINE COTAL_CONTROL_SOCKET \
+            OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD; do
+     [ -z "${!v:-}" ] || printf 'export %s=%q\n' "$v" "${!v}"
+   done >"$seatdir/env.new" && chmod 600 -- "$seatdir/env.new" && mv -f -- "$seatdir/env.new" "$seatdir/env") \
+    || die "cannot write the seat's environment file"
   setenv COTAL_LAUNCH_MATERIAL /run/sandbox/seat/material.json
   [ -z "${COTAL_AGENT_FILE:-}" ] || setenv COTAL_AGENT_FILE /run/sandbox/seat/agent-file
   setenv OPENCODE_DB "$lane/oc/db/$name/opencode.db"
@@ -717,6 +752,8 @@ else
     fi
     exec "$oc" "$@"' _ "$oc" "$pin" "${sa[@]}" "$@")
 fi
+# a seat's connector variables come from its environment file (above), never from an argument
+[ -z "$seat" ] || cmd=(/run/current-system/sw/bin/bash -c '. /run/sandbox/seat/env && exec "$@"' _ "${cmd[@]}")
 
 seat_sync() { # $1 = the launcher's pid; a credential re-signed outside reaches the copy inside
   while kill -0 "$1" 2>/dev/null; do
@@ -758,4 +795,5 @@ systemd-run --user --scope -q --expand-environment=no --unit="$unit" \
   "$pasta" --config-net -q "${net[@]}" -U none -u none --no-map-gw --dns-forward "$dnsaddr" -- \
   /bin/sh -c '"$1" -f "$2" || { echo "opencode-sandbox: could not set the network rules; not starting" >&2; exit 99; }
     shift 2; exec "$@"' sh "$nft" "$lane/net.nft" "$bwrap" "${args[@]}" -- "${cmd[@]}" || rc=$?
+[ "$rc" = 0 ] || lognote "the sandbox (systemd-run, pasta, nft, bwrap or opencode) exited with $rc; its own words are in the tab only"
 exit "$rc"

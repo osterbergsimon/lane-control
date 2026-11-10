@@ -381,6 +381,14 @@ What a sandboxed seat can reach is in the header of `scripts/opencode-sandbox.sh
 what the agent needs: the Cotal broker's port outward, this seat's server port inward on host loopback (its TUI runs
 outside as a client of that server), and read-only this seat's mesh credential and launch material and the Cotal plugin.
 It takes away the owner's global OpenCode config, its MCP servers and the Rove plugin, which a seat does not need.
+Inside its network namespace the seat's server listens on every address (`server listening on http://0.0.0.0:<port>`),
+because pasta delivers the one inward port to the namespace's interface. On the host that port is bound on 127.0.0.1
+only, and the host's LAN and global addresses refuse it [tested, 2026-11-10]. The server password and the Cotal
+connection variables reach the sandbox from a file of the seat's (mode 600), never as arguments of pasta or bwrap,
+which every local user can read through `/proc`. A seat's tab closes when its launch fails, and `cotal_spawn` then says
+only `exited on launch`. The launcher's own errors are kept in `~/.cache/opencode-lanes/wt-<hash>/seat-launch.log`
+from the point the lane is known, with the sandbox's exit code when it fails. The output of systemd-run, pasta, bwrap
+and opencode, and an error before the lane is known (a missing tool, a bad branch), are in the tab only.
 The model can read the credential and use the mesh as its own identity, with the grants the broker enforces. A seat's
 branch is the worktree's branch at its first launch, and the model is the one Cotal was asked for. The seat's database
 lives in the lane, so a resumed sandboxed seat keeps it only if the same worktree stays.
