@@ -22,6 +22,7 @@ case " $* " in *" -I nixpkgs=flake:nixpkgs "*) ;; *)
   [ -n "${NIX_PATH:-}" ] || { echo "error: file 'nixpkgs' was not found in the Nix search path" >&2; exit 1; } ;;
 esac
 [ ! -e "$STUB_DIR/nix-fails" ] || { echo "error: shell.nix: something else broke" >&2; exit 1; }
+[ ! -e "$STUB_DIR/nix-warns" ] || echo "warning: Git tree is dirty" >&2
 echo "export FROM_SHELL_NIX=1"
 """
 
@@ -35,7 +36,7 @@ def block(start, end):
 def head():
     """The launcher's error helpers, as the script defines them."""
     text = SANDBOX.read_text()
-    lines = [l for l in text.splitlines() if re.match(r"^(launch_log=|die\(\) )", l)]
+    lines = [l for l in text.splitlines() if re.match(r"^(launch_log=|lognote\(\) |die\(\) )", l)]
     assert any(l.startswith("die() ") for l in lines), lines
     return "\n".join(lines) + "\n"
 
@@ -93,6 +94,16 @@ class SeatLaunch(unittest.TestCase):
         self.assertIn("something else broke", r.stderr)
         self.assertIn("something else broke", log.read_text())
 
+    def test_nix_s_warnings_still_reach_the_terminal(self):
+        (self.stubs / "nix-warns").touch()
+        r = self.dev_env()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("warning: Git tree is dirty", r.stderr)
+        self.assertEqual((self.lane / "dev-env.sh").read_text(), "export FROM_SHELL_NIX=1\n")
+
+    def test_the_nix_path_choice_is_explained(self):
+        self.assertIn("wins over a\n  # nix-path in nix.conf", SANDBOX.read_text())
+
     def test_no_shell_nix_no_dev_environment(self):
         (self.main / "shell.nix").unlink()
         r = self.dev_env()
@@ -117,6 +128,17 @@ class SeatLaunch(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertNotIn("not-reached", r.stdout)
         self.assertIn("false", log.read_text())
+
+    def test_a_failing_sandbox_leaves_its_exit_code_in_the_launch_log(self):
+        log = self.lane / "seat-launch.log"
+        line = [l for l in SANDBOX.read_text().splitlines() if l.startswith('[ "$rc" = 0 ] || lognote')]
+        self.assertEqual(len(line), 1)
+        r = self.run_bash(head() + f"launch_log={log}\nCOTAL_NAME=s1\nrc=1\n" + line[0] + "\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("exited with 1", log.read_text())
+        log.unlink()
+        self.run_bash(head() + f"launch_log={log}\nrc=0\n" + line[0] + "\n")
+        self.assertFalse(log.exists())
 
     def test_the_seat_keeps_its_launch_log_in_the_lane_and_bounded(self):
         text = SANDBOX.read_text()

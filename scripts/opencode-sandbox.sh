@@ -120,10 +120,15 @@ export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$no_ask" SSH_ASKPASS="$no_ask" GCM_INT
 
 # A seat's Orca tab closes when this launcher exits, and Cotal reports only "exited on launch": a seat keeps its launcher's
 # errors in the lane (outside the sandbox), set below once the lane is known. A Rove lane prints them in its terminal.
+# What the log holds: every die and unexpected failure of the launcher itself from the point the lane is known (an error
+# before that, such as a missing tool or a bad branch, is in the tab only), and the exit code of the sandbox when it is
+# not 0. The sandbox's own output (systemd-run, pasta, nft, bwrap, opencode) goes to the tab only. There is no set -E:
+# the relay and the watchdogs expect failing commands, and an inherited ERR trap would end them.
 launch_log=""
-die() { echo "opencode-sandbox: $*" >&2; [ -z "$launch_log" ] || printf '%s %s opencode-sandbox: %s\n' "$(date -u +%FT%TZ)" "${COTAL_NAME:-?}" "$*" >>"$launch_log" 2>/dev/null || true; exit 2; }
-# an unexpected failure (set -e) names the command that failed, in the terminal and in the launch log; the command's
-# text, never its expanded values
+lognote() { [ -z "$launch_log" ] || printf '%s %s opencode-sandbox: %s\n' "$(date -u +%FT%TZ)" "${COTAL_NAME:-?}" "$*" >>"$launch_log" 2>/dev/null || true; }
+die() { echo "opencode-sandbox: $*" >&2; lognote "$*"; exit 2; }
+# an unexpected failure (set -e) at the top level names the command that failed, in the terminal and in the launch log;
+# the command's text, never its expanded values
 trap 'die "stopped: \"$BASH_COMMAND\" failed (line $LINENO)"' ERR
 # the day/night file: env wins (empty = none), else MODE_FILE of the playbook config (read in a subshell: only that value)
 conf=${PLAYBOOK_CONFIG:-$HOME/.config/rove/playbook.conf.sh}
@@ -355,11 +360,13 @@ devenv=""
 if [ -f "$(dirname "$common")/shell.nix" ]; then
   # A Cotal seat's environment is Cotal's allow-list, which has no NIX_PATH: a shell.nix that imports <nixpkgs> then
   # failed and stopped every seat of the project. Without NIX_PATH, <nixpkgs> is the flake registry's nixpkgs, the one
-  # the sandbox's own tools come from. A lane that has NIX_PATH keeps it.
+  # the sandbox's own tools come from. A lane that has NIX_PATH keeps it. Without NIX_PATH this -I also wins over a
+  # nix-path in nix.conf: a machine whose nix.conf points nixpkgs at a channel gets the registry's nixpkgs here.
   nixp=(); [ -n "${NIX_PATH:-}" ] || nixp=(-I nixpkgs=flake:nixpkgs)
   nixerr=$(nix --extra-experimental-features 'nix-command flakes' print-dev-env "${nixp[@]}" \
     --file "$(dirname "$common")/shell.nix" 2>&1 >"$lane/dev-env.sh") \
     || die "the dev environment of $(dirname "$common")/shell.nix failed: $(printf '%s' "$nixerr" | tail -n 5)"
+  [ -z "$nixerr" ] || printf '%s\n' "$nixerr" >&2   # nix's warnings still reach the terminal
   devenv=$lane/dev-env.sh
 fi
 
@@ -788,4 +795,5 @@ systemd-run --user --scope -q --expand-environment=no --unit="$unit" \
   "$pasta" --config-net -q "${net[@]}" -U none -u none --no-map-gw --dns-forward "$dnsaddr" -- \
   /bin/sh -c '"$1" -f "$2" || { echo "opencode-sandbox: could not set the network rules; not starting" >&2; exit 99; }
     shift 2; exec "$@"' sh "$nft" "$lane/net.nft" "$bwrap" "${args[@]}" -- "${cmd[@]}" || rc=$?
+[ "$rc" = 0 ] || lognote "the sandbox (systemd-run, pasta, nft, bwrap or opencode) exited with $rc; its own words are in the tab only"
 exit "$rc"
