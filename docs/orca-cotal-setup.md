@@ -74,7 +74,8 @@ Run as the agent user, never root. Pass `-s <space>` to every `cotal` call (`doc
 | 12 | A first lane, from the coordinator | the lane's tab opens first in its child task; its report DM wakes the coordinator | `cotal ps` lists the lane, and later the DM arrives |
 
 ## 3. Known failure modes and their fixes
-From `docs/orca.md`, `reliability.md`, the skill and git history; the last two rows are from this diagnosis.
+From `docs/orca.md`, `reliability.md`, the skill and git history; the last two rows are from the mesh-loss diagnosis.
+An OpenCode seat's Orca tab closes when its launch fails: read the launcher's error in its lane's `seat-launch.log`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -88,6 +89,8 @@ From `docs/orca.md`, `reliability.md`, the skill and git history; the last two r
 | An agent keeps an expired key | OpenCode 2 stores credentials in each agent's database | stop it, move `.cotal/opencode/<name>/` aside, spawn again |
 | A required tier is refused (exit 4) | the running `mgr` predates the launch wrapper on its PATH | at a natural stop: `cotal svc stop mgr -s <space> --yes`, `cotal svc remove mgr -s <space> --yes`, rerun project-setup |
 | `<name> exited on launch` | a pinned model that the server does not list | fix the model in `lanes.tsv` |
+| `<name> exited on launch` for every OpenCode seat of a project that has a `shell.nix`; the lane's `dev-env.sh` is empty | before 2026-11-10 the sandbox built the dev environment with `import <nixpkgs>`, and a seat's environment (Cotal's allow-list) has no `NIX_PATH` | the launcher now uses the flake registry's nixpkgs when `NIX_PATH` is unset: rerun project-setup to install it. The launcher's own error is in `~/.cache/opencode-lanes/wt-<hash>/seat-launch.log` (`<hash>`: the first 16 hex of sha256 of the worktree's path) |
+| `<name> exited on launch` for an OpenCode seat started by a direct `cotal_spawn`; the tab shows `server listening on http://127.0.0.1:<port>` (a sandboxed seat shows `0.0.0.0`) and the owner's own MCP servers starting | the running `mgr` predates the launch wrapper, so it ran the real `opencode` outside the sandbox. `lane-tier` refuses this, a direct `cotal_spawn` does not | spawn no OpenCode seat there; at a natural stop restart `mgr` as in the "required tier is refused" row |
 | A lane joins but stays silent | used-up quota (`usage limit exceeded` in the lane's `opencode.log`) | another key or tier |
 | A Claude agent never starts | the folder-trust prompt was not answered | `cd <repo> && claude` once, or `--trust-folder` |
 | A lane misses the setup script or onboarding files | Orca reads `orca.yaml` from the worktree, made from `origin/<branch>` | commit and push (project-setup asks) |
