@@ -65,10 +65,10 @@ Run as the agent user, never root. Pass `-s <space>` to every `cotal` call (`doc
 | 3 | Sign in to Claude once (`claude`); for bypass mode, accept its warning once | `claude --version` | a version and no login prompt |
 | 4 | Only for hosted OpenCode tiers: `~/.config/opencode-sandbox/auth.json`, mode 600, holding a key for lanes only (never copy the owner's login) | `project-setup` warns when the file is missing or unusable | no `sandbox key` warning |
 | 5 | `scripts/project-setup <repo>` (`docs/orca.md` §5b) | `cotal space` | the space `● reachable` at `nats://127.0.0.1:<port>` |
-| 6 | (same run) broker, delivery daemon, `mgr` | `cotal svc -s <space>` | `mgr`, `stack-broker`, `stack-delivery` all `running` |
+| 6 | (same run) broker, delivery daemon, `mgr` | `cotal svc -s <space>` | `mgr`, `stack-broker`, `stack-delivery` all `running`. `auth-service`, `web` and the other optional built-ins show `not started`, which is normal on a static-auth space |
 | 7 | (same run) coordinator and design lead | `cotal ps -s <space>` | both rows show `running` under PROCESS and `idle` or `working` under MESH. In Orca, the tab `cotal-<name>` sits in the main checkout and in the `design-lead` task |
 | 8 | Manager health | `cotal manager status -s <space>`; `cotal service logs mgr -s <space>` | `Process observation: running`, `Readiness observation: endpoint-serving`; no line starting `!` that recurs |
-| 9 | Credential health | `cotal doctor auth --space <space> --plain` (run in the repo; read-only without `--fix`) | live seats, `delivery.creds` and `membership-rw.creds` all `healthy`. `expired` is normal only for seats already reaped |
+| 9 | Credential health | `cotal doctor auth --space <space> --plain` (run in the repo; read-only without `--fix`) | live seats, `delivery.creds` and `membership-rw.creds` all `healthy`. `near-expiry` or `expired` ("the broker denies this credential") is expected for seats already reaped, and so is the closing line `! local credential findings remain` that they cause |
 | 10 | Claude wake path (once per machine, by hand) | the agent's tab shows no `Cotal incoming auto-wake is unavailable` notice at startup; a `cotal send -s <space> -t coordinator "test, no reply"` wakes an idle coordinator | the coordinator takes a turn |
 | 11 | Machine coordinator and window guard (`docs/orca.md`, "The machine coordinator and the window guard", in its order) | `systemctl --user status lane-control-window-guard.service` | `active (running)`; the journal shows polls |
 | 12 | A first lane, from the coordinator | the lane's tab opens first in its child task; its report DM wakes the coordinator | `cotal ps` lists the lane, and later the DM arrives |
@@ -86,7 +86,7 @@ From `docs/orca.md`, `reliability.md`, the skill and git history; the last two r
 | orcad breaks for other users | a global `TMPDIR` in `/etc/environment` points into one home | orca-host-install falls back to `~/tmp` |
 | The OpenCode TUI dies at start | a `noexec` `/tmp` | set `TMPDIR` (and pass it in `spawn.env`) |
 | An agent keeps an expired key | OpenCode 2 stores credentials in each agent's database | stop it, move `.cotal/opencode/<name>/` aside, spawn again |
-| A required tier is refused (exit 4) | the running `mgr` predates the launch wrapper on its PATH | at a natural stop: `cotal svc stop mgr`, `cotal svc remove mgr`, rerun project-setup |
+| A required tier is refused (exit 4) | the running `mgr` predates the launch wrapper on its PATH | at a natural stop: `cotal svc stop mgr -s <space> --yes`, `cotal svc remove mgr -s <space> --yes`, rerun project-setup |
 | `<name> exited on launch` | a pinned model that the server does not list | fix the model in `lanes.tsv` |
 | A lane joins but stays silent | used-up quota (`usage limit exceeded` in the lane's `opencode.log`) | another key or tier |
 | A Claude agent never starts | the folder-trust prompt was not answered | `cd <repo> && claude` once, or `--trust-folder` |
