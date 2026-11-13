@@ -152,7 +152,7 @@ class SeatLaunch(unittest.TestCase):
         env = dict(self.env, COTAL_NAME="s1", OPENCODE_SERVER_USERNAME="opencode",
                    OPENCODE_SERVER_PASSWORD="pw 'with' $pecial\nchars", COTAL_ACCEPTED_TOKEN="tok-123", **extra)
         script = head() + "launch_log=\nargs=()\nro() { :; }\nrw() { :; }\n"
-        script += f"seat=1 task= name=s1 seatdir={seatdir} lane={self.lane} oc=/x/bin/opencode devenv= work={self.dir}\n"
+        script += f"seat=1 task= name=s1 seatdir={seatdir} lane={self.lane} oc=/x/bin/opencode devenv= work={self.dir} p_http= p_https= p_no=\n"
         script += block("# environment: an allow-list", "# --- the machine-wide heavy-work gate")
         script += 'printf "%s\\n" "${args[@]}"\n'
         return self.run_bash(script, env), seatdir

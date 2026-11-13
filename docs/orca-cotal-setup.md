@@ -80,6 +80,7 @@ An OpenCode seat's Orca tab closes when its launch fails: read the launcher's er
 | Symptom | Cause | Fix |
 |---|---|---|
 | Agents never see the proxy | `cotal up` gives its manager a fixed environment | the `mgr` service with `envRefs` (project-setup does it) |
+| A sandboxed OpenCode seat cannot reach the AI gateway behind the work proxy (`<name> exited on launch`, or the model never answers) | before 2026-11-13 the sandbox passed no proxy variables in and refused the proxy's private address; or the proxy's address changed after the seat launched; or the proxy URL was refused (the reason is in `seat-launch.log`) | the sandbox now passes the proxy in and opens exactly its address and port (`docs/orca.md`, "A proxy"): rerun project-setup to install it, give `HTTPS_PROXY` as `[http(s)://]host:port`, and relaunch the seat when the proxy's address changes |
 | A `cotal` call acts on another project's broker | no `-s`, so the space last chosen with `cotal use` is used | `-s <space>` on every call |
 | Cotal refuses to seed extensions | group-writable `~/.config` (Debian umask 002) | umask 022, `chmod g-w ~/.config ~/.config/cotal` |
 | Cotal refuses the bundled nats-server | writable `/usr/local` after a Node tarball install | `chown -R root:root /usr/local` |
