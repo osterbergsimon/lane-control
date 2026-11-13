@@ -30,6 +30,8 @@
 # Instance paths are not hardcoded here: private paths the test checks are SANDBOX_TEST_* in the playbook config.
 #
 # Changes (newest first):
+#   2026-11-13  an HTTP(S) proxy set at launch is passed in, and exactly its address and port are allowed out (a work site
+#               reaches its AI gateway only through one, usually on a private address); the key check uses it too
 #   2026-11-10  seats: a shell.nix that imports <nixpkgs> no longer stops every seat (Cotal passes no NIX_PATH: the flake
 #               registry's nixpkgs stands in); the launcher's errors are kept in the lane's seat-launch.log; the server
 #               password and the Cotal connection variables reach the sandbox from a file, not from bwrap's arguments
@@ -80,6 +82,9 @@
 #               port per line in ~/.config/lane-control/projects/<folder>-<hash>/sandbox-ports,
 #               keyed on the main checkout's full path (folder name plus the first 10 hex of sha256 of its real path). Ports only, closed
 #               by default; list only test or dev containers, never anything holding real data.
+#               An HTTP(S) proxy set at launch (HTTP_PROXY, HTTPS_PROXY, either case): exactly its address and port are allowed
+#               (one on host loopback is forwarded like the listed ports), its variables are passed in with NO_PROXY covering
+#               the lane's loopback; a hostname is resolved once, at launch. Nothing else opens; no proxy set, nothing changes.
 #   processes   own pid namespace (no /proc of other processes), own session, dies with its parent,
 #               one systemd scope (MemoryMax, no swap) around all of it
 # A Cotal seat (OPENCODE_SANDBOX_SEAT=1) is the same sandbox with exactly this added, because the model must work under
@@ -252,10 +257,72 @@ fi
 # file of its own (the bare key, rewritten at every launch so a rotated key applies).
 lanekey=$("$jq" -er --arg p "$prov" '(.[$p] // .["opencode-go"] // .opencode) | select(.type == "api") | .key | strings | select(length > 0)' "$auth" 2>/dev/null) \
   || die "$auth has no opencode-go api key ({\"opencode-go\":{\"type\":\"api\",\"key\":\"...\"}})"
+# --- the proxy: a site that reaches the provider only through an HTTP(S) proxy (HTTP_PROXY, HTTPS_PROXY, either case) ---
+# Set outside, it is passed in (both cases, NO_PROXY always covering the lane's own loopback), and exactly its address and
+# port are allowed out of the namespace; a proxy on host loopback is forwarded to the lane's loopback, as the broker is.
+# Nothing else opens: whatever the proxy itself lets through is the proxy's policy. A hostname is resolved here, once: a
+# proxy whose address changes needs a relaunch. A URL that is not [http(s)://]host:port stops the launch. No proxy set:
+# no rule, no port and no variable is added. Values are never printed (a URL could hold a password).
+p_http="" p_https="" p_no="" proxy_rules="" proxy_ports=""
+for v in HTTP HTTPS; do
+  u=${v}_PROXY l=${v,,}_proxy
+  [ -z "${!u:-}" ] || [ -z "${!l:-}" ] || [ "${!u}" = "${!l}" ] || die "$u and $l name different proxies (they disagree): set one"
+done
+p_http=${HTTP_PROXY:-${http_proxy:-}} p_https=${HTTPS_PROXY:-${https_proxy:-}}
+proxy_allow() { # $1 = the variable's name, $2 = a proxy URL: its address(es) and port into proxy_rules or proxy_ports
+  local u=$2 host port addrs a r v6=""
+  case $u in *[[:space:][:cntrl:]]*) die "$1: the proxy URL has a space or control character in it" ;; esac
+  case $u in *@*) die "$1: a proxy URL with credentials (user:password@) is not supported: they would be on bwrap's command line, readable by every local user" ;; esac
+  if [[ $u =~ ^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$ ]]; then
+    case ${BASH_REMATCH[1],,} in http|https) ;; *) die "$1: only http:// or https:// proxies are supported, not ${BASH_REMATCH[1]}://" ;; esac
+    u=${BASH_REMATCH[2]}
+  fi
+  u=${u%/}
+  if [[ $u =~ ^\[([0-9A-Fa-f:.]+)\]:([0-9]+)$ ]]; then host=${BASH_REMATCH[1]} port=${BASH_REMATCH[2]} v6=1
+    [[ $host == *:*:* ]] || die "$1: the proxy's [address] is not an IPv6 address"
+  elif [[ $u =~ ^([A-Za-z0-9][A-Za-z0-9.-]*):([0-9]+)$ ]]; then host=${BASH_REMATCH[1]} port=${BASH_REMATCH[2]}
+  else die "$1: the proxy URL is not [http(s)://]host:port (an explicit port, no path)"; fi
+  [[ $port =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -le 65535 ] || die "$1: the proxy's port $port is not 1-65535"
+  if [ -n "$v6" ]; then addrs=$host
+  elif [[ $host =~ ^[0-9.]+$ ]]; then
+    [[ $host =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] && [ "${BASH_REMATCH[1]}" -le 255 ] \
+      && [ "${BASH_REMATCH[2]}" -le 255 ] && [ "${BASH_REMATCH[3]}" -le 255 ] && [ "${BASH_REMATCH[4]}" -le 255 ] \
+      || die "$1: the proxy's address $host is not an IPv4 address"
+    addrs=$host
+  else
+    command -v getent >/dev/null || die "$1: no getent to resolve the proxy's host $host"
+    addrs=$(getent ahosts "$host" 2>/dev/null | awk '{ print $1 }' | sort -u) || addrs=""
+    [ -n "$addrs" ] || die "$1: cannot resolve the proxy's host $host"
+  fi
+  while IFS= read -r a; do
+    case $a in
+      0.*|::|0:0:0:0:0:0:0:0) die "$1: the proxy's address $a is not a proxy address" ;;
+      127.*|::1)  # host loopback: pasta forwards the one port, as it does the broker's
+        case ",$proxy_ports," in *",$port,"*) ;; *) proxy_ports=${proxy_ports:+$proxy_ports,}$port ;; esac
+        continue ;;
+      *:*) r="ip6 daddr $a tcp dport $port accept" ;;
+      *) r="ip daddr $a tcp dport $port accept" ;;
+    esac
+    case $'\n'"$proxy_rules"$'\n' in *$'\n'"$r"$'\n'*) ;; *) proxy_rules=${proxy_rules:+$proxy_rules$'\n'}$r ;; esac
+  done <<<"$addrs"
+}
+if [ -n "$p_http$p_https" ]; then
+  [ -z "$p_http" ] || proxy_allow HTTP_PROXY "$p_http"
+  [ -z "$p_https" ] || [ "$p_https" = "$p_http" ] || proxy_allow HTTPS_PROXY "$p_https"
+  case ${NO_PROXY:-}${no_proxy:-} in *[[:cntrl:]]*) die "NO_PROXY has a control character in it" ;; esac
+  IFS=, read -ra nps <<<"${NO_PROXY:-},${no_proxy:-},127.0.0.1,localhost,::1"
+  for e in "${nps[@]}"; do
+    e=${e#"${e%%[![:space:]]*}"}; e=${e%"${e##*[![:space:]]}"}
+    [ -n "$e" ] || continue
+    case ",$p_no," in *",$e,"*) ;; *) p_no=${p_no:+$p_no,}$e ;; esac
+  done
+fi
+
 keyurl=https://opencode.ai/zen/go/v1/models; [ "$prov" = opencode ] && keyurl=https://opencode.ai/zen/v1/models
+kx=(); [ -z "$p_https" ] || kx=(--proxy "$p_https" --noproxy "$p_no")  # the key check goes the way the lane will
 if [ "${OPENCODE_SANDBOX_CHECK_KEY:-1}" != 0 ]; then # a rejected key fails here, not as a device-login prompt or a fallback model
   code=$(printf 'header = "Authorization: Bearer %s"\n' "$lanekey" \
-    | "$curl" -sS -m 15 -o /dev/null -w '%{http_code}' -K - "$keyurl" 2>/dev/null || true)
+    | "$curl" -sS -m 15 -o /dev/null -w '%{http_code}' "${kx[@]}" -K - "$keyurl" 2>/dev/null || true)
   case $code in
     401|403) die "the provider rejected the lane key $auth (HTTP $code): replace it" ;;
     200) ;;
@@ -682,6 +749,12 @@ fi
 for v in TERM COLORTERM LANG LC_ALL LC_CTYPE LOCALE_ARCHIVE TZDIR TERMINFO TERMINFO_DIRS NIX_LD NIX_LD_LIBRARY_PATH; do
   [ -z "${!v:-}" ] || setenv "$v" "${!v}"
 done
+# the proxy (see "the proxy" above), in both cases so that every tool sees it; only when one is set
+if [ -n "$p_http$p_https" ]; then
+  [ -z "$p_http" ] || { setenv HTTP_PROXY "$p_http"; setenv http_proxy "$p_http"; }
+  [ -z "$p_https" ] || { setenv HTTPS_PROXY "$p_https"; setenv https_proxy "$p_https"; }
+  setenv NO_PROXY "$p_no"; setenv no_proxy "$p_no"
+fi
 
 # --- the machine-wide heavy-work gate ---
 # /run and the owner's config are absent inside: a lane left to itself would make private slots under its own default
@@ -780,11 +853,17 @@ unit="opencode-sandbox-$$-$(date +%s)"
 setsid -f bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 5; done; systemctl --user stop "$2.scope" 2>/dev/null
   [ -z "$3" ] || rm -rf -- "$3"' \
   _ "$$" "$unit" "$seatdir" </dev/null >/dev/null 2>&1
+# the network: a proxy on host loopback is one more forwarded port (once); then pasta's ports and the rule set
+for p in ${proxy_ports//,/ }; do
+  [ -z "$seat" ] || [ "$p" != "$sport" ] || die "the proxy's port $p on host loopback is this seat's server port"
+  case ",${seat:+$bport,}$extra_ports," in *",$p,"*) ;; *) extra_ports=${extra_ports:+$extra_ports,}$p ;; esac
+done
 net=(-t none -T "${extra_ports:-none}")
 [ -z "$seat" ] || net=(-t "127.0.0.1/$sport" -T "$bport${extra_ports:+,$extra_ports}")
 # outbound rules for the namespace; bwrap then runs without any capability, so the lane cannot change them
 { printf 'table inet lane_out {\nchain out {\ntype filter hook output priority 0; policy accept;\n'
   echo 'oifname "lo" accept'
+  [ -z "$proxy_rules" ] || printf '%s\n' "$proxy_rules"   # exactly the proxy's address and port, before every reject
   echo 'ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } reject'
   echo 'ip6 daddr { ::/128, fc00::/7, fe80::/10, ff00::/8 } reject'
   "$ipcmd" -o -4 addr show scope global | awk '{ sub(/\/.*/, "", $4); print "ip daddr " $4 " reject" }'

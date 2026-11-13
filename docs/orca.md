@@ -409,6 +409,18 @@ those are forwarded to the lane's loopback, the same way as the broker. It is cl
 address ranges, and a malformed entry stops the launch. List only test or dev containers, never anything holding real
 data. It applies to every sandbox lane of the project, Rove ones too.
 
+A proxy: a site that reaches its AI gateway only through an HTTP(S) proxy sets `HTTP_PROXY`/`HTTPS_PROXY` (either case)
+where the sandbox is launched; for seats they reach the manager through its `envRefs` and the seats through `spawn.env`
+(above). The sandbox then passes them in, in both cases, with `NO_PROXY`/`no_proxy` always covering `127.0.0.1`,
+`localhost` and `::1`, so the seat's calls to its own server never go to the proxy. Exactly the proxy's address and port
+are allowed out, ahead of the rules that refuse private ranges (a proxy at `proxy.example:3128` on a private address opens
+that address on port 3128, nothing else); a proxy on host loopback (`127.0.0.1:3128`, `localhost:3128`) is forwarded to
+the lane's loopback, the same way as the broker. What the proxy itself lets through is the proxy's policy. A hostname is
+resolved once, at launch: **a proxy whose address changes needs a relaunch** of the lane. The URL must be
+`[http(s)://]host:port` with an explicit port; anything else (no port, a path, a `socks5://` proxy, credentials in the URL,
+which would be on bwrap's command line, a host that does not resolve, upper and lower case naming different proxies) stops
+the launch. The launch-time key check goes through the same proxy. With no proxy set, nothing changes.
+
 The host's global addresses are refused from the list read at launch: an address the host gains later (a rotating public IPv6,
 a DHCP change on a public IPv4) is not refused for a long-lived seat. Limits: static-auth meshes with one broker on host
 loopback only; a user-auth mesh, a remote broker or a space that requires the event plane is refused. Marking
