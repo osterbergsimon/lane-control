@@ -298,7 +298,6 @@ proxy_allow() { # $1 = the variable's name, $2 = a proxy URL: its address(es) an
     case $a in
       0.*|::|0:0:0:0:0:0:0:0) die "$1: the proxy's address $a is not a proxy address" ;;
       127.*|::1)  # host loopback: pasta forwards the one port, as it does the broker's
-        [ -z "$seat" ] || [ "$port" != "$sport" ] || die "$1: the proxy's port $port on host loopback is this seat's server port"
         case ",$proxy_ports," in *",$port,"*) ;; *) proxy_ports=${proxy_ports:+$proxy_ports,}$port ;; esac
         continue ;;
       *:*) r="ip6 daddr $a tcp dport $port accept" ;;
@@ -856,6 +855,7 @@ setsid -f bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 5; done; systemctl -
   _ "$$" "$unit" "$seatdir" </dev/null >/dev/null 2>&1
 # the network: a proxy on host loopback is one more forwarded port (once); then pasta's ports and the rule set
 for p in ${proxy_ports//,/ }; do
+  [ -z "$seat" ] || [ "$p" != "$sport" ] || die "the proxy's port $p on host loopback is this seat's server port"
   case ",${seat:+$bport,}$extra_ports," in *",$p,"*) ;; *) extra_ports=${extra_ports:+$extra_ports,}$p ;; esac
 done
 net=(-t none -T "${extra_ports:-none}")

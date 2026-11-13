@@ -83,8 +83,9 @@ class SandboxProxy(unittest.TestCase):
         return subprocess.run(["bash", "-c", "set -euo pipefail\n" + DIE + script], env=dict(self.env, **env),
                               capture_output=True, text=True, timeout=TIMEOUT)
 
-    def proxy(self, seat="", sport="", **env):
-        return self.run_bash(f"seat={seat} sport={sport}\n" + block(*PROXY_BLOCK) + SHOW, **env)
+    def proxy(self, seat="", **env):
+        # as in the script: the proxy block runs before the seat block sets sport and bport
+        return self.run_bash(f"seat={seat}\n" + block(*PROXY_BLOCK) + SHOW, **env)
 
     def fields(self, r):
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -93,19 +94,22 @@ class SandboxProxy(unittest.TestCase):
         out["rules"] = rules.rsplit(">\n", 1)[0]
         return out
 
-    def network(self, seat="", extra_ports="", **env):
+    def network(self, seat="", extra_ports="", expect_rc=0, **env):
         """The proxy block, then the network block: pasta's port options and the nft rule set."""
-        script = f"seat={seat} sport=4100 bport=4222 extra_ports={extra_ports} lane={self.lane} ipcmd=ip\n"
-        script += block(*PROXY_BLOCK)
+        script = f"seat={seat}\n" + block(*PROXY_BLOCK)
+        # then, in script order, the seat block's ports and the project's listed ports
+        script += f"sport=4100 bport=4222 extra_ports={extra_ports} lane={self.lane} ipcmd=ip\n"
         script += block("# the network: ", "systemd-run --user --scope")
         script += 'printf "net=%s\\n" "${net[*]}"\n'
         r = self.run_bash(script, **env)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, expect_rc, r.stderr)
+        if expect_rc:
+            return r
         return r.stdout.strip(), (self.lane / "net.nft").read_text()
 
     def env_args(self, **env):
         """The environment allow-list block of a Rove lane: bwrap's --setenv arguments, one per line."""
-        script = f"seat= sport=\n" + block(*PROXY_BLOCK)
+        script = "seat=\n" + block(*PROXY_BLOCK)
         script += f"args=()\nro() {{ :; }}\nrw() {{ :; }}\ntask= lane={self.lane} oc=/x/bin/opencode devenv= work={self.dir}\n"
         script += block("# environment: an allow-list", "# --- the machine-wide heavy-work gate")
         script += 'printf "%s\\n" "${args[@]}"\n'
@@ -194,9 +198,15 @@ class SandboxProxy(unittest.TestCase):
         self.assertEqual(net, "net=-t 127.0.0.1/4100 -T 4222,3128")
 
     def test_a_loopback_proxy_on_the_seat_s_server_port_is_refused(self):
-        r = self.proxy(seat="1", sport="4100", HTTPS_PROXY="http://127.0.0.1:4100")
-        self.assertEqual(r.returncode, 2)
+        r = self.network(seat="1", expect_rc=2, HTTPS_PROXY="http://127.0.0.1:4100")
         self.assertIn("server port", r.stderr)
+        self.assertFalse((self.lane / "net.nft").exists())
+
+    def test_a_seat_with_a_loopback_proxy_gets_through_the_proxy_block_before_sport_is_set(self):
+        # review 1: the block read $sport before the seat block sets it, and set -u killed every such seat
+        for proxy in ("http://127.0.0.1:3128", "http://localhost:3128"):
+            f = self.fields(self.proxy(seat="1", HTTPS_PROXY=proxy))
+            self.assertEqual(f["ports"], "3128")
 
     # --- a bad proxy fails the launch and opens nothing ---
 
@@ -231,7 +241,7 @@ class SandboxProxy(unittest.TestCase):
     # --- the key check goes through the proxy ---
 
     def key_check(self, **env):
-        script = f"seat= sport=\n" + block(*PROXY_BLOCK)
+        script = "seat=\n" + block(*PROXY_BLOCK)
         script += f"curl={self.stubs}/curl lanekey=k auth=/x/auth.json prov=opencode-go\n"
         script += block("keyurl=", 'mkdir -p "$lane"/{oc')
         r = self.run_bash(script, **env)
