@@ -12,6 +12,11 @@
 
 # --- Opening another lane (lane-room). Looser than the gate: idle agents cost little. ---
 # LANE_ROOM_MIN_MEM_GB=8     # hold a new lane under this much available memory. Default: memory GB/8, at least 2.
-# LANE_ROOM_MAX_LOAD=18      # hold a new lane over this 5-minute load. Default: 1.5 times the cores.
+# LANE_ROOM_MAX_LOAD=18      # hold a new lane over this many runnable tasks (CPU contention: threads waiting for or
+#                            # using a core, not the load average; SCHED_IDLE and nice-19 tasks are left out, so
+#                            # idle-priority CI does not count). Default: 1.5 times the cores. Name kept from when
+#                            # this was the 5-minute load.
+# LANE_ROOM_SAMPLES=5        # runnable tasks are counted this many times and averaged.
+# LANE_ROOM_SAMPLE_SECS=1    # seconds between the counts (decimals allowed; 0 for none).
 # LANE_ROOM_MAX_AGENTS=12    # hold a new lane at this many lane agents. Default: cores, or memory GB/2 if that is
 #                            # lower; at least 2.

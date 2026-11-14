@@ -2,11 +2,22 @@
 # lane-room: is there room on this machine to open another lane? Run it before opening one; on a non-zero exit hold
 # the lane and tell the owner.
 #
-#   lane-room       Prints available memory, load against cores, the lane agents running, and a verdict line.
+#   lane-room       Prints available memory, CPU contention against cores, the lane agents running, and a verdict line.
 #
-# Too busy when: available memory is under LANE_ROOM_MIN_MEM_GB, the 5-minute load is over LANE_ROOM_MAX_LOAD (a short
-# burst should not hold a lane), or LANE_ROOM_MAX_AGENTS lane agents are running. Idle agents cost little, so this
-# limit is looser than the heavy-work gate (lane-heavy).
+# Too busy when: available memory is under LANE_ROOM_MIN_MEM_GB, CPU contention is over LANE_ROOM_MAX_LOAD, or
+# LANE_ROOM_MAX_AGENTS lane agents are running. Idle agents cost little, so this limit is looser than the heavy-work
+# gate (lane-heavy).
+#
+# CPU contention is the number of runnable tasks (threads in state R, from <pid>/task/<tid>/stat), counted
+# LANE_ROOM_SAMPLES times LANE_ROOM_SAMPLE_SECS apart and averaged, so one instant does not decide. Left out: tasks
+# under SCHED_IDLE (policy 5) and at nice 19; they only run when nothing else wants the core. Idle-priority CI does
+# that, and it must not hold a lane. Nice-17 tasks (the Claude sessions) are counted. Not the 5-minute load average
+# (it counts uninterruptible I/O waits and lags a burst by minutes) and not /proc/pressure/cpu (a stalled idle-priority
+# task raises that as well). The name LANE_ROOM_MAX_LOAD is kept from the load-average rule.
+#
+# The contention check is host-only: it reads the tasks in $LANE_PROC_DIR, so inside the OpenCode sandbox (its own
+# /proc) it sees only the sandbox's tasks and reads near 0. Run lane-room on the host.
+# lane-heavy runs its jobs at nice 19, so lane builds are left out here too; the lane-heavy slots limit those.
 #
 # Lane agents are the Cotal agents of role lane or reviewer run by this user, counted once each however many processes
 # they have, from process environments. Only those two variables are read; nothing else in an environment is kept.
@@ -18,11 +29,39 @@ self=$(readlink -f "$0")
 . "${self%/*}/lane-limits.sh"
 
 avail_mb=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' "$LANE_PROC_DIR/meminfo" 2>/dev/null)
-read -r load1 load5 load15 _ 2>/dev/null <"$LANE_PROC_DIR/loadavg"
-if [ -z "$avail_mb" ] || [ -z "${load5:-}" ]; then
-  echo "lane-room: cannot read memory or load from $LANE_PROC_DIR; hold the lane" >&2
+
+# One sample, in one pass: "runnable idle nice19 seen" counts. sed reads every stat file (a thread that exits meanwhile
+# is an error on stderr, dropped, and the rest are still read; -s adds the newline a cut-off file lacks); awk counts.
+sample() {
+  local me=$BASHPID      # not inline below: there $BASHPID would be the awk process itself
+  sed -s -n p "$LANE_PROC_DIR"/[0-9]*/task/[0-9]*/stat 2>/dev/null | awk -v me="$me" '
+    {
+      # comm (field 2) may hold spaces and parentheses: everything up to the last ")" is the pid and comm.
+      rest = $0
+      sub(/^.*\)/, "", rest)
+      if (split(rest, f, " ") < 39) next      # cut off mid-write; policy is field 41, the 39th after comm
+      seen = 1
+      if (f[2] == me) next                    # our own sed and awk (children of this subshell) are not load
+      if (f[1] != "R") next
+      if (f[39] == 5) idle++
+      else if (f[17] == 19) nice19++
+      else runnable++
+    }
+    END { print runnable + 0, idle + 0, nice19 + 0, seen + 0 }'
+}
+
+sum_run=0 sum_idle=0 sum_nice=0 any=0
+for ((i = 0; i < LANE_ROOM_SAMPLES; i++)); do
+  [ "$i" -eq 0 ] || sleep "$LANE_ROOM_SAMPLE_SECS"
+  read -r r n d s < <(sample)
+  sum_run=$((sum_run + r)) sum_idle=$((sum_idle + n)) sum_nice=$((sum_nice + d)) any=$((any + s))
+done
+if [ -z "$avail_mb" ] || [ "$any" -eq 0 ]; then
+  echo "lane-room: cannot read memory or tasks from $LANE_PROC_DIR; hold the lane" >&2
   exit 2
 fi
+avg() { awk -v t="$1" -v n="$LANE_ROOM_SAMPLES" 'BEGIN { printf "%.1f", t / n }'; }
+contention=$(avg "$sum_run")
 
 declare -A lane_agents=()
 for environ in "$LANE_PROC_DIR"/[0-9]*/environ; do
@@ -41,12 +80,12 @@ agents=${#lane_agents[@]}
 
 avail_gb=$(awk -v m="$avail_mb" 'BEGIN { printf "%.1f", m / 1024 }')
 echo "memory  ${avail_gb}G available of ${LANE_MEM_GB}G (hold under ${LANE_ROOM_MIN_MEM_GB}G)"
-echo "load    $load5 over 5 min on $LANE_CORES cores (hold over $LANE_ROOM_MAX_LOAD); 1 min $load1, 15 min $load15"
+echo "load    $contention runnable tasks on $LANE_CORES cores (hold over $LANE_ROOM_MAX_LOAD); average of $LANE_ROOM_SAMPLES samples $LANE_ROOM_SAMPLE_SECS s apart; left out $(avg "$sum_idle") SCHED_IDLE, $(avg "$sum_nice") nice 19"
 echo "lanes   $agents lane agents running (hold at $LANE_ROOM_MAX_AGENTS)"
 
 busy=
 [ "$avail_mb" -ge $((LANE_ROOM_MIN_MEM_GB * 1024)) ] || busy="$busy; memory ${avail_gb}G"
-awk -v l="$load5" -v m="$LANE_ROOM_MAX_LOAD" 'BEGIN { exit !(l <= m) }' || busy="$busy; load $load5"
+awk -v l="$contention" -v m="$LANE_ROOM_MAX_LOAD" 'BEGIN { exit !(l <= m) }' || busy="$busy; load $contention runnable"
 [ "$agents" -lt "$LANE_ROOM_MAX_AGENTS" ] || busy="$busy; $agents lane agents"
 
 if [ -n "$busy" ]; then
