@@ -15,6 +15,10 @@
 # (it counts uninterruptible I/O waits and lags a burst by minutes) and not /proc/pressure/cpu (a stalled idle-priority
 # task raises that as well). The name LANE_ROOM_MAX_LOAD is kept from the load-average rule.
 #
+# The contention check is host-only: it reads the tasks in $LANE_PROC_DIR, so inside the OpenCode sandbox (its own
+# /proc) it sees only the sandbox's tasks and reads near 0. Run lane-room on the host.
+# lane-heavy runs its jobs at nice 19, so lane builds are left out here too; the lane-heavy slots limit those.
+#
 # Lane agents are the Cotal agents of role lane or reviewer run by this user, counted once each however many processes
 # they have, from process environments. Only those two variables are read; nothing else in an environment is kept.
 #
