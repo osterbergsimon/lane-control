@@ -26,24 +26,24 @@ self=$(readlink -f "$0")
 
 avail_mb=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' "$LANE_PROC_DIR/meminfo" 2>/dev/null)
 
-# One sample: "runnable idle nice19" counts. A thread that exits while we read it is skipped, never an error.
+# One sample, in one pass: "runnable idle nice19 seen" counts. sed reads every stat file (a thread that exits meanwhile
+# is an error on stderr, dropped, and the rest are still read; -s adds the newline a cut-off file lacks); awk counts.
 sample() {
-  local stat line rest runnable=0 idle=0 nice19=0 seen=0 f
-  for stat in "$LANE_PROC_DIR"/[0-9]*/task/[0-9]*/stat; do
-    line=
-    { IFS= read -r line <"$stat"; } 2>/dev/null || [ -n "$line" ] || continue   # the braces catch the open error too
-    # comm (field 2) may hold spaces and parentheses: everything up to the last ')' is the pid and comm.
-    case $line in *')'*) ;; *) continue ;; esac
-    rest=${line##*)}
-    read -ra f <<<"$rest"
-    [ "${#f[@]}" -ge 39 ] || continue      # cut off mid-write; policy is field 41, 39th after comm
-    seen=1
-    [ "${f[0]}" = R ] || continue
-    if [ "${f[38]}" = 5 ]; then idle=$((idle + 1))
-    elif [ "${f[16]}" = 19 ]; then nice19=$((nice19 + 1))
-    else runnable=$((runnable + 1)); fi
-  done
-  echo "$runnable $idle $nice19 $seen"
+  local me=$BASHPID      # not inline below: there $BASHPID would be the awk process itself
+  sed -s -n p "$LANE_PROC_DIR"/[0-9]*/task/[0-9]*/stat 2>/dev/null | awk -v me="$me" '
+    {
+      # comm (field 2) may hold spaces and parentheses: everything up to the last ")" is the pid and comm.
+      rest = $0
+      sub(/^.*\)/, "", rest)
+      if (split(rest, f, " ") < 39) next      # cut off mid-write; policy is field 41, the 39th after comm
+      seen = 1
+      if (f[2] == me) next                    # our own sed and awk (children of this subshell) are not load
+      if (f[1] != "R") next
+      if (f[39] == 5) idle++
+      else if (f[17] == 19) nice19++
+      else runnable++
+    }
+    END { print runnable + 0, idle + 0, nice19 + 0, seen + 0 }'
 }
 
 sum_run=0 sum_idle=0 sum_nice=0 any=0

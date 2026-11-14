@@ -82,10 +82,10 @@ class Machine(unittest.TestCase):
     def set_proc(self, avail_gb):
         (self.proc / "meminfo").write_text(f"MemTotal: {64 * 1048576} kB\nMemAvailable: {avail_gb * 1048576} kB\n")
 
-    def task(self, pid, comm, state="R", nice=0, policy=0, tid=None):
+    def task(self, pid, comm, state="R", nice=0, policy=0, tid=None, ppid=0):
         """A thread's stat file as the kernel writes it: 52 fields, comm in parentheses, nice 19th, policy 41st."""
         f = ["0"] * 53
-        f[1], f[2], f[3], f[19], f[41] = str(pid), f"({comm})", state, str(nice), str(policy)
+        f[1], f[2], f[3], f[4], f[19], f[41] = str(pid), f"({comm})", state, str(ppid), str(nice), str(policy)
         d = self.proc / str(pid) / "task" / str(tid or pid)
         d.mkdir(parents=True, exist_ok=True)
         (d / "stat").write_text(" ".join(f[1:]) + "\n")
@@ -450,6 +450,17 @@ class RoomTests(Machine):
         r = self.room()
         self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
         self.assertIn("1.0 runnable", r.stdout)
+
+    def test_lane_room_does_not_count_its_own_reader(self):
+        # The reader (sed) is a runnable child of the sampling subshell. A stub sed rewrites a task as that child
+        # just before reading, so the count is 1 (the other task) only if lane-room skips its own children.
+        self.task(9100, "sed", "R", ppid=1)
+        stat = self.proc / "9100" / "task" / "9100" / "stat"
+        line = stat.read_text().split()
+        line[3] = "$PPID"
+        self.stub("sed", f'#!/usr/bin/env sh\necho "{" ".join(line)}" > "{stat}"\nexec {shutil.which("sed")} "$@"\n')
+        self.task(9101, "other", "R")
+        self.assertIn("1.0 runnable", self.room().stdout)
 
     def test_samples_are_averaged(self):
         a, b = self.task(8000, "a", "R", nice=17), self.task(8001, "b", "R", nice=17)
