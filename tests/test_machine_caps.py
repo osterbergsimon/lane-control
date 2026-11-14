@@ -61,7 +61,8 @@ class Machine(unittest.TestCase):
         self.stubs = self.dir / "stubs"
         self.proc.mkdir()
         self.stubs.mkdir()
-        self.set_proc(avail_gb=40, load5=2)
+        self.set_proc(avail_gb=40)
+        self.task(900, "init", "S")   # a readable /proc always has tasks; an empty one is "cannot read"
         (self.proc / "vmstat").write_text("oom_kill 5\n")
         self.limits = self.dir / "limits.sh"
         self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_HEAVY_POLL_SECS=0.05)
@@ -78,17 +79,27 @@ class Machine(unittest.TestCase):
         path.write_text(body)
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
-    def set_proc(self, avail_gb, load5):
+    def set_proc(self, avail_gb):
         (self.proc / "meminfo").write_text(f"MemTotal: {64 * 1048576} kB\nMemAvailable: {avail_gb * 1048576} kB\n")
-        (self.proc / "loadavg").write_text(f"1.00 {load5}.00 3.00 1/100 200\n")
+
+    def task(self, pid, comm, state="R", nice=0, policy=0, tid=None):
+        """A thread's stat file as the kernel writes it: 52 fields, comm in parentheses, nice 19th, policy 41st."""
+        f = ["0"] * 53
+        f[1], f[2], f[3], f[19], f[41] = str(pid), f"({comm})", state, str(nice), str(policy)
+        d = self.proc / str(pid) / "task" / str(tid or pid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "stat").write_text(" ".join(f[1:]) + "\n")
+        return d / "stat"
 
     def write_limits(self, **settings):
+        # lane-room samples three times, instantly, unless a test asks otherwise.
+        settings = {"LANE_ROOM_SAMPLES": 3, "LANE_ROOM_SAMPLE_SECS": 0, **settings}
         self.limits.write_text("".join(f"{k}={v}\n" for k, v in settings.items()))
 
     def limits_seen(self, cores=12, mem_gb=64):
         self.stub("nproc", f"#!/usr/bin/env sh\necho {cores}\n")
         (self.proc / "meminfo").write_text(f"MemTotal: {mem_gb * 1048576} kB\nMemAvailable: 1048576 kB\n")
-        names = "LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD LANE_ROOM_MAX_AGENTS".split()
+        names = "LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD LANE_ROOM_MAX_AGENTS LANE_ROOM_SAMPLES".split()
         show = "; ".join(f'echo "{n}=${n}"' for n in names)
         r = subprocess.run(["bash", "-c", f". {LIMITS}; {show}"], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -372,18 +383,83 @@ class RoomTests(Machine):
         self.assertIn("40.0G available of 64G", r.stdout)
         self.assertIn("on 12 cores", r.stdout)
         self.assertIn("0 lane agents", r.stdout)
+        self.assertIn("0.0 runnable", r.stdout)
 
     def test_too_little_memory(self):
-        self.set_proc(avail_gb=3, load5=2)
+        self.set_proc(avail_gb=3)
         r = self.room()
         self.assertEqual(r.returncode, 1)
         self.assertIn("TOO BUSY: memory 3.0G", r.stdout)
 
-    def test_too_much_load(self):
-        self.set_proc(avail_gb=40, load5=23)
+    def test_idle_priority_work_does_not_hold_a_lane(self):
+        # 30 build threads under SCHED_IDLE and 30 at nice 19: a load average of 60, but nothing is held up.
+        for i in range(30):
+            self.task(1000 + i, "cc1plus", "R", nice=0, policy=5)
+            self.task(2000 + i, "rustc", "R", nice=19)
+        r = self.room()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("0.0 runnable", r.stdout)
+        self.assertIn("left out 30.0 SCHED_IDLE, 30.0 nice 19", r.stdout)
+        self.assertIn("room for another lane", r.stdout)
+
+    def test_runnable_sessions_at_nice_17_hold_a_lane(self):
+        for i in range(20):
+            self.task(3000 + i, "claude", "R", nice=17)
+        r = self.room()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("20.0 runnable", r.stdout)
+        self.assertIn("3 samples", r.stdout)
+        self.assertIn("TOO BUSY: load 20.0 runnable", r.stdout)
+
+    def test_only_runnable_threads_count_and_every_thread_counts(self):
+        for i in range(30):
+            self.task(4000 + i, "idle-sleeper", "S")
+            self.task(4100 + i, "disk-wait", "D")
+        self.task(5000, "threaded", "R")
+        for tid in (5001, 5002):
+            self.task(5000, "threaded", "R", tid=tid)
+        self.assertIn("3.0 runnable", self.room().stdout)
+
+    def test_the_limit_is_the_setting(self):
+        for i in range(5):
+            self.task(3000 + i, "claude", "R", nice=17)
+        self.assertEqual(self.room().returncode, 0)
+        self.write_limits(LANE_ROOM_MAX_LOAD=4)
         r = self.room()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("load 23.00", r.stdout)
+        self.assertIn("hold over 4", r.stdout)
+
+    def test_a_comm_with_spaces_and_parentheses_is_parsed(self):
+        self.task(6000, "Web Content) R 0 (x", "S", nice=0, policy=0)
+        self.task(6001, "a) b (c) 5", "R", nice=19)        # a nice-19 runnable task, however its name looks
+        self.task(6002, ") 5 19 (", "R", nice=17)          # counted
+        out = self.room().stdout
+        self.assertIn("1.0 runnable", out)
+        self.assertIn("1.0 nice 19", out)
+
+    def test_a_task_that_vanishes_is_skipped(self):
+        self.task(7000, "gone", "R", nice=17)
+        self.task(7001, "here", "R", nice=17)
+        (self.proc / "7002" / "task" / "7002").mkdir(parents=True)        # thread with no stat
+        (self.proc / "7003" / "task").mkdir(parents=True)                 # process with no threads
+        self.task(7004, "half", "R").write_text("7004 (half")             # cut off mid-write
+        self.task(7005, "empty", "R").write_text("")
+        (self.proc / "7006").mkdir()
+        (self.proc / "7006" / "task").write_text("a file, not a directory\n")
+        shutil.rmtree(self.proc / "7000")
+        r = self.room()
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        self.assertIn("1.0 runnable", r.stdout)
+
+    def test_samples_are_averaged(self):
+        a, b = self.task(8000, "a", "R", nice=17), self.task(8001, "b", "R", nice=17)
+        self.write_limits(LANE_ROOM_SAMPLES=3, LANE_ROOM_SAMPLE_SECS=0.5)
+        self.stub("sleep", f'#!/usr/bin/env sh\necho "$1" >> "$STUB_DIR/sleep.log"\n'
+                           f'sed "s/ R / S /" {b} > {b}.new && mv {b}.new {b}\n')
+        r = self.room()
+        self.assertIn("1.3 runnable", r.stdout)                  # 2, 1, 1
+        self.assertIn("3 samples 0.5 s apart", r.stdout)
+        self.assertEqual((self.stubs / "sleep.log").read_text().split(), ["0.5", "0.5"])
 
     def test_agents_are_counted_once_and_only_lane_work(self):
         for pid, uid in ((1, "a"), (2, "a"), (3, "b")):
@@ -404,8 +480,13 @@ class RoomTests(Machine):
         self.assertIn("2 lane agents", r.stdout.splitlines()[-1])
 
     def test_unreadable_machine_state_holds_the_lane(self):
-        (self.proc / "loadavg").unlink()
+        (self.proc / "meminfo").unlink()
         self.assertEqual(self.room().returncode, 2)
+        self.set_proc(avail_gb=40)
+        shutil.rmtree(self.proc / "900")                 # no task to read at all
+        r = self.room()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot read", r.stderr)
 
     def test_room_is_looser_than_the_gate(self):
         out = self.limits_seen()
@@ -417,7 +498,7 @@ class LimitsTests(Machine):
         self.limits.unlink()
         self.assertEqual(self.limits_seen(12, 64), {"LANE_HEAVY_SLOTS": 2, "LANE_HEAVY_MEM_GB": 24,
                                                     "LANE_ROOM_MIN_MEM_GB": 8, "LANE_ROOM_MAX_LOAD": 18,
-                                                    "LANE_ROOM_MAX_AGENTS": 12})
+                                                    "LANE_ROOM_MAX_AGENTS": 12, "LANE_ROOM_SAMPLES": 5})
         small = self.limits_seen(2, 4)
         self.assertEqual(small["LANE_HEAVY_SLOTS"], 1)
         self.assertGreaterEqual(small["LANE_HEAVY_MEM_GB"], 1)
@@ -456,7 +537,7 @@ class LimitsTests(Machine):
 class ContentTests(unittest.TestCase):
     def test_every_setting_is_documented(self):
         names = set(re.findall(r"^(LANE_(?:HEAVY|ROOM)_[A-Z_]+)=", LIMITS.read_text(), re.M))
-        self.assertEqual(len(names), 6)
+        self.assertEqual(len(names), 8)
         example = EXAMPLE.read_text()
         for name in names:
             self.assertIn(f"# {name}=", example)

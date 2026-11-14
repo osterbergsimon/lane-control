@@ -773,7 +773,7 @@ if [ -x "$tools/lane-heavy" ] && [ -x "$tools/lane-room" ] && [ -r "$tools/lane-
       { [ ! -L "$f" ] && { [ ! -e "$f" ] || [ -f "$f" ]; } && : >>"$f"; } 2>/dev/null || exit 0
     done
     for v in LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_HEAVY_POLL_SECS LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD \
-             LANE_ROOM_MAX_AGENTS; do
+             LANE_ROOM_MAX_AGENTS LANE_ROOM_SAMPLES LANE_ROOM_SAMPLE_SECS; do
       printf '%s=%s\n' "$v" "${!v}"
     done >"$lane/limits.sh"
     printf '%s %s' "$LANE_HEAVY_SLOTS" "$LANE_STATE_DIR") || slots=
