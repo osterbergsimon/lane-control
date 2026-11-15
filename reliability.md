@@ -117,12 +117,12 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 
 ## 23. First sandboxed-lane rollout
 - **Failures:** the documented launch form broke on Rove's appended brief (needs `--auto --prompt`); the engine's new-session flag froze the TUI size; an explicit branch override lost to the caller's task env; files outside the worktree (worker rules, symlinked skills) vanished inside; no `bd`, no CI read, no host loopback; the header said no key was needed.
-- **Fixes:** launch form and conventions in `model-routing.md` (sandboxed swift lanes); the flag gated; a read-only CI-checks relay; an explicit branch wins; `issues.md` says sandboxed lanes file through the coordinator. Positive: auto-approve inside the sandbox ended permission-prompt stalls (an unsandboxed lane had sat 8 h on a prompt).
-- **Rollout rule:** supervised first lane per project; the test suite (`scripts/test-opencode-sandbox.sh`) from a scratch worktree after every sandbox change.
+- **Fixes (removed with the sandbox, below):** a launch form and conventions for sandboxed lanes; the flag gated; a read-only CI-checks relay; an explicit branch wins; sandboxed lanes filed through the coordinator. Positive: auto-approve inside the sandbox ended permission-prompt stalls (an unsandboxed lane had sat 8 h on a prompt).
+- Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at 807d944).
 
 ## 24. A crash-looping tool inside a lane floods the host with core dumps
 - **Failure:** a browser binary downloaded inside a lane crashed in a loop; the host's core-dump handler tried to process every dump and overloaded the machine.
-- **Fix:** the sandbox sets `RLIMIT_CORE` to 0, soft and hard, inherited by everything inside (a lane cannot raise it). Do the same for any unattended workload that can run untrusted or flaky binaries.
+- **Fix:** set `RLIMIT_CORE` to 0, soft and hard, for any unattended workload that can run untrusted or flaky binaries (the removed OpenCode sandbox did this for its lanes).
 
 ## 25. opencode 2.x keeps credentials in its own database
 - **Failure:** after an upgrade, lanes were logged out: a 2.x data directory never imports `auth.json` (that happens only when migrating an old database), so a lane with a fresh per-lane data dir had no key.
@@ -130,7 +130,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 
 ## 26. A git credential prompt can pop up on the owner's desktop
 - **Failure:** a relay running `git`/`gh` outside any terminal fell back to an askpass program when a credential was missing, opening a window on the owner's desktop.
-- **Fix:** every script that runs git or gh unattended sets `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` and `SSH_ASKPASS` to `false`, `GCM_INTERACTIVE=never`, `GH_PROMPT_DISABLED=1`: a missing credential then fails fast with an error. The sandbox test proves no askpass runs.
+- **Fix:** every script that runs git or gh unattended sets `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` and `SSH_ASKPASS` to `false`, `GCM_INTERACTIVE=never`, `GH_PROMPT_DISABLED=1`: a missing credential then fails fast with an error.
 
 ## 27. The NixOS GitHub runner module needs four changes for container CI jobs
 - **Failure:** on a dedicated NixOS runner box (`services.github-runners`), container jobs failed in turn: "Could not find a part of the path '/proc/1/cgroup'" (ProtectProc=invisible); no Docker group access (PrivateUsers=yes); "No space left on device" in `uv sync` (the default work dir is a small RAM-backed runtime dir); and an ephemeral runner that could not re-register after its first job (registration tokens expire after an hour).
@@ -139,5 +139,4 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 ## 28. Cloud sessions launched from a dirty checkout
 - **Failure:** `claude --cloud` from a checkout with uncommitted changes, or not on a pushed branch, uploads the local dirty tree and attaches no GitHub source: no origin remote, pushes and API writes refused; sources attach only at creation. Private local edits can leave the machine this way.
 - **Fix:** launch only from a clean detached worktree at origin/<base> with nothing private in it; brief step 1 = push the branch and open a draft PR, else stop. Rescue: have the session print `git format-patch --stdout origin/<base>..HEAD`, then teleport (`claude --teleport <id>`) from a clean worktree and extract the patch; teleport takes the session over, so only after the patch is printed. The Agent tool's isolation="remote" may silently run a local subagent.
-- **Sandboxed lanes outlived their terminals:** when a tab closed or Rove restarted, the launcher died of SIGHUP, but the sandbox's network helper ignores it, so the lane's systemd scope lived on with no terminal: idle, about 0.5 GB each, 14 of them after two restarts. Fix: the launcher names the scope and starts a watchdog in its own session that stops the scope once the launcher is gone. Lanes started before the fix still leak; stop their scopes by hand (`systemctl --user list-units 'run-p*'`, no tty and no CPU).
-- **Archive does not stop a lane:** Rove's `archive` only hides the task; its engine (and a sandboxed lane's scope) keeps running and holding memory. Close-out order: `tab-close` (ends the PTY), then `archive`.
+- **Archive does not stop a lane:** Rove's `archive` only hides the task; its engine keeps running and holding memory. Close-out order: `tab-close` (ends the PTY), then `archive`.

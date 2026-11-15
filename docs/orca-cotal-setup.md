@@ -20,7 +20,7 @@ from its bundled docs (`cotal_docs`), not from memory.
                                               │                  as Orca tabs, mints and renews their credentials   │
                                               │   seats          coordinator, design lead, lanes, reviewers         │
                                               │                  (Claude via the Cotal plugin, OpenCode via         │
-                                              │                   opencode-seat and the sandbox)                    │
+                                              │                   its Cotal plugin)                                 │
                                               │ per machine:                                                       │
                                               │   space `machine`: machine coordinator                              │
                                               │   lane-control-window-guard.service (systemd user unit)             │
@@ -40,7 +40,6 @@ from its bundled docs (`cotal_docs`), not from memory.
 | Claude plugin and wake channel | Cotal's Claude Code plugin: it gives a managed session its mesh tools and wakes an idle session on a message (Claude "channels") | `~/.cotal/claude-plugin/` | `cotal setup -H claude ... --configure-only` (project-setup step 4) |
 | settings store, tier table | per-project choices and `lanes.tsv`, outside the repo | `~/.config/lane-control/projects/<folder>-<hash>/` | project-setup (`--show` prints it) |
 | skills | `orca-cli` and `orca-cotal-lanes`, user level, because a lane worktree carries only committed files | `~/.agents/skills/`, linked into Claude and OpenCode | project-setup step 3 |
-| `opencode-seat`, sandbox | the `opencode` that the manager runs: a hosted model goes into `scripts/opencode-sandbox.sh`, anything else is refused unless marked the owner's own | `~/.agents/bin/cotal-opencode/opencode`, first on mgr's PATH | project-setup |
 | window guard | budget orders and the low-memory notice by `cotal send`; spends no tokens | systemd user unit `lane-control-window-guard.service` | `scripts/window-guard-install` |
 | machine coordinator | one agent per machine in the space `machine` | `~/code/machine-coordinator` | `scripts/machine-coordinator-setup` |
 | `project-pause` | `rest`/`wake` (a guard marker only), `stop`/`start` (also the coordinator and design lead) | marker next to the guard's state file | the owner or a coordinator |
@@ -52,7 +51,7 @@ Nothing is ever typed into a composer. Orca plays no part in delivery: it only h
 
 How a lane starts: the coordinator runs `orca worktree create --parent-worktree active`, waits for `orca-setup-done`,
 then calls `cotal_spawn`. The manager asks orcad for a tab in that worktree and starts `claude` (with the plugin) or
-`opencode` (that is, `opencode-seat`) there, with a fresh credential. The seat joins the roster, and the lane reports
+`opencode` there, with a fresh credential. The seat joins the roster, and the lane reports
 by `cotal_dm`.
 
 ## 2. Bring-up on a fresh machine, with a check after each step
@@ -63,24 +62,21 @@ Run as the agent user, never root. Pass `-s <space>` to every `cotal` call (`doc
 | 1 | Orca on the workstation; connect the host (`docs/orca.md` §2-3), or `scripts/orca-host-install <user@host> --pair` for a host without downloads | `orca status --json` on the host (`orca-ide` on a NixOS workstation) | `result.runtime.reachable: true`, `state: "ready"` |
 | 2 | `npm i -g cotal-ai` and the harnesses; `cotal telemetry off`; `cotal ext add @cotal-ai/orca`; `~/.config/cotal/config.json` with `spawn.env` naming the proxy variables and `TMPDIR` (names only, no values) | `cotal --version`; `cotal ext list` | `cotal-ai 0.145.1` and an `orca` line |
 | 3 | Sign in to Claude once (`claude`); for bypass mode, accept its warning once | `claude --version` | a version and no login prompt |
-| 4 | Only for hosted OpenCode tiers: `~/.config/opencode-sandbox/auth.json`, mode 600, holding a key for lanes only (never copy the owner's login) | `project-setup` warns when the file is missing or unusable | no `sandbox key` warning |
-| 5 | `scripts/project-setup <repo>` (`docs/orca.md` §5b) | `cotal space` | the space `● reachable` at `nats://127.0.0.1:<port>` |
-| 6 | (same run) broker, delivery daemon, `mgr` | `cotal svc -s <space>` | `mgr`, `stack-broker`, `stack-delivery` all `running`. `auth-service`, `web` and the other optional built-ins show `not started`, which is normal on a static-auth space |
-| 7 | (same run) coordinator and design lead | `cotal ps -s <space>` | both rows show `running` under PROCESS and `idle` or `working` under MESH. In Orca, the tab `cotal-<name>` sits in the main checkout and in the `design-lead` task |
-| 8 | Manager health | `cotal manager status -s <space>`; `cotal service logs mgr -s <space>` | `Process observation: running`, `Readiness observation: endpoint-serving`; no line starting `!` that recurs |
-| 9 | Credential health | `cotal doctor auth --space <space> --plain` (run in the repo; read-only without `--fix`) | live seats, `delivery.creds` and `membership-rw.creds` all `healthy`. `near-expiry` or `expired` ("the broker denies this credential") is expected for seats already reaped, and so is the closing line `! local credential findings remain` that they cause |
-| 10 | Claude wake path (once per machine, by hand) | the agent's tab shows no `Cotal incoming auto-wake is unavailable` notice at startup; a `cotal send -s <space> -t coordinator "test, no reply"` wakes an idle coordinator | the coordinator takes a turn |
-| 11 | Machine coordinator and window guard (`docs/orca.md`, "The machine coordinator and the window guard", in its order) | `systemctl --user status lane-control-window-guard.service` | `active (running)`; the journal shows polls |
-| 12 | A first lane, from the coordinator | the lane's tab opens first in its child task; its report DM wakes the coordinator | `cotal ps` lists the lane, and later the DM arrives |
+| 4 | `scripts/project-setup <repo>` (`docs/orca.md` §5b) | `cotal space` | the space `● reachable` at `nats://127.0.0.1:<port>` |
+| 5 | (same run) broker, delivery daemon, `mgr` | `cotal svc -s <space>` | `mgr`, `stack-broker`, `stack-delivery` all `running`. `auth-service`, `web` and the other optional built-ins show `not started`, which is normal on a static-auth space |
+| 6 | (same run) coordinator and design lead | `cotal ps -s <space>` | both rows show `running` under PROCESS and `idle` or `working` under MESH. In Orca, the tab `cotal-<name>` sits in the main checkout and in the `design-lead` task |
+| 7 | Manager health | `cotal manager status -s <space>`; `cotal service logs mgr -s <space>` | `Process observation: running`, `Readiness observation: endpoint-serving`; no line starting `!` that recurs |
+| 8 | Credential health | `cotal doctor auth --space <space> --plain` (run in the repo; read-only without `--fix`) | live seats, `delivery.creds` and `membership-rw.creds` all `healthy`. `near-expiry` or `expired` ("the broker denies this credential") is expected for seats already reaped, and so is the closing line `! local credential findings remain` that they cause |
+| 9 | Claude wake path (once per machine, by hand) | the agent's tab shows no `Cotal incoming auto-wake is unavailable` notice at startup; a `cotal send -s <space> -t coordinator "test, no reply"` wakes an idle coordinator | the coordinator takes a turn |
+| 10 | Machine coordinator and window guard (`docs/orca.md`, "The machine coordinator and the window guard", in its order) | `systemctl --user status lane-control-window-guard.service` | `active (running)`; the journal shows polls |
+| 11 | A first lane, from the coordinator | the lane's tab opens first in its child task; its report DM wakes the coordinator | `cotal ps` lists the lane, and later the DM arrives |
 
 ## 3. Known failure modes and their fixes
 From `docs/orca.md`, `reliability.md`, the skill and git history; the last two rows are from the mesh-loss diagnosis.
-An OpenCode seat's Orca tab closes when its launch fails: read the launcher's error in its lane's `seat-launch.log`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Agents never see the proxy | `cotal up` gives its manager a fixed environment | the `mgr` service with `envRefs` (project-setup does it) |
-| A sandboxed OpenCode seat cannot reach the AI gateway behind the work proxy (`<name> exited on launch`, or the model never answers) | before 2026-11-13 the sandbox passed no proxy variables in and refused the proxy's private address; or the proxy's address changed after the seat launched; or the proxy URL was refused (the reason is in `seat-launch.log`) | the sandbox now passes the proxy in and opens exactly its address and port (`docs/orca.md`, "A proxy"): rerun project-setup to install it, give `HTTPS_PROXY` as `[http(s)://]host:port`, and relaunch the seat when the proxy's address changes |
 | A `cotal` call acts on another project's broker | no `-s`, so the space last chosen with `cotal use` is used | `-s <space>` on every call |
 | Cotal refuses to seed extensions | group-writable `~/.config` (Debian umask 002) | umask 022, `chmod g-w ~/.config ~/.config/cotal` |
 | Cotal refuses the bundled nats-server | writable `/usr/local` after a Node tarball install | `chown -R root:root /usr/local` |
@@ -88,10 +84,7 @@ An OpenCode seat's Orca tab closes when its launch fails: read the launcher's er
 | orcad breaks for other users | a global `TMPDIR` in `/etc/environment` points into one home | orca-host-install falls back to `~/tmp` |
 | The OpenCode TUI dies at start | a `noexec` `/tmp` | set `TMPDIR` (and pass it in `spawn.env`) |
 | An agent keeps an expired key | OpenCode 2 stores credentials in each agent's database | stop it, move `.cotal/opencode/<name>/` aside, spawn again |
-| A required tier is refused (exit 4) | the running `mgr` predates the launch wrapper on its PATH | at a natural stop: `cotal svc stop mgr -s <space> --yes`, `cotal svc remove mgr -s <space> --yes`, rerun project-setup |
 | `<name> exited on launch` | a pinned model that the server does not list | fix the model in `lanes.tsv` |
-| `<name> exited on launch` for every OpenCode seat of a project that has a `shell.nix`; the lane's `dev-env.sh` is empty | before 2026-11-10 the sandbox built the dev environment with `import <nixpkgs>`, and a seat's environment (Cotal's allow-list) has no `NIX_PATH` | the launcher now uses the flake registry's nixpkgs when `NIX_PATH` is unset: rerun project-setup to install it. The launcher's own error is in `~/.cache/opencode-lanes/wt-<hash>/seat-launch.log` (`<hash>`: the first 16 hex of sha256 of the worktree's path) |
-| `<name> exited on launch` for an OpenCode seat started by a direct `cotal_spawn`; the tab shows `server listening on http://127.0.0.1:<port>` (a sandboxed seat shows `0.0.0.0`) and the owner's own MCP servers starting | the running `mgr` predates the launch wrapper, so it ran the real `opencode` outside the sandbox. `lane-tier` refuses this, a direct `cotal_spawn` does not | spawn no OpenCode seat there; at a natural stop restart `mgr` as in the "required tier is refused" row |
 | A lane joins but stays silent | used-up quota (`usage limit exceeded` in the lane's `opencode.log`) | another key or tier |
 | A Claude agent never starts | the folder-trust prompt was not answered | `cd <repo> && claude` once, or `--trust-folder` |
 | A lane misses the setup script or onboarding files | Orca reads `orca.yaml` from the worktree, made from `origin/<branch>` | commit and push (project-setup asks) |

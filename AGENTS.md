@@ -7,8 +7,8 @@ Most of the repo is prose doctrine (`machine.md`, `reliability.md`, `model-routi
 ## Checks
 - `python3 -m unittest discover -s tests`: must pass before any commit. Fast; stubs Orca and Cotal (`tests/stubs/`).
 - `sh -n` / `bash -n` on every shell script you change.
-- Never run `tests/test-orca-host-install.sh` or `scripts/test-opencode-sandbox.sh` unless the issue says so: the
-  first wipes a real host user's Orca, the second needs a real sandbox. Say in your report that you did not.
+- Never run `tests/test-orca-host-install.sh` unless the issue says so: it wipes a real host user's Orca. Say in your
+  report that you did not.
 
 ## Rules
 - The repo is **public**. No hostnames, IPs, keys, tokens, usernames of real machines or private paths in anything

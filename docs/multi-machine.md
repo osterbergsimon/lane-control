@@ -15,7 +15,7 @@ The ergonomic layer is a single **global coordinator** on `<main>` that can see 
 Each machine is a complete, standalone lane-control install:
 - its project coordinators, lanes, beads databases and checkouts;
 - its own copy of the config (`playbook.conf.sh`) listing only the coordinators that run there;
-- its own scripts: `window-guard.sh` (messages only its local coordinators, and watches its own memory and swap), `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh` as Rove routines in its own daemon, and the sandbox if it runs third-party lanes;
+- its own scripts: `window-guard.sh` (messages only its local coordinators, and watches its own memory and swap), `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh` as Rove routines in its own daemon;
 - its own mode file (day or night).
 
 Lanes are always local to their coordinator: Rove refuses a lane parent on another machine (`REMOTE_PARENT_UNSUPPORTED`) and a multi-repo task across machines (`REMOTE_EXTRA_UNSUPPORTED`).
@@ -79,7 +79,6 @@ The global coordinator wakes at the start of the owner's day, pulls `rove api co
 - `gh` limited to the repos that live there (fine-grained token or per-repo deploy keys). Rove's `github-sync` copies the whole token; avoid it. A credential for the beads remote, scoped the same way.
 - Beads for each pinned project, a checkout, `AGENTS.md` and `.rove/init.sh` via git. The coordinator's gitignored local hook settings are installed per machine, guarded by that machine's coordinator task id.
 - User systemd with linger (`loginctl enable-linger`) so the Rove daemon, routines and watches survive logout.
-- If it runs sandboxed lanes: everything in `machine.md` and the README requirements (bubblewrap, pasta, unprivileged user namespaces, a real upstream resolver in `/etc/resolv.conf`, NixOS-tested), then `scripts/test-opencode-sandbox.sh` once as the acceptance proof.
 - Secrets (lane vendor key, tokens) as root- or user-only files, mode 600, per machine, never in git or in a message. Prefer a distinct key per machine so one can be revoked.
 - SSH: key-only, dedicated keys between machines (not the owner's personal key), no agent forwarding. `rove machine inbound deny credentials` and review `land` and `lifecycle`. Treat `<host>` as lower trust than `<main>` if it is internet-facing.
 - Private data stays on the machine that owns it; a project that needs it is pinned there.
@@ -101,7 +100,7 @@ Pinned does not mean stuck. When the owner decides "run this project on that mac
 
 1. **On the old machine: stop cleanly.** No new launches. Park every lane per `issues.md` Parking (label, `Resume (...)` note, branch pushed, key in the handover; `park-check.sh` clean). Merge what is ready. Push all branches. `bd dolt push` (issues and memories). The coordinator writes its handover memory, then stops.
 2. **Retire the old coordinator.** Stop or remove its Rove main task. Keep the checkout and beads until step 6 verifies. Remove the project from the old machine's config (`COORD_TASK`, `COORD_REPO`) and from anything scheduled there, so no routine or guard wakes it. Confirm the old machine is silent.
-3. **On the new machine: set up.** Clone the repo (`rove api add --repo <host/owner/name> --clone --machine <alias>` if it fits **[test]**, else `git clone` and `rove add`). Pull beads from the Dolt remote and check that issue and memory counts match the old side. Install AGENTS.md sections, project init, coordinator local settings and the config entry; add the project to the routines' config; scope secrets to this repo; add sandbox prerequisites if it runs third-party lanes.
+3. **On the new machine: set up.** Clone the repo (`rove api add --repo <host/owner/name> --clone --machine <alias>` if it fits **[test]**, else `git clone` and `rove add`). Pull beads from the Dolt remote and check that issue and memory counts match the old side. Install AGENTS.md sections, project init, coordinator local settings and the config entry; add the project to the routines' config; scope secrets to this repo.
 4. **Start fresh.** Start the coordinator from its handover (`bd recall handover-latest`, `rove api context`). It resumes parked lanes first (`bd ready --label parked`).
 5. **Re-point the global coordinator.** Update its project-to-machine map (`COORD_MACHINE`) and confirm one round trip: a message sent, the reply received, one gate raised and seen.
 6. **Verify, then clean up.** Verification list:
@@ -115,10 +114,9 @@ Pinned does not mean stuck. When the owner decides "run this project on that mac
 **Rollback** before step 6 completes: the old checkout and beads are intact, so stop the new coordinator, restore the old config entries and routines, pull any beads changes back with `bd dolt pull`, and restart the old coordinator from its handover. After step 6 a rollback is a second migration.
 
 ## 9. Minimal first step
-1. Pick one small, data-free project and one SSH host. Prepare the host per section 6 (without sandbox first).
+1. Pick one small, data-free project and one SSH host. Prepare the host per section 6.
 2. `rove machine add <ssh-target> --alias <alias>` on `<main>`; `rove machine list` and `rove machine doctor`.
 3. On the host: config with its one coordinator, the guard and the three routines; create the project's coordinator there.
 4. From `<main>`, address it: `rove api list --machine <alias>`, `rove api context --machine <alias> --repo <path>`, `send` one FYI, ask for a reply.
 5. Check the test list in 3.3: send and reply round trip, `report --delivery`, a gate raised on the host seen from `<main>`, the merged usage feed, the owner report including the host, and behaviour with the host stopped and the network cut.
-6. Add the sandbox on the host only after the above passes, with `test-opencode-sandbox.sh`.
 Success: the project runs a night on the host unattended, the next morning's report from `<main>` shows its state and decisions, and a down host is reported rather than missed.
