@@ -3,7 +3,8 @@
 # EXAMPLE; this is the only file that names models or vendors.
 
 # --- Tiers, by role. Any tier may be "none" (engine empty): routing then skips it. ---
-#   swift:    cheap third-party lane (none: no OpenCode lanes without the sandbox, model-routing.md)
+#   swift:    cheap third-party lane. none here: OpenCode on swift runs unsandboxed only in calvin, through its Orca
+#             coordinator (model-routing.md, "Sandbox per tier"); elsewhere it needs the sandbox back first
 #   standard: everyday lane
 #   deep:     careful lane, reviews from tier B  top: rare second opinion, only via the machine coordinator
 TIERS="swift standard deep top"
@@ -64,7 +65,7 @@ declare -A COORD_SLOTS=( )   # optional: working lanes the night watch wants bus
 # Optional: raise one project's weekly ceiling by N points (e.g. a project that mostly uses a cheap tier)
 declare -A COORD_CEILING_ADD=( )
 
-# --- Docs review launcher (runs on a tier: standard while swift is none) ---
+# --- Docs review launcher (runs on a tier: standard, since swift is none here) ---
 DOCS_REVIEW_TIER=standard
 BRIEF_DIR="$HOME/.config/rove"     # <PROJECT>-docs-review.md lives here
 DOCS_REVIEW_WAIT=90                # seconds before checking the first prompt was submitted

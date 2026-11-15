@@ -3163,8 +3163,16 @@ class LaneTierTests(unittest.TestCase):
             r = self.tier(f"{self.HEAD}\nswift\topencode\t{model}\t-\n", "swift")
             self.assertEqual(r.returncode, 4, model)
             self.assertEqual(r.stdout, "")
-            for word in ("refused", "OpenCode lanes were removed", "one tier up", "cotal_spawn", str(self.table)):
+            for word in ("refused", "only in calvin", "Orca coordinator", "one tier up", "cotal_spawn", str(self.table)):
                 self.assertIn(word, r.stderr)
+            self.assertNotIn("removed", r.stderr)
+
+    def test_a_hosted_opencode_model_is_refused_whatever_the_harness_cell_says(self):
+        for harness in ("claude", "OpenCode", "opencode2", "oc"):
+            for model in ("opencode/deepseek-v4.1-flash", "opencode-go/deepseek-v4.1-flash"):
+                r = self.tier(f"{self.HEAD}\nswift\t{harness}\t{model}\t-\n", "swift")
+                self.assertEqual(r.returncode, 4, (harness, model))
+                self.assertEqual(r.stdout, "")
 
     def test_a_sandbox_column_from_before_is_ignored(self):
         for cell in ("required", "none", "", "maybe"):
@@ -3652,6 +3660,14 @@ class TierChoiceTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), tiers.read_text())
         self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
+        self.assertIn("only in calvin", r.stderr)
+
+    def test_a_misspelled_harness_on_a_hosted_model_is_warned_about(self):
+        tiers = self.e.home / "t.tsv"
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\tOpenCode\topencode-go/deepseek-v4.1-flash\t-\n")
+        r = self.e.run(str(self.repo), "--tiers", str(tiers))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("warning: swift is an OpenCode tier", r.stderr)
 
     def test_the_default_table_gets_no_opencode_warning(self):
         r = self.e.run(str(self.repo))

@@ -143,9 +143,16 @@ class TierTableTests(unittest.TestCase):
                 "(calvin, for now). To bring it back, restore it from git history (last in main at b97c919).")
         for f in ("model-routing.md", "README.md", "docs/orca.md"):
             self.assertIn(line, (ROOT / f).read_text(), f)
-        limit = "Outside calvin there are no OpenCode lanes, and no hosted global-region model runs bare"
         for f in ("model-routing.md", "README.md", "docs/orca.md"):
-            self.assertIn(limit, " ".join((ROOT / f).read_text().split()), f)
+            flat = " ".join((ROOT / f).read_text().split())
+            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin",
+                           "orca-ide orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash",
+                           "lane-control's own lane tools do not start OpenCode",
+                           "Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare",
+                           "needs the sandbox back first (restore it from b97c919)",
+                           "the default for every project but calvin"):
+                self.assertIn(needle, flat, f)
+            self.assertNotIn("swift is `none` for now", flat, f)
         self.assertIn("are not trusted with the owner's machine", (ROOT / "model-routing.md").read_text())
         self.assertNotIn("807d944", " ".join((ROOT / f).read_text() for f in ("model-routing.md", "README.md", "docs/orca.md", "reliability.md")))
 
@@ -471,6 +478,8 @@ class LaneSkillCliTests(unittest.TestCase):
 
     def test_the_skill_sends_a_refused_opencode_tier_one_tier_up(self):
         self.assertIn("Exit 4 refuses an OpenCode tier", self.flat)
+        self.assertIn("swift on OpenCode runs only in calvin", self.flat)
+        self.assertNotIn("there are no OpenCode lanes", self.flat)
         self.assertIn("never start a refused tier with `cotal_spawn`", self.flat)
 
     def test_every_tier_goes_through_lane_tier_before_a_spawn(self):

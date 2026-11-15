@@ -593,11 +593,11 @@ def check_tier_table(text: str) -> list:
 
 def opencode_rows_note(tier_text: str):
     """Warns about the OpenCode rows of a project's table: lane-tier refuses them, so their work goes one tier up."""
-    rows = [t for t, h, _ in check_tier_table(tier_text) if h == "opencode"]
+    rows = [t for t, h, m in check_tier_table(tier_text) if h == "opencode" or m.startswith(HOSTED_OPENCODE)]
     if rows:
-        print(f"warning: {', '.join(rows)} is an OpenCode tier: lane-tier refuses it (OpenCode lanes went with the "
-              "OpenCode sandbox, model-routing.md). Set its harness to none in the project's lanes.tsv.",
-              file=sys.stderr, flush=True)
+        print(f"warning: {', '.join(rows)} is an OpenCode tier: lane-tier refuses it (swift on OpenCode runs only in "
+              "calvin, through calvin's Orca coordinator; model-routing.md). Set its harness to none in the project's "
+              "lanes.tsv.", file=sys.stderr, flush=True)
 
 
 def usable_own_model(name: str) -> bool:
