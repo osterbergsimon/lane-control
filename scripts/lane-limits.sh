@@ -32,6 +32,8 @@ LANE_HEAVY_POLL_SECS=2
 LANE_ROOM_MIN_MEM_GB=$lane_default_room_mem
 LANE_ROOM_MAX_LOAD=$lane_default_room_load
 LANE_ROOM_MAX_AGENTS=$lane_default_room_agents
+LANE_ROOM_SAMPLES=5
+LANE_ROOM_SAMPLE_SECS=1
 
 # Slot files live on the per-user tmpfs. Deliberately not $XDG_RUNTIME_DIR or $TMPDIR: they differ between a lane's
 # shells, and two lanes that resolve different directories would not share a limit.
@@ -67,6 +69,10 @@ lane_setting LANE_HEAVY_MEM_GB "$lane_default_job_gb"
 lane_setting LANE_ROOM_MIN_MEM_GB "$lane_default_room_mem"
 lane_setting LANE_ROOM_MAX_LOAD "$lane_default_room_load"
 lane_setting LANE_ROOM_MAX_AGENTS "$lane_default_room_agents"
+lane_setting LANE_ROOM_SAMPLES 5 1
 case $LANE_HEAVY_POLL_SECS in
   '' | *[!0-9.]* | *.*.* | .) LANE_HEAVY_POLL_SECS=2 ;;
+esac
+case $LANE_ROOM_SAMPLE_SECS in
+  '' | *[!0-9.]* | *.*.* | .) LANE_ROOM_SAMPLE_SECS=1 ;;
 esac
