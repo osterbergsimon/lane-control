@@ -30,8 +30,10 @@ Tier by the paths the task touches (lane-control model-routing: highest tier win
 for prose docs, scripts without private data and CI). Then look the tier up in the tier table file your persona names (the project's `lanes.tsv` in its settings store under
 `~/.config/lane-control/projects/<project>/`, by absolute path, because lane worktrees do not carry it): run `~/.agents/bin/lane-tier <table> <tier>`, which prints the tier's harness, model and permission.
 
-A tier whose harness is `none` is skipped: `lane-tier` exits 3, go one tier up. Any other non-zero exit: hold the lane
-and tell the owner what it printed. `inherit` means the project's Claude permission mode, which
+A tier whose harness is `none` is skipped: `lane-tier` exits 3, go one tier up. Exit 4 refuses an OpenCode tier
+(there are no OpenCode lanes): never start a refused tier with `cotal_spawn` and never edit the table to get past it; go
+one tier up and tell the owner in your next line. Any other non-zero exit: hold the lane and tell the owner what it
+printed. `inherit` means the project's Claude permission mode, which
 your persona names; pass that value.
 
 ## 2. Open the lane

@@ -3,13 +3,14 @@
 # EXAMPLE; this is the only file that names models or vendors.
 
 # --- Tiers, by role. Any tier may be "none" (engine empty): routing then skips it. ---
-#   swift:    cheap third-party lane            standard: everyday lane
+#   swift:    cheap third-party lane (none: no OpenCode lanes without the sandbox, model-routing.md)
+#   standard: everyday lane
 #   deep:     careful lane, reviews from tier B  top: rare second opinion, only via the machine coordinator
 TIERS="swift standard deep top"
-declare -A TIER_ENGINE=( [swift]=opencode [standard]=claude [deep]=claude [top]=claude )
-declare -A TIER_CMD=(    [swift]="opencode --auto" [standard]="" [deep]="" [top]="" )   # engine launch command, "" = default
-declare -A TIER_MODEL=(  [swift]="<cheap-model-id>" [standard]="sonnet" [deep]="opus" [top]="<top-model-id>" )
-declare -A TIER_BUDGET=( [swift]=cheap [standard]=main [deep]=main [top]=main )         # budget name, or none | manual
+declare -A TIER_ENGINE=( [swift]=none [standard]=claude [deep]=claude [top]=claude )
+declare -A TIER_CMD=(    [swift]="" [standard]="" [deep]="" [top]="" )   # engine launch command, "" = default
+declare -A TIER_MODEL=(  [swift]="" [standard]="sonnet" [deep]="opus" [top]="<top-model-id>" )
+declare -A TIER_BUDGET=( [swift]=none [standard]=main [deep]=main [top]=main )         # budget name, or none | manual
 
 # --- Budgets: name -> usage feed and ceiling. A tier whose budget is none or manual (no feed)
 # is never throttled by the scripts; its caps in the routing file are the only limit. ---
@@ -63,9 +64,9 @@ declare -A COORD_SLOTS=( )   # optional: working lanes the night watch wants bus
 # Optional: raise one project's weekly ceiling by N points (e.g. a project that mostly uses a cheap tier)
 declare -A COORD_CEILING_ADD=( )
 
-# --- Docs review launcher (runs on a tier, normally swift) ---
-DOCS_REVIEW_TIER=swift
+# --- Docs review launcher (runs on a tier: standard while swift is none) ---
+DOCS_REVIEW_TIER=standard
 BRIEF_DIR="$HOME/.config/rove"     # <PROJECT>-docs-review.md lives here
 DOCS_REVIEW_WAIT=90                # seconds before checking the first prompt was submitted
 # Run in the worktree; empty output = first prompt not submitted. Empty setting = always nudge once.
-DOCS_REVIEW_SUBMITTED_CMD="opencode session list"
+DOCS_REVIEW_SUBMITTED_CMD=""

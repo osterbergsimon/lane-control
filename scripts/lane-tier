@@ -5,8 +5,10 @@
 #   lane-tier --check <table>    prints "<tier> <harness> <model>" per row (- for no model); nothing else is decided
 #
 # Exit: 0 the tier may be started; 2 usage, a bad table or an unknown tier; 3 the tier's harness is none (skip it, one
-# tier up). Columns other than tier, harness, model and permission are ignored (a table from before may still have a
-# sandbox column). The check is what the orca-cotal-lanes skill runs before cotal_spawn.
+# tier up); 4 refused: an OpenCode tier. OpenCode lanes went with the OpenCode sandbox (model-routing.md, "Sandbox per
+# tier"): no project starts one, whatever its model, until the sandbox is back. Columns other than tier, harness, model
+# and permission are ignored (a table from before may still have a sandbox column). The check is what the
+# orca-cotal-lanes skill runs before cotal_spawn; --check only lists the rows.
 set -u
 
 die() { echo "lane-tier: $*" >&2; exit 2; }
@@ -65,5 +67,13 @@ IFS=$'\037' read -r harness model permission <<<"$out"
 if [ "$harness" = none ]; then
   echo "lane-tier: tier $tier has harness none: skip it and go one tier up" >&2
   exit 3
+fi
+if [ "$harness" = opencode ]; then
+  cat >&2 <<MSG
+lane-tier: refused: tier $tier is an OpenCode tier ($model). OpenCode lanes were removed with the OpenCode sandbox, and
+a hosted global-region model never runs bare (model-routing.md, "Sandbox per tier"). Do not start it with cotal_spawn:
+go one tier up, and tell the owner that $table still has this row.
+MSG
+  exit 4
 fi
 printf 'harness=%s model=%s permission=%s\n' "$harness" "$model" "$permission"

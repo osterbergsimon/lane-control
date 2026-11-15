@@ -591,6 +591,15 @@ def check_tier_table(text: str) -> list:
     return [tuple(l.split()) for l in r.stdout.splitlines() if l.strip()]
 
 
+def opencode_rows_note(tier_text: str):
+    """Warns about the OpenCode rows of a project's table: lane-tier refuses them, so their work goes one tier up."""
+    rows = [t for t, h, _ in check_tier_table(tier_text) if h == "opencode"]
+    if rows:
+        print(f"warning: {', '.join(rows)} is an OpenCode tier: lane-tier refuses it (OpenCode lanes went with the "
+              "OpenCode sandbox, model-routing.md). Set its harness to none in the project's lanes.tsv.",
+              file=sys.stderr, flush=True)
+
+
 def usable_own_model(name: str) -> bool:
     return bool(MODEL_NAME.fullmatch(name)) and not name.startswith(HOSTED_OPENCODE)
 
@@ -625,6 +634,7 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
         if state == "updated" and not (h == "opencode" and m.startswith(HOSTED_OPENCODE)):
             changed.append(name)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
+    opencode_rows_note(tier_text)
     say("gitignore", ignore_cotal(repo), ".cotal/")
     return changed
 
@@ -711,7 +721,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             f"only in the defaults: {key(theirs)}")
     if own_text is not None:
         try:
-            check_tier_table(own_text)
+            opencode_rows_note(own_text)
         except Fail as e:
             print(f"warning: {e}: lane-tier refuses every tier until it is fixed", file=sys.stderr, flush=True)
     changed = []
@@ -2245,6 +2255,10 @@ def show(repo: Path) -> int:
     try:
         tiers = [l.split("\t")[0] for l in tab.read_text().splitlines() if l.strip() and not l.startswith("#")][1:]
         print(f"lanes.tsv: {tab} (tiers: {', '.join(tiers) or 'none'})")
+        try:
+            opencode_rows_note(tab.read_text())
+        except Fail as e:
+            print(f"warning: {e}", file=sys.stderr, flush=True)
     except (OSError, UnicodeDecodeError):
         print(f"lanes.tsv: {tab} (not there yet)")
     for d in attached_of(st):

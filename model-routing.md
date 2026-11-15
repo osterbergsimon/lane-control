@@ -109,7 +109,8 @@ One line per task, appended when the coordinator closes the issue.
 A script, brief or message enforces a limit only if the owner decided it (dated in the instance's routing file). Any other limit (a per-day share, a lane count, a throttle) needs the owner's yes first; until then it is, at most, a recommendation. Same for deterministic machine-wide slot caps: the machine coordinator arbitrates by judgment.
 
 ## Sandbox per tier
-Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at 807d944).
+Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at b97c919).
+Global-region models (for example ones served from China) are not trusted with the owner's machine; every hosted OpenCode model counts as one, because where it is served is unknown. Outside calvin there are no OpenCode lanes, and no hosted global-region model runs bare: `scripts/lane-tier` refuses every OpenCode tier (exit 4), and re-adding OpenCode lanes needs the sandbox back first. Calvin's OpenCode runs as Orca workers (`orca orchestration worker-start --agent opencode`), not as lanes.
 
 ## Third-party lanes (conventions)
 - **Nesting and base branch:** called from inside a Rove session, `rove api add` makes the new task a child of the caller and cuts its worktree from the caller's CURRENT branch tip, not the repo default. A launcher on any other branch than the lane's base (a design lead on its own branch, a lane) passes `--base-branch <base>`; `--parent <id>` nests under another task, `--no-parent` makes a top-level task. (Older Rove had a separate `spawn` verb; it is gone.)

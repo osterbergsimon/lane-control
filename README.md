@@ -8,7 +8,7 @@ Three layers of agents, each a task of the runner you use:
 - **Project coordinator** (one per repo): the repo's main task. Queues work in beads (`bd`), writes briefs, launches worker lanes, reruns the gates, reviews, merges, raises owner decisions to you (as Rove gates on Rove).
 - **Worker lanes**: child tasks of the coordinator (Rove child tasks, or Orca child tasks with one Cotal agent each), one issue, one branch, one PR each, on a **tier**.
 
-Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so cheap third-party or local models (through opencode) and Claude models mix freely. Any tier may be "none".
+Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so other engines and Claude models can mix. Any tier may be "none"; swift is `none` for now, since OpenCode lanes went with the OpenCode sandbox ("Sandbox" below).
 
 Why: the real constraint is a budget (say a weekly plan limit), not attention. Work is routed by the paths it touches, reviewed by risk, and throttled by lane count, never by lowering the tier. The owner sees one report and a short list of decisions.
 
@@ -67,7 +67,6 @@ About half an hour for one project. Everything marked **planned** is manual toda
    - `bd init` in the checkout; no bd git hooks (`issues.md`).
    - Write the project's **path map** (which paths need which tier, and which review tier) in `.lane-control/routing.md`, from `templates/adapt/routing.md`; gate commands, private data directories and the other project facts go in `.lane-control/project.md`. On Rove, also paste `templates/AGENTS-coordination.md` into AGENTS.md (the Orca flow does not).
    - Install `templates/project-settings.json` as the project's agent settings, `templates/coordinator-settings.local.json` as the coordinator's gitignored local settings (Rove only: its hooks need `ROVE_TASK_ID` and `rove api context`) and `templates/rove-init.sh` as `.rove/init.sh`. `project-setup` installs none of them under Orca + Cotal; there, take only its `attribution` and `includeCoAuthoredBy` keys into your `.claude/settings.json` if you want them (the rest is Rove-specific; see "Commit identity and AI attribution" below).
-   - For third-party lanes: pin the model in `templates/opencode.json`.
 5. **Start the coordinators (Rove).** Open the machine coordinator's main task on a repo holding your instance notes (owner decisions, caps, priorities) and have it read `README.md`, `roles.md`, `model-routing.md`, `reliability.md` and the config. Open each project coordinator on its repo, pointing at its `AGENTS.md`. Queue issues, then tell it to go.
 
 **Planned:** a bootstrap script for steps 1 to 3 and the per-project files of step 4, and a doctor command that checks an install against `machine.md`.
@@ -108,7 +107,7 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 - **Every failure with a durable fix** goes into `reliability.md`.
 
 ## Sandbox
-Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at 807d944).
+Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at b97c919). Outside calvin there are no OpenCode lanes, and no hosted global-region model runs bare: `scripts/lane-tier` refuses every OpenCode tier (exit 4), and re-adding OpenCode lanes needs the sandbox back first. Calvin's OpenCode runs as Orca workers (`orca orchestration worker-start --agent opencode`), not as lanes.
 
 ## License
 MIT, see `LICENSE`.

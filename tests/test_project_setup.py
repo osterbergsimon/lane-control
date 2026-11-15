@@ -3056,11 +3056,12 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.refresh().returncode, 0)
         self.assertIn("swift\tnone\t-\t-\n", table.read_text())
 
-    def test_refresh_says_nothing_of_a_sandbox_for_an_opencode_tier(self):
+    def test_refresh_warns_about_an_opencode_tier(self):
         self.setup_project("--tiers", str(self._old_table()))
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("sandbox", r.stderr.replace(str(ROOT), ""))
+        self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
+        self.assertNotIn("sandbox required", r.stderr)
 
     def _old_table(self):
         f = self.e.home / "old.tsv"
@@ -3153,15 +3154,26 @@ class LaneTierTests(unittest.TestCase):
         return subprocess.run([str(TIER_TOOL), str(self.table), tier], capture_output=True, text=True)
 
     def test_a_tier_prints_its_row(self):
-        r = self.tier(f"{self.HEAD}\nswift\topencode\tgw/m\t-\n", "swift")
+        r = self.tier(f"{self.HEAD}\nstandard\tclaude\tsonnet\tinherit\n", "standard")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout, "harness=opencode model=gw/m permission=-\n")
+        self.assertEqual(r.stdout, "harness=claude model=sonnet permission=inherit\n")
+
+    def test_every_opencode_tier_is_refused(self):
+        for model in ("opencode/deepseek-v4.1-flash", "opencode-go/kimi", "gw/m", ""):
+            r = self.tier(f"{self.HEAD}\nswift\topencode\t{model}\t-\n", "swift")
+            self.assertEqual(r.returncode, 4, model)
+            self.assertEqual(r.stdout, "")
+            for word in ("refused", "OpenCode lanes were removed", "one tier up", "cotal_spawn", str(self.table)):
+                self.assertIn(word, r.stderr)
 
     def test_a_sandbox_column_from_before_is_ignored(self):
         for cell in ("required", "none", "", "maybe"):
-            r = self.tier(f"{self.HEAD}\tsandbox\nswift\topencode\topencode/x\t-\t{cell}\n", "swift")
+            text = (f"{self.HEAD}\tsandbox\nswift\topencode\topencode/x\t-\t{cell}\n"
+                    f"deep\tclaude\topus\tinherit\t{cell}\n")
+            self.assertEqual(self.tier(text, "swift").returncode, 4, cell)
+            r = self.tier(text, "deep")
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(r.stdout, "harness=opencode model=opencode/x permission=-\n")
+            self.assertEqual(r.stdout, "harness=claude model=opus permission=inherit\n")
 
     def test_a_tier_cell_with_a_space_is_a_bad_table(self):
         r = self.tier(f"{self.HEAD}\nmy tier\tclaude\tsonnet\tinherit\n", "my tier")
@@ -3169,9 +3181,9 @@ class LaneTierTests(unittest.TestCase):
         self.assertIn("contains a space", r.stderr)
 
     def test_an_empty_model_cell_prints_empty(self):
-        r = self.tier(f"{self.HEAD}\nswift\topencode\t\t-\n", "swift")
+        r = self.tier(f"{self.HEAD}\nstandard\tclaude\t\tinherit\n", "standard")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout, "harness=opencode model= permission=-\n")
+        self.assertEqual(r.stdout, "harness=claude model= permission=inherit\n")
 
     def test_an_empty_harness_is_a_bad_table(self):
         r = self.tier(f"{self.HEAD}\nswift\t\tgw/m\t-\n", "swift")
@@ -3187,9 +3199,9 @@ class LaneTierTests(unittest.TestCase):
         self.assertEqual(self.tier(f"{self.HEAD}\nswift\topencode\tm/x\t-\n", "ultra").returncode, 2)
 
     def test_columns_are_found_by_name(self):
-        r = self.tier("sandbox\tmodel\ttier\tpermission\tharness\nnone\tgw/m\tswift\t-\topencode\n", "swift")
+        r = self.tier("sandbox\tmodel\ttier\tpermission\tharness\nnone\tsonnet\tswift\tinherit\tclaude\n", "swift")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("model=gw/m", r.stdout)
+        self.assertIn("model=sonnet", r.stdout)
 
     def test_comments_and_the_shipped_template_parse(self):
         r = subprocess.run([str(TIER_TOOL), "--check", str(TIER_TOOL.parent.parent / "templates" / "lanes.tsv")],
@@ -3635,10 +3647,16 @@ class TierChoiceTests(unittest.TestCase):
 
     def test_full_tiers_file_is_used_as_it_is(self):
         tiers = self.e.home / "t.tsv"
-        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\tgw/m\t-\n")
+        tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/deepseek-v4.1-flash\t-\n")
         r = self.e.run(str(self.repo), "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), tiers.read_text())
+        self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
+
+    def test_the_default_table_gets_no_opencode_warning(self):
+        r = self.e.run(str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("OpenCode tier", r.stderr)
 
     def test_a_rerun_keeps_an_edited_table_and_tiers_replaces_it(self):
         self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
@@ -3667,7 +3685,11 @@ class TierChoiceTests(unittest.TestCase):
         r = self.e.run(str(self.repo))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), old)
-        self.assertNotIn("sandbox", r.stderr.replace(str(ROOT), ""))
+        self.assertNotIn("sandbox required", r.stderr)
+        self.assertIn("warning: swift is an OpenCode tier", r.stderr)
+        show = self.e.run(str(self.repo), "--show", adapt=True)
+        self.assertEqual(show.returncode, 0, show.stderr)
+        self.assertIn("warning: swift is an OpenCode tier", show.stderr)
 
 
 if __name__ == "__main__":
