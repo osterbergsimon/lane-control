@@ -8,7 +8,7 @@ Three layers of agents, each a task of the runner you use:
 - **Project coordinator** (one per repo): the repo's main task. Queues work in beads (`bd`), writes briefs, launches worker lanes, reruns the gates, reviews, merges, raises owner decisions to you (as Rove gates on Rove).
 - **Worker lanes**: child tasks of the coordinator (Rove child tasks, or Orca child tasks with one Cotal agent each), one issue, one branch, one PR each, on a **tier**.
 
-Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so cheap third-party or local models (through opencode) and Claude models mix freely. Any tier may be "none".
+Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so other engines and Claude models can mix. Any tier may be "none". Swift on OpenCode runs unsandboxed only in calvin for now, through calvin's Orca coordinator; for every other project swift is `none` ("Sandbox" below).
 
 Why: the real constraint is a budget (say a weekly plan limit), not attention. Work is routed by the paths it touches, reviewed by risk, and throttled by lane count, never by lowering the tier. The owner sees one report and a short list of decisions.
 
@@ -26,9 +26,6 @@ Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, and Claude Code (
 - Orca (the desktop app on your workstation, with Orca's server on a remote host if the agents run there) and Cotal (`cotal-ai`, with its Orca extension: `cotal ext add @cotal-ai/orca`)
 - the agent harnesses you use (`@anthropic-ai/claude-code`, `@opencode/cli`), signed in once as the user the agents run as
 - a normal user, never root; a git identity configured in the repo
-
-Optional for either runner:
-- for sandboxed third-party lanes: `opencode`, bubblewrap, pasta, systemd user scopes. The sandbox is tested on NixOS only (it fetches `bubblewrap`, `passt` and `curl` through `nix`).
 
 ## Quickstart
 ### Orca + Cotal
@@ -70,7 +67,6 @@ About half an hour for one project. Everything marked **planned** is manual toda
    - `bd init` in the checkout; no bd git hooks (`issues.md`).
    - Write the project's **path map** (which paths need which tier, and which review tier) in `.lane-control/routing.md`, from `templates/adapt/routing.md`; gate commands, private data directories and the other project facts go in `.lane-control/project.md`. On Rove, also paste `templates/AGENTS-coordination.md` into AGENTS.md (the Orca flow does not).
    - Install `templates/project-settings.json` as the project's agent settings, `templates/coordinator-settings.local.json` as the coordinator's gitignored local settings (Rove only: its hooks need `ROVE_TASK_ID` and `rove api context`) and `templates/rove-init.sh` as `.rove/init.sh`. `project-setup` installs none of them under Orca + Cotal; there, take only its `attribution` and `includeCoAuthoredBy` keys into your `.claude/settings.json` if you want them (the rest is Rove-specific; see "Commit identity and AI attribution" below).
-   - For third-party lanes: pin the model in `templates/opencode.json`, list private paths in `SANDBOX_PRIVATE_PATHS`, run `scripts/test-opencode-sandbox.sh` once.
 5. **Start the coordinators (Rove).** Open the machine coordinator's main task on a repo holding your instance notes (owner decisions, caps, priorities) and have it read `README.md`, `roles.md`, `model-routing.md`, `reliability.md` and the config. Open each project coordinator on its repo, pointing at its `AGENTS.md`. Queue issues, then tell it to go.
 
 **Planned:** a bootstrap script for steps 1 to 3 and the per-project files of step 4, and a doctor command that checks an install against `machine.md`.
@@ -86,12 +82,12 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 | File | What |
 |---|---|
 | `roles.md` | jobs and rules of the machine coordinator and a project coordinator |
-| `model-routing.md` | tiers, routing by path map, escalation, limits, weekly and window steps, night mode, message protocol, sandbox conventions, context protocol, cloud sessions |
+| `model-routing.md` | tiers, routing by path map, escalation, limits, weekly and window steps, night mode, message protocol, third-party lane conventions, context protocol, cloud sessions |
 | `issues.md` | beads doctrine: claim, close, parking, filing bar, weekly grooming, stale claims |
 | `reliability.md` | numbered failure, fix, reuse log; read before setting up a coordinator |
 | `machine.md` | what is machine-specific; checks for a new box; CI runner patterns |
 | `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
-| `scripts/` | `window-guard.sh` with `window-guard-install`, `machine-coordinator-setup`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `opencode-sandbox.sh` with `test-opencode-sandbox.sh`, `lib.sh` (shared); machine caps, installed to `~/.agents/bin` by `project-setup`: `lane-heavy` (the machine-wide gate for builds and full test suites), `lane-room` (the check before opening a lane), `lane-tier` (looks up a tier and refuses a `sandbox required` tier under Orca + Cotal), `lane-limits.sh` (their shared limits; a machine's own in a copy of `limits.example.sh`); for Orca + Cotal (`docs/orca.md` §5b): `project-setup` (an Orca project with a Cotal coordinator and frontend design lead, here or on an SSH host; one run onboards the repo: an agent adapts the lane files, the owner says yes once to commit them, a second question offers to commit a drafted `orca.yaml` and push, since Orca makes lane worktrees from `origin/<branch>`, and the agents start after, with no flag; safe to re-run or interrupt), `project-pause` (`rest` and `wake` leave a project alone so the window guard stops waking it, `stop` and `start` also free its agents' memory; `docs/orca.md` §5b) and `orca-host-install` (Orca's server on a host without downloads, optional scripted pairing); superseded trial scripts `cotal-agent`, `orca-cotal-task`; for wsp (`docs/wsp.md`): `wsp-owner-code.mjs`. Each header is its contract |
+| `scripts/` | `window-guard.sh` with `window-guard-install`, `machine-coordinator-setup`, `machine-night-watch.sh`, `stale-claims.sh`, `park-check.sh`, `docs-review-launch.sh`, `lib.sh` (shared); machine caps, installed to `~/.agents/bin` by `project-setup`: `lane-heavy` (the machine-wide gate for builds and full test suites), `lane-room` (the check before opening a lane), `lane-tier` (looks up a tier in a project's tier table), `lane-limits.sh` (their shared limits; a machine's own in a copy of `limits.example.sh`); for Orca + Cotal (`docs/orca.md` §5b): `project-setup` (an Orca project with a Cotal coordinator and frontend design lead, here or on an SSH host; one run onboards the repo: an agent adapts the lane files, the owner says yes once to commit them, a second question offers to commit a drafted `orca.yaml` and push, since Orca makes lane worktrees from `origin/<branch>`, and the agents start after, with no flag; safe to re-run or interrupt), `project-pause` (`rest` and `wake` leave a project alone so the window guard stops waking it, `stop` and `start` also free its agents' memory; `docs/orca.md` §5b) and `orca-host-install` (Orca's server on a host without downloads, optional scripted pairing); superseded trial scripts `cotal-agent`, `orca-cotal-task`; for wsp (`docs/wsp.md`): `wsp-owner-code.mjs`. Each header is its contract |
 | `templates/` | AGENTS sections, project and coordinator settings, init script, worker and review briefs, budget ceiling, opencode config |
 | `docs/multi-machine.md` | design (not implemented): projects pinned to machines, one global coordinator over SSH |
 | `docs/orca-cotal-setup.md` | Orca + Cotal: every part and how they connect, bring-up order with a check per step, known failure modes, the diagnosis of workers losing the mesh |
@@ -111,9 +107,7 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 - **Every failure with a durable fix** goes into `reliability.md`.
 
 ## Sandbox
-`scripts/opencode-sandbox.sh` runs opencode for third-party model lanes in bubblewrap: a deny-by-default filesystem (the lane's worktree, a private git dir, a few read-only system files), its own network namespace through pasta (internet only, no host loopback), a memory cap in a systemd scope, and a relay so the lane can push its own branch and open its PR without holding credentials. `test-opencode-sandbox.sh` checks the denials. Which tiers need it is a per-tier choice (`model-routing.md`, "Sandbox per tier"): global-region models, which includes every hosted OpenCode model, must run in it, and an internal or offline gateway may run without it.
-
-This is a practical boundary for code-only lanes, not a security guarantee. It is tested on one NixOS setup, depends on the host kernel and on bubblewrap and pasta behaving as documented, and has not been independently audited. Review the script and its test before trusting it with hostile code, and keep private material off any machine that runs third-party lanes.
+Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at b97c919). Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin for now (owner 2026-11-15). There, calvin's Orca coordinator starts it with `orca-ide orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash`; lane-control's own lane tools do not start OpenCode. Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare: `scripts/lane-tier` refuses every OpenCode tier (exit 4), the default tier table's swift row is `none` (the default for every project but calvin), and re-adding OpenCode lanes elsewhere needs the sandbox back first (restore it from b97c919).
 
 ## License
 MIT, see `LICENSE`.

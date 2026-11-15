@@ -1,8 +1,8 @@
 # Tier table for orca-cotal-lanes: harness and model per lane-control tier (model-routing.md).
 # permission: inherit = the project's Claude permission mode; "-" = not applicable. harness none = tier skipped.
-# sandbox: required = never runs bare (a hosted OpenCode model, in the sandbox through the launch wrapper, see docs/orca.md); none = may run without it.
-tier	harness	model	permission	sandbox
-swift	opencode	opencode/deepseek-v4.1-flash	-	required
-standard	claude	sonnet	inherit	none
-deep	claude	opus	inherit	none
-top	none	-	-	none
+# swift is none: the default for every project but calvin, where OpenCode on swift runs through calvin's Orca coordinator.
+tier	harness	model	permission
+swift	none	-	-
+standard	claude	sonnet	inherit
+deep	claude	opus	inherit
+top	none	-	-

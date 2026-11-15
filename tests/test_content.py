@@ -131,12 +131,36 @@ class SettingsStoreContentTests(unittest.TestCase):
 class TierTableTests(unittest.TestCase):
     def test_default_tiers(self):
         rows = [l.split("\t") for l in TIERS.read_text().splitlines() if l and not l.startswith("#")]
-        self.assertEqual(rows[0], ["tier", "harness", "model", "permission", "sandbox"])
+        self.assertEqual(rows[0], ["tier", "harness", "model", "permission"])
         table = {r[0]: r[1:] for r in rows[1:]}
-        self.assertEqual(table["swift"], ["opencode", "opencode/deepseek-v4.1-flash", "-", "required"])
-        self.assertEqual(table["standard"], ["claude", "sonnet", "inherit", "none"])
-        self.assertEqual(table["deep"], ["claude", "opus", "inherit", "none"])
-        self.assertEqual(table["top"], ["none", "-", "-", "none"])
+        self.assertEqual(table["swift"], ["none", "-", "-"])
+        self.assertEqual(table["standard"], ["claude", "sonnet", "inherit"])
+        self.assertEqual(table["deep"], ["claude", "opus", "inherit"])
+        self.assertEqual(table["top"], ["none", "-", "-"])
+
+    def test_the_owners_decision_on_the_sandbox_is_written_down(self):
+        line = ("Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed "
+                "(calvin, for now). To bring it back, restore it from git history (last in main at b97c919).")
+        for f in ("model-routing.md", "README.md", "docs/orca.md"):
+            self.assertIn(line, (ROOT / f).read_text(), f)
+        for f in ("model-routing.md", "README.md", "docs/orca.md"):
+            flat = " ".join((ROOT / f).read_text().split())
+            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin",
+                           "orca-ide orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash",
+                           "lane-control's own lane tools do not start OpenCode",
+                           "Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare",
+                           "needs the sandbox back first (restore it from b97c919)",
+                           "the default for every project but calvin"):
+                self.assertIn(needle, flat, f)
+            self.assertNotIn("swift is `none` for now", flat, f)
+        self.assertIn("are not trusted with the owner's machine", (ROOT / "model-routing.md").read_text())
+        self.assertNotIn("807d944", " ".join((ROOT / f).read_text() for f in ("model-routing.md", "README.md", "docs/orca.md", "reliability.md")))
+
+    def test_the_rove_example_runs_no_opencode_tier(self):
+        text = (ROOT / "config.example.sh").read_text()
+        self.assertIn("[swift]=none", text)
+        self.assertNotIn("opencode --auto", text)
+        self.assertNotIn("DOCS_REVIEW_TIER=swift", text)
 
 
 class NoTypingIntoAgentsTests(unittest.TestCase):
@@ -448,14 +472,20 @@ class LaneSkillCliTests(unittest.TestCase):
         for word in ("`none`", "`inherit`"):
             self.assertIn(word, self.text)
 
-    def test_the_skill_says_a_refused_tier_waits_for_the_launch_wrapper(self):
-        self.assertIn("launch wrapper", self.text)
-        self.assertNotIn("cannot run inside the sandbox yet", self.text)
+    def test_the_skill_has_no_sandbox_left(self):
+        for word in ("sandbox", "launch wrapper"):
+            self.assertNotIn(word, self.text)
 
-    def test_every_tier_goes_through_the_sandbox_refusal_before_a_spawn(self):
+    def test_the_skill_sends_a_refused_opencode_tier_one_tier_up(self):
+        self.assertIn("Exit 4 refuses an OpenCode tier", self.flat)
+        self.assertIn("swift on OpenCode runs only in calvin", self.flat)
+        self.assertNotIn("there are no OpenCode lanes", self.flat)
+        self.assertIn("never start a refused tier with `cotal_spawn`", self.flat)
+
+    def test_every_tier_goes_through_lane_tier_before_a_spawn(self):
         self.assertIn("~/.agents/bin/lane-tier", self.text)
         self.assertLess(self.text.index("lane-tier"), self.text.index("## 2. Open the lane"))
-        self.assertIn("never start a refused tier", self.flat)
+        self.assertIn("Any other non-zero exit: hold the lane", self.flat)
         review = self.text[self.text.index("## 5. Review a lane"):]
         self.assertIn("lane-tier", review)
 

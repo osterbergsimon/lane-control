@@ -13,7 +13,6 @@ Owner-approved 2026-10-30. Applies to every project; a project's AGENTS.md carri
 - No bd git hooks (`core.hooksPath` unset, nothing bd in `.git/hooks`) and no `issues.jsonl` export lying in `.beads/`: a hook that imports an old export reopens closed issues. Keep exports in `.beads/backup/`.
 
 ## Filing
-- Sandboxed lanes (third-party model lanes in the opencode sandbox) have no `bd`: they put Resume notes and follow-ups in the PR body or their report, and the coordinator claims, notes and files for them.
 - Lanes file a follow-up only for a real defect or missing piece, with evidence (command, file, observed vs expected), at P2 or higher.
 - Nits, ideas and "could also" go in the PR body or the issue's notes, not in beads.
 - Before filing, search (`bd search`) and add to an existing issue instead of duplicating.
@@ -28,7 +27,7 @@ Owner-approved 2026-10-30. Applies to every project; a project's AGENTS.md carri
 Parking a lane (stopping it without a merge: budget, reboot, priorities) must be resumable; owner 2026-10-31: "we cannot park stuff without being sure of how to resume; things will be forgotten".
 - **Three things, all verified:** (1) label `parked` on the issue; (2) the issue's notes begin with one line `Resume (<date>): branch <b> @ <commit>; next: <first step>; open: <questions or none>`; (3) the issue key listed in the coordinator's handover.
 - **Delete the Rove task only after** all three are verified and `branch @ commit` exists on origin.
-- **Resume** = a fresh lane on that branch (sandboxed lanes: `OPENCODE_SANDBOX_PR_BRANCH` when it has a PR), brief = the Resume note. Remove the `parked` label when resumed.
+- **Resume** = a fresh lane on that branch, brief = the Resume note. Remove the `parked` label when resumed.
 - **Free slots take `bd ready --label parked` first**, by priority, before other ready issues.
 - `scripts/park-check.sh` checks this daily (below).
 

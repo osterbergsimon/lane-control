@@ -15,8 +15,6 @@ HEAVY = ROOT / "scripts" / "lane-heavy"
 ROOM = ROOT / "scripts" / "lane-room"
 LIMITS = ROOT / "scripts" / "lane-limits.sh"
 EXAMPLE = ROOT / "limits.example.sh"
-SANDBOX = ROOT / "scripts" / "opencode-sandbox.sh"
-MARK = "# --- the machine-wide heavy-work gate"
 TIMEOUT = 20
 
 # The fake scope: the probe answers with a real memory limit, anything else runs the command after `--`. Like the real
@@ -335,7 +333,7 @@ class HeavyTests(Machine):
         self.assertNotIn("waiting", r.stderr)
 
     def test_a_read_only_slot_file_still_takes_the_slot_and_stays_empty(self):
-        # What a sandboxed lane has: a file it can lock and not write.
+        # A slot file the lane can lock and not write.
         state = Path(self.env["LANE_STATE_DIR"])
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
         slot = state / "heavy.0"
@@ -588,116 +586,6 @@ class ContentTests(unittest.TestCase):
         lines = (ROOT / "config.example.sh").read_text().splitlines()
         self.assertTrue(any(l.startswith("NIGHT_MEM_MIN_GB=8") and "available memory" in l for l in lines))
         self.assertFalse(any(l.startswith("WINDOW_STOP_PCT") and "available memory" in l for l in lines))
-
-
-class SandboxGateTests(Machine):
-    """The sandbox's gate block on its own, with the bind helpers stubbed: no real sandbox, no real load."""
-
-    def gate_block(self):
-        text = SANDBOX.read_text()
-        self.assertIn(MARK, text)
-        return text.split(MARK)[1].split("# the provider and the model")[0]
-
-    def run_block(self):
-        lane = self.dir / "lane"
-        lane.mkdir(exist_ok=True)
-        script = "set -euo pipefail\n" + "".join(f'{f}() {{ echo "{f} $*"; }}\n' for f in ("ro", "rw", "setenv"))
-        script += f"lane={lane}\n# " + self.gate_block()
-        r = subprocess.run(["bash", "-c", script], env=dict(self.env, HOME=str(self.dir)), capture_output=True,
-                           text=True, timeout=TIMEOUT)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        return r, lane
-
-    def install(self):
-        tools = self.dir / ".agents" / "bin"
-        tools.mkdir(parents=True, exist_ok=True)
-        for src in (HEAVY, ROOM, LIMITS):
-            shutil.copy(src, tools / src.name)
-        return tools
-
-    def test_the_lane_gets_the_tools_and_the_real_slot_directory(self):
-        tools = self.install()
-        out = self.run_block()[0].stdout.splitlines()
-        state = self.env["LANE_STATE_DIR"]
-        self.assertIn(f"ro {state}/heavy.0", out)   # only lockable: a lane cannot write onto the host's tmpfs
-        self.assertFalse(any(l.startswith(f"rw {state}") for l in out))
-        self.assertNotIn(f"rw {state}", out)   # the files, never the directory: a lane could plant links the gate follows
-        self.assertTrue(Path(state, "heavy.0").is_file())
-        self.assertIn(f"setenv LANE_STATE_DIR {state}", out)   # the lane must not work out a path of its own
-        for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
-            self.assertIn(f"ro {tools / name}", out)
-        self.assertEqual(os.stat(state).st_mode & 0o777, 0o700)
-
-    def test_the_lane_gets_the_machines_limits_not_its_own_defaults(self):
-        self.install()
-        self.write_limits(LANE_HEAVY_SLOTS=3, LANE_HEAVY_MEM_GB=7)
-        r, lane = self.run_block()
-        for i in range(3):
-            self.assertIn(f"ro {self.env['LANE_STATE_DIR']}/heavy.{i}", r.stdout.splitlines())
-        self.assertNotIn("heavy.3", r.stdout)
-        self.assertIn(f"ro {lane / 'limits.sh'} /run/sandbox/limits.sh", r.stdout.splitlines())
-        self.assertIn("setenv LANE_LIMITS_FILE /run/sandbox/limits.sh", r.stdout.splitlines())
-        written = (lane / "limits.sh").read_text()
-        self.assertIn("LANE_HEAVY_SLOTS=3\n", written)
-        self.assertIn("LANE_HEAVY_MEM_GB=7\n", written)
-
-    def test_noisy_or_broken_owner_limits_do_not_stop_the_launch(self):
-        self.install()
-        self.limits.write_text("echo hello\nno-such-command\nLANE_HEAVY_SLOTS=2\n")
-        r, lane = self.run_block()
-        self.assertIn(f"ro {self.env['LANE_STATE_DIR']}/heavy.1", r.stdout.splitlines())
-        self.assertIn("LANE_HEAVY_SLOTS=2\n", (lane / "limits.sh").read_text())
-
-    def test_an_exit_in_the_owners_limits_does_not_stop_the_launch(self):
-        self.install()
-        self.limits.write_text("exit 3\n")
-        r, _ = self.run_block()   # run_block checks the exit code: the launch goes on past the block
-        self.assertEqual(r.stdout, "")
-        self.assertIn("no machine-wide heavy-work gate", r.stderr)
-
-    def test_without_the_tools_it_binds_nothing_and_says_so(self):
-        r, _ = self.run_block()
-        self.assertEqual(r.stdout, "")
-        self.assertIn("no machine-wide heavy-work gate", r.stderr)
-
-    def test_a_slot_directory_it_cannot_trust_binds_nothing(self):
-        self.install()
-        real = self.dir / "elsewhere"
-        real.mkdir()
-        os.symlink(real, self.env["LANE_STATE_DIR"])
-        r, _ = self.run_block()
-        self.assertEqual(r.stdout, "")
-        self.assertIn("no machine-wide heavy-work gate", r.stderr)
-
-    def test_a_slot_that_is_a_link_binds_nothing_and_creates_nothing(self):
-        self.install()
-        state = Path(self.env["LANE_STATE_DIR"])
-        state.mkdir(mode=0o700)
-        outside = self.dir / "outside"
-        outside.mkdir()
-        (state / "heavy.0").symlink_to(outside / "created-by-gate")
-        r, _ = self.run_block()
-        self.assertEqual(r.stdout, "")
-        self.assertIn("no machine-wide heavy-work gate", r.stderr)
-        self.assertIn("could not set up its slot files", r.stderr)   # the tools are there: installing them is no remedy
-        self.assertNotIn("run project-setup", r.stderr)
-        self.assertFalse((outside / "created-by-gate").exists())
-
-    def test_a_slot_that_is_not_a_file_binds_nothing(self):
-        self.install()
-        Path(self.env["LANE_STATE_DIR"], "heavy.0").mkdir(parents=True)
-        r, _ = self.run_block()
-        self.assertEqual(r.stdout, "")
-
-    def test_without_the_tools_it_says_to_install_them(self):
-        r, _ = self.run_block()
-        self.assertEqual(r.stdout, "")
-        self.assertIn("run project-setup to install it", r.stderr)
-
-    def test_the_helpers_exist_where_the_block_runs(self):
-        text = SANDBOX.read_text().split(MARK)[0]
-        for helper in ("ro()", "rw()", "setenv()"):
-            self.assertIn(helper, text)
 
 
 if __name__ == "__main__":
