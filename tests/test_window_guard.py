@@ -444,7 +444,7 @@ class MachineCoordinatorSetupTests(unittest.TestCase):
 class RetiredWatchTests(unittest.TestCase):
     def test_machine_watch_is_gone_from_scripts_and_docs(self):
         self.assertFalse((ROOT / "scripts" / "machine-watch.sh").exists())
-        for rel in ("README.md", "docs/multi-machine.md", "docs/orca.md", "roles.md", "config.example.sh"):
+        for rel in ("README.md", "docs/multi-machine.md", "orchestrators/orca-cotal/docs/orca.md", "roles.md", "config.example.sh"):
             self.assertNotIn("machine-watch", (ROOT / rel).read_text(), rel)
         self.assertNotIn("WINDOW_WATCH_PCT", (ROOT / "config.example.sh").read_text())
 

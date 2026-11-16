@@ -59,7 +59,7 @@ from pathlib import Path
 def _find_root():
     """core/lcroot.py, loaded by path from the checkout this file lives in (or its copy on a host)."""
     import importlib.util
-    path = Path(__file__).resolve().parent.parent / "core" / "lcroot.py"
+    path = Path(__file__).resolve().parents[3] / "core" / "lcroot.py"  # orchestrators/orca-cotal/scripts/ -> root
     spec = importlib.util.spec_from_file_location("lcroot", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -67,6 +67,7 @@ def _find_root():
 
 
 HERE = _find_root()  # lane-control checkout (or its copy on a host)
+OC = HERE / "orchestrators" / "orca-cotal"  # this orchestrator's personas, skill and templates
 HARNESSES = ("claude", "opencode")
 MODES = ("auto", "bypassPermissions", "default")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
@@ -74,7 +75,9 @@ ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop sh
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # the library first: a new tool never sees an old one
 HOST_FILES = (".lane-control-root", "core/lcroot.py", "scripts/project-setup", *(f"scripts/{t}" for t in LANE_TOOLS),
-              "personas", "skills", "templates", "model-routing.md")  # what --host copies
+              "orchestrators/orca-cotal/scripts/project-setup", "orchestrators/orca-cotal/personas",
+              "orchestrators/orca-cotal/skills", "orchestrators/orca-cotal/templates",
+              "model-routing.md")  # what --host copies (scripts/<name> are links to their real files, copied too)
 
 
 class Fail(Exception):
@@ -503,8 +506,8 @@ def skills():
     lane_tools(home)
     root = home / ".agents" / "skills"
     dst = root / "orca-cotal-lanes"
-    want = {"SKILL.md": (HERE / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text(),
-            "brief.md": (HERE / "templates" / "lane-brief.md").read_text()}
+    want = {"SKILL.md": (OC / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text(),
+            "brief.md": (OC / "templates" / "lane-brief.md").read_text()}
     fresh = not dst.exists()
     changed = False
     if not (root / "orca-cli").exists():
@@ -636,7 +639,7 @@ def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: st
     roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
     changed = []  # personas that existed and now read differently: a running agent keeps the old text
     for name, (h, m) in roles:
-        text = render_persona((HERE / "personas" / f"{name}.md").read_text(), h, m,
+        text = render_persona((OC / "personas" / f"{name}.md").read_text(), h, m,
                               mode.get(name, "default") if isinstance(mode, dict) else mode, project, table,
                               review_persona, design_lead=lead is not None, attached=attached)
         state = write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text)
@@ -708,7 +711,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         else:
             pin = (stored.get("models") or {}).get(name)  # the store's pin for a persona that is missing
             harness, model = harness_model(pin) if isinstance(pin, str) and name != "reviewer" else reviewer
-        texts[name] = (harness, model, render_persona((HERE / "personas" / f"{name}.md").read_text(), harness, model,
+        texts[name] = (harness, model, render_persona((OC / "personas" / f"{name}.md").read_text(), harness, model,
                                                       modes.get(name) or others, project, str(table),
                                                       str(agents / "reviewer.md"), design_lead=design_lead,
                                                       attached=tuple(attached_of(stored))))
@@ -1115,7 +1118,7 @@ DIFF_LIMIT = 60000  # bytes of diff in a prompt; one argument may hold at most 1
 FINDINGS_LIMIT = 30000  # bytes of reviewer findings in a prompt
 STOPPED = 3  # exit status: the owner's answer is needed, and no Orca step ran
 READ_TOOLS = ("Read", "Glob", "Grep")
-TEMPLATES = HERE / "templates" / "adapt"
+TEMPLATES = OC / "templates" / "adapt"
 PROMPTS = ("prompt.md", "review-prompt.md", "check-prompt.md", "answers-prompt.md")  # the prompts; every other file there is a template to adapt
 ADAPT_RULES = f"""
 Rules for this run:
@@ -2366,7 +2369,7 @@ def main(argv=None) -> int:
         print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are {adapter[1]}",
               file=sys.stderr)
         return 2
-    tiers = Path(a.tiers or HERE / "templates" / "lanes.tsv").expanduser()
+    tiers = Path(a.tiers or OC / "templates" / "lanes.tsv").expanduser()
     if a.with_repos and (a.refresh or a.show):
         print("project-setup: --with attaches a repo and cannot go with --refresh or --show (they cover the repos "
               "already attached; run without them to attach another)", file=sys.stderr)

@@ -7,6 +7,12 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# Every file under scripts/ before the orchestrator split: machines, units and docs still call them by these paths.
+OLD_SCRIPT_PATHS = ("cotal-agent", "docs-review-launch.sh", "lane-heavy", "lane-limits.sh", "lane-room", "lane-tier",
+                    "lib.sh", "machine-coordinator-setup", "machine-night-watch.sh", "orca-cotal-task",
+                    "orca-host-install", "park-check.sh", "project-pause", "project-setup", "stale-claims.sh",
+                    "window-guard-install", "window-guard.sh", "wsp-owner-code.mjs")
+SOURCED_ONLY = ("lane-limits.sh", "lib.sh", "window-guard.sh", "wsp-owner-code.mjs")  # read, not run (as on main)
 
 
 def load_lcroot():
@@ -64,6 +70,15 @@ class RootLookupTest(unittest.TestCase):
                            env={**os.environ, "PLAYBOOK_CONFIG": str(conf)})
         self.assertEqual(r.returncode, 1)
         self.assertIn("lane-control root not found", r.stderr)
+
+
+class OldPathsTest(unittest.TestCase):
+    def test_old_script_paths_resolve(self):
+        for name in OLD_SCRIPT_PATHS:
+            p = ROOT / "scripts" / name
+            self.assertTrue(p.is_file(), name)  # follows a symlink to its new home
+            if name not in SOURCED_ONLY:
+                self.assertTrue(os.access(p, os.X_OK), name)
 
 
 if __name__ == "__main__":

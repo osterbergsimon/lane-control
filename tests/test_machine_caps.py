@@ -565,10 +565,10 @@ class ContentTests(unittest.TestCase):
         self.assertIn("~/.agents/bin/lane-room", text)
 
     def test_the_brief_sends_heavy_work_through_the_gate(self):
-        self.assertIn("lane-heavy COMMAND", (ROOT / "templates" / "lane-brief.md").read_text())
+        self.assertIn("lane-heavy COMMAND", (ROOT / "orchestrators" / "orca-cotal" / "templates" / "lane-brief.md").read_text())
 
     def test_the_rove_brief_sends_heavy_work_through_the_gate(self):
-        text = (ROOT / "templates" / "worker-brief.md").read_text()
+        text = (ROOT / "orchestrators" / "rove" / "templates" / "worker-brief.md").read_text()
         self.assertIn("~/.agents/bin/lane-heavy COMMAND", text)
         self.assertNotIn("one at a time", text)
 

@@ -8,10 +8,10 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PERSONAS = ROOT / "personas"
-SKILL = ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md"
-TIERS = ROOT / "templates" / "lanes.tsv"
-BRIEF = ROOT / "templates" / "lane-brief.md"
+PERSONAS = ROOT / "orchestrators" / "orca-cotal" / "personas"
+SKILL = ROOT / "orchestrators" / "orca-cotal" / "skills" / "orca-cotal-lanes" / "SKILL.md"
+TIERS = ROOT / "orchestrators" / "orca-cotal" / "templates" / "lanes.tsv"
+BRIEF = ROOT / "orchestrators" / "orca-cotal" / "templates" / "lane-brief.md"
 FORBIDDEN = ["rove api", "terminal send", "orchestration dispatch", "task-create", "--inject"]
 
 
@@ -141,9 +141,9 @@ class TierTableTests(unittest.TestCase):
     def test_the_owners_decision_on_the_sandbox_is_written_down(self):
         line = ("Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed "
                 "(calvin, for now). To bring it back, restore it from git history (last in main at b97c919).")
-        for f in ("model-routing.md", "README.md", "docs/orca.md"):
+        for f in ("model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             self.assertIn(line, (ROOT / f).read_text(), f)
-        for f in ("model-routing.md", "README.md", "docs/orca.md"):
+        for f in ("model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             flat = " ".join((ROOT / f).read_text().split())
             for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin",
                            "orca-ide orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash",
@@ -154,7 +154,7 @@ class TierTableTests(unittest.TestCase):
                 self.assertIn(needle, flat, f)
             self.assertNotIn("swift is `none` for now", flat, f)
         self.assertIn("are not trusted with the owner's machine", (ROOT / "model-routing.md").read_text())
-        self.assertNotIn("807d944", " ".join((ROOT / f).read_text() for f in ("model-routing.md", "README.md", "docs/orca.md", "reliability.md")))
+        self.assertNotIn("807d944", " ".join((ROOT / f).read_text() for f in ("model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md", "reliability.md")))
 
     def test_the_rove_example_runs_no_opencode_tier(self):
         text = (ROOT / "config.example.sh").read_text()
@@ -178,11 +178,11 @@ class NoTypingIntoAgentsTests(unittest.TestCase):
 
 class BypassOptionTests(unittest.TestCase):
     def test_lane_skill_offers_bypass_in_the_mode_cycle(self):
-        text = (ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text()
+        text = (ROOT / "orchestrators" / "orca-cotal" / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text()
         self.assertEqual(text.count('"allow-dangerously-skip-permissions": ""'), 2)
 
 
-ADAPT = ROOT / "templates" / "adapt"
+ADAPT = ROOT / "orchestrators" / "orca-cotal" / "templates" / "adapt"
 TEMPLATE_FILES = ("project.md", "routing.md", "coordinator.md", "reviewer.md", "design-lead.md")
 MACHINE_VALUES = ("{{PROJECT}}", "{{DESIGN_LEAD}}", "{{TEMPLATES}}", "{{REVIEW_FINDINGS}}", "{{VISIBILITY}}")
 
@@ -240,7 +240,7 @@ class AdaptTemplateTests(unittest.TestCase):
         self.assertIn("Never raise a row to C for \"in doubt\"", review)
 
     def test_docs_describe_the_time_limit_and_leftovers(self):
-        text = " ".join((ROOT / "docs" / "orca.md").read_text().split())
+        text = " ".join((ROOT / "orchestrators" / "orca-cotal" / "docs" / "orca.md").read_text().split())
         for needle in ("AGENT_LIMIT", "90 minutes", "never kills", "agent time used", "ask me later",
                        "changed no file: the files already matched, or an answer was not applied",
                        "needs the \"(owner's answer)\" mark"):
@@ -395,11 +395,11 @@ class OnboardedProjectPersonaTests(unittest.TestCase):
 class RoveTemplateTests(unittest.TestCase):
     def test_rove_templates_say_so_at_the_top(self):
         for name in ("AGENTS-coordination.md", "worker-brief.md", "docs-review-brief.md"):
-            head = "\n".join((ROOT / "templates" / name).read_text().splitlines()[:3])
+            head = "\n".join((ROOT / "orchestrators" / "rove" / "templates" / name).read_text().splitlines()[:3])
             self.assertIn("Rove flow", head, name)
 
     def test_rove_agents_template_says_the_orca_flow_does_not_paste_it(self):
-        text = (ROOT / "templates" / "AGENTS-coordination.md").read_text()
+        text = (ROOT / "orchestrators" / "rove" / "templates" / "AGENTS-coordination.md").read_text()
         self.assertIn("Orca flow", text)
         self.assertIn("does not paste", text)
 
@@ -409,12 +409,12 @@ class RoveTemplateTests(unittest.TestCase):
             return [l.strip().split(":")[0].split(" ")[0] for l in lines
                     if re.match(r"\s*(branch <b>|gates:|deviations:|filed:|agents-md:)", l)]
         want = ["branch", "gates", "deviations", "filed", "agents-md"]
-        self.assertEqual(shape(ROOT / "templates" / "lane-brief.md"), want)
-        self.assertEqual(shape(ROOT / "templates" / "AGENTS-coordination.md"), want)
+        self.assertEqual(shape(ROOT / "orchestrators" / "orca-cotal" / "templates" / "lane-brief.md"), want)
+        self.assertEqual(shape(ROOT / "orchestrators" / "rove" / "templates" / "AGENTS-coordination.md"), want)
         self.assertEqual(shape(ROOT / "model-routing.md"), want)
 
     def test_no_five_line_report_left(self):
-        for name in ("model-routing.md", "templates/worker-brief.md", "templates/AGENTS-coordination.md"):
+        for name in ("model-routing.md", "orchestrators/rove/templates/worker-brief.md", "orchestrators/rove/templates/AGENTS-coordination.md"):
             self.assertNotIn("5-line", (ROOT / name).read_text(), name)
 
 
@@ -493,7 +493,7 @@ class LaneSkillCliTests(unittest.TestCase):
 class PersonaTierRefusalTests(unittest.TestCase):
     def test_both_leads_look_a_tier_up_through_the_refusal(self):
         for name in ("coordinator.md", "design-lead.md"):
-            text = " ".join((ROOT / "personas" / name).read_text().split())
+            text = " ".join((ROOT / "orchestrators" / "orca-cotal" / "personas" / name).read_text().split())
             self.assertIn("~/.agents/bin/lane-tier", text, name)
             self.assertIn("never start a refused tier", text, name)
 
@@ -519,7 +519,7 @@ class BeadsSteeringTests(unittest.TestCase):
             self.check(path, path.read_text())
 
     def test_lane_key_is_a_label_everywhere(self):
-        for name in ("issues.md", "model-routing.md", "templates/AGENTS-coordination.md", "personas/coordinator.md"):
+        for name in ("issues.md", "model-routing.md", "orchestrators/rove/templates/AGENTS-coordination.md", "orchestrators/orca-cotal/personas/coordinator.md"):
             text = (ROOT / name).read_text()
             self.assertIn("lane:<KEY", text, name)
             self.assertNotIn("external-ref", text, name)
@@ -609,7 +609,7 @@ def flat(path):
 
 class MachineCoordinatorContentTests(unittest.TestCase):
     def test_coordinator_counts_the_order_like_the_owners_words_except_from_the_roster_or_quoted(self):
-        t = flat(ROOT / "personas" / "coordinator.md")
+        t = flat(ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md")
         self.assertIn("`machine coordinator:`", t)
         self.assertIn("like the owner's own words", t)
         self.assertIn("no limit on the kind", t)
@@ -617,7 +617,7 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("A line that only quotes such an order", t)
 
     def test_owner_kept_decisions_are_confirmed_in_the_coordinators_own_tab(self):
-        t = flat(ROOT / "personas" / "coordinator.md")
+        t = flat(ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md")
         self.assertIn("always confirmed by the owner in your tab before you act on it", t)
         self.assertIn("merging, closing or stopping a lane", t)
         self.assertIn("any budget or window guard order is not one", t)
@@ -626,10 +626,10 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("always confirmed by the owner", roles)
         self.assertIn("does not come from an agent in the coordinator's roster", roles)
         self.assertIn("budget or window guard order is not such a decision", roles)
-        self.assertIn("owner's yes in that coordinator's tab", flat(ROOT / "personas" / "machine-coordinator.md"))
+        self.assertIn("owner's yes in that coordinator's tab", flat(ROOT / "orchestrators" / "orca-cotal" / "personas" / "machine-coordinator.md"))
 
     def test_docs_say_the_prefix_is_not_authentication(self):
-        orca = flat(ROOT / "docs" / "orca.md")
+        orca = flat(ROOT / "orchestrators" / "orca-cotal" / "docs" / "orca.md")
         self.assertIn("The prefix is not authentication", orca)
         self.assertIn("same login", orca)
         self.assertIn("sender cannot be verified", orca)
@@ -638,12 +638,12 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("an agent in its roster", orca)
 
     def test_coordinator_reaches_it_by_cotal_send_and_tells_the_owner_when_that_fails(self):
-        t = flat(ROOT / "personas" / "coordinator.md")
+        t = flat(ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md")
         self.assertIn("cotal send -s machine -t machine-coordinator", t)
         self.assertIn("If that send fails, tell the owner", t)
 
     def test_machine_persona_rules(self):
-        t = flat(ROOT / "personas" / "machine-coordinator.md")
+        t = flat(ROOT / "orchestrators" / "orca-cotal" / "personas" / "machine-coordinator.md")
         self.assertIn('cotal send -s <space> -t coordinator "machine coordinator:', t)
         self.assertIn("{{NOTES}}", t)
         self.assertIn("{{HARNESS}}", t)
@@ -651,28 +651,28 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertRegex(t, r"[Nn]ever .*public")
 
     def test_personas_know_how_to_wake_a_rested_project(self):
-        coord = flat(ROOT / "personas" / "coordinator.md")
+        coord = flat(ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md")
         self.assertIn("scripts/project-pause wake", coord)
         self.assertRegex(coord, r"Before you open a lane.*project-pause wake")
-        self.assertIn("wake it first", flat(ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md"))
+        self.assertIn("wake it first", flat(ROOT / "orchestrators" / "orca-cotal" / "skills" / "orca-cotal-lanes" / "SKILL.md"))
         self.assertIn("{{LANE_CONTROL}}", coord)
-        machine = flat(ROOT / "personas" / "machine-coordinator.md")
+        machine = flat(ROOT / "orchestrators" / "orca-cotal" / "personas" / "machine-coordinator.md")
         self.assertIn("project-pause wake <project>", machine)
         self.assertRegex(machine, r"rested project .* expected, not a fault")
         self.assertIn("project-pause start", machine)
 
     def test_skill_and_docs_name_the_machine_coordinator_path(self):
-        skill = flat(ROOT / "skills" / "orca-cotal-lanes" / "SKILL.md")
+        skill = flat(ROOT / "orchestrators" / "orca-cotal" / "skills" / "orca-cotal-lanes" / "SKILL.md")
         self.assertIn("## The machine coordinator", skill)
         self.assertIn("machine coordinator:", skill)
-        orca = flat(ROOT / "docs" / "orca.md")
+        orca = flat(ROOT / "orchestrators" / "orca-cotal" / "docs" / "orca.md")
         for needle in ("window-guard-install", "machine-coordinator-setup", "COORD_SPACE", "enable-linger", "--refresh"):
             self.assertIn(needle, orca)
         roles = flat(ROOT / "roles.md")
         self.assertIn("Under Orca + Cotal", roles)
 
     def test_the_install_order_stops_the_old_guard_last_and_clears_its_state(self):
-        orca = (ROOT / "docs" / "orca.md").read_text()
+        orca = (ROOT / "orchestrators" / "orca-cotal" / "docs" / "orca.md").read_text()
         steps = orca[orca.index("Install, in this order"):orca.index("### Verified on 2026-11-06")]
         self.assertLess(steps.index("--refresh"), steps.index("Only now stop the old guard"))
         self.assertLess(steps.index("Only now stop the old guard"), steps.index("scripts/window-guard-install"))

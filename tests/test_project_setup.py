@@ -241,7 +241,7 @@ class PureTests(unittest.TestCase):
         self.assertNotEqual(self.m.derive_port("a"), self.m.derive_port("b"))
 
     def test_render_persona_claude(self):
-        text = (ROOT / "personas" / "coordinator.md").read_text()
+        text = (ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md").read_text()
         out = self.m.render_persona(text, "claude", "opus", "auto", "Shop")
         self.assertIn("agent: claude", out)
         self.assertIn("model: opus", out)
@@ -252,7 +252,7 @@ class PureTests(unittest.TestCase):
         self.assertIn("coordinator of Shop", out)
 
     def test_render_persona_opencode(self):
-        text = (ROOT / "personas" / "design-lead.md").read_text()
+        text = (ROOT / "orchestrators" / "orca-cotal" / "personas" / "design-lead.md").read_text()
         out = self.m.render_persona(text, "opencode", "opencode/deepseek-v4.1-flash", "auto", "Shop")
         self.assertIn("events: false", out)
         self.assertNotIn("permission-mode", out)
@@ -1080,7 +1080,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(events[-2:], ["flush", "input"])  # right before the commit question
 
     def test_an_exposure_answer_is_marked_and_a_confirming_answer_keeps_the_list(self):
-        self.assertIn("(owner's answer)", (ROOT / "templates" / "adapt" / "answers-prompt.md").read_text())
+        self.assertIn("(owner's answer)", (ROOT / "orchestrators" / "orca-cotal" / "templates" / "adapt" / "answers-prompt.md").read_text())
         self.e.script_agents(sonnet=[self.WRITE_Q, {}], opus=[PASS])
         _, out, _ = self.in_terminal(["yes, as you chose", "n"])
         self.assertIn("files already matched", out)
@@ -3642,7 +3642,7 @@ class TierChoiceTests(unittest.TestCase):
         status, out, ask = self.in_terminal([])
         self.assertEqual(status, 0)
         ask.assert_not_called()
-        self.assertEqual(self.table.read_text(), (ROOT / "templates" / "lanes.tsv").read_text())
+        self.assertEqual(self.table.read_text(), (ROOT / "orchestrators" / "orca-cotal" / "templates" / "lanes.tsv").read_text())
         self.assertEqual(self.row(), "swift\tnone\t-\t-")
         self.assertNotIn("opencode: ", out)
 
