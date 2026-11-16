@@ -1,0 +1,45 @@
+# Core: what every orchestrator shares
+
+These files do not depend on which orchestrator runs the agents. A project keeps them when it switches from one
+orchestrator to another; everything that does depend on one is in `orchestrators/<name>/`.
+
+| File | What |
+|---|---|
+| `roles.md` | jobs and rules of the machine coordinator and a project coordinator |
+| `model-routing.md` | tiers, routing by path map, escalation, limits, weekly and window steps, night mode, message protocol, third-party lane conventions, context protocol, cloud sessions |
+| `issues.md` | beads doctrine: claim, close, parking, filing bar, weekly grooming, stale claims |
+| `reliability.md` | numbered failure, fix, reuse log; entries that came from one orchestrator say which |
+| `machine.md` | what is machine-specific; checks for a new box; CI runner patterns |
+| `config.example.sh` | the one config the scripts read: tiers, budgets, thresholds, coordinators |
+| `limits.example.sh` | a machine's own limits for the heavy-work and room gates |
+| `lane-ledger.tsv` | one row per finished task, used to calibrate routing |
+| `scripts/lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh` | the machine caps: the gate for builds and full test suites, the check before opening a lane, the tier lookup, their shared limits |
+| `scripts/window-guard.sh`, `window-guard-install` | budget orders and the low-memory notice; it reads budgets (core) but sends its orders through an orchestrator (today `cotal send`, so it needs Orca + Cotal) |
+| `scripts/stale-claims.sh`, `park-check.sh`, `lib.sh` | daily beads checks and the shared config and budget helpers |
+| `templates/budget-ceiling.json`, `window-guard.service` | the weekly ceiling file and the guard's systemd unit |
+| `lcroot.py` | finds the lane-control checkout by its marker file, `.lane-control-root` |
+
+Why shared: roles, routing, budgets, the heavy-work gate, beads and the reliability log are how we work, whatever
+starts the agents. A switch carries them over unchanged (`orchestrators/switching.md`).
+
+## Paths kept for live machines
+
+Machines, installed units and running agents call some files by their old paths. Each old path is a relative
+symlink to the file's new home, so nothing on a machine has to change. Remove one only after every machine that
+uses it has been updated.
+
+| Old path | Now | Who uses it |
+|---|---|---|
+| `scripts/window-guard.sh` | `core/scripts/window-guard.sh` | the installed `lane-control-window-guard.service` runs it (written by `window-guard-install`) |
+| `scripts/lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh` | `core/scripts/` | docs and briefs; `project-setup` copies them to `~/.agents/bin` (from `core/scripts/` now), which project build scripts call |
+| `scripts/lib.sh` | `core/scripts/lib.sh` | sourced by every watch script, wherever it is started from |
+| `scripts/stale-claims.sh`, `park-check.sh` | `core/scripts/` | Rove routines (`bash <repo>/scripts/...`) |
+| `scripts/window-guard-install` | `core/scripts/window-guard-install` | the install steps in the docs |
+| `scripts/project-setup`, `project-pause`, `machine-coordinator-setup`, `orca-host-install`, `orca-cotal-task`, `cotal-agent` | `orchestrators/orca-cotal/scripts/` | rendered personas (`<repo>/scripts/project-pause wake`), `project-setup --host` (runs `scripts/project-setup` in the host copy) and the docs |
+| `scripts/machine-night-watch.sh`, `docs-review-launch.sh` | `orchestrators/rove/scripts/` | Rove routines |
+| `scripts/wsp-owner-code.mjs` | `orchestrators/wsp/scripts/` | the wsp notes |
+| `roles.md`, `model-routing.md` | `core/` | a machine coordinator whose persona was rendered before the move reads them there |
+| `model-routing.md`, `reliability.md`, `lane-ledger.tsv` | `core/` | the Rove quickstart linked them into `~/.config/rove/` |
+
+`~/.agents/bin/lane-heavy` and `~/.agents/bin/lane-limits.sh` are copies, not links: they keep working as they are
+and are refreshed from `core/scripts/` by the next `project-setup` run.

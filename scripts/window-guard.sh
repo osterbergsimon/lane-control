@@ -1,0 +1,1 @@
+../core/scripts/window-guard.sh

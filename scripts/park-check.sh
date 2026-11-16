@@ -1,0 +1,1 @@
+../core/scripts/park-check.sh

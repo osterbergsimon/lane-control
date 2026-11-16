@@ -12,6 +12,8 @@ OLD_SCRIPT_PATHS = ("cotal-agent", "docs-review-launch.sh", "lane-heavy", "lane-
                     "lib.sh", "machine-coordinator-setup", "machine-night-watch.sh", "orca-cotal-task",
                     "orca-host-install", "park-check.sh", "project-pause", "project-setup", "stale-claims.sh",
                     "window-guard-install", "window-guard.sh", "wsp-owner-code.mjs")
+# Root files a live machine reads by path (core/README.md, "Paths kept for live machines").
+OLD_DOC_PATHS = ("roles.md", "model-routing.md", "reliability.md", "lane-ledger.tsv")
 SOURCED_ONLY = ("lane-limits.sh", "lib.sh", "window-guard.sh", "wsp-owner-code.mjs")  # read, not run (as on main)
 
 
@@ -79,6 +81,15 @@ class OldPathsTest(unittest.TestCase):
             self.assertTrue(p.is_file(), name)  # follows a symlink to its new home
             if name not in SOURCED_ONLY:
                 self.assertTrue(os.access(p, os.X_OK), name)
+
+    def test_old_doc_paths_resolve_to_core(self):
+        for name in OLD_DOC_PATHS:
+            self.assertEqual((ROOT / name).resolve(), (ROOT / "core" / name).resolve(), name)
+
+    def test_live_paths_are_listed_in_core_readme(self):
+        text = (ROOT / "core" / "README.md").read_text()
+        for name in (*OLD_SCRIPT_PATHS, *OLD_DOC_PATHS):
+            self.assertIn(name, text, name)
 
 
 if __name__ == "__main__":

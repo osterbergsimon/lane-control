@@ -1,0 +1,1 @@
+../orchestrators/rove/scripts/machine-night-watch.sh
