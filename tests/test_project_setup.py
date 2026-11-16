@@ -2059,6 +2059,11 @@ class OnboardingTests(unittest.TestCase):
         for path in m.HOST_FILES:
             self.assertTrue((ROOT / path).exists(), path)
 
+    def test_host_mode_carries_the_root_lookup(self):
+        files = load().HOST_FILES  # the copy on the host finds its own root, like a checkout
+        self.assertIn(".lane-control-root", files)
+        self.assertIn("core/lcroot.py", files)
+
     def test_host_mode_carries_the_machine_tools(self):
         for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
             self.assertIn(f"scripts/{name}", load().HOST_FILES)

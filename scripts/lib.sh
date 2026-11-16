@@ -1,4 +1,14 @@
 # Shared by the watch scripts: loads the config, defines budget helpers.
+
+# lc_root: the lane-control checkout of the running script, found by its marker file (symlinks resolved).
+lc_root() {
+  local d; d=$(dirname "$(readlink -f "$0")")
+  while :; do
+    [ -f "$d/.lane-control-root" ] && { echo "$d"; return 0; }
+    [ "$d" = / ] && { echo "lane-control root not found" >&2; return 1; }
+    d=$(dirname "$d")
+  done
+}
 CONF="${PLAYBOOK_CONFIG:-$HOME/.config/rove/playbook.conf.sh}"
 declare -A COORD_CEILING_ADD=( )   # default: no per-project raise (config may override)
 declare -A COORD_REPO=( )

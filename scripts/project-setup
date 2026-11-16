@@ -56,14 +56,24 @@ import time
 import zlib
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent.parent  # lane-control checkout (or its copy on a host)
+def _find_root():
+    """core/lcroot.py, loaded by path from the checkout this file lives in (or its copy on a host)."""
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "core" / "lcroot.py"
+    spec = importlib.util.spec_from_file_location("lcroot", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.find_root(Path(__file__))
+
+
+HERE = _find_root()  # lane-control checkout (or its copy on a host)
 HARNESSES = ("claude", "opencode")
 MODES = ("auto", "bypassPermissions", "default")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # the library first: a new tool never sees an old one
-HOST_FILES = ("scripts/project-setup", *(f"scripts/{t}" for t in LANE_TOOLS),
+HOST_FILES = (".lane-control-root", "core/lcroot.py", "scripts/project-setup", *(f"scripts/{t}" for t in LANE_TOOLS),
               "personas", "skills", "templates", "model-routing.md")  # what --host copies
 
 
