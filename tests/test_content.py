@@ -622,7 +622,7 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("merging, closing or stopping a lane", t)
         self.assertIn("any budget or window guard order is not one", t)
         self.assertNotIn("unless the order says", t)
-        roles = flat(ROOT / "core" / "roles.md")
+        roles = flat(ROOT / "orchestrators" / "orca-cotal" / "notes.md")  # moved from core/roles.md
         self.assertIn("always confirmed by the owner", roles)
         self.assertIn("does not come from an agent in the coordinator's roster", roles)
         self.assertIn("budget or window guard order is not such a decision", roles)
@@ -668,8 +668,8 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         orca = flat(ROOT / "orchestrators" / "orca-cotal" / "docs" / "orca.md")
         for needle in ("window-guard-install", "machine-coordinator-setup", "COORD_SPACE", "enable-linger", "--refresh"):
             self.assertIn(needle, orca)
-        roles = flat(ROOT / "core" / "roles.md")
-        self.assertIn("Under Orca + Cotal", roles)
+        self.assertIn("Under Orca + Cotal", flat(ROOT / "orchestrators" / "orca-cotal" / "notes.md"))
+        self.assertIn("orchestrators/orca-cotal/notes.md#roles", flat(ROOT / "core" / "roles.md"))
 
     def test_the_install_order_stops_the_old_guard_last_and_clears_its_state(self):
         orca = (ROOT / "orchestrators" / "orca-cotal" / "docs" / "orca.md").read_text()

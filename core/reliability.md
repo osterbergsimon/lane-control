@@ -1,6 +1,7 @@
 # Coordinator reliability log
 
 Failures of coordinators (long-lived agent main tasks directing worker lanes), each with the durable fix and how to reuse it. Newest last. Add an entry for every failure that leads to a durable fix.
+An entry that came from one orchestrator says so on an `Orchestrator:` line under its heading; entries without one apply to all.
 
 ## 1. Read usage, never assume it is unknowable
 - **Failure:** a coordinator told a peer that weekly usage could not be read, and kept working at 95-98 % of the weekly limit, past the owner's ceiling.
@@ -8,11 +9,13 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Reuse:** read feed and ceiling before every launch on a metered budget. Share a "PRESSURE on/off" signal between coordinators. Budgets with no feed are managed by caps and by the owner's reports.
 
 ## 2. Never let a worker report sit unhandled
+Orchestrator: Rove
 - **Failure:** a worker reported while the coordinator session had crashed; the report was never read.
 - **Fix:** a hook in the coordinator's checkout only (`UserPromptSubmit` and `SessionStart`) injects `rove api context --text` into every turn: finished, stuck and unknown tasks and open decision gates.
 - **Reuse:** `templates/coordinator-settings.local.json`. Keep it out of committed settings so workers do not pay for it. On every report: verify the claims, decide, follow up, record the outcome on the issue.
 
 ## 3. Owner decisions as gates, not chat lines
+Orchestrator: Rove
 - **Failure:** decisions drowned in long status output.
 - **Fix:** `rove api gate-raise --task-id <main> --question ... --option k=label --recommend k`. The answer returns as a gate-answered message. Every reply with pending gates starts with a "Decisions for you" block.
 - **Reuse:** as written.
@@ -35,11 +38,13 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Privacy:** third-party lanes see everything they read. Keep them code-only, with no private data links (the init script branches on the task's vendor).
 
 ## 6. Survive a coordinator crash
+Orchestrator: Rove
 - All rules live in AGENTS.md and beads memories, not in the session.
 - The `SessionStart` hook re-injects state; a `handover-latest` memory holds the last handover.
 - A routine aimed at a dead tab does nothing: night routines revive the tab first (`rove api tab-revive`).
 
 ## 7. The agent harness itself
+Orchestrator: Rove
 - **Auto mode:** it blocks a coordinator from editing its own permission settings ("self-modification") and from launching auto-approving agents. The owner installs the project allow rules for `rove api add` once.
 - **MCP servers and connectors:** turn off those a project does not need in the project settings; every tool schema costs context.
 
@@ -48,6 +53,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Worker gate claims miss workspaces:** a worker reported "format green" but had run it in the root workspace only; a second workspace failed. The coordinator's rerun covers every workspace (AGENTS.md lists them); one script runs them all.
 
 ## 9. Lessons from the first fleet
+Orchestrator: Rove
 - **Third-party first prompt lost on spawn, every time:** 11 of 11 spawns sat on an empty start screen. After spawn, wait ~25 s and resend the full brief with `--prompt-file` if no work shows.
 - **Worker report silently lost to shell quoting:** a worker used `rove api send --prompt "...(...)..."`; the shell failed on the parenthesis and the coordinator saw nothing while the PR sat ready. Worker rule: always `--prompt-file - <<'EOF'` and check `"delivered":true`. Coordinator: sweep `context` for PRs with passing CI and no report.
 - **Renaming a branch with an open PR closes the PR's link:** GitHub cannot retarget a PR's head branch. Rename only before the first push.
@@ -56,6 +62,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Review catches what green CI doesn't:** a cheap-tier file-type sniffing fix passed CI but would have reclassified every office file as a plain archive (the override fired on any non-matching verdict). Read every production diff and ask "what else matches this condition?"
 
 ## 10. Lessons from a second fleet
+Orchestrator: Rove
 - **A worker's screenshot script rebooted the owner's desktop.** It signed in to a dev backend and clicked a button whose route ran the host's reboot as the desktop user, which the OS allowed without a prompt. Fixes: a worker rule (never call host-acting routes on a real backend; stub them in the browser test tool) and a product guard (host control off by default on desktops and in containers). Any app that can act on its host is a hazard when it runs on the coordinator's machine: list those routes in the worker rules.
 - **A broad `pkill -f` killed the owner's live dev server.** Workers stop only processes they started, by the PID saved at start; never by pattern or a looked-up PID. Give the owner's stack reserved ports.
 - **Verify in the real deployment artifact, not only in CI.** A command passed every test in the dev environment but failed in the published image, where the package was an editable install pointing at a deleted path. Run the command once inside the published image; add a CI smoke step for it.
@@ -66,11 +73,13 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Merges in a row conflict.** Two PRs touching the same files: send the second back with the exact files and the behaviour from both sides to keep. When a PR's CI ran before other merges, have the worker merge the base branch and rerun the gates (dependency bumps especially).
 
 ## 11. Coordinator-only hooks leak into worker worktrees
+Orchestrator: Rove
 - **Failure:** the inbox hook in the main checkout's local settings also fired in every worker session (the harness applies the main checkout's local settings to its git worktrees). Workers received the coordinator's task list and owner decisions.
 - **Fix:** guard the hook with the coordinator's own task id: `[ "${ROVE_TASK_ID:-}" = "<id>" ] || exit 0; ...` (in the template).
 - **Reuse:** guard any coordinator-only hook the same way.
 
 ## 12. A web inbox that fails on decision gates
+Orchestrator: Rove
 - **Failure:** every gate errored in the inbox UI while other items rendered (reported upstream).
 - **Workaround:** until fixed, put every decision in the chat reply as well as in the gate, and call `rove api gate-answer` yourself when the owner answers in chat.
 
@@ -88,6 +97,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Fix:** chain the whole sequence with `&&`, or test the merge result explicitly (`if git merge ...; then ...; fi`), and run follow-up steps only after the push succeeded and `gh pr view <n> --json state` says MERGED.
 
 ## 16. Deleting a finished task: remove its private-data links first, by literal path
+Orchestrator: Rove
 - **Failure:** `rove api delete` refuses a worktree with gitignored content (`DIRTY_WORKTREE`): private-data symlinks the init script adds to every task, a cache directory. An `rm "$d/$l"` loop to clear them was blocked by the harness safety check (an unbounded variable could expand to `/`).
 - **Fix:** after the merge, `ls -la <worktree> | grep -- '->'`, then `rm` each link by its literal absolute path (never `-r`, never a bare variable; `"${d:?}/..."` if a variable is unavoidable), delete caches by literal path, then `rove api delete`. Better: have the init script record what it links, so a cleanup can undo exactly that.
 
@@ -100,6 +110,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Fix:** lanes take a free or per-worktree port, never a framework default, and kill only PIDs they started (`$!`), never a pid read off a port or matched by name. Reserve ports for the owner's stack.
 
 ## 19. Decision dialogs get overwritten by lane messages
+Orchestrator: Rove
 - **Failure:** several times an interactive question dialog came back with a lane's report text in place of the owner's answer. A report delivered while the dialog was open took the answer slot, so the dialog recorded no real answer.
 - **Fix:** never act on a dialog answer that is not one of its options or the owner's own words. While lanes are active, put owner decisions in Rove gates (`gate-raise`; answers come back as a gate-answered message) and list them in chat as well. Use the dialog only when no lane is likely to report.
 
@@ -112,10 +123,12 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Fix:** read the max of the last 60 samples for the newest reset (`BUDGET_USAGE` in `config.example.sh`); usage only rises within a window.
 
 ## 22. `rove api feedback` is a public post under the owner's account
+Orchestrator: Rove
 - **Failure:** a coordinator filed a bug with `rove api feedback`; it became a public discussion naming two private projects and their gate ids. Editing it later leaves the original in the public edit history; only the repo maintainer can delete that.
 - **Fix:** public posts need the owner's approval first and generic wording (`roles.md`, `model-routing.md`).
 
 ## 23. First sandboxed-lane rollout
+Orchestrator: Rove
 - **Failures:** the documented launch form broke on Rove's appended brief (needs `--auto --prompt`); the engine's new-session flag froze the TUI size; an explicit branch override lost to the caller's task env; files outside the worktree (worker rules, symlinked skills) vanished inside; no `bd`, no CI read, no host loopback; the header said no key was needed.
 - **Fixes (removed with the sandbox, below):** a launch form and conventions for sandboxed lanes; the flag gated; a read-only CI-checks relay; an explicit branch wins; sandboxed lanes filed through the coordinator. Positive: auto-approve inside the sandbox ended permission-prompt stalls (an unsandboxed lane had sat 8 h on a prompt).
 - Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at b97c919).
@@ -137,6 +150,7 @@ Failures of coordinators (long-lived agent main tasks directing worker lanes), e
 - **Fix:** serviceOverrides ProtectProc="default", PrivateUsers=false, ReadWritePaths=[workDir]; workDir on disk with an age-out tmpfiles rule; tokenFile holding a fine-grained PAT scoped to the one repo with only Administration read-write (the module mints a registration token per job); job containers with `--init` so killed children are reaped.
 
 ## 28. Cloud sessions launched from a dirty checkout
+Orchestrator: Rove (the archive bullet only)
 - **Failure:** `claude --cloud` from a checkout with uncommitted changes, or not on a pushed branch, uploads the local dirty tree and attaches no GitHub source: no origin remote, pushes and API writes refused; sources attach only at creation. Private local edits can leave the machine this way.
 - **Fix:** launch only from a clean detached worktree at origin/<base> with nothing private in it; brief step 1 = push the branch and open a draft PR, else stop. Rescue: have the session print `git format-patch --stdout origin/<base>..HEAD`, then teleport (`claude --teleport <id>`) from a clean worktree and extract the patch; teleport takes the session over, so only after the patch is printed. The Agent tool's isolation="remote" may silently run a local subagent.
 - **Archive does not stop a lane:** Rove's `archive` only hides the task; its engine keeps running and holding memory. Close-out order: `tab-close` (ends the PTY), then `archive`.
