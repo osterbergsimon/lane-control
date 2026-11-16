@@ -70,7 +70,9 @@ def adapter_for(adapters: dict, name: str, action: str):
 
 
 def run(cmd: list, cwd=None, check=True) -> subprocess.CompletedProcess:
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
+    # a missing credential fails fast instead of opening a prompt on the owner's desktop (core/reliability.md 26)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "false", "SSH_ASKPASS": "false",
+           "GCM_INTERACTIVE": "never", "GH_PROMPT_DISABLED": "1"}
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env)
     if check and r.returncode != 0:
         raise GitFail(f"{' '.join(cmd)} failed: {(r.stderr or r.stdout).strip()}")

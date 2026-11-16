@@ -21,6 +21,9 @@ import os, sys
 with open(os.environ["GH_LOG"], "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\\n")
 if sys.argv[1:3] == ["pr", "create"]:
+    with open(os.environ["GH_LOG"] + ".env", "w") as f:
+        for k in ("GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "GCM_INTERACTIVE", "GH_PROMPT_DISABLED"):
+            f.write(f"{k}={os.environ.get(k, '')}\\n")
     print("https://example.com/acme/shop/pull/7")
 elif sys.argv[1:3] == ["repo", "view"]:
     sys.exit(1)
@@ -272,6 +275,14 @@ class SwitchTests(OrchTest):
         self.assertIn("nothing to switch", r.stdout)
         self.assertNotIn("human steps", r.stdout)
         self.assert_untouched(p)
+
+    def test_git_and_gh_never_prompt(self):
+        p = self.fixture()
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        env = dict(l.split("=", 1) for l in Path(str(self.e.gh_log) + ".env").read_text().splitlines())
+        self.assertEqual(env, {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "false", "SSH_ASKPASS": "false",
+                               "GCM_INTERACTIVE": "never", "GH_PROMPT_DISABLED": "1"})
 
     def test_switch_asks_without_yes(self):
         p = self.fixture()
