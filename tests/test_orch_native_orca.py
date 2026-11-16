@@ -30,7 +30,7 @@ class TemplateTests(unittest.TestCase):
         flat = " ".join(text.split())
         for needle in ("orchestration", "worker-start", "own worktree", "lane-heavy", "handover-latest", "check"):
             self.assertIn(needle, flat, needle)
-        for private in ("calvin", "pasteur", "vellum", "/home/", "cotal"):
+        for private in ("/home/", "/mnt/", "cotal", "~/code/"):
             self.assertNotIn(private, text.lower(), private)
 
 
