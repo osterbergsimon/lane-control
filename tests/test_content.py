@@ -682,5 +682,61 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("COORD_SPACE", (ROOT / "core" / "config.example.sh").read_text())
 
 
+ORCH = ROOT / "orchestrators"
+STATUSES = ("untested", "trial", "in use", "parked", "retired")
+
+
+def orchestrator_dirs():
+    return sorted(d for d in ORCH.iterdir() if d.is_dir())
+
+
+def record_status(d):
+    head = (d / "record.md").read_text().splitlines()[:5]
+    for line in head:
+        m = re.match(r"Status: (.+?)\s*$", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+class OrchestratorRecordTests(unittest.TestCase):
+    def test_every_orchestrator_has_record(self):
+        dirs = orchestrator_dirs()
+        self.assertGreaterEqual(len(dirs), 5)
+        for d in dirs:
+            self.assertTrue((d / "record.md").is_file(), d.name)
+            self.assertIn(record_status(d), STATUSES, d.name)
+            text = (d / "record.md").read_text()
+            self.assertIn("\n## History\n", text, d.name)
+            hist = text.split("\n## History\n", 1)[1].split("\n## ", 1)[0]
+            self.assertRegex(hist, r"(?m)^- \d{4}-\d{2}-\d{2} ", d.name)
+
+    def test_status_table_matches_records(self):
+        rows = {}
+        for line in (ORCH / "README.md").read_text().splitlines():
+            cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+            if len(cells) >= 3 and cells[0] in {d.name for d in orchestrator_dirs()}:
+                rows[cells[0]] = cells[2]
+        self.assertEqual(rows, {d.name: record_status(d) for d in orchestrator_dirs()})
+
+    def test_checklist_has_the_nine_points_and_the_result_format(self):
+        text = (ORCH / "checklist.md").read_text()
+        for n in range(1, 10):
+            self.assertRegex(text, rf"(?m)^## {n}\. ", n)
+        self.assertIn("pass|partial|fail|untested", text)
+
+    def test_records_use_the_checklist_result_words(self):
+        for d in orchestrator_dirs():
+            text = (d / "record.md").read_text()
+            for line in re.findall(r"(?m)^- (\d)\. [^:]+: (\S+)", text):
+                self.assertIn(line[1].rstrip(","), ("pass", "partial", "fail", "untested"), (d.name, line))
+
+    def test_switch_guide_has_the_human_steps(self):
+        text = " ".join((ORCH / "switching.md").read_text().lower().split())
+        for needle in ("wip/<name>", "handover", "stop the old coordinator", "start a fresh one",
+                       "none of the old orchestrator's tools", "scripts/orch switch"):
+            self.assertIn(needle, text, needle)
+
+
 if __name__ == "__main__":
     unittest.main()
