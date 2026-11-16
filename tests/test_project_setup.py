@@ -2054,7 +2054,7 @@ class OnboardingTests(unittest.TestCase):
 
     def test_host_mode_carries_what_onboarding_reads(self):
         m = load()
-        self.assertIn("templates", m.HOST_FILES)  # templates/adapt/ with it
+        self.assertIn("orchestrators/orca-cotal/templates", m.HOST_FILES)  # templates/adapt/ with it
         self.assertIn("core/model-routing.md", m.HOST_FILES)
         for path in m.HOST_FILES:
             self.assertTrue((ROOT / path).exists(), path)
@@ -3217,7 +3217,7 @@ class LaneTierTests(unittest.TestCase):
         self.assertIn("model=sonnet", r.stdout)
 
     def test_comments_and_the_shipped_template_parse(self):
-        r = subprocess.run([str(TIER_TOOL), "--check", str(TIER_TOOL.parent.parent / "templates" / "lanes.tsv")],
+        r = subprocess.run([str(TIER_TOOL), "--check", str(ROOT / "orchestrators" / "orca-cotal" / "templates" / "lanes.tsv")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines(), ["swift none -", "standard claude sonnet", "deep claude opus", "top none -"])
