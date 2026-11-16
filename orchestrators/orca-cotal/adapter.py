@@ -1,7 +1,8 @@
 """orca-cotal adapter for scripts/orch: what project-setup leaves in a project, found and removed exactly.
 
 Markers (the union of what the strip PRs of 2026-11-15 removed from three projects, and what project-setup adds):
-- `.lane-control/`: the adapted files (coordinator, design lead, project, reviewer, routing);
+- the adapted files in `.lane-control/` (coordinator, design lead, project, reviewer, routing): strip deletes those
+  five and the folder once it is empty; it refuses a folder that is a symlink or holds any other file;
 - AGENTS.md's section between `<!-- lane-control:begin -->` and `<!-- lane-control:end -->` (in the symlink's target
   when AGENTS.md is a link inside the repo);
 - the `.cotal/` line in `.gitignore`;
@@ -10,8 +11,9 @@ Markers (the union of what the strip PRs of 2026-11-15 removed from three projec
 `orca.yaml` is Orca's, used without Cotal too: not a marker. Prose a project wrote about Cotal in its own words is not
 ours either; it is for whoever reviews the strip PR.
 
-setup runs `scripts/project-setup` on the project as it is: that script asks its own questions and commits on its
-own, so no PR is made and it says so first.
+setup runs `scripts/project-setup --no-start` on the project as it is: that script edits the main checkout, runs
+its adapting and reviewing agents, asks its own questions and commits on its own, so no PR is made and it says so
+first. It starts no coordinator or design lead; it prints how to start them.
 """
 import shutil
 import subprocess
@@ -23,11 +25,14 @@ RUNS_IN_PLACE = frozenset({"setup"})
 ROOT = Path(__file__).resolve().parents[2]
 
 ADAPTED = ".lane-control"
+ADAPTED_FILES = ("coordinator.md", "design-lead.md", "project.md", "reviewer.md", "routing.md")
 BEGIN = "<!-- lane-control:begin -->"
 END = "<!-- lane-control:end -->"
 IGNORE_LINES = (".cotal/", ".cotal")
 SECTION = "AGENTS.md lane-control section"
-WARNING = "project-setup commits on its own; no PR is made. It asks its questions in this terminal."
+WARNING = ("project-setup commits on its own; no PR is made. It edits the project's main checkout in place, runs its "
+           "adapting and reviewing agents (headless) and asks its questions in this terminal. It starts no "
+           "coordinator or design lead (--no-start).")
 
 
 def read(f: Path) -> str:
@@ -113,9 +118,19 @@ def strip(project: Path, work: Path) -> list:
             gi.unlink()
             changes.append(".gitignore: removed (it held only the .cotal/ line)")
     d = work / ADAPTED
+    if d.is_symlink():
+        raise ValueError(f"{ADAPTED} is a symlink; strip only removes the adapted files in a real folder: "
+                         "remove them by hand")
     if d.is_dir():
-        names = sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file())
-        shutil.rmtree(d)
+        others = sorted(str(p.relative_to(d)) for p in d.rglob("*")
+                        if str(p.relative_to(d)) not in ADAPTED_FILES and not p.is_dir())
+        if others:
+            raise ValueError(f"{ADAPTED}/ holds files project-setup did not write ({', '.join(others)}); move or "
+                             "remove them by hand, then run strip again")
+        names = [n for n in ADAPTED_FILES if (d / n).exists()]
+        for n in names:
+            (d / n).unlink()
+        shutil.rmtree(d)  # only empty folders are left
         changes.append(f"{ADAPTED}/: removed ({', '.join(names)})")
         if "project.md" in names:
             changes.append(f"check before merging: {ADAPTED}/project.md held the adapted project facts; carry into "
@@ -127,6 +142,9 @@ def setup(project: Path, work, dry: bool = False) -> int:
     script = ROOT / "orchestrators" / "orca-cotal" / "scripts" / "project-setup"
     print(WARNING, flush=True)
     if dry:
-        print(f"dry run: would run {script} {project}")
+        print(f"dry run: would run {script} {project} --no-start")
         return 0
-    return subprocess.run([str(script), str(project)]).returncode
+    code = subprocess.run([str(script), str(project), "--no-start"]).returncode
+    print(f"To start its coordinator and design lead, run `{ROOT / 'scripts' / 'project-setup'} {project}` "
+          "(a rerun only does what is missing).", flush=True)
+    return code

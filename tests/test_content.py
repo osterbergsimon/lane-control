@@ -597,6 +597,13 @@ class CleanupSteeringTests(unittest.TestCase):
                        "built-in agent switcher", "not proven", "opens agents"):
             self.assertIn(needle, t, needle)
 
+    def test_shared_rules_kept_their_wording(self):
+        self.assertIn("On Rove: keep the coordinator's inbox hook out of committed settings and guard it with the "
+                      "coordinator's task id.", flat(ROOT / "core" / "roles.md"))
+        self.assertIn("A blocked lane parks** instead of idling or guessing: on Rove on a gate (needs owner); under "
+                      "Orca + Cotal it asks through its coordinator (a DM).", flat(ROOT / "core" / "model-routing.md"))
+        self.assertNotIn("every orchestrator's brief template", flat(ROOT / "core" / "model-routing.md"))
+
     def test_issues_doctrine_names_the_close_rule(self):
         t = self.flat(ROOT / "core" / "issues.md")
         for needle in ("close the lane after the merge", "whoever opened the lane", "without `--force`", "branches are kept unless the owner says"):
@@ -622,10 +629,11 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("merging, closing or stopping a lane", t)
         self.assertIn("any budget or window guard order is not one", t)
         self.assertNotIn("unless the order says", t)
-        roles = flat(ROOT / "orchestrators" / "orca-cotal" / "notes.md")  # moved from core/roles.md
-        self.assertIn("always confirmed by the owner", roles)
-        self.assertIn("does not come from an agent in the coordinator's roster", roles)
+        roles = flat(ROOT / "core" / "roles.md")  # the generic rule stays shared
+        self.assertIn("always confirmed by the owner in that coordinator's own tab", roles)
         self.assertIn("budget or window guard order is not such a decision", roles)
+        notes = flat(ROOT / "orchestrators" / "orca-cotal" / "notes.md")  # the Cotal order rule moved there
+        self.assertIn("does not come from an agent in the coordinator's roster", notes)
         self.assertIn("owner's yes in that coordinator's tab", flat(ROOT / "orchestrators" / "orca-cotal" / "personas" / "machine-coordinator.md"))
 
     def test_docs_say_the_prefix_is_not_authentication(self):

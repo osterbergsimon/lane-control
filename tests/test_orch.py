@@ -20,6 +20,9 @@ GH_STUB = """#!/usr/bin/env python3
 import os, sys
 with open(os.environ["GH_LOG"], "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:3] == ["pr", "create"] and os.environ.get("GH_FAIL_PR"):
+    print("pr create refused", file=sys.stderr)
+    sys.exit(1)
 if sys.argv[1:3] == ["pr", "create"]:
     with open(os.environ["GH_LOG"] + ".env", "w") as f:
         for k in ("GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "GCM_INTERACTIVE", "GH_PROMPT_DISABLED"):
@@ -85,8 +88,8 @@ class Env:
         shutil.rmtree(seed)
         return main
 
-    def run(self, *args, orch=ORCH, cwd=None, stdin=None):
-        return subprocess.run([str(orch), *args], capture_output=True, text=True, env=self.env,
+    def run(self, *args, orch=ORCH, cwd=None, stdin=None, env=None):
+        return subprocess.run([str(orch), *args], capture_output=True, text=True, env={**self.env, **(env or {})},
                               cwd=cwd or self.d, input=stdin, timeout=120)
 
     def gh_calls(self):
@@ -193,6 +196,12 @@ class CommandTests(OrchTest):
                 self.assertIn(f"{name} has no {action} adapter yet", r.stderr)
 
 
+def orch_heads(p) -> list:
+    """The orch/ branches on origin."""
+    return [l.split("refs/heads/")[1] for l in git(p, "ls-remote", "--heads", "origin").stdout.splitlines()
+            if "refs/heads/orch/" in l]
+
+
 def switch_steps() -> str:
     """The numbered human steps of orchestrators/switching.md, as the file has them."""
     lines = (ROOT / "orchestrators" / "switching.md").read_text().splitlines()
@@ -243,9 +252,9 @@ class SwitchTests(OrchTest):
         prs = [c for c in self.e.gh_calls() if c.startswith("pr create")]
         self.assertEqual(len(prs), 1, self.e.gh_calls())
         heads = git(p, "ls-remote", "--heads", "origin").stdout
-        self.assertIn("refs/heads/orch/switch-orca-cotal-to-native-orca", heads)
+        self.assertIn("refs/heads/orch/switch-orca-cotal-to-native-orca-", heads)
         self.assertEqual(heads.count("orch/"), 1)
-        branch = "origin/orch/switch-orca-cotal-to-native-orca"
+        branch = "origin/" + orch_heads(p)[0]
         git(p, "fetch", "-q", "origin")
         agents = git(p, "show", f"{branch}:AGENTS.md").stdout
         self.assertNotIn("lane-control:begin", agents)
@@ -283,6 +292,55 @@ class SwitchTests(OrchTest):
         env = dict(l.split("=", 1) for l in Path(str(self.e.gh_log) + ".env").read_text().splitlines())
         self.assertEqual(env, {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "false", "SSH_ASKPASS": "false",
                                "GCM_INTERACTIVE": "never", "GH_PROMPT_DISABLED": "1"})
+
+    def test_the_same_switch_twice_makes_two_branches(self):
+        p = self.fixture()
+        for _ in range(2):
+            r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes")
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(git(p, "ls-remote", "--heads", "origin").stdout.count("orch/switch-"), 2)
+
+    def test_two_branch_names_in_the_same_second_differ(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("orch_mod", ROOT / "core" / "orch.py")
+        orch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(orch)
+        orch.time.strftime = lambda fmt: "20261116-120000"  # the same second for both
+        self.assertNotEqual(orch.stamp(), orch.stamp())
+
+    def test_a_failed_worktree_leaves_no_temp_dir(self):
+        p = self.fixture()
+        git(p, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/nosuch")
+        tmp = self.e.d / "tmp"
+        tmp.mkdir()
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes", env={"TMPDIR": str(tmp)})
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertEqual(list(tmp.iterdir()), [])
+
+    def test_a_failed_pr_keeps_the_commit_and_names_the_pushed_branch(self):
+        p = self.fixture()
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes",
+                       env={"GH_FAIL_PR": "1"})
+        self.assertEqual(r.returncode, 4, r.stderr)
+        branch = orch_heads(p)[0]
+        self.assertIn(branch, r.stderr)
+        self.assertIn("pushed", r.stderr)
+        self.assertIn("gh pr create", r.stderr)
+        self.assertIn(branch, git(p, "branch", "--format=%(refname:short)").stdout.split())
+        self.assertEqual(git(p, "worktree", "list").stdout.count("\n"), 1)
+
+    def test_a_failed_push_keeps_the_commit_on_a_local_branch(self):
+        p = self.fixture()
+        git(p, "remote", "set-url", "--push", "origin", str(self.e.d / "no-such-remote.git"))
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes")
+        self.assertEqual(r.returncode, 4, r.stderr)
+        local = [b for b in git(p, "branch", "--format=%(refname:short)").stdout.split() if b.startswith("orch/")]
+        self.assertEqual(len(local), 1, git(p, "branch").stdout)
+        self.assertIn(local[0], r.stderr)
+        self.assertIn("not pushed", r.stderr)
+        self.assertIn("orchestrator: native-orca", git(p, "show", f"{local[0]}:AGENTS.md").stdout)
+        self.assertEqual(git(p, "worktree", "list").stdout.count("\n"), 1)
+        self.assertEqual(self.e.gh_calls(), [])
 
     def test_switch_asks_without_yes(self):
         p = self.fixture()

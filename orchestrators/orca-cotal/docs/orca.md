@@ -5,7 +5,7 @@ runs below were on 2026-11-05 with Orca 1.4.250 (desktop on a NixOS workstation)
 against a Debian box reached only over SSH, whose internet was limited by an allowlisting proxy.
 Tags: **[tested]** ran it, **[docs]** read in the project's docs but not run, **[none]** no equivalent.
 How the parts connect, the bring-up order with a check per step, a failure-mode table and the diagnosis of lost
-meshes: `docs/orca-cotal-setup.md`.
+meshes: `orchestrators/orca-cotal/docs/orca-cotal-setup.md`.
 
 lane-control's Rove scripts call `rove api` and do **not** run unchanged on Orca or Cotal. What carries over is the doctrine
 (roles, tiers, path map, beads, review by risk) and the shape: one coordinator per project launching worker lanes.
@@ -176,7 +176,7 @@ template rule works. The suggestions file has two fixed headings, `## AGENTS.md 
 (Answers before the commit. After the review loop, in a terminal, each question still open is shown in turn and the owner
 may answer it in plain text; Enter leaves that question for later (the agent's choice stays, and the coordinator asks, see Leftovers). Type-ahead is flushed before the commit
 question, so a line typed early never answers it. The answers go to one more adapter run with its own short rules
-(`templates/adapt/answers-prompt.md`: apply only the answers, change nothing else, an answer is the owner's word, no
+(`orchestrators/orca-cotal/templates/adapt/answers-prompt.md`: apply only the answers, change nothing else, an answer is the owner's word, no
 new questions, no suggestions file), followed by the same scope check as every agent run. That run is not reviewed: the
 file list says "Changed by your answers, not re-checked" and shows its diff. It adds at most one agent run to an
 onboarding. Only the answered questions leave the list, and only when the run changed a file; if it changed nothing,
@@ -192,8 +192,8 @@ and the answers' changes and asks only the questions still on the list.)
    `~/.config/opencode/skills/`): Orca's `orca-cli` and lane-control's `orca-cotal-lanes`. They are user-level
    because a lane worktree carries only committed files.
 4. Creates the Cotal space (`cotal space create`; plus `cotal setup -H claude` for the Claude plugin and wake channel).
-5. Renders the personas from `personas/` (coordinator, design lead, reviewer) into `.cotal/agents/` (Cotal reads them
-   there) and the tier table `templates/lanes.tsv` into the project's settings store (below), and gitignores `.cotal/`.
+5. Renders the personas from `orchestrators/orca-cotal/personas/` (coordinator, design lead, reviewer) into `.cotal/agents/` (Cotal reads them
+   there) and the tier table `orchestrators/orca-cotal/templates/lanes.tsv` into the project's settings store (below), and gitignores `.cotal/`.
    Each persona names the tier table and the reviewer persona by absolute path, and the project's Claude permission
    mode.
 5a. Setup script: Orca runs `orca.yaml` `scripts.setup` in each new worktree (a "Setup" tab), but reads it from the
@@ -347,7 +347,7 @@ The coordinator (or the design lead, for its own frontend lanes) follows the `or
    brief as `prompt`. For OpenCode add `events: false`; for Claude, `launchOptions: {"permission-mode": …}`.
 4. The lane reports by `cotal_dm`, and the DM wakes the parent as its own turn.
 5. Task cards show state via `orca worktree set --comment/--workspace-status`.
-6. From review tier B up, a reviewer (`personas/reviewer.md`) runs as `<key>-review` in the lane's worktree, on a
+6. From review tier B up, a reviewer (`orchestrators/orca-cotal/personas/reviewer.md`) runs as `<key>-review` in the lane's worktree, on a
    different model from the lane's: read-only, given the issue and commit but not the lane's report, findings as
    blocker/major/minor by DM. Blocker and major are fixed, at most two rounds, then the owner decides.
 
@@ -394,7 +394,7 @@ One agent per machine, `machine-coordinator` in the Cotal space `machine`, in it
 job. Projects keep their own spaces and Cotal has no messages between spaces, so orders cross by shell with
 `cotal send -s <space> -t coordinator "machine coordinator: ..."`. That works from a shell on this machine under the
 space's own signer; it has not been exercised live yet, so step 4 is the first real test. An order that starts
-`machine coordinator:` counts like the owner's own words (`personas/coordinator.md`).
+`machine coordinator:` counts like the owner's own words (`orchestrators/orca-cotal/personas/coordinator.md`).
 
 The prefix is not authentication. The guard, the machine coordinator, the owner and any agent with a shell on this
 machine send under the same login, so the sender cannot be verified. That is why a decision the owner keeps (merging,

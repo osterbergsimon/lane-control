@@ -34,7 +34,7 @@ scripts/orch setup   <project> --orchestrator <name>   # prepare the project for
 scripts/orch strip   <project> --orchestrator <name>   # remove that orchestrator's instructions and config
 scripts/orch switch  <project> --from <a> --to <b>     # strip a, set up b, then print the human steps
 ```
-`<project>` is the path to the project's main checkout. Changes land on a new branch in a new worktree, opened as a PR; the main checkout is never touched, and nothing is merged, stopped or started. `--dry-run` shows what would change. An action an orchestrator has no adapter for fails before any change.
+`<project>` is the path to the project's main checkout. Changes land on a new branch in a new worktree, opened as a PR; the main checkout is never touched, and nothing is merged, stopped or started. The one exception is `setup --orchestrator orca-cotal`: it runs `project-setup --no-start` in the main checkout, which commits on its own and runs its adapting and reviewing agents (it says so first, and prints how to start the coordinator). `--dry-run` shows what would change. An action an orchestrator has no adapter for fails before any change.
 
 ## Requirements
 Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, Python 3, and Claude Code (or whichever engines your tiers use), logged in. The rest is per orchestrator, in its `setup.md`.

@@ -7,12 +7,15 @@
   orch switch <project> --from <a> --to <b> [--dry-run] [--yes]
 
 <project> is the path to the project's main checkout. `status` only reads it. Every change is made on a new branch
-in a new git worktree cut from the remote default branch (the main checkout and its local changes are never
-touched), committed with the project's git identity and opened as one PR with `gh`; nothing is merged. `strip` and
-`switch` show the change and ask before they commit (`--yes` skips the question; without a terminal it is
-required). `--dry-run` shows the change and commits nothing. The only worktree the command removes is the one it
-made in the same run, when there is nothing to commit, on a dry run or a no. It never stops or starts agents,
-stashes, switches branches or force-pushes.
+(`orch/<action>-<name>-<time>-<random>`) in a new git worktree cut from the remote default branch (the main
+checkout and its local changes are never touched), committed with the project's git identity and opened as one PR
+with `gh`; nothing is merged. `strip` and `switch` show the change and ask before they commit (`--yes` skips the
+question; without a terminal it is required). `--dry-run` shows the change and commits nothing. The only worktree the
+command removes is the one it made in the same run: always at the end. Its branch goes too only when nothing was
+committed (nothing to do, a dry run, a no, an error before the commit); once a commit exists the branch stays, and
+an error after it names the branch and whether it was pushed. It never stops or starts agents, stashes, switches
+branches or force-pushes. The one exception is `setup --orchestrator orca-cotal`, which runs project-setup in the
+main checkout (orchestrators/orca-cotal/setup.md) and says so first.
 
 Each orchestrator's adapter (orchestrators/<name>/adapter.py) declares its ACTIONS; an action it lacks fails before
 any change. An adapter may set RUNS_IN_PLACE for an action that runs on the project as it is (it then does its own
@@ -23,6 +26,8 @@ Exit: 0 done or nothing to do; 2 usage; 3 action not supported; 4 git or gh fail
 import argparse
 import importlib.util
 import os
+import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -101,8 +106,13 @@ def make_worktree(project: Path, branch: str) -> Path:
     """A new worktree on a new branch from origin/<default>, outside the project; the main checkout is not touched."""
     run(["git", "-C", str(project), "fetch", "-q", "origin"])
     base = default_branch(project)
-    work = Path(tempfile.mkdtemp(prefix="orch-")) / project.name
-    run(["git", "-C", str(project), "worktree", "add", "-q", "-b", branch, str(work), f"origin/{base}"])
+    tmp = Path(tempfile.mkdtemp(prefix="orch-"))
+    work = tmp / project.name
+    try:
+        run(["git", "-C", str(project), "worktree", "add", "-q", "-b", branch, str(work), f"origin/{base}"])
+    except GitFail:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     return work
 
 
@@ -110,18 +120,26 @@ def drop_worktree(project: Path, work: Path, branch: str):
     """Undo make_worktree of this run: its worktree and its branch, which hold nothing committed."""
     run(["git", "-C", str(project), "worktree", "remove", "--force", str(work)], check=False)
     run(["git", "-C", str(project), "branch", "-D", branch], check=False)
-    try:
-        work.parent.rmdir()
-    except OSError:
-        pass
+    shutil.rmtree(work.parent, ignore_errors=True)
 
 
-def open_pr(work: Path, title: str, body: str) -> str:
+def open_pr(work: Path, title: str, body: str, state: dict) -> str:
+    """Commit, push, open the PR. `state` records how far it got: "committed", then "pushed"."""
     branch = run(["git", "-C", str(work), "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
     run(["git", "-C", str(work), "add", "-A"])
     run(["git", "-C", str(work), "commit", "-q", "-m", title])
-    run(["git", "-C", str(work), "push", "-q", "-u", "origin", branch])
-    return run(["gh", "pr", "create", "--head", branch, "--title", title, "--body", body], cwd=work).stdout.strip()
+    state["committed"] = True
+    try:
+        run(["git", "-C", str(work), "push", "-q", "-u", "origin", branch])
+    except GitFail as e:
+        raise GitFail(f"{e}\nThe commit is kept on local branch {branch} (not pushed): push it with "
+                      f"`git push -u origin {branch}`, then open the PR with `gh pr create --head {branch}`.")
+    state["pushed"] = True
+    try:
+        return run(["gh", "pr", "create", "--head", branch, "--title", title, "--body", body], cwd=work).stdout.strip()
+    except GitFail as e:
+        raise GitFail(f"{e}\nBranch {branch} is pushed to origin with no PR: open it with "
+                      f"`gh pr create --head {branch}`.")
 
 
 def confirm(question: str, yes: bool) -> bool:
@@ -142,7 +160,8 @@ def show(changes: list, work: Path):
 
 
 def stamp() -> str:
-    return time.strftime("%Y%m%d-%H%M%S")
+    """Time and a random part: two runs in the same second, or the same switch twice, never share a branch."""
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
 
 
 def cmd_status(adapters: dict, project: Path) -> int:
@@ -163,7 +182,7 @@ def change_in_worktree(project: Path, branch: str, steps: list, title: str, body
                        yes: bool, nothing: str, after=None) -> int:
     """Run each step (a function of (project, work) returning change lines) in one new worktree, then one PR."""
     work = make_worktree(project, branch)
-    keep = False
+    state = {}
     try:
         changes = []
         for step in steps:
@@ -181,19 +200,15 @@ def change_in_worktree(project: Path, branch: str, steps: list, title: str, body
         if ask and not confirm("commit these and open a PR?", yes):
             print("nothing committed")
             return 0
-        url = open_pr(work, title, body + "\n\n" + "\n".join(f"- {c}" for c in changes))
-        keep = True
+        url = open_pr(work, title, body + "\n\n" + "\n".join(f"- {c}" for c in changes), state)
         print(f"PR: {url}")
         if after:
             after()
         return 0
     finally:
-        if keep:
+        if state.get("committed"):  # the branch holds the commit: keep it, drop only the worktree
             run(["git", "-C", str(project), "worktree", "remove", "--force", str(work)], check=False)
-            try:
-                work.parent.rmdir()
-            except OSError:
-                pass
+            shutil.rmtree(work.parent, ignore_errors=True)
         else:
             drop_worktree(project, work, branch)
 
@@ -273,7 +288,7 @@ def cmd_switch(adapters: dict, project: Path, src: str, dst: str, dry: bool, yes
         print(switch_steps(ROOT))
 
     return change_in_worktree(
-        project, f"orch/switch-{src}-to-{dst}", [old.strip, new.setup],
+        project, f"orch/switch-{src}-to-{dst}-{stamp()}", [old.strip, new.setup],
         f"orch: switch {src} to {dst}",
         f"`scripts/orch switch --from {src} --to {dst}` (lane-control). Merge on the owner's word, then follow "
         "orchestrators/switching.md.", dry, ask=True, yes=yes, nothing="nothing to switch", after=steps)

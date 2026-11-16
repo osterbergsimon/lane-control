@@ -82,6 +82,28 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue((self.p / "AGENTS.md").is_symlink())
         self.assertEqual((self.p / "docs" / "rules.md").read_text(), PROJECT_TEXT)
 
+    def test_strip_refuses_a_file_it_does_not_own(self):
+        (self.p / ".lane-control" / "custom-notes.md").write_text("the owner's own notes\n")
+        with self.assertRaises(ValueError) as cm:
+            self.a.strip(self.p, self.p)
+        self.assertIn("custom-notes.md", str(cm.exception))
+        self.assertTrue((self.p / ".lane-control" / "custom-notes.md").exists())
+        self.assertTrue((self.p / ".lane-control" / "project.md").exists())
+
+    def test_strip_refuses_a_symlinked_folder(self):
+        (self.p / ".lane-control").rename(self.p / "lc-real")
+        (self.p / ".lane-control").symlink_to("lc-real")
+        with self.assertRaises(ValueError) as cm:
+            self.a.strip(self.p, self.p)
+        self.assertIn("symlink", str(cm.exception))
+        self.assertTrue((self.p / "lc-real" / "project.md").exists())
+
+    def test_strip_removes_only_the_files_it_owns(self):
+        (self.p / ".lane-control" / "routing.md").unlink()  # a project that never had one of them
+        changes = self.a.strip(self.p, self.p)
+        self.assertFalse((self.p / ".lane-control").exists())
+        self.assertTrue(any("coordinator.md" in c and "routing.md" not in c for c in changes), changes)
+
     def test_strip_refuses_unpaired_markers(self):
         (self.p / "AGENTS.md").write_text(PROJECT_TEXT + "<!-- lane-control:begin -->\nhalf\n")
         with self.assertRaises(ValueError):
@@ -143,6 +165,17 @@ class CommandTests(OrchTest):
         self.assertEqual(self.e.gh_calls(), [])
         self.assertNotIn("orch/", git(p, "branch", "-a").stdout)
 
+    def test_strip_with_a_file_it_does_not_own_stops_cleanly(self):
+        files = fixture_files()
+        files[".lane-control/custom-notes.md"] = "the owner's own notes\n"
+        p = self.e.project(files)
+        r = self.e.run("strip", str(p), "--orchestrator", "orca-cotal", "--yes")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("custom-notes.md", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(self.e.gh_calls(), [])
+        self.assertNotIn("orch/", git(p, "branch", "-a").stdout)
+
     def test_setup_calls_project_setup_and_warns(self):
         root = self.e.fake_root({})
         (root / "orchestrators" / "orca-cotal" / "scripts").mkdir(parents=True)
@@ -156,7 +189,10 @@ class CommandTests(OrchTest):
         out = r.stdout
         warn = "project-setup commits on its own; no PR is made"
         self.assertIn(warn, out)
-        self.assertIn(f"PROJECT-SETUP RAN {p}", out)
+        self.assertIn("edits the project's main checkout", out)
+        self.assertIn("adapting and reviewing agents", out)
+        self.assertIn(f"PROJECT-SETUP RAN {p} --no-start", out)
+        self.assertIn(f"project-setup {p}", out[out.index("PROJECT-SETUP RAN"):])  # how to start the agents
         self.assertLess(out.index(warn), out.index("PROJECT-SETUP RAN"))
         self.assertEqual(self.e.gh_calls(), [])
 

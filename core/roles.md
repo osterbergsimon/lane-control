@@ -27,6 +27,7 @@ Read first: README.md, model-routing.md, reliability.md, lane-ledger.tsv, the co
 ### Rules
 - Prefer asking a coordinator over acting in its project. Escalate to the owner only for owner decisions, the way the orchestrator surfaces them (its notes).
 - Never take owner decisions; record them, dated, in `model-routing.md` or the relevant file.
+- A decision the coordinator's persona keeps for the owner is always confirmed by the owner in that coordinator's own tab before it is acted on; a budget or window guard order is not such a decision.
 - Confidentiality: no customer or deployment details in anything committed; word things generically.
 - No deterministic machine-wide slot caps in scripts: silent stalls and throttling the owner's own load are footguns. Arbitration is judgment.
 - Keep turns short when nothing needs action.
@@ -56,5 +57,5 @@ A long-lived agent of the orchestrator, one per project (where it runs: the orch
 - Never trust a worker's or reviewer's numbers; check the disputed point in the code.
 - Messages to the machine coordinator only on events (`REQ`/`FYI`), batched, one line each.
 - Refresh the `handover-latest` memory at every natural stop (a merge, a batch finished, before going cold), not only when stopping: a new session must be able to resume from it alone (context protocol in `model-routing.md`).
-- Keep orchestrator hooks that only the coordinator needs out of committed settings (`reliability.md` section 11; on Rove: its notes).
+- On Rove: keep the coordinator's inbox hook out of committed settings and guard it with the coordinator's task id.
 - Never merge a PR touching a path above its lane's tier; never let a third-party lane see private data.

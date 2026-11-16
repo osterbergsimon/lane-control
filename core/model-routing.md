@@ -66,13 +66,13 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 - **Wall clock per lane:** swift 2 h, standard 4 h, deep 8 h, checked by the project coordinator (and by the night routine, where the orchestrator has one).
 - **Stall:** no push for 2 h while running gets one ping, then the lane is stopped, its WIP committed, and it is requeued one tier up.
 - **In flight:** per-project caps set by the owner (machine coordinator records them).
-- **A blocked lane parks** instead of idling or guessing: it asks the owner through the orchestrator (how: its notes, section "Model routing").
+- **A blocked lane parks** instead of idling or guessing: on Rove on a gate (needs owner); under Orca + Cotal it asks through its coordinator (a DM).
 
 ## Night mode
 Per orchestrator: only Rove has a night routine today (`orchestrators/rove/notes.md#night-mode`).
 
 ## Message protocol
-- **Lane → coordinator:** the 6-line report below (every orchestrator's brief template carries it), once, at the end; mid-lane only for a blocker.
+- **Lane → coordinator:** the 6-line report below (the Orca + Cotal and Rove brief templates carry it), once, at the end; mid-lane only for a blocker.
   ```
   <KEY> succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP: <one line>
   branch <b> · PR #<n> · ci passing|pending|failing

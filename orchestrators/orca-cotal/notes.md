@@ -2,7 +2,7 @@
 
 Passages moved here from the shared files in `core/` because they only apply on Orca + Cotal. The rules themselves
 are in `core/`; this file says how Orca + Cotal carries them out. Orca + Cotal is parked (`record.md`); its setup is
-`docs/orca.md` and `docs/orca-cotal-setup.md`.
+`orchestrators/orca-cotal/docs/orca.md` and `orchestrators/orca-cotal/docs/orca-cotal-setup.md`.
 
 ## Roles
 From `core/roles.md`.
@@ -16,7 +16,7 @@ From `core/roles.md`.
 
 Project coordinator:
 - Its own agent in the project's Cotal space.
-- Briefs: `templates/lane-brief.md` (installed with the skill `orca-cotal-lanes`).
+- Briefs: `orchestrators/orca-cotal/templates/lane-brief.md` (installed with the skill `orca-cotal-lanes`).
 - Launch: an Orca child task with one Cotal agent (the skill `orca-cotal-lanes`).
 - Reports arrive as Cotal messages.
 - Decisions: in the coordinator's tab (gates are not used).

@@ -21,8 +21,9 @@ Summarised from the trial's report, kept outside this repo with its evidence.
 - 1. Install: pass — run, task with dependencies, worker start (about 20 s fresh, under 2 s reusing a kept-open
   terminal), task update and dispatch reuse all worked; one manual step: the coordinator must start every ready task
   itself (a run never schedules work).
-- 2. Two workers: pass — the coordinator started its workers itself (part of the report's setup point; scratch work
-  ran in a child worktree of its own).
+- 2. Two workers: partial — the coordinator started its workers itself and they reported back, but the workers
+  shared one child worktree (the trial's start records show two workers in the same workspace); a worktree and
+  branch per worker was not tried.
 - 3. Messages: partial — send, ask, reply, check and check-and-wait work, and every message woke plain workers; but
   replies to a worker that also coordinates its own run were never delivered, and the owner had to nudge it twice.
   The owner sees a one-line "you have a message, run check" prompt in the agent's composer, queued while it is busy.
