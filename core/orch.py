@@ -234,7 +234,7 @@ def main(argv: list) -> int:
         if a.action == "switch":
             return cmd_switch(adapters, project, a.src, a.dst, a.dry_run, a.yes)
         return cmd_one(adapters, a.action, project, a.orchestrator, a.dry_run, a.yes)
-    except Usage as e:
+    except (Usage, ValueError) as e:  # an adapter raises ValueError when the project is in a state it won't guess at
         print(f"orch: {e}", file=sys.stderr)
         return 2
     except Unsupported as e:
