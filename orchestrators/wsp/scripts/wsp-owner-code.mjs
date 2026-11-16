@@ -1,4 +1,4 @@
-// Mint a wsp pairing code that pairs a browser as the OWNER (see docs/wsp.md, section 4).
+// Mint a wsp pairing code that pairs a browser as the OWNER (see orchestrators/wsp/docs/wsp.md, section 4).
 //
 // `wsp host pair` mints device codes; in wsp 0.3.10 such a browser has no role and every action is refused. The
 // host's own protocol also mints the code `wsp init` uses for the browser it opens (`pair.issue` with `here: true`),

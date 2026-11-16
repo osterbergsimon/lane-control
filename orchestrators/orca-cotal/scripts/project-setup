@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Set up an Orca project run by Cotal agents: a coordinator and a frontend design lead (see docs/orca.md).
+"""Set up an Orca project run by Cotal agents: a coordinator and a frontend design lead (see orchestrators/orca-cotal/docs/orca.md).
 
   project-setup <git-url|dir> [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
@@ -32,7 +32,7 @@ in .cotal/agents/ (keeping each one's harness, model and permission mode), reins
 tier table alone and says which running agents keep the old text until restarted. No adapting or reviewing
 agent, no broker, no Orca worktree, no commit.
 
-The tier table is decided once per project: a full --tiers, else the defaults (templates/lanes.tsv). A re-run keeps the
+The tier table is decided once per project: a full --tiers, else the defaults (orchestrators/orca-cotal/templates/lanes.tsv). A re-run keeps the
 project's table unless --tiers gives another.
 
 Per-project settings live outside the repo and outside .cotal/ (which Cotal owns), in

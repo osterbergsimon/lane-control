@@ -2,7 +2,7 @@
 """Creates the machine coordinator: its own private folder, the Cotal space `machine`, its persona, its agent.
 
 The folder is a local git repo for private notes and is never pushed to a public remote. Reruns change only what is
-missing, and keep the notes. Builds on project-setup's steps; see docs/orca.md for the order of the install.
+missing, and keep the notes. Builds on project-setup's steps; see orchestrators/orca-cotal/docs/orca.md for the order of the install.
 """
 import argparse
 import importlib.machinery

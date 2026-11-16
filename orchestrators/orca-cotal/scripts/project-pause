@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Let a project rest, or pause its standing agents (coordinator and design lead); see docs/orca.md.
+"""Let a project rest, or pause its standing agents (coordinator and design lead); see orchestrators/orca-cotal/docs/orca.md.
 
   project-pause rest|wake|stop|start|status <project-dir | project-name>
 

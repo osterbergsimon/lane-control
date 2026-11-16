@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs the window guard as a systemd user service, from this checkout: run it from the main checkout, not a lane
-# worktree, because the unit runs the script where it finds it. docs/orca.md has the order of the steps around it.
+# worktree, because the unit runs the script where it finds it. orchestrators/orca-cotal/docs/orca.md has the order of the steps around it.
 # Captures the current PATH for the unit, because cotal, node and jq are usually outside systemd's default PATH.
 here=$(dirname "$(readlink -f "$0")")
 . "$here/lib.sh"   # sourced before set -u: the config is the owner's

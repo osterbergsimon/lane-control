@@ -54,7 +54,7 @@ when a coordinator should run lanes and talk to them while you type.
 ## 4. Orca alone: coordinator and lanes
 - One worktree per lane is Orca's native unit: `orca worktree create --repo id:<repoId> --name <lane> --json`, nested
   under the coordinator's worktree via "Parent workspace" (Advanced drawer). This also gives one branch per lane, as
-  `templates/AGENTS-coordination.md` expects. [docs]
+  `orchestrators/rove/templates/AGENTS-coordination.md` expects. [docs]
 - Drive agents from a script or the coordinator: `orca terminal create --worktree path:<dir> --command "<agent>"`,
   `orca terminal read`, `orca terminal wait --for tui-idle`, `orca terminal send --text … --enter`. [docs]
 - `orca terminal send` **types** into the terminal: check `terminal read`/`wait --for tui-idle` before sending, and

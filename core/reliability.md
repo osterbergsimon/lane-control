@@ -12,7 +12,7 @@ An entry that came from one orchestrator says so on an `Orchestrator:` line unde
 Orchestrator: Rove
 - **Failure:** a worker reported while the coordinator session had crashed; the report was never read.
 - **Fix:** a hook in the coordinator's checkout only (`UserPromptSubmit` and `SessionStart`) injects `rove api context --text` into every turn: finished, stuck and unknown tasks and open decision gates.
-- **Reuse:** `templates/coordinator-settings.local.json`. Keep it out of committed settings so workers do not pay for it. On every report: verify the claims, decide, follow up, record the outcome on the issue.
+- **Reuse:** `orchestrators/rove/templates/coordinator-settings.local.json`. Keep it out of committed settings so workers do not pay for it. On every report: verify the claims, decide, follow up, record the outcome on the issue.
 
 ## 3. Owner decisions as gates, not chat lines
 Orchestrator: Rove
