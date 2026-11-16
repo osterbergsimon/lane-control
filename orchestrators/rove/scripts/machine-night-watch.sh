@@ -20,7 +20,7 @@
 #     the /compact is skipped and logged. Run per coordinator in parallel.
 # A tier on a budget without a usage feed (none/manual) is allowed "within caps" unless memory is short.
 set -uo pipefail
-here=$(dirname "$0"); . "$here/lib.sh"
+here=$(dirname "$(readlink -f "$0")"); . "$here/../../../core/scripts/lib.sh"
 mkdir -p "$NIGHT_START_DIR"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lane-control"; mkdir -p "$STATE_DIR"
 night_key=$(date -d '-7 hours' +%F)          # 22:05-06:05 is one night

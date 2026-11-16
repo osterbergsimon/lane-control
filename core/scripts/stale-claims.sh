@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Daily stale-claim check (issues.md): in-progress beads issues whose task key (the `lane:<KEY>` label; old
 # issues: external_ref) has no live Rove task go to that project's coordinator. Spends no tokens. Needs COORD_REPO in the config.
-here=$(dirname "$0"); . "$here/lib.sh"
+here=$(dirname "$(readlink -f "$0")"); . "$here/lib.sh"
 live=$(rove api list | jq -r '.tasks[].title' | grep -oE '^[A-Z]+-[0-9]+' | sort -u)
 for p in "${!COORD_REPO[@]}"; do
   [ -n "${COORD_TASK[$p]:-}" ] || continue

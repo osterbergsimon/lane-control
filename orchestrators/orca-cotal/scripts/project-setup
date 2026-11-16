@@ -77,7 +77,7 @@ LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # the l
 HOST_FILES = (".lane-control-root", "core/lcroot.py", "scripts/project-setup", *(f"scripts/{t}" for t in LANE_TOOLS),
               "orchestrators/orca-cotal/scripts/project-setup", "orchestrators/orca-cotal/personas",
               "orchestrators/orca-cotal/skills", "orchestrators/orca-cotal/templates",
-              "model-routing.md")  # what --host copies (scripts/<name> are links to their real files, copied too)
+              *(f"core/scripts/{t}" for t in LANE_TOOLS), "core/model-routing.md")  # what --host copies (scripts/<name> are links to their real files, copied too)
 
 
 class Fail(Exception):
@@ -485,7 +485,7 @@ def lane_tools(home: Path):
     fresh = not (bin_dir / "lane-heavy").exists()
     changed = False
     for name in LANE_TOOLS:
-        src, dst = HERE / "scripts" / name, bin_dir / name
+        src, dst = HERE / "core" / "scripts" / name, bin_dir / name
         mode = src.stat().st_mode & 0o777
         if dst.exists() and dst.read_bytes() == src.read_bytes() and dst.stat().st_mode & 0o777 == mode:
             continue
@@ -595,7 +595,7 @@ MODEL_NAME = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:/-]+")
 def check_tier_table(text: str) -> list:
     """(tier, harness, model) per row, by scripts/lane-tier so the table has one reader. A bad table is a Fail."""
     try:
-        r = subprocess.run(["bash", str(HERE / "scripts" / "lane-tier"), "--check", "/dev/stdin"], input=text,
+        r = subprocess.run(["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--check", "/dev/stdin"], input=text,
                            capture_output=True, text=True)
     except OSError as e:
         raise Fail(f"cannot check the tier table: {e}")

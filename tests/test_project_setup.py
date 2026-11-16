@@ -2055,7 +2055,7 @@ class OnboardingTests(unittest.TestCase):
     def test_host_mode_carries_what_onboarding_reads(self):
         m = load()
         self.assertIn("templates", m.HOST_FILES)  # templates/adapt/ with it
-        self.assertIn("model-routing.md", m.HOST_FILES)
+        self.assertIn("core/model-routing.md", m.HOST_FILES)
         for path in m.HOST_FILES:
             self.assertTrue((ROOT / path).exists(), path)
 

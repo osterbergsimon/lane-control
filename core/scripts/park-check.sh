@@ -4,7 +4,7 @@
 # commit, and not be closed. Parked more than PARK_MAX_DAYS (7) days is reported too. Problems go to that
 # project's coordinator in one message; a clean run sends nothing. Spends no tokens.
 # Run by the same Rove script routine as stale-claims.sh (add it next to that one, daily).
-here=$(dirname "$0"); . "$here/lib.sh"
+here=$(dirname "$(readlink -f "$0")"); . "$here/lib.sh"
 PARK_MAX_DAYS=${PARK_MAX_DAYS:-7}
 for p in "${!COORD_REPO[@]}"; do
   [ -n "${COORD_TASK[$p]:-}" ] || continue

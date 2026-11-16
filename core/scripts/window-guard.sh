@@ -22,7 +22,7 @@
 # `project-pause stop` has a marker <state dir>/paused/<space>: nothing is sent or queued for it, and waiting orders
 # are dropped; its weekly stage is not advanced, so the first poll after the marker is removed sends the weekly
 # standing (window orders are not replayed). A crashed coordinator has no marker, so it still warns. GUARD_POLLS=<n> stops after n polls (tests).
-here=$(dirname "$0"); . "$here/lib.sh"
+here=$(dirname "$(readlink -f "$0")"); . "$here/lib.sh"
 declare -A wstage stage reset_at handled checked mem   # handled: last reset acted on (a stale feed repeats it)
 STATE_FILE="${GUARD_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/lane-control/window-guard.state}"
 PENDING_FILE="$STATE_FILE.pending"; RETRY_SECS="${GUARD_RETRY_SECS:-3600}"

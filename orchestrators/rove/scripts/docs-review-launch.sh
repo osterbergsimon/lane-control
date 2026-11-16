@@ -2,9 +2,9 @@
 # Weekly docs review: launch a lane on DOCS_REVIEW_TIER as a child of a project coordinator, then nudge
 # it once if the engine left the first prompt unsubmitted (known paste bug).
 # Usage: docs-review-launch.sh <PROJECT>
-# Needs COORD_TASK[<PROJECT>] and $BRIEF_DIR/<PROJECT>-docs-review.md (from templates/docs-review-brief.md).
+# Needs COORD_TASK[<PROJECT>] and $BRIEF_DIR/<PROJECT>-docs-review.md (from orchestrators/rove/templates/docs-review-brief.md).
 set -euo pipefail
-here=$(dirname "$0"); . "$here/lib.sh"
+here=$(dirname "$(readlink -f "$0")"); . "$here/../../../core/scripts/lib.sh"
 p=${1:?usage: docs-review-launch.sh <PROJECT>}
 parent=${COORD_TASK[$p]:?no coordinator for $p in config}
 t=$DOCS_REVIEW_TIER

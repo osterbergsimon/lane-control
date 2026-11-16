@@ -141,9 +141,9 @@ class TierTableTests(unittest.TestCase):
     def test_the_owners_decision_on_the_sandbox_is_written_down(self):
         line = ("Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed "
                 "(calvin, for now). To bring it back, restore it from git history (last in main at b97c919).")
-        for f in ("model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
+        for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             self.assertIn(line, (ROOT / f).read_text(), f)
-        for f in ("model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
+        for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             flat = " ".join((ROOT / f).read_text().split())
             for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin",
                            "orca-ide orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash",
@@ -153,11 +153,11 @@ class TierTableTests(unittest.TestCase):
                            "the default for every project but calvin"):
                 self.assertIn(needle, flat, f)
             self.assertNotIn("swift is `none` for now", flat, f)
-        self.assertIn("are not trusted with the owner's machine", (ROOT / "model-routing.md").read_text())
-        self.assertNotIn("807d944", " ".join((ROOT / f).read_text() for f in ("model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md", "reliability.md")))
+        self.assertIn("are not trusted with the owner's machine", (ROOT / "core" / "model-routing.md").read_text())
+        self.assertNotIn("807d944", " ".join((ROOT / f).read_text() for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md", "reliability.md")))
 
     def test_the_rove_example_runs_no_opencode_tier(self):
-        text = (ROOT / "config.example.sh").read_text()
+        text = (ROOT / "core" / "config.example.sh").read_text()
         self.assertIn("[swift]=none", text)
         self.assertNotIn("opencode --auto", text)
         self.assertNotIn("DOCS_REVIEW_TIER=swift", text)
@@ -388,7 +388,7 @@ class OnboardedProjectPersonaTests(unittest.TestCase):
         self.assertIn(".lane-control/design-lead.md", text)
 
     def test_path_map_lives_in_routing_md(self):
-        self.assertIn(".lane-control/routing.md", (ROOT / "model-routing.md").read_text().splitlines()[2])
+        self.assertIn(".lane-control/routing.md", (ROOT / "core" / "model-routing.md").read_text().splitlines()[2])
         self.assertIn(".lane-control/routing.md", (ROOT / "README.md").read_text())
 
 
@@ -411,10 +411,10 @@ class RoveTemplateTests(unittest.TestCase):
         want = ["branch", "gates", "deviations", "filed", "agents-md"]
         self.assertEqual(shape(ROOT / "orchestrators" / "orca-cotal" / "templates" / "lane-brief.md"), want)
         self.assertEqual(shape(ROOT / "orchestrators" / "rove" / "templates" / "AGENTS-coordination.md"), want)
-        self.assertEqual(shape(ROOT / "model-routing.md"), want)
+        self.assertEqual(shape(ROOT / "core" / "model-routing.md"), want)
 
     def test_no_five_line_report_left(self):
-        for name in ("model-routing.md", "orchestrators/rove/templates/worker-brief.md", "orchestrators/rove/templates/AGENTS-coordination.md"):
+        for name in ("core/model-routing.md", "orchestrators/rove/templates/worker-brief.md", "orchestrators/rove/templates/AGENTS-coordination.md"):
             self.assertNotIn("5-line", (ROOT / name).read_text(), name)
 
 
@@ -519,7 +519,7 @@ class BeadsSteeringTests(unittest.TestCase):
             self.check(path, path.read_text())
 
     def test_lane_key_is_a_label_everywhere(self):
-        for name in ("issues.md", "model-routing.md", "orchestrators/rove/templates/AGENTS-coordination.md", "orchestrators/orca-cotal/personas/coordinator.md"):
+        for name in ("core/issues.md", "core/model-routing.md", "orchestrators/rove/templates/AGENTS-coordination.md", "orchestrators/orca-cotal/personas/coordinator.md"):
             text = (ROOT / name).read_text()
             self.assertIn("lane:<KEY", text, name)
             self.assertNotIn("external-ref", text, name)
@@ -598,7 +598,7 @@ class CleanupSteeringTests(unittest.TestCase):
             self.assertIn(needle, t, needle)
 
     def test_issues_doctrine_names_the_close_rule(self):
-        t = self.flat(ROOT / "issues.md")
+        t = self.flat(ROOT / "core" / "issues.md")
         for needle in ("close the lane after the merge", "whoever opened the lane", "without `--force`", "branches are kept unless the owner says"):
             self.assertIn(needle, t)
 
@@ -622,7 +622,7 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("merging, closing or stopping a lane", t)
         self.assertIn("any budget or window guard order is not one", t)
         self.assertNotIn("unless the order says", t)
-        roles = flat(ROOT / "roles.md")
+        roles = flat(ROOT / "core" / "roles.md")
         self.assertIn("always confirmed by the owner", roles)
         self.assertIn("does not come from an agent in the coordinator's roster", roles)
         self.assertIn("budget or window guard order is not such a decision", roles)
@@ -668,7 +668,7 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         orca = flat(ROOT / "orchestrators" / "orca-cotal" / "docs" / "orca.md")
         for needle in ("window-guard-install", "machine-coordinator-setup", "COORD_SPACE", "enable-linger", "--refresh"):
             self.assertIn(needle, orca)
-        roles = flat(ROOT / "roles.md")
+        roles = flat(ROOT / "core" / "roles.md")
         self.assertIn("Under Orca + Cotal", roles)
 
     def test_the_install_order_stops_the_old_guard_last_and_clears_its_state(self):
@@ -679,7 +679,7 @@ class MachineCoordinatorContentTests(unittest.TestCase):
         self.assertIn("window-guard.state", steps)
 
     def test_config_example_lists_the_spaces(self):
-        self.assertIn("COORD_SPACE", (ROOT / "config.example.sh").read_text())
+        self.assertIn("COORD_SPACE", (ROOT / "core" / "config.example.sh").read_text())
 
 
 if __name__ == "__main__":
