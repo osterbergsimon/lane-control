@@ -190,5 +190,95 @@ class CommandTests(OrchTest):
                 self.assertIn(f"{name} has no {action} adapter yet", r.stderr)
 
 
+def switch_steps() -> str:
+    """The numbered human steps of orchestrators/switching.md, as the file has them."""
+    lines = (ROOT / "orchestrators" / "switching.md").read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("1. "))
+    return "\n".join(lines[start:]).strip()
+
+
+class SwitchTests(OrchTest):
+    def fixture(self):
+        from test_orch_orca_cotal import fixture_files
+        return self.e.project(fixture_files())
+
+    def assert_untouched(self, p):
+        self.assertEqual(self.e.gh_calls(), [])
+        self.assertNotIn("orch/", git(p, "branch", "-a").stdout)
+        self.assertNotIn("orch/", git(p, "ls-remote", "--heads", "origin").stdout)
+        self.assertEqual(git(p, "worktree", "list").stdout.count("\n"), 1)
+
+    def test_switch_refuses_when_target_lacks_setup(self):
+        p = self.fixture()
+        before = tree_hash(p)
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "herdr", "--yes")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("herdr has no setup adapter yet", r.stderr)
+        self.assertEqual(tree_hash(p), before)
+        self.assert_untouched(p)
+
+    def test_switch_refuses_when_source_lacks_strip(self):
+        p = self.fixture()
+        r = self.e.run("switch", str(p), "--from", "rove", "--to", "native-orca", "--yes")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("rove has no strip adapter yet", r.stderr)
+        self.assert_untouched(p)
+
+    def test_switch_to_orca_cotal_refuses_and_points_to_setup(self):
+        p = self.e.project()
+        r = self.e.run("switch", str(p), "--from", "native-orca", "--to", "orca-cotal", "--yes")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("setup --orchestrator orca-cotal", r.stderr)
+        self.assert_untouched(p)
+
+    def test_switch_strip_then_setup_one_pr(self):
+        p = self.fixture()
+        before = tree_hash(p)
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(tree_hash(p), before)
+        prs = [c for c in self.e.gh_calls() if c.startswith("pr create")]
+        self.assertEqual(len(prs), 1, self.e.gh_calls())
+        heads = git(p, "ls-remote", "--heads", "origin").stdout
+        self.assertIn("refs/heads/orch/switch-orca-cotal-to-native-orca", heads)
+        self.assertEqual(heads.count("orch/"), 1)
+        branch = "origin/orch/switch-orca-cotal-to-native-orca"
+        git(p, "fetch", "-q", "origin")
+        agents = git(p, "show", f"{branch}:AGENTS.md").stdout
+        self.assertNotIn("lane-control:begin", agents)
+        self.assertIn("<!-- orchestrator: native-orca -->", agents)
+        self.assertNotIn(".lane-control/", git(p, "ls-tree", "-r", "--name-only", branch).stdout)
+        self.assertEqual(git(p, "log", "--format=%s", f"origin/main..{branch}").stdout.count("\n"), 1)
+
+    def test_switch_prints_human_checklist(self):
+        p = self.fixture()
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.rstrip().endswith(switch_steps()), r.stdout[-600:])
+
+    def test_switch_dry_run_commits_nothing(self):
+        p = self.fixture()
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("+<!-- orchestrator: native-orca -->", r.stdout)
+        self.assertIn("-<!-- lane-control:begin -->", r.stdout)
+        self.assert_untouched(p)
+
+    def test_switch_with_nothing_to_do_prints_no_steps(self):
+        section = (ROOT / "orchestrators" / "native-orca" / "templates" / "agents-section.md").read_text()
+        p = self.e.project({"AGENTS.md": section})
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("nothing to switch", r.stdout)
+        self.assertNotIn("human steps", r.stdout)
+        self.assert_untouched(p)
+
+    def test_switch_asks_without_yes(self):
+        p = self.fixture()
+        r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", stdin="")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assert_untouched(p)
+
+
 if __name__ == "__main__":
     unittest.main()

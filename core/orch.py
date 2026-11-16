@@ -158,7 +158,7 @@ def cmd_status(adapters: dict, project: Path) -> int:
 
 
 def change_in_worktree(project: Path, branch: str, steps: list, title: str, body: str, dry: bool, ask: bool,
-                       yes: bool, nothing: str) -> int:
+                       yes: bool, nothing: str, after=None) -> int:
     """Run each step (a function of (project, work) returning change lines) in one new worktree, then one PR."""
     work = make_worktree(project, branch)
     keep = False
@@ -173,6 +173,8 @@ def change_in_worktree(project: Path, branch: str, steps: list, title: str, body
         show(changes, work)
         if dry:
             print("dry run: nothing committed")
+            if after:
+                after()
             return 0
         if ask and not confirm("commit these and open a PR?", yes):
             print("nothing committed")
@@ -180,6 +182,8 @@ def change_in_worktree(project: Path, branch: str, steps: list, title: str, body
         url = open_pr(work, title, body + "\n\n" + "\n".join(f"- {c}" for c in changes))
         keep = True
         print(f"PR: {url}")
+        if after:
+            after()
         return 0
     finally:
         if keep:
@@ -245,8 +249,32 @@ def main(argv: list) -> int:
         return 4
 
 
+def switch_steps(root: Path) -> str:
+    """The human steps, read from orchestrators/switching.md (the numbered list to its end), never copied here."""
+    lines = (root / "orchestrators" / "switching.md").read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("1. "))
+    return "\n".join(lines[start:]).strip()
+
+
 def cmd_switch(adapters: dict, project: Path, src: str, dst: str, dry: bool, yes: bool) -> int:
-    raise Unsupported("switch is not written yet")
+    """Both adapters checked first; then one worktree: strip src, set up dst, one commit, one PR, the human steps."""
+    if src == dst:
+        raise Usage("--from and --to name the same orchestrator")
+    old = adapter_for(adapters, src, "strip")
+    new = adapter_for(adapters, dst, "setup")
+    if "setup" in getattr(new, "RUNS_IN_PLACE", frozenset()):
+        raise Unsupported(f"{dst} setup commits on its own, so it cannot share a switch PR: run "
+                          f"`scripts/orch strip --orchestrator {src} {project}`, merge it, then "
+                          f"`scripts/orch setup --orchestrator {dst} {project}`")
+    def steps():
+        print("\nThe human steps (orchestrators/switching.md):\n")
+        print(switch_steps(ROOT))
+
+    return change_in_worktree(
+        project, f"orch/switch-{src}-to-{dst}", [old.strip, new.setup],
+        f"orch: switch {src} to {dst}",
+        f"`scripts/orch switch --from {src} --to {dst}` (lane-control). Merge on the owner's word, then follow "
+        "orchestrators/switching.md.", dry, ask=True, yes=yes, nothing="nothing to switch", after=steps)
 
 
 if __name__ == "__main__":
