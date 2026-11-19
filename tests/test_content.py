@@ -867,7 +867,8 @@ class NativePersonaTests(unittest.TestCase):
             for needle in ("Claude Code's SendMessage", "ListAgents", "an OpenCode session or an agent on another host",
                            "orca-ide orchestration run-create --objective", "your session name",
                            "orca-ide orchestration run-list", "--to run:<id>", "a send is not a read",
-                           "write it in your own terminal for the owner", "Never type into another session's terminal"):
+                           "write it in your own terminal for the owner", "Never type into another session's terminal",
+                           "Orca's one-line message prompt", "then run `orca-ide orchestration check`"):
                 self.assertIn(needle, t, (role, needle))
 
     def test_no_persona_types_into_a_terminal(self):

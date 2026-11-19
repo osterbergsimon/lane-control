@@ -31,7 +31,8 @@ permission mode is `{{MODE}}`.
 
 ## Messages
 - Your own Run is your Orca address and your lanes' Run: if `orca-ide orchestration run-current` shows none, create
-  it from your own terminal with `orca-ide orchestration run-create --objective "<your session name>"`.
+  it from your own terminal with `orca-ide orchestration run-create --objective "<your session name>"`. Mail to it
+  arrives as Orca's one-line message prompt (it waits while you are busy): then run `orca-ide orchestration check`.
 - Claude to Claude on this machine (`{{PROJECT}} coordinator`, `machine coordinator`): Claude Code's SendMessage,
   addressed by session name (ListAgents lists them). Ask for a one-word ack when it matters: a send is not a read.
 - With an OpenCode session or an agent on another host: find its Run in `orca-ide orchestration run-list` (the
