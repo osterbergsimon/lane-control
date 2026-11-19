@@ -462,6 +462,25 @@ class NightPrecheckTests(MachineTest):
         self.assertEqual(r.returncode, 1)
         self.assertIn("no coordinators", r.stderr)
 
+    def test_paused_project_skipped(self):
+        import hashlib
+        co = self.claude_coordinator("proj", 90)
+        self.conf(f"proj {co} claude proj coordinator")
+        real = co.resolve()
+        store = self.home / ".config" / "lane-control" / "projects" / \
+            f"{real.name}-{hashlib.sha256(str(real).encode()).hexdigest()[:10]}"
+        store.mkdir(parents=True)
+        (store / "settings.json").write_text(json.dumps({"paused": True, "coordinator": "claude/opus"}))
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+        self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+        self.assertIn("proj: paused", r.stderr)
+        (store / "settings.json").write_text(json.dumps({"paused": False}))
+        self.assertEqual(self.run_script("night-precheck", env={"LANE_HOUR": "2"}).stdout, "DUE proj idle=90min\n")
+        (store / "settings.json").write_text("{not json")
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+        self.assertEqual(r.stdout, "")  # cannot tell: no check-in (it would spend budget)
+        self.assertIn("settings", r.stderr)
+
     def test_offline_runner_due(self):
         self.gh({"runners": {"o/r": [{"name": "r1", "status": "offline"}, {"name": "r2", "status": "online"}]}})
         self.machine_conf('COORDINATORS=""\nRUNNER_REPOS="o/r o/gone"\n')

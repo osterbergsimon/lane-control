@@ -20,7 +20,8 @@ is left); when the budget is unknown (no config, no usage feed, a feed that give
 either, and the precheck says so with one BUDGET line once a night (stamp ~/.cache/lane-control/night/.budget-unknown,
 16 h), not every hour. Runners are reported either way.
 
-Coordinators and runner repos come from ~/.config/lane-control/machine.conf (LANE_MACHINE_CONF). Check-in stamps are
+A project marked paused in its settings store (project-pause) is skipped; a settings file that cannot be read means
+no check-in for it, said on stderr. Coordinators and runner repos come from ~/.config/lane-control/machine.conf (LANE_MACHINE_CONF). Check-in stamps are
 ~/.cache/lane-control/night/<name>.
 
 Exit: 0 something is due; 1 nothing is due (a coordinator whose idle time is unknown, or a runner list gh cannot
@@ -138,6 +139,13 @@ def main(argv: list) -> int:
             due.append(f"BUDGET unknown ({why}): no check-ins until the usage feed gives a reading")
         coords = []
     for c in coords:
+        try:
+            if machineconf.paused(c.checkout):
+                err(f"{c.name}: paused (project-pause), no check-in")
+                continue
+        except machineconf.ConfError as e:
+            err(f"{c.name}: {e}; no check-in")
+            continue
         try:
             idle = harnesses.load_harness(c.harness).idle_minutes(c.checkout, now, "coordinator")
         except (OSError, sqlite3.Error) as e:

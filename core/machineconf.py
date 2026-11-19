@@ -5,6 +5,7 @@ state of self-hosted runners.
 The file is shell-sourceable KEY=value, so it is read by sourcing it in bash; COORDINATORS has one coordinator per
 line, `<name> <checkout path> <harness> <Orca terminal title>` (the title may have spaces, the path may not).
 """
+import hashlib
 import json
 import os
 import re
@@ -88,6 +89,28 @@ def presence() -> dict:
     if r.returncode != 0:
         raise ConfError(f"{LANE_LIMITS}: could not work out presence ({r.stderr.strip()})")
     return dict(zip(names, r.stdout.split("\0")))
+
+
+def settings_file(checkout: Path) -> Path:
+    """The project's settings store file, where project-setup and project-pause keep its settings (`paused` among
+    them): <config>/lane-control/projects/<folder name>-<first 10 hex of sha256 of the real path>/settings.json."""
+    real = Path(checkout).resolve()
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    key = f"{real.name}-{hashlib.sha256(str(real).encode()).hexdigest()[:10]}"
+    return config / "lane-control" / "projects" / key / "settings.json"
+
+
+def paused(checkout: Path) -> bool:
+    """Whether project-pause marked the project paused. No settings file: not paused. One that cannot be read raises
+    ConfError, so a caller can skip rather than guess."""
+    f = settings_file(checkout)
+    try:
+        data = json.loads(f.read_text())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as e:
+        raise ConfError(f"{f}: cannot read the project's settings ({e})") from None
+    return bool(isinstance(data, dict) and data.get("paused"))
 
 
 class RunnerError(Exception):
