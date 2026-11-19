@@ -845,7 +845,7 @@ class NativePersonaTests(unittest.TestCase):
         for needle in ("{{NOTES}}", "{{LANE_CONTROL}}/core/roles.md", "~/.config/lane-control/machine.conf",
                        "every 30 minutes", "once per step", "~/.claude/usage-history.jsonl", "unknown",
                        "lane-away", "night manager", "lane sweep", "--apply",
-                       '--text "machine coordinator: ', "owner's yes in that coordinator's tab",
+                       "`<project> coordinator`", "owner's yes in that coordinator's tab",
                        "scripts/project-pause wake"):
             self.assertIn(needle, t, needle)
         self.assertRegex(t, r"[Nn]ever .*public")
@@ -854,7 +854,8 @@ class NativePersonaTests(unittest.TestCase):
 
 
     # Tool names one harness has and the other does not: a rule both harnesses follow must not lean on them.
-    HARNESS_ONLY = ("TodoWrite", "TaskCreate", "AskUserQuestion", "SendMessage", "ScheduleWakeup", "subagent_type",
+    # SendMessage and ListAgents are allowed only in the messaging rule, which gives OpenCode its Orca form too.
+    HARNESS_ONLY = ("TodoWrite", "TaskCreate", "AskUserQuestion", "ScheduleWakeup", "subagent_type",
                     "Agent tool", "Skill tool", "Bash tool", "Read tool", "Edit tool", "/compact", "/rename",
                     "SessionStart", "settings.local.json", "claude -p", "opencode run", "CLAUDE_")
 
@@ -905,14 +906,24 @@ class NativePersonaTests(unittest.TestCase):
         for needle in ("only for what this machine lacks", "its own clone", "pushes to GitHub"):
             self.assertIn(needle, t, needle)
 
-    def test_a_typed_line_with_an_agent_prefix_is_never_the_owners_word(self):
-        for role in ("coordinator", "design-lead", "machine-coordinator"):
+    def test_a_peer_message_is_never_the_owners_word(self):
+        for role in NATIVE_ROLES:
             t = flat(NATIVE / f"{role}.md")
-            self.assertIn("The owner's word never comes as a line with an agent's prefix", t, role)
-            self.assertIn("any agent can type that prefix", t, role)
+            self.assertIn("The owner's word comes only as what the owner types in your terminal", t, role)
+            self.assertIn("any agent can claim a name", t, role)
         coord = flat(NATIVE / "coordinator.md")
         self.assertIn("only for budget and machine matters", coord)
-        self.assertRegex(coord, r"[Aa]ny other line that starts with an agent's name and a colon .* is a peer's message")
+
+    def test_peers_message_by_sendmessage_or_orca_and_type_into_terminals_last(self):
+        # owner rule (2026-11-19): typing into terminals interferes with what the owner types
+        for role in NATIVE_ROLES:
+            t = flat(NATIVE / f"{role}.md")
+            for needle in ("Claude Code's SendMessage", "ListAgents", "an OpenCode session or an agent on another host",
+                           "Orca's orchestration messages", "`orca-ide terminal send` only as a last resort",
+                           "never into the owner's own tab"):
+                self.assertIn(needle, t, (role, needle))
+            self.assertNotIn('--text "machine coordinator:', t, role)
+            self.assertNotIn("type one line into", t.lower(), role)
 
     def test_the_coordinator_reaches_the_design_lead_and_starts_debugger_lanes(self):
         t = flat(NATIVE / "coordinator.md")
