@@ -241,7 +241,7 @@ class PureTests(unittest.TestCase):
         self.assertNotEqual(self.m.derive_port("a"), self.m.derive_port("b"))
 
     def test_render_persona_claude(self):
-        text = (ROOT / "personas" / "coordinator.md").read_text()
+        text = (ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md").read_text()
         out = self.m.render_persona(text, "claude", "opus", "auto", "Shop")
         self.assertIn("agent: claude", out)
         self.assertIn("model: opus", out)
@@ -252,7 +252,7 @@ class PureTests(unittest.TestCase):
         self.assertIn("coordinator of Shop", out)
 
     def test_render_persona_opencode(self):
-        text = (ROOT / "personas" / "design-lead.md").read_text()
+        text = (ROOT / "orchestrators" / "orca-cotal" / "personas" / "design-lead.md").read_text()
         out = self.m.render_persona(text, "opencode", "opencode/deepseek-v4.1-flash", "auto", "Shop")
         self.assertIn("events: false", out)
         self.assertNotIn("permission-mode", out)
@@ -1080,7 +1080,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(events[-2:], ["flush", "input"])  # right before the commit question
 
     def test_an_exposure_answer_is_marked_and_a_confirming_answer_keeps_the_list(self):
-        self.assertIn("(owner's answer)", (ROOT / "templates" / "adapt" / "answers-prompt.md").read_text())
+        self.assertIn("(owner's answer)", (ROOT / "orchestrators" / "orca-cotal" / "templates" / "adapt" / "answers-prompt.md").read_text())
         self.e.script_agents(sonnet=[self.WRITE_Q, {}], opus=[PASS])
         _, out, _ = self.in_terminal(["yes, as you chose", "n"])
         self.assertIn("files already matched", out)
@@ -2054,10 +2054,15 @@ class OnboardingTests(unittest.TestCase):
 
     def test_host_mode_carries_what_onboarding_reads(self):
         m = load()
-        self.assertIn("templates", m.HOST_FILES)  # templates/adapt/ with it
-        self.assertIn("model-routing.md", m.HOST_FILES)
+        self.assertIn("orchestrators/orca-cotal/templates", m.HOST_FILES)  # templates/adapt/ with it
+        self.assertIn("core/model-routing.md", m.HOST_FILES)
         for path in m.HOST_FILES:
             self.assertTrue((ROOT / path).exists(), path)
+
+    def test_host_mode_carries_the_root_lookup(self):
+        files = load().HOST_FILES  # the copy on the host finds its own root, like a checkout
+        self.assertIn(".lane-control-root", files)
+        self.assertIn("core/lcroot.py", files)
 
     def test_host_mode_carries_the_machine_tools(self):
         for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
@@ -3212,7 +3217,7 @@ class LaneTierTests(unittest.TestCase):
         self.assertIn("model=sonnet", r.stdout)
 
     def test_comments_and_the_shipped_template_parse(self):
-        r = subprocess.run([str(TIER_TOOL), "--check", str(TIER_TOOL.parent.parent / "templates" / "lanes.tsv")],
+        r = subprocess.run([str(TIER_TOOL), "--check", str(ROOT / "orchestrators" / "orca-cotal" / "templates" / "lanes.tsv")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines(), ["swift none -", "standard claude sonnet", "deep claude opus", "top none -"])
@@ -3637,7 +3642,7 @@ class TierChoiceTests(unittest.TestCase):
         status, out, ask = self.in_terminal([])
         self.assertEqual(status, 0)
         ask.assert_not_called()
-        self.assertEqual(self.table.read_text(), (ROOT / "templates" / "lanes.tsv").read_text())
+        self.assertEqual(self.table.read_text(), (ROOT / "orchestrators" / "orca-cotal" / "templates" / "lanes.tsv").read_text())
         self.assertEqual(self.row(), "swift\tnone\t-\t-")
         self.assertNotIn("opencode: ", out)
 

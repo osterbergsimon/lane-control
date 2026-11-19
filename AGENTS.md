@@ -1,8 +1,10 @@
 # lane-control: agent rules
 
 Scripts, personas, skills and written doctrine for running software projects with coding agents (README.md).
-Most of the repo is prose doctrine (`machine.md`, `reliability.md`, `model-routing.md`, `roles.md`, `issues.md`,
-`docs/`); the code is `scripts/`, with personas in `personas/`, skills in `skills/` and templates in `templates/`.
+Shared doctrine and scripts are in `core/` (`roles.md`, `model-routing.md`, `issues.md`, `reliability.md`,
+`machine.md`, `core/scripts/`); everything that depends on one orchestrator is in `orchestrators/<name>/` (record,
+setup, notes, adapter, docs, scripts, personas, skills, templates). `scripts/orch` is the command; every other file in
+`scripts/` is a link kept at an old path (`core/README.md`). Scripts find the repo root by `.lane-control-root`.
 
 ## Checks
 - `python3 -m unittest discover -s tests`: must pass before any commit. Fast; stubs Orca and Cotal (`tests/stubs/`).

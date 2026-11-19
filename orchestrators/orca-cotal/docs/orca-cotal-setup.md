@@ -1,7 +1,7 @@
 # Orca + Cotal: how the parts fit, bring-up, failure modes
 
 This page shows how the parts connect, the order to bring them up on a fresh machine (with a check after each step),
-and the failures this repo has recorded. The commands and flags are in `docs/orca.md` §5b, and this page points there
+and the failures this repo has recorded. The commands and flags are in `orchestrators/orca-cotal/docs/orca.md` §5b, and this page points there
 for them. Versions as tested: Orca 1.4.250, Cotal 0.145.1, Claude Code 2.1.x, OpenCode 2.2.1. The Cotal facts come
 from its bundled docs (`cotal_docs`), not from memory.
 
@@ -36,7 +36,7 @@ from its bundled docs (`cotal_docs`), not from memory.
 | delivery daemon | serves durable DMs and channel delivery and the membership feed; holds a lease per space | same root | `cotal up` with the broker |
 | `mgr` | the space's manager as a saved Cotal service on the Orca runtime. It launches each seat as an Orca tab and mints a 24-hour seat credential, which it renews at 75% of its life. It carries `envRefs` for PATH and the proxy variables | definition `<repo>/.cotal/mgr-service.json`; log via `cotal service logs mgr -s <space>` | `cotal svc add/start mgr` (project-setup step 6) |
 | seat | one agent process in an Orca tab, joined to the mesh under its own identity | its worktree; credential `<repo>/.cotal/auth/` (secret: never open) | `cotal spawn -d` (project-setup) or `cotal_spawn` (coordinator) |
-| personas | the coordinator, design-lead and reviewer prompts, rendered from `personas/` | `<repo>/.cotal/agents/` (Cotal reads them there) | project-setup step 5, `--refresh` |
+| personas | the coordinator, design-lead and reviewer prompts, rendered from `orchestrators/orca-cotal/personas/` | `<repo>/.cotal/agents/` (Cotal reads them there) | project-setup step 5, `--refresh` |
 | Claude plugin and wake channel | Cotal's Claude Code plugin: it gives a managed session its mesh tools and wakes an idle session on a message (Claude "channels") | `~/.cotal/claude-plugin/` | `cotal setup -H claude ... --configure-only` (project-setup step 4) |
 | settings store, tier table | per-project choices and `lanes.tsv`, outside the repo | `~/.config/lane-control/projects/<folder>-<hash>/` | project-setup (`--show` prints it) |
 | skills | `orca-cli` and `orca-cotal-lanes`, user level, because a lane worktree carries only committed files | `~/.agents/skills/`, linked into Claude and OpenCode | project-setup step 3 |
@@ -55,24 +55,24 @@ then calls `cotal_spawn`. The manager asks orcad for a tab in that worktree and 
 by `cotal_dm`.
 
 ## 2. Bring-up on a fresh machine, with a check after each step
-Run as the agent user, never root. Pass `-s <space>` to every `cotal` call (`docs/orca.md`, host gotchas).
+Run as the agent user, never root. Pass `-s <space>` to every `cotal` call (`orchestrators/orca-cotal/docs/orca.md`, host gotchas).
 
 | # | Step | Check | Healthy output |
 |---|---|---|---|
-| 1 | Orca on the workstation; connect the host (`docs/orca.md` §2-3), or `scripts/orca-host-install <user@host> --pair` for a host without downloads | `orca status --json` on the host (`orca-ide` on a NixOS workstation) | `result.runtime.reachable: true`, `state: "ready"` |
+| 1 | Orca on the workstation; connect the host (`orchestrators/orca-cotal/docs/orca.md` §2-3), or `scripts/orca-host-install <user@host> --pair` for a host without downloads | `orca status --json` on the host (`orca-ide` on a NixOS workstation) | `result.runtime.reachable: true`, `state: "ready"` |
 | 2 | `npm i -g cotal-ai` and the harnesses; `cotal telemetry off`; `cotal ext add @cotal-ai/orca`; `~/.config/cotal/config.json` with `spawn.env` naming the proxy variables and `TMPDIR` (names only, no values) | `cotal --version`; `cotal ext list` | `cotal-ai 0.145.1` and an `orca` line |
 | 3 | Sign in to Claude once (`claude`); for bypass mode, accept its warning once | `claude --version` | a version and no login prompt |
-| 4 | `scripts/project-setup <repo>` (`docs/orca.md` §5b) | `cotal space` | the space `● reachable` at `nats://127.0.0.1:<port>` |
+| 4 | `scripts/project-setup <repo>` (`orchestrators/orca-cotal/docs/orca.md` §5b) | `cotal space` | the space `● reachable` at `nats://127.0.0.1:<port>` |
 | 5 | (same run) broker, delivery daemon, `mgr` | `cotal svc -s <space>` | `mgr`, `stack-broker`, `stack-delivery` all `running`. `auth-service`, `web` and the other optional built-ins show `not started`, which is normal on a static-auth space |
 | 6 | (same run) coordinator and design lead | `cotal ps -s <space>` | both rows show `running` under PROCESS and `idle` or `working` under MESH. In Orca, the tab `cotal-<name>` sits in the main checkout and in the `design-lead` task |
 | 7 | Manager health | `cotal manager status -s <space>`; `cotal service logs mgr -s <space>` | `Process observation: running`, `Readiness observation: endpoint-serving`; no line starting `!` that recurs |
 | 8 | Credential health | `cotal doctor auth --space <space> --plain` (run in the repo; read-only without `--fix`) | live seats, `delivery.creds` and `membership-rw.creds` all `healthy`. `near-expiry` or `expired` ("the broker denies this credential") is expected for seats already reaped, and so is the closing line `! local credential findings remain` that they cause |
 | 9 | Claude wake path (once per machine, by hand) | the agent's tab shows no `Cotal incoming auto-wake is unavailable` notice at startup; a `cotal send -s <space> -t coordinator "test, no reply"` wakes an idle coordinator | the coordinator takes a turn |
-| 10 | Machine coordinator and window guard (`docs/orca.md`, "The machine coordinator and the window guard", in its order) | `systemctl --user status lane-control-window-guard.service` | `active (running)`; the journal shows polls |
+| 10 | Machine coordinator and window guard (`orchestrators/orca-cotal/docs/orca.md`, "The machine coordinator and the window guard", in its order) | `systemctl --user status lane-control-window-guard.service` | `active (running)`; the journal shows polls |
 | 11 | A first lane, from the coordinator | the lane's tab opens first in its child task; its report DM wakes the coordinator | `cotal ps` lists the lane, and later the DM arrives |
 
 ## 3. Known failure modes and their fixes
-From `docs/orca.md`, `reliability.md`, the skill and git history; the last two rows are from the mesh-loss diagnosis.
+From `orchestrators/orca-cotal/docs/orca.md`, `reliability.md`, the skill and git history; the last two rows are from the mesh-loss diagnosis.
 
 | Symptom | Cause | Fix |
 |---|---|---|

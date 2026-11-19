@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 HEAVY = ROOT / "scripts" / "lane-heavy"
 ROOM = ROOT / "scripts" / "lane-room"
 LIMITS = ROOT / "scripts" / "lane-limits.sh"
-EXAMPLE = ROOT / "limits.example.sh"
+EXAMPLE = ROOT / "core" / "limits.example.sh"
 TIMEOUT = 20
 
 # The fake scope: the probe answers with a real memory limit, anything else runs the command after `--`. Like the real
@@ -558,17 +558,17 @@ class ContentTests(unittest.TestCase):
                 self.assertIn(needle, header)
 
     def test_machine_md_has_the_machine_wide_rule(self):
-        text = (ROOT / "machine.md").read_text()
+        text = (ROOT / "core" / "machine.md").read_text()
         self.assertNotIn("one heavy build or run at a time per project", text)
         self.assertIn("## Machine caps", text)
         self.assertIn("~/.agents/bin/lane-heavy", text)
         self.assertIn("~/.agents/bin/lane-room", text)
 
     def test_the_brief_sends_heavy_work_through_the_gate(self):
-        self.assertIn("lane-heavy COMMAND", (ROOT / "templates" / "lane-brief.md").read_text())
+        self.assertIn("lane-heavy COMMAND", (ROOT / "orchestrators" / "orca-cotal" / "templates" / "lane-brief.md").read_text())
 
     def test_the_rove_brief_sends_heavy_work_through_the_gate(self):
-        text = (ROOT / "templates" / "worker-brief.md").read_text()
+        text = (ROOT / "orchestrators" / "rove" / "templates" / "worker-brief.md").read_text()
         self.assertIn("~/.agents/bin/lane-heavy COMMAND", text)
         self.assertNotIn("one at a time", text)
 
@@ -583,7 +583,7 @@ class ContentTests(unittest.TestCase):
             self.assertIn(f"`{tool}`", text)
 
     def test_config_comments_sit_on_their_own_settings(self):
-        lines = (ROOT / "config.example.sh").read_text().splitlines()
+        lines = (ROOT / "core" / "config.example.sh").read_text().splitlines()
         self.assertTrue(any(l.startswith("NIGHT_MEM_MIN_GB=8") and "available memory" in l for l in lines))
         self.assertFalse(any(l.startswith("WINDOW_STOP_PCT") and "available memory" in l for l in lines))
 

@@ -1,0 +1,4 @@
+# Orca runs scripts.setup in every new worktree of this repo. Keep the last line.
+scripts:
+  setup: |
+    echo ready > .orca-setup-done

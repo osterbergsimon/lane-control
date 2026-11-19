@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""orca-cotal-task <name> "<first task>" [--role R] [--no-parent]
+
+Create an Orca task for a Cotal agent: Orca makes the worktree (own branch), nested under the CALLER's worktree, and
+opens a terminal in it running `cotal-agent`, so the new agent joins the Cotal mesh under <name>.
+Run it from inside a worktree (a coordinator runs it from its own terminal). Prints one JSON line:
+{"name", "worktree", "branch", "terminal"} or exits non-zero with Orca's error.
+"""
+import argparse, json, os, shlex, shutil, subprocess, sys
+
+ORCA = shutil.which("orca") or os.path.expanduser("~/.orca/cli/bin/orca")
+
+def orca(*args):
+    out = subprocess.run([ORCA, *args, "--json"], capture_output=True, text=True, timeout=120)
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        sys.exit(f"orca {' '.join(args[:2])}: {out.stderr.strip() or out.stdout.strip()}")
+    if not data.get("ok", True):
+        sys.exit(f"orca {' '.join(args[:2])}: {json.dumps(data.get('error'))}")
+    return data.get("result", data)
+
+ap = argparse.ArgumentParser()
+ap.add_argument("name")
+ap.add_argument("task", help="first message for the new agent")
+ap.add_argument("--role", default="lane")
+ap.add_argument("--no-parent", action="store_true", help="top-level task instead of nesting under the caller")
+a = ap.parse_args()
+
+here = orca("worktree", "current")["worktree"]
+create = ["worktree", "create", "--repo", f"id:{here['repoId']}", "--name", a.name, "--setup", "skip"]
+create += ["--no-parent"] if a.no_parent else ["--parent-worktree", f"worktree:{here['id']}"]
+made = orca(*create)
+wt = made.get("worktree") or made
+path = wt["path"]
+cmd = " ".join(["cotal-agent", "--role", shlex.quote(a.role), "-p", shlex.quote(a.task)])
+term = orca("terminal", "create", "--worktree", f"path:{path}", "--title", f"cotal-{a.name}", "--command", cmd)
+print(json.dumps({"name": os.path.basename(path), "worktree": path, "branch": wt.get("branch"),
+                  "terminal": (term.get("terminal") or term).get("handle")}))

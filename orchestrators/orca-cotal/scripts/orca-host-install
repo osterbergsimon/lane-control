@@ -1,0 +1,204 @@
+#!/bin/sh
+# Put Orca's server (orcad) and its node runtime on an SSH host, from this workstation's Orca install, so the host
+# needs no downloads (nodejs.org, onorca.dev). Optionally start it and pair this desktop with it (no GUI click).
+#
+#   orca-host-install <ssh-host> [--pair [--no-tunnel]] [--port N] [--allow-root] [--appimage-root DIR]
+#
+# Without --pair: add the host in Orca (Settings > SSH, or import ~/.ssh/config) and connect; Orca finds this
+# install and reuses it. With --pair: orcad runs on the host on 127.0.0.1:<port> (a systemd user unit when the host
+# has a user manager, otherwise detached like the desktop starts it), a local ssh tunnel forwards the same port
+# (systemd user unit orca-tunnel-<host>), and `orca environment add` saves it as environment <host>.
+#
+# --no-tunnel: start orcad and print its pairing code, but set up no tunnel and save no environment.
+# Output lines: "installed|exists orcad-<ver>", "started|running orcad <port>", "paired|already-paired <host>".
+# Env: LANE_SSH_CONFIG (a separate ssh config, passed as ssh -F), ORCA_CLI (default orca-ide on PATH, else ~/.config/orca/linux-orca-cli-shim/orca), ORCA_ARTIFACTS (default ~/.config/orca/orcad-artifacts).
+set -eu
+
+die() { echo "orca-host-install: $*" >&2; exit "${2:-1}"; }
+host=""; pair=0; tunnel=1; port=6768; allow_root=0; appimage_root=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --pair) pair=1 ;;
+    --no-tunnel) tunnel=0 ;;
+    --port) port=$2; shift ;;
+    --allow-root) allow_root=1 ;;
+    --appimage-root) appimage_root=$2; shift ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -*) die "unknown option $1" 2 ;;
+    *) [ -z "$host" ] || die "one host only" 2; host=$1 ;;
+  esac
+  shift
+done
+[ -n "$host" ] || die "usage: orca-host-install <ssh-host> [--pair] [--port N]" 2
+
+artifacts=${ORCA_ARTIFACTS:-$HOME/.config/orca/orcad-artifacts}
+pkg_cli=$(command -v orca-ide 2>/dev/null || true)
+if [ -n "$pkg_cli" ]; then default_cli=$pkg_cli; else default_cli=$HOME/.config/orca/linux-orca-cli-shim/orca; fi
+orca=${ORCA_CLI:-$default_cli}
+# LANE_SSH_CONFIG: a separate ssh config for trial or throwaway hosts (passed as ssh -F), so they stay out of ~/.ssh/config.
+sshf=""
+if [ -n "${LANE_SSH_CONFIG:-}" ]; then
+  sshcfg=$(cd "$(dirname "$LANE_SSH_CONFIG")" && pwd)/$(basename "$LANE_SSH_CONFIG")
+  [ -f "$sshcfg" ] || die "LANE_SSH_CONFIG $LANE_SSH_CONFIG not found" 2
+  sshf="-F $sshcfg"
+fi
+r() { ssh $sshf -o BatchMode=yes "$host" "$@"; }
+
+# --- host facts ---
+facts=$(r 'id -u; uname -m; (ldd --version 2>&1 || true) | head -1') || die "cannot ssh to $host"
+uid=$(echo "$facts" | sed -n 1p); arch=$(echo "$facts" | sed -n 2p); libc=$(echo "$facts" | sed -n 3p)
+if [ "$uid" = 0 ] && [ "$allow_root" = 0 ]; then die "$host logs in as root; agents should not run as root (use a normal user, or --allow-root)" 2; fi
+case $arch in x86_64) a=x64 ;; aarch64|arm64) a=arm64 ;; *) die "unsupported arch $arch" ;; esac
+case $libc in *musl*) target=linux-$a-musl ;; *) target=linux-$a-glibc ;; esac
+
+# --- local artifacts: the slot the desktop already built for this target, and its node ---
+[ -d "$artifacts/$target" ] || die "no $target slot in $artifacts (connect any $target host once from the Orca app, or use a matching host)"
+ver=$(ls -t "$artifacts/$target" | head -1)
+slot=$artifacts/$target/$ver
+nodesha=$(tr -d '[:space:]' < "$slot/.runtime-node")
+# A packaged orca-ide (resources/bin/orca-ide) carries the node runtime two levels up; else the AppImage cache.
+if [ -z "$appimage_root" ] && [ -n "$pkg_cli" ]; then
+  appimage_root=$(dirname "$(dirname "$(readlink -f "$pkg_cli")")")
+fi
+if [ -z "$appimage_root" ] || [ ! -x "$appimage_root/node-runtime/bin/node" ]; then
+  appimage_root=$(ls -dt "$HOME"/.cache/appimage-run/*/resources 2>/dev/null | head -1 || true)
+fi
+node=""
+if [ -n "$appimage_root" ] && [ -x "$appimage_root/node-runtime/bin/node" ] && [ "$a" = x64 ]; then
+  node=$appimage_root/node-runtime/bin/node
+fi
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+if [ -z "$node" ] || [ "$(sha256sum "$node" | cut -d' ' -f1)" != "$nodesha" ]; then
+  tarball=$(ls "$artifacts"/node/archives/node-*-linux-$a.tar.gz 2>/dev/null | head -1 || true)
+  [ -n "$tarball" ] || die "no node binary with sha $nodesha found (AppImage resources or $artifacts/node/archives)"
+  tar -xzf "$tarball" -C "$tmp" --wildcards '*/bin/node' --strip-components=1
+  node=$tmp/bin/node
+fi
+[ "$(sha256sum "$node" | cut -d' ' -f1)" = "$nodesha" ] || die "node binary sha does not match $nodesha"
+
+# --- install (idempotent) ---
+rslot="\$HOME/.orca-remote/orcad-$ver"
+rnode="\$HOME/.orca-remote/runtimes/node-$nodesha"
+if r "test -f $rslot/.install-complete && test -f $rslot/orcad.js && test -f $rnode/.verified && test -x $rnode/bin/node"; then
+  echo "exists orcad-$ver"
+else
+  stage=".stage-$$"
+  r "umask 077; mkdir -p ~/.orca-remote/$stage/slot ~/.orca-remote/$stage/node/bin ~/.orca-remote/runtimes"
+  tar -C "$slot" -cf - . | r "tar -C ~/.orca-remote/$stage/slot -xf -"
+  tar -C "$(dirname "$node")" -cf - node | r "tar -C ~/.orca-remote/$stage/node/bin -xf -"
+  r "set -e; cd ~/.orca-remote/$stage
+     node/bin/node --version >/dev/null || { echo 'node runtime does not run on this host' >&2; exit 1; }
+     chmod 755 node/bin/node; chmod 755 slot/ripgrep/*/rg slot/agent-browser-* 2>/dev/null || true
+     rm -rf $rslot $rnode; mv slot $rslot; mv node $rnode
+     touch $rnode/.verified $rslot/.install-complete
+     [ -f ~/.orca-remote/orcad-machine.json ] || printf '{\"schemaVersion\":1,\"machineKey\":\"%s\"}' \"\$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \\n')\" > ~/.orca-remote/orcad-machine.json
+     cd ..; rm -rf $stage; chmod 700 ~/.orca-remote"
+  echo "installed orcad-$ver"
+fi
+[ "$pair" = 1 ] || exit 0
+
+# --- start orcad (idempotent) ---
+# Ours and current: running. Ours but an older slot (Orca was upgraded): stop it, start the new one.
+# Anything else on the port: refuse rather than mistake it for orcad.
+state=$(r "st=none
+  for p in \$(pgrep -u \$(id -u) -f 'orcad[.]js .*--port $port\$'); do
+    case \"\$(readlink /proc/\$p/cwd) \$(tr '\\0' ' ' < /proc/\$p/cmdline)\" in
+      *orcad-$ver*) st=current ;; *) [ \$st = current ] || st=stale ;;
+    esac
+  done
+  [ \$st = none ] && ss -ltn | grep -q '127.0.0.1:$port ' && st=foreign
+  echo \$st")
+case $state in
+  foreign) die "port $port on $host is in use by another process (another user's orcad?); pick one with --port" ;;
+  stale) r "systemctl --user stop orcad.service 2>/dev/null; pkill -u \$(id -u) -f 'orcad[.]js .*--port $port\$'; sleep 2"
+         echo "stopped older orcad $port" ;;
+esac
+if [ "$state" = current ]; then
+  echo "running orcad $port"
+else
+  r "set -e; cd $rslot; rm -f .orcad-readiness-$port
+     [ -w \"\${TMPDIR:-/tmp}\" ] || { mkdir -p ~/tmp; export TMPDIR=\$HOME/tmp; }
+     if systemctl --user show-environment >/dev/null 2>&1; then
+       mkdir -p ~/.config/systemd/user
+       cat > ~/.config/systemd/user/orcad.service <<UNIT
+[Unit]
+Description=Orca server (orcad $ver)
+[Service]
+WorkingDirectory=\$PWD
+Environment=ORCA_VERSION=$ver ORCA_USER_DATA=\$HOME/.orca
+ExecStart=/bin/sh -c 'exec \$HOME/.orca-remote/runtimes/node-$nodesha/bin/node --max-semi-space-size=8 \$PWD/orcad.js --json --bind 127.0.0.1 --port $port > .orcad-readiness-$port 2>> orcad.log'
+Restart=on-failure
+[Install]
+WantedBy=default.target
+UNIT
+       systemctl --user daemon-reload; systemctl --user enable --now orcad.service
+     else
+       ORCA_VERSION=$ver ORCA_USER_DATA=\$HOME/.orca setsid nohup $rnode/bin/node --max-semi-space-size=8 $rslot/orcad.js \
+         --json --bind 127.0.0.1 --port $port > .orcad-readiness-$port 2>> orcad.log < /dev/null &
+     fi"
+  echo "started orcad $port"
+fi
+# The pairing code is in orcad's first stdout line, kept per port. Only read when it is needed: an orcad that was
+# already running may have no code left to give, and an already-paired desktop does not need one.
+pairing_url() {
+  ready=""; i=0
+  while [ $i -lt 60 ]; do
+    ready=$(r "head -1 $rslot/.orcad-readiness-$port 2>/dev/null" || true)
+    case $ready in *orca_server_ready*) break ;; esac
+    i=$((i + 1)); sleep 1
+  done
+  case $ready in
+    *orca_server_ready*) ;;
+    *) if [ "$state" = current ]; then
+         die "orcad on $host:$port runs but its pairing code is gone; stop it (pkill -u <user> -f 'orcad[.]js .*--port $port\$' on $host) and rerun"
+       fi
+       die "orcad did not report ready in 60s; see ~/.orca-remote/orcad-$ver/orcad.log on $host" ;;
+  esac
+  url=$(printf '%s' "$ready" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pairing"]["url"] or "")')
+  [ -n "$url" ] || die "orcad reported no pairing url"
+  printf '%s\n' "$url"
+}
+if [ "$tunnel" = 0 ]; then url=$(pairing_url) || exit 1; echo "pairing-code $url"; exit 0; fi
+
+# --- local tunnel (same port both ends, so the pairing endpoint is valid as is) ---
+name=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
+unit=orca-tunnel-$name.service
+mkdir -p "$HOME/.config/systemd/user"
+unitfile=$HOME/.config/systemd/user/$unit
+old=$(cat "$unitfile" 2>/dev/null || true)
+cat > "$unitfile" <<UNIT
+[Unit]
+Description=Orca tunnel to $host:$port
+[Service]
+ExecStart=/usr/bin/env ssh $sshf -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:$port:127.0.0.1:$port $host
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=default.target
+UNIT
+systemctl --user daemon-reload
+systemctl --user enable --now "$unit" >/dev/null 2>&1
+# A changed unit (other port or host) must replace a tunnel that is already running.
+[ "$old" = "$(cat "$unitfile")" ] || systemctl --user restart "$unit"
+i=0; while [ $i -lt 20 ] && ! ss -ltn | grep -q "127.0.0.1:$port "; do i=$((i + 1)); sleep 1; done
+ss -ltn | grep -q "127.0.0.1:$port " || die "tunnel $unit did not come up (journalctl --user -u $unit)"
+
+# --- pair ---
+[ -x "$orca" ] || die "Orca CLI not found at $orca (open Orca once, or set ORCA_CLI)"
+if "$orca" environment list --json 2>/dev/null | python3 -c '
+import json,sys; n=sys.argv[1]
+envs=json.load(sys.stdin).get("result",{}).get("environments",[])
+sys.exit(0 if any(e.get("name")==n for e in envs) else 1)' "$name" &&
+   ! "$orca" status --environment "$name" --json 2>/dev/null | grep -q '"reachable": true'; then
+  # Saved but unreachable: the host's identity changed (its ~/.orca was reset). Pair afresh.
+  "$orca" environment rm --environment "$name" --json >/dev/null 2>&1 || die "cannot remove stale environment $name"
+fi
+if "$orca" status --environment "$name" --json 2>/dev/null | grep -q '"reachable": true'; then
+  echo "already-paired $name"
+else
+  url=$(pairing_url) || exit 1
+  outp=$("$orca" environment add --name "$name" --pairing-code "$url" --json 2>&1) || {
+    case $outp in *lready*paired*) echo "already-paired $name"; exit 0 ;; esac
+    die "environment add failed: $outp"; }
+  echo "paired $name"
+fi

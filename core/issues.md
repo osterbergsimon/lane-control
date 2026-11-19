@@ -26,16 +26,16 @@ Owner-approved 2026-10-30. Applies to every project; a project's AGENTS.md carri
 ## Parking
 Parking a lane (stopping it without a merge: budget, reboot, priorities) must be resumable; owner 2026-10-31: "we cannot park stuff without being sure of how to resume; things will be forgotten".
 - **Three things, all verified:** (1) label `parked` on the issue; (2) the issue's notes begin with one line `Resume (<date>): branch <b> @ <commit>; next: <first step>; open: <questions or none>`; (3) the issue key listed in the coordinator's handover.
-- **Delete the Rove task only after** all three are verified and `branch @ commit` exists on origin.
+- **Delete the task (the orchestrator's lane) only after** all three are verified and `branch @ commit` exists on origin.
 - **Resume** = a fresh lane on that branch, brief = the Resume note. Remove the `parked` label when resumed.
 - **Free slots take `bd ready --label parked` first**, by priority, before other ready issues.
 - `scripts/park-check.sh` checks this daily (below).
 
 ## Daily parked-lane check (script, no tokens)
-`scripts/park-check.sh`, a Rove script routine run daily next to `stale-claims.sh` (add a second routine pointing at it), lists per project the `parked` issues that lack a `Resume (` note, whose branch is not on origin or does not contain the named commit, or that are closed, plus any parked over 7 days. One message to that project's coordinator; a clean run sends nothing.
+`scripts/park-check.sh`, a script routine run daily next to `stale-claims.sh` (today a Rove routine: `orchestrators/rove/notes.md#issues`), lists per project the `parked` issues that lack a `Resume (` note, whose branch is not on origin or does not contain the named commit, or that are closed, plus any parked over 7 days. One message to that project's coordinator; a clean run sends nothing.
 
 ## Daily stale-claim check (script, no tokens)
-`scripts/stale-claims.sh` (a Rove script routine) lists in-progress issues whose key has no live task and sends the list to that project's coordinator, who fixes the claims per Lifecycle.
+`scripts/stale-claims.sh` (a daily script routine; today a Rove routine, see its notes) lists in-progress issues whose key has no live task and sends the list to that project's coordinator, who fixes the claims per Lifecycle.
 
 ## Concurrent writers
 - beads runs embedded Dolt (single writer, owner's setup: no server). Lanes write rarely: one claim, notes, a follow-up; bulk writes (grooming, closing after a merge) are the coordinator's, one at a time.

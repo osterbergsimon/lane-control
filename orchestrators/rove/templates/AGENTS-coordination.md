@@ -1,8 +1,8 @@
 # AGENTS.md sections to adapt (Rove flow)
 
 **Rove flow only.** The Orca flow (`project-setup`) does not paste this file into a project. It uses
-`templates/adapt/` (the path map is `.lane-control/routing.md`) and `templates/lane-brief.md`. The report shape at the end
-is the same 6-line shape as `templates/lane-brief.md`.
+`orchestrators/orca-cotal/templates/adapt/` (the path map is `.lane-control/routing.md`) and `orchestrators/orca-cotal/templates/lane-brief.md`. The report shape at the end
+is the same 6-line shape as `orchestrators/orca-cotal/templates/lane-brief.md`.
 
 Copy into a project's AGENTS.md and replace every `<...>` (paths, components, gate commands, key prefix).
 Tiers are roles (swift, standard, deep, top); the machine's config maps them to engines and models.
