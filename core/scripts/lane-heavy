@@ -4,7 +4,8 @@
 #   lane-heavy <command> [args...]        A pipeline or redirect needs: lane-heavy sh -c '...'
 #
 # - Only LANE_HEAVY_SLOTS jobs run at once for this user, across every project and lane on the machine. The rest wait,
-#   and say so once on stderr. Waiters poll, so the order is not strictly first come, first served.
+#   and say so once on stderr. Waiters poll, so the order is not strictly first come, first served; each poll reads
+#   the limits again, so a waiter takes a slot that opens at night or away. A running job keeps the limits it got.
 # - The job runs at low CPU and IO priority, and with a memory limit of LANE_HEAVY_MEM_GB (no swap) in a systemd user
 #   scope when the host has a working one. Without one it runs with no memory limit and says so; it never fails for that.
 # - The command's arguments reach it unchanged: systemd-run is told not to expand `$` in them. A systemd too old for that
@@ -52,10 +53,9 @@ ci=
 [ "${GITHUB_ACTIONS:-}" = true ] && ci=1
 case ${LANE_HEAVY_CI:-} in '' | 0) ;; *) ci=1 ;; esac
 slot_prefix=heavy mem_setting=LANE_HEAVY_MEM_GB
-if [ -n "$ci" ]; then
-  slot_prefix=ci-heavy mem_setting=LANE_CI_MEM_GB
-  LANE_HEAVY_SLOTS=$LANE_CI_SLOTS LANE_HEAVY_MEM_GB=$LANE_CI_MEM_GB
-fi
+[ -z "$ci" ] || slot_prefix=ci-heavy mem_setting=LANE_CI_MEM_GB
+pool_limits() { [ -z "$ci" ] || LANE_HEAVY_SLOTS=$LANE_CI_SLOTS LANE_HEAVY_MEM_GB=$LANE_CI_MEM_GB; }
+pool_limits
 
 exec {slot_fd}</dev/null   # replaced by a real slot; a valid fd keeps the job's "close the slot" redirect harmless
 
@@ -83,7 +83,13 @@ elif ! state_dir_usable; then
   say "cannot use $LANE_STATE_DIR: running without the machine-wide limit"
 elif ! take_slot; then
   say "all $LANE_HEAVY_SLOTS ${ci:+CI }heavy-work slot(s) on this machine are busy: waiting for a turn"
-  until take_slot; do sleep "$LANE_HEAVY_POLL_SECS"; done
+  # Limits are read again on each poll (quietly: the first read said what was wrong): a slot that opens at night,
+  # when the owner leaves or when the budget stops is one this waiter can take.
+  until take_slot; do
+    sleep "$LANE_HEAVY_POLL_SECS"
+    . "${self%/*}/lane-limits.sh" 2>/dev/null
+    pool_limits
+  done
 fi
 
 # Best-effort at the lowest level rather than the idle class: idle can starve a job outright, which looks like a hang.

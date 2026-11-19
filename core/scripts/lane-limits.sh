@@ -9,7 +9,7 @@
 #                      reset, so the machine is CI's (default ~/.config/lane-control/budget-stopped). Its writer
 #                      touches it on every check while the budget stays stopped and removes it after the reset.
 # Presence, for the file to branch on: LANE_PRESENCE is day or away (night 23-07, the away file, or the budget
-# stopped), and LANE_PRESENCE_WHY says which. A job keeps the limits it started with. Budget stopped is away for
+# stopped), and LANE_PRESENCE_WHY says which. A running job keeps the limits it started with. Budget stopped is away for
 # limits only, never for anything that would spend budget (a night check-in).
 # Not settings; for tests:
 #   LANE_PROC_DIR      /proc to read (default /proc)   LANE_STATE_DIR   where slots live (default below)

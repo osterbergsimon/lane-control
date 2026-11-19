@@ -236,6 +236,22 @@ class HeavyTests(Machine):
         self.assertEqual(err.count("waiting for a turn"), 1, err)
         self.assertEqual(holder.wait(timeout=TIMEOUT), 0)
 
+    def test_a_waiter_takes_a_slot_that_opens_while_it_waits(self):
+        # Night starts, the owner leaves or the budget stops: the waiter does not keep looking for the day's slots.
+        holder, release = self.holder("first")
+        marker = self.dir / "second.ran"
+        waiter = self.start("sh", "-c", f"touch {marker}")
+        time.sleep(0.3)
+        self.assertFalse(marker.exists())
+        self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=3, LANE_HEAVY_POLL_SECS=0.05)
+        _, err = waiter.communicate(timeout=TIMEOUT)
+        self.assertEqual(waiter.returncode, 0)
+        self.assertTrue(marker.exists())
+        self.assertEqual(err.count("waiting for a turn"), 1, err)
+        self.assertIsNone(holder.poll())             # the first job still holds its slot
+        release.touch()
+        self.assertEqual(holder.wait(timeout=TIMEOUT), 0)
+
     def test_never_more_than_the_slots(self):
         self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=0, LANE_HEAVY_POLL_SECS=0.02)
         log = self.dir / "overlap.log"
