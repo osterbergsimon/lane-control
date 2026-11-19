@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""night-precheck: the night manager automation's precheck (spec section 8). Exit 0 = start the agent; anything
+else = skip the run, which costs nothing.
+
+  night-precheck                 what is due now, one line each:
+                                   DUE <name> idle=<n>min        a coordinator to check in on
+                                   OFFLINE <runner,...> repo=<r> self-hosted runners not online
+  night-precheck --checked <name> record that <name> was just checked in on (the night manager runs it after
+                                   each check-in), so it is not due again for RECHECK_MIN minutes
+
+Due only while the owner counts as away (LANE_OWNER_AWAY from lane-limits.sh: night, NIGHT_START-NIGHT_END, or the
+away file; a stopped budget never counts, since a check-in spends budget), and then for a coordinator idle at least
+IDLE_MIN minutes and not checked in on for RECHECK_MIN minutes, or a runner of RUNNER_REPOS offline. Idle is the
+newest write of the coordinator's own session (the one started with LANE_ROLE/LANE_PERSONA), read by its harness
+adapter; Orca's terminal output is no idle signal (status-line redraws keep it fresh).
+
+Coordinators and runner repos come from ~/.config/lane-control/machine.conf (LANE_MACHINE_CONF). Check-in stamps are
+~/.cache/lane-control/night/<name>.
+
+Exit: 0 something is due; 1 nothing is due (a coordinator whose idle time is unknown, or a runner list gh cannot
+read, is named on stderr); 2 it cannot tell (no or a bad machine.conf, an unreadable session folder or store): the
+run is skipped and stderr says why.
+"""
+import os
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import harnesses  # noqa: E402
+import machineconf  # noqa: E402
+
+
+def stamp_dir() -> Path:
+    v = os.environ.get("XDG_CACHE_HOME")
+    base = Path(v) if v and os.path.isabs(v) else Path.home() / ".cache"
+    return base / "lane-control" / "night"
+
+
+def err(msg: str):
+    print(f"night-precheck: {msg}", file=sys.stderr)
+
+
+def checked(name: str) -> int:
+    if not machineconf.NAME.fullmatch(name or ""):
+        err(f"--checked takes a coordinator name from machine.conf, got {name!r}")
+        return 2
+    d = stamp_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).touch()
+    return 0
+
+
+def recently_checked(name: str, recheck_min: int, now: float) -> bool:
+    try:
+        return now - (stamp_dir() / name).stat().st_mtime < recheck_min * 60
+    except FileNotFoundError:
+        return False
+
+
+def main(argv: list) -> int:
+    if argv[:1] == ["--checked"] and len(argv) == 2:
+        return checked(argv[1])
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    if argv:
+        err("usage: night-precheck [--checked <name>]")
+        return 2
+    try:
+        conf = machineconf.load()
+        coords = machineconf.coordinators(conf)
+        for c in coords:
+            harnesses.load_harness(c.harness)
+        away = machineconf.presence()
+    except (machineconf.ConfError, ValueError) as e:
+        err(str(e))
+        return 2
+    for w in conf["warnings"]:
+        err(w)
+    if not away.get("LANE_OWNER_AWAY"):
+        err(f"the owner is not away ({away.get('LANE_PRESENCE_WHY') or 'day'}): nothing is due")
+        return 1
+    now, due, broken = time.time(), [], False
+    for c in coords:
+        try:
+            idle = harnesses.load_harness(c.harness).idle_minutes(c.checkout, now, "coordinator")
+        except (OSError, sqlite3.Error) as e:
+            err(f"{c.name}: cannot read its {c.harness} session for {c.checkout} ({e}); skipping this run")
+            broken = True
+            continue
+        if idle is None:
+            err(f"{c.name}: no coordinator session recorded for {c.checkout}: it was not started with LANE_ROLE and "
+                "LANE_PERSONA (project-setup starts it so), so its idle time is unknown and it gets no check-in")
+            continue
+        if idle >= conf["IDLE_MIN"] and not recently_checked(c.name, conf["RECHECK_MIN"], now):
+            due.append(f"DUE {c.name} idle={idle}min")
+    for repo in machineconf.runner_repos(conf):
+        try:
+            off = machineconf.offline_runners(repo)
+        except machineconf.RunnerError as e:
+            err(f"runners of {e}: not counted")
+            continue
+        if off:
+            due.append(f"OFFLINE {','.join(off)} repo={repo}")
+    if broken:
+        return 2
+    for line in due:
+        print(line)
+    return 0 if due else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
