@@ -195,6 +195,43 @@ class ClaudeAdapterTests(HomeTest):
         self.assertEqual(self.entries(), [{"matcher": "startup|resume|compact",
                                            "hooks": [{"type": "command", "command": str(HOOK)}]}])
 
+    def ours(self):
+        return {"matcher": "startup|resume|compact", "hooks": [{"type": "command", "command": str(HOOK)}]}
+
+    def write_starts(self, starts):
+        import json
+        self.settings.parent.mkdir(exist_ok=True)
+        self.settings.write_text(json.dumps({"hooks": {"SessionStart": starts}}))
+
+    def test_claude_hook_beside_foreign_same_matcher(self):
+        foreign = {"matcher": "startup|resume|compact", "hooks": [{"type": "command", "command": "/x/other.sh"}]}
+        self.write_starts([foreign])
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertEqual(self.entries(), [foreign, self.ours()])
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+
+    def test_claude_hook_mixed_entry_keeps_foreign(self):
+        other = {"type": "command", "command": "/x/other.sh", "timeout": 5}
+        mixed = {"matcher": "startup|resume|compact", "extra": 1,
+                 "hooks": [{"type": "command", "command": "/old/lane-control/core/harnesses/persona-hook.sh"}, other]}
+        self.write_starts([mixed])
+        changes = self.a.install_persona_hook(self.checkout)
+        self.assertTrue(changes)
+        self.assertEqual(self.entries(), [{"matcher": "startup|resume|compact", "extra": 1, "hooks": [other]},
+                                          self.ours()])
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+
+    def test_claude_hook_foreign_script_same_name_kept(self):
+        foreign = {"matcher": "startup", "hooks": [{"type": "command", "command": "/opt/othertool/persona-hook.sh"}]}
+        self.write_starts([foreign])
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertEqual(self.entries(), [foreign, self.ours()])
+
+    def test_claude_hook_duplicates_of_ours_collapse(self):
+        self.write_starts([self.ours(), self.ours()])
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertEqual(self.entries(), [self.ours()])
+
     def test_claude_hook_command_quotes_odd_paths(self):
         import shlex
         from unittest import mock

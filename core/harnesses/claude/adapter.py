@@ -20,7 +20,7 @@ STATUS = "in use"
 ORCA_AGENT_ID = "claude"
 MODEL_FLAGS = frozenset({"model", "effort"})
 MATCHER = "startup|resume|compact"
-HOOK_NAME = harnesses.PERSONA_HOOK.name
+HOOK_TAIL = ("core", "harnesses", "persona-hook.sh")
 
 
 def start_command(role: str, persona: Path, model: str, permission_mode: "str | None") -> list:
@@ -32,18 +32,22 @@ def start_command(role: str, persona: Path, model: str, permission_mode: "str | 
 
 
 def _ours(hook) -> bool:
+    """Our hook: one command word, a path ending core/harnesses/persona-hook.sh (another tool's script of the same
+    name is not ours)."""
     if not isinstance(hook, dict):
         return False
     try:
         words = shlex.split(str(hook.get("command", "")))
     except ValueError:
         return False
-    return len(words) == 1 and Path(words[0]).name == HOOK_NAME
+    return len(words) == 1 and Path(words[0]).parts[-3:] == HOOK_TAIL
 
 
 def install_persona_hook(checkout: Path) -> list:
-    """Add the persona hook to <checkout>/.claude/settings.local.json once; other settings are kept. An entry that
-    points at another copy of persona-hook.sh (a moved lane-control) is updated in place. Returns change lines."""
+    """Add the persona hook to <checkout>/.claude/settings.local.json once, as its own SessionStart entry; every other
+    setting, entry and hook is kept as it is. Our hook found anywhere else (a moved lane-control, an entry shared
+    with someone else's hook, a duplicate) is taken out of that place only, so the file ends with exactly one entry
+    of ours. Returns change lines."""
     path = Path(checkout) / ".claude" / "settings.local.json"
     data = {}
     if path.exists():
@@ -56,14 +60,23 @@ def install_persona_hook(checkout: Path) -> list:
     if not isinstance(starts, list):
         raise ValueError(f"{path}: not an object with hooks.SessionStart a list; fix it by hand, it was left as it is")
     want = {"matcher": MATCHER, "hooks": [{"type": "command", "command": shlex.quote(str(harnesses.PERSONA_HOOK))}]}
-    mine = [e for e in starts if isinstance(e, dict) and any(_ours(h) for h in e.get("hooks") or [])]
-    if mine == [want]:
+
+    def holds_ours(e):
+        return isinstance(e, dict) and isinstance(e.get("hooks"), list) and any(_ours(h) for h in e["hooks"])
+    if [e for e in starts if holds_ours(e)] == [want]:
         return []
-    keep = [e for e in starts if not any(e is m for m in mine)]
-    data["hooks"] = {**hooks, "SessionStart": keep + [want]}
+    kept = []
+    for e in starts:
+        if not holds_ours(e):
+            kept.append(e)
+            continue
+        others = [h for h in e["hooks"] if not _ours(h)]
+        if others:  # someone else's hooks share this entry: keep the entry and them, take only ours out
+            kept.append({**e, "hooks": others})
+    data["hooks"] = {**hooks, "SessionStart": kept + [want]}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
-    what = "updated" if mine else "added"
+    what = "updated" if any(holds_ours(e) for e in starts) else "added"
     return [f"{path}: {what} the SessionStart persona hook ({MATCHER})"]
 
 
