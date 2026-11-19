@@ -26,8 +26,8 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   newest `time_updated` of that session's family (up to its root, then every sub-agent session below it) in the v2
   store, `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/`), tables `session_v2` and
   `session_message`, times in milliseconds. Other sessions in the checkout do not count; no record means no marked
-  session (`None`). Sessions are found by the recorded id, so one started in a sub-folder of the checkout counts
-  too. The older `session` table and `storage/` folder are not v2's; a store with only those raises "not an
+  session (`None`). The record is kept under the folder the server was started in (the checkout, as Orca's
+  terminal starts it); a server started in a sub-folder is not found. The older `session` table and `storage/` folder are not v2's; a store with only those raises "not an
   OpenCode 2 store".
 - Folders come from the caller's environment (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`). A server
   started with other ones (an Orca-managed account with private XDG folders, or `OPENCODE_CONFIG_DIR`) loads
