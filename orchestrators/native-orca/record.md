@@ -8,6 +8,16 @@ Orca worktrees and Orca's own orchestration (run, task, worker, check), with no 
 ## History
 - 2026-11-15 trial (ORCH-1, Orca 1.4.250): adopt with changes for Claude lanes.
 - 2026-11-15 in use: every project moved to native Orca orchestration, by hand, the same day.
+- 2026-11-19 lessons from the week's lanes written into doctrine (`core/reliability.md` entries 29-37).
+
+## Lessons
+What running lanes natively taught us, as the places they are written down:
+- An idle coordinator with pending work is stuck; the night manager (phase 4 of the native-Orca plan) wakes it
+  (`core/reliability.md` entries 29 and 30 hold it and the lane sweep). Idle is the newest write of the coordinator's session transcript: Orca's terminal
+  `lastOutputAt` is no idle signal (status-line redraws keep it fresh), and a worktree's `lastActivityAt` can be days
+  old, so the sweep uses the newest of push, commit and terminal output.
+- Presence-based limits, CI waiting outside the heavy slot, the runner and Nix items, the test time-scale and
+  relayed-approval rules, and budget steps from the ceiling: entries 31-37.
 
 ## Retest when
 - Orca changes its orchestration commands (it ships about 1.4 desktop releases a day): pin the version and retest

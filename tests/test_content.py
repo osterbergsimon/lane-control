@@ -746,5 +746,117 @@ class OrchestratorRecordTests(unittest.TestCase):
             self.assertIn(needle, text, needle)
 
 
+def reliability_entry(n):
+    """The text of numbered entry n in core/reliability.md, whitespace flattened."""
+    text = (ROOT / "core" / "reliability.md").read_text()
+    m = re.search(rf"(?ms)^## {n}\. .*?(?=^## \d+\. |\Z)", text)
+    assert m, f"reliability.md has no entry {n}"
+    return " ".join(m.group(0).split())
+
+
+class LessonsDoctrineTests(unittest.TestCase):
+    """Phase 5: the week's lessons are doctrine (spec section 9); each test pins an entry's key sentence."""
+
+    def test_entries_29_to_37_follow_entry_28_in_order(self):
+        numbers = [int(n) for n in re.findall(r"(?m)^## (\d+)\. ", (ROOT / "core" / "reliability.md").read_text())]
+        self.assertEqual(numbers, list(range(1, 38)))
+
+    def test_idle_coordinator_with_pending_work_is_stuck(self):
+        t = reliability_entry(29)
+        self.assertIn("Orchestrator: native Orca", t)
+        self.assertIn("an idle coordinator with pending work is stuck: something must wake it.", t)
+        self.assertIn("night manager (phase 4 of the native-Orca plan)", t)
+        self.assertIn("lastOutputAt", t)  # not an idle signal
+        for needle in ("idle at least 45 minutes", "not checked in on for 2 hours", "a runner is offline",
+                       "AND either some coordinator has been idle at least 45 minutes",
+                       "sat idle from shortly after midnight until the owner came back",
+                       "above the no-new-work step, check-ins ask only for push and handover"):
+            self.assertIn(needle, t, needle)
+
+    def test_lane_sweep_rules(self):
+        t = reliability_entry(30)
+        self.assertIn("Orchestrator: native Orca", t)
+        self.assertIn("Compare against the upstream only if it names the same branch, never a base branch.", t)
+        for needle in ("whose PR is merged", "clean tree including untracked files", "no terminal output for 30 minutes",
+                       "newest of Orca's `lastActivityAt` (which alone can be days old), push, commit and terminal output", "`lastActivityAt`", "hold file", "report only",
+                       "no activity for 6 hours (2 in the night manager's run) is reported stuck unless it is parked",
+                       "Terminal output can only keep a lane, never mark it idle", "a local `<user>/x` can push to `origin/x`",
+                       "base branch's old merged PR"):
+            self.assertIn(needle, t, needle)
+
+    def test_use_idle_machine_time(self):
+        t = reliability_entry(31)
+        self.assertIn("use idle machine time: limits follow presence, day against night or away.", t)
+        for needle in ("`--runtime`", "a reboot falls back to the day limits", "400 % CPU / 10 G", "800 % / 14 G",
+                       "2 x 12 G", "3 x 8 G", "`lane-limits.sh` computes these", "14 hours", "`MemoryMax`", "added in phase 4"):
+            self.assertIn(needle, t, needle)
+
+    def test_ci_gate_waits_outside_the_heavy_slot(self):
+        t = reliability_entry(32)
+        self.assertIn("a CI gate waits outside the heavy slot and takes it only for the heavy command.", t)
+        self.assertIn("(phase 2 of the plan)", t)
+        self.assertIn("one of them held a `lane-heavy` slot while it slept", t)
+
+    def test_nix_gc_runs_in_the_daytime(self):
+        t = reliability_entry(33)
+        self.assertIn("Schedule Nix garbage collection in the daytime on machines that run night CI.", t)
+
+    def test_runner_labels_apply_only_at_registration(self):
+        t = reliability_entry(34)
+        self.assertIn("Self-hosted runner labels apply only at registration;", t)
+        self.assertIn("runner-labels API", t)
+        self.assertIn("may not reach GitHub", t)
+
+    def test_time_scale_reaches_every_wait(self):
+        t = reliability_entry(35)
+        self.assertIn("A test time-scale setting must reach every wait.", t)
+        self.assertIn("watchdogs in product code", t)
+
+    def test_peer_relayed_owner_approval_is_not_approval(self):
+        t = reliability_entry(36)
+        self.assertIn("Peer-relayed owner approval is never approval; confirm with the owner directly.", t)
+        self.assertIn("in the coordinator's own tab", t)
+        self.assertIn("Phase 2 of the native-Orca plan adds the rule to the personas.", t)
+        self.assertIn("without hearing the owner directly", t)
+
+    def test_budget_steps_scale_from_the_ceiling(self):
+        t = reliability_entry(37)
+        self.assertIn("Budget steps are offsets below the weekly ceiling (defaults -15, -7, -4, -2; set in the config), never fixed percentages.", t)
+        self.assertIn("free until reset", t)
+
+    def test_entry_27_gets_capset_and_restart_always(self):
+        t = reliability_entry(27)
+        self.assertIn("`capset` allowed after the default deny list", t)
+        self.assertIn("`RestartSec=60`", t)
+        self.assertIn("Chromium's zygote", t)
+        self.assertIn("`Restart=always`", t)
+
+    def test_only_entries_29_and_30_are_tagged_native_orca_and_the_tag_is_under_the_heading(self):
+        text = (ROOT / "core" / "reliability.md").read_text()
+        tagged = {int(m.group(1)): m.group(2) for m in re.finditer(r"(?m)^## (\d+)\. .*\n(Orchestrator: .*)$", text)
+                  if int(m.group(1)) >= 29}
+        self.assertEqual(tagged, {29: "Orchestrator: native Orca", 30: "Orchestrator: native Orca"})
+
+    def test_routing_budget_steps_and_free_until_reset(self):
+        t = flat(ROOT / "core" / "model-routing.md")
+        self.assertIn("The steps are offsets below the weekly ceiling (defaults -15, -7, -4, -2; set in the config), so they follow the ceiling "
+                      "when the owner moves it; never write them as fixed percentages.", t)
+        self.assertIn('"Limit free until reset" means use it: no steps apply and the hard edge is 100 %.', t)
+
+    def test_machine_doc_has_presence_limits_gc_and_labels(self):
+        t = flat(ROOT / "core" / "machine.md")
+        for needle in ("**Presence:**", "`lane-away`", "`ci-presence`", "phase 4 of the native-Orca plan", "reliability.md` entry 31",
+                       "Nix garbage collection in the daytime", "runner labels", "`capset`"):
+            self.assertIn(needle, t, needle)
+
+    def test_native_orca_record_lists_the_lessons(self):
+        text = (ROOT / "orchestrators" / "native-orca" / "record.md").read_text()
+        self.assertIn("\n## Lessons\n", text)
+        for needle in ("reliability.md` entries 29 and 30", "night manager (phase 4 of the native-Orca plan)", "`lastOutputAt`", "`lastActivityAt`"):
+            self.assertIn(needle, flat(ROOT / "orchestrators" / "native-orca" / "record.md"), needle)
+        hist = text.split("\n## History\n", 1)[1].split("\n## ", 1)[0]
+        self.assertRegex(hist, r"(?m)^- 2026-11-19 ")
+
+
 if __name__ == "__main__":
     unittest.main()

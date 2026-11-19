@@ -145,12 +145,51 @@ Orchestrator: Rove
 - **Failure:** a relay running `git`/`gh` outside any terminal fell back to an askpass program when a credential was missing, opening a window on the owner's desktop.
 - **Fix:** every script that runs git or gh unattended sets `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` and `SSH_ASKPASS` to `false`, `GCM_INTERACTIVE=never`, `GH_PROMPT_DISABLED=1`: a missing credential then fails fast with an error.
 
-## 27. The NixOS GitHub runner module needs four changes for container CI jobs
-- **Failure:** on a dedicated NixOS runner box (`services.github-runners`), container jobs failed in turn: "Could not find a part of the path '/proc/1/cgroup'" (ProtectProc=invisible); no Docker group access (PrivateUsers=yes); "No space left on device" in `uv sync` (the default work dir is a small RAM-backed runtime dir); and an ephemeral runner that could not re-register after its first job (registration tokens expire after an hour).
-- **Fix:** serviceOverrides ProtectProc="default", PrivateUsers=false, ReadWritePaths=[workDir]; workDir on disk with an age-out tmpfiles rule; tokenFile holding a fine-grained PAT scoped to the one repo with only Administration read-write (the module mints a registration token per job); job containers with `--init` so killed children are reaped.
+## 27. The NixOS GitHub runner module needs changes for container CI jobs
+- **Failure:** on a dedicated NixOS runner box (`services.github-runners`), container jobs failed in turn: "Could not find a part of the path '/proc/1/cgroup'" (ProtectProc=invisible); no Docker group access (PrivateUsers=yes); "No space left on device" in `uv sync` (the default work dir is a small RAM-backed runtime dir); an ephemeral runner that could not re-register after its first job (registration tokens expire after an hour); Chromium's zygote failing to start in browser tests (the module's default syscall deny list blocks `capset`); and a runner that exited and stayed down.
+- **Fix:** serviceOverrides ProtectProc="default", PrivateUsers=false, ReadWritePaths=[workDir]; workDir on disk with an age-out tmpfiles rule; tokenFile holding a fine-grained PAT scoped to the one repo with only Administration read-write (the module mints a registration token per job); job containers with `--init` so killed children are reaped; `capset` allowed after the default deny list (a later `SystemCallFilter` entry, so the allow follows the deny); `Restart=always` with `RestartSec=60`, so a runner that exits comes back without restarting in a tight loop.
 
 ## 28. Cloud sessions launched from a dirty checkout
 Orchestrator: Rove (the archive bullet only)
 - **Failure:** `claude --cloud` from a checkout with uncommitted changes, or not on a pushed branch, uploads the local dirty tree and attaches no GitHub source: no origin remote, pushes and API writes refused; sources attach only at creation. Private local edits can leave the machine this way.
 - **Fix:** launch only from a clean detached worktree at origin/<base> with nothing private in it; brief step 1 = push the branch and open a draft PR, else stop. Rescue: have the session print `git format-patch --stdout origin/<base>..HEAD`, then teleport (`claude --teleport <id>`) from a clean worktree and extract the patch; teleport takes the session over, so only after the patch is printed. The Agent tool's isolation="remote" may silently run a local subagent.
 - **Archive does not stop a lane:** Rove's `archive` only hides the task; its engine keeps running and holding memory. Close-out order: `tab-close` (ends the PTY), then `archive`.
+
+## 29. An idle coordinator with pending work is stuck
+Orchestrator: native Orca
+- **Failure:** a coordinator ended its turn after a merge-train CI failure and sat idle from shortly after midnight until the owner came back, about 17 hours later. The runners looked quiet, but nobody was driving.
+- **Rule:** an idle coordinator with pending work is stuck: something must wake it. An agent session never wakes itself, so a coordinator waiting on lanes, CI or a merge train does nothing until a message reaches it.
+- **Fix:** the night manager (phase 4 of the native-Orca plan): an Orca automation that runs a precheck script first and does nothing (costs nothing) unless something is due. Due = the owner is away or it is night, AND either some coordinator has been idle at least 45 minutes and was not checked in on for 2 hours, or a runner is offline. It then sends each due coordinator one check-in (lanes, CI, merge trains; reply "nothing" if done). Budget gate: above the no-new-work step, check-ins ask only for push and handover. Idle means the newest write of the coordinator's session transcript; Orca's terminal `lastOutputAt` is not an idle signal, because status-line redraws keep it fresh.
+
+## 30. Lane sweep: what may be removed, what is parked
+Orchestrator: native Orca
+- **Failure:** a lane whose branch tracked its base branch (`origin/develop`) was matched, by the PR lookup on that name, to the base branch's old merged PR and flagged as merged; with `--apply`, a lane sitting at an old base-branch head could have been removed.
+- **Fix:** the sweep (a native-Orca automation, added in phase 4 of the plan) runs every 3 hours, report only by default. `--apply` removes only lanes whose PR is merged, whose HEAD is that PR's head or behind it, with a clean tree including untracked files, and no terminal output for 30 minutes. Parked = open PR, HEAD equal to or behind its upstream, clean, and no live terminal or PR head equals HEAD. Look the PR up by the lane's upstream, not its local name (a local `<user>/x` can push to `origin/x`). Compare against the upstream only if it names the same branch, never a base branch. Activity = the newest of Orca's `lastActivityAt` (which alone can be days old), push, commit and terminal output; a lane with no merged PR and no activity for 6 hours (2 in the night manager's run) is reported stuck unless it is parked. Terminal output can only keep a lane, never mark it idle (redraws make a lane look alive, so it is kept). A hold file skips lanes the owner wants kept.
+
+## 31. Use idle machine time
+- **Rule:** use idle machine time: limits follow presence, day against night or away. Fixed day limits leave a machine idle while the owner sleeps or is away.
+- **How:** night is 23-07 by default; away is an away file that expires after 14 hours (`lane-away` writes it, added in phase 4 of the native-Orca plan). The CI slice is set with `systemctl --user set-property --runtime` from a user timer: day 400 % CPU / 10 G, night or away 800 % / 14 G (the memory figure is `MemoryMax`); `--runtime` means a reboot falls back to the day limits. `lane-heavy` slots are 2 x 12 G by day and 3 x 8 G at night or away, so lanes, the CI slice and about 10 G for the desktop and agents fit a 46 G machine (owner 2026-11-19). `lane-limits.sh` computes these from memory and presence (`LANE_CI_MEM_GB`, `LANE_CI_CPU_PCT` for the slice); a machine's `limits.sh` may override them.
+- **Note:** these are machine limits, not budget shares: the budget steps are the only budget limit (`model-routing.md`).
+
+## 32. A CI gate must not hold a heavy slot while it waits
+- **Failure:** CI stalled because both runners sat in a gate script waiting behind another project's long job chain, and one of them held a `lane-heavy` slot while it slept. Load stayed low while CI made no progress.
+- **Rule:** a CI gate waits outside the heavy slot and takes it only for the heavy command. Wait first, then run `lane-heavy <the heavy command>`: a slot held while waiting keeps real builds queued behind an idle process. The native-Orca personas (phase 2 of the plan) carry the same rule for lanes.
+
+## 33. Garbage collection and night CI
+- **Failure:** the midnight Nix garbage collection most likely deleted an unrooted `.drv` that an evaluation started before midnight still referred to, so a night CI run failed with a missing `.drv`. Garbage collection removes inputs out from under a running build.
+- **Fix:** Schedule Nix garbage collection in the daytime on machines that run night CI.
+
+## 34. A runner's labels apply only at registration
+- **Failure:** a second runner was registered without the label the workflow asked for, so it sat idle and the jobs never reached it. The fix was the runner-labels API plus the config. Another runner's label existed only on GitHub, set through the API.
+- **Fix:** Self-hosted runner labels apply only at registration; a change in the runner's config may not reach GitHub. Set the labels in the config and through the runner-labels API, and check the runner list afterwards.
+
+## 35. A time-scale setting must reach every wait
+- **Failure:** a slow host ran the tests with a time scale that lengthened their timeouts, and one watchdog ignored it and fired early there, stopping an export. It looked like a product failure.
+- **Fix:** A test time-scale setting must reach every wait. One helper reads it and every wait goes through it, including watchdogs in product code that the tests drive, not only the tests' own sleeps.
+
+## 36. An owner's approval relayed by a peer
+- **Failure:** approvals relayed by another coordinator (a ceiling change, a deploy) were acted on without hearing the owner directly; the notes marked them "relayed, not heard directly".
+- **Fix:** Peer-relayed owner approval is never approval; confirm with the owner directly. The owner's answer counts only when it comes in the coordinator's own tab. Phase 2 of the native-Orca plan adds the rule to the personas.
+
+## 37. Budget steps scale from the ceiling
+- **Rule:** Budget steps are offsets below the weekly ceiling (defaults -15, -7, -4, -2; set in the config), never fixed percentages. A ceiling of 93 gives 78, 86, 89 and 91; a ceiling of 50 gives 35, 43, 46 and 48. "Limit free until reset" means use it, with the hard edge at 100 % (`model-routing.md`).
