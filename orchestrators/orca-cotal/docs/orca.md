@@ -358,7 +358,7 @@ Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCod
 
 Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin for now (owner
 2026-11-15). There, calvin's Orca coordinator starts it with
-`orca-ide orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash`; lane-control's own lane
+`orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash`; lane-control's own lane
 tools do not start OpenCode. Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare
 (`model-routing.md`, "Sandbox per tier"); re-adding them elsewhere needs the sandbox back first (restore it from
 b97c919). The default tier table's swift row is harness `none`, the default for every project but calvin, so its work
