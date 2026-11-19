@@ -853,5 +853,34 @@ class NativePersonaTests(unittest.TestCase):
         self.assertRegex(t, r"[Nn]ever throttle the owner|owner's own work is never throttled")
 
 
+    # Tool names one harness has and the other does not: a rule both harnesses follow must not lean on them.
+    HARNESS_ONLY = ("TodoWrite", "TaskCreate", "AskUserQuestion", "SendMessage", "ScheduleWakeup", "subagent_type",
+                    "Agent tool", "Skill tool", "Bash tool", "Read tool", "Edit tool", "/compact", "/rename",
+                    "SessionStart", "settings.local.json", "claude -p", "opencode run", "CLAUDE_")
+
+    def harness_only_names(self, text):
+        return [n for n in self.HARNESS_ONLY if n in text]
+
+    def test_each_is_harness_neutral(self):
+        for role in NATIVE_ROLES:
+            self.assertEqual(self.harness_only_names((NATIVE / f"{role}.md").read_text()), [], role)
+        self.assertEqual(self.harness_only_names("use the Agent tool, then /compact"), ["Agent tool", "/compact"])
+
+    def test_lane_starters_name_both_harnesses_orca_agent_ids(self):
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
+            self.assertIn("`claude`", t, role)
+            self.assertIn("`opencode2`", t, role)
+
+    def test_every_placeholder_is_one_the_render_step_fills(self):
+        # project-setup's render_persona fills them; machine-coordinator-setup calls it and adds {{NOTES}}
+        project = (ROOT / "scripts" / "project-setup").read_text()
+        machine = project + (ROOT / "scripts" / "machine-coordinator-setup").read_text()
+        for role in NATIVE_ROLES:
+            src = machine if role == "machine-coordinator" else project
+            for ph in sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", (NATIVE / f"{role}.md").read_text()))):
+                self.assertTrue(f'"{ph}' in src, (role, ph))
+
+
 if __name__ == "__main__":
     unittest.main()
