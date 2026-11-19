@@ -37,7 +37,7 @@ def start_command(role: str, persona: Path, model: str, permission_mode: "str | 
     if permission_mode not in AUTO_MODES | ASK_MODES:
         raise ValueError(f"OpenCode has no permission mode {permission_mode!r} "
                          f"(it takes {', '.join(sorted(AUTO_MODES))} as --auto, or default)")
-    cmd = harnesses.env_prefix(role, persona) + [
+    cmd = harnesses.env_prefix(role, persona, model) + [
         "OPENCODE_CONFIG_CONTENT=" + json.dumps({"model": model, "agents": {PRIMARY_AGENT: {"model": model}}}),
         "opencode2", "--standalone"]
     if permission_mode in AUTO_MODES:

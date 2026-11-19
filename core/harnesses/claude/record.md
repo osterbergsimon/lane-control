@@ -20,6 +20,10 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
   started with a config folder the caller does not know (an Orca-managed profile) reads as `None`. Anything the
   coordinator starts from its own shell inherits the markers (a `claude -p` one-shot, for example) and records
   itself instead, until the coordinator's next start, resume, clear or compaction.
+- If lane-control is moved or removed, every Claude session in a set-up checkout shows a (non-blocking) hook error
+  at start until `install_persona_hook` runs again and moves the entry to the new path.
+- Not verified: how Claude names the transcript folder of a very long path (it may shorten it); the adapter does
+  not shorten.
 - Wake: Orca types worker reports into a Claude coordinator (native-orca record, ORCH-1).
 
 ## History

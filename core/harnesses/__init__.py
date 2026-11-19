@@ -50,8 +50,11 @@ def check_role_and_persona(role: str, persona: Path) -> Path:
     return persona
 
 
-def env_prefix(role: str, persona: Path) -> list:
+def env_prefix(role: str, persona: Path, model: str) -> list:
+    """The shared start of every start command, after the shared checks (role, absolute persona, a model)."""
     persona = check_role_and_persona(role, persona)
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("a model is required (an empty one would start the harness on its own default)")
     return ["env", f"LANE_ROLE={role}", f"LANE_PERSONA={persona}"]
 
 

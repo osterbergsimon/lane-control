@@ -202,6 +202,13 @@ class LoaderTests(HomeTest):
         self.record("claude", "../../etc/passwd")
         self.assertIsNone(self.pkg.read_session(self.checkout, "coordinator", "claude"))  # not an id
 
+    def test_start_command_refuses_empty_model(self):
+        # Review n4: an empty model would start the harness on whatever its config says.
+        for name, mod in self.pkg.harnesses().items():
+            for model in ("", "  "):
+                with self.assertRaises(ValueError, msg=(name, model)):
+                    mod.start_command("coordinator", Path("/abs/p.md"), model, None)
+
     def test_every_adapter_has_the_interface(self):
         for name, mod in self.pkg.harnesses().items():
             self.assertEqual(mod.NAME, name)

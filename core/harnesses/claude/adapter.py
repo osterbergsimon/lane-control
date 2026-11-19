@@ -26,7 +26,7 @@ HOOK_TAIL = ("core", "harnesses", "persona-hook.sh")
 
 def start_command(role: str, persona: Path, model: str, permission_mode: "str | None") -> list:
     """argv for an Orca terminal's --command: env LANE_ROLE=<role> LANE_PERSONA=<persona> claude --model <model>."""
-    cmd = harnesses.env_prefix(role, persona) + ["claude", "--model", model]
+    cmd = harnesses.env_prefix(role, persona, model) + ["claude", "--model", model]
     if permission_mode:
         cmd += ["--permission-mode", permission_mode]
     return cmd

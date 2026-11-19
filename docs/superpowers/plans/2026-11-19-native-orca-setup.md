@@ -135,7 +135,9 @@ path constants only.
 
 - [ ] Task 3.1: `--orchestrator {native-orca,orca-cotal}`, default `native-orca`; the Cotal path runs exactly as
   before (its tests unchanged). `--coordinator/--design-lead/--reviewer` accept `claude/<model>` and
-  `opencode/<model>`; refuse what `lane-tier` refuses (exit 2, message names the rule).
+  `opencode/<model>`; refuse what `lane-tier` refuses (exit 2, message names the rule). The OpenCode adapter takes
+  only `auto`, `bypassPermissions` (both `--auto`) and `default`: map or refuse the other Claude permission modes
+  (`acceptEdits`, `plan`, `dontAsk`) for an OpenCode role before calling `start_command` (NO-1 review 1).
 - [ ] Task 3.2: native path renders the five personas into `.lane-control/` (adaptation agent and reviewer as
   today, run with the chosen harness), installs each chosen harness's persona hook, adds the AGENTS.md section by
   calling the native-orca orchestrator adapter's `setup`.
