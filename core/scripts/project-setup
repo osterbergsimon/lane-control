@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Set up an Orca project run by Cotal agents: a coordinator and a frontend design lead (see orchestrators/orca-cotal/docs/orca.md).
+"""Set up an Orca project with a coordinator and a frontend design lead: on native Orca (the default), or run by Cotal
+agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
 
-  project-setup <git-url|dir> [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
+  project-setup <git-url|dir> [--orchestrator native-orca|orca-cotal] [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE] [--own-model M]... [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
+
+Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
+adapting agent and a reviewer, committed only on the owner's yes; the role files go to .lane-control/additions/ and
+AGENTS.md gets the lane-control and native-orca sections), then the personas of the coordinator, design lead,
+reviewer and debugger rendered into .lane-control/<role>.md with the project's additions at the end (kept out of git
+by .git/info/exclude), the persona hook of each standing role's harness (core/harnesses/), and the coordinator and
+design lead each started in its own Orca terminal titled "<project> coordinator" / "<project> design lead", which
+makes the session's own Orca Run before the agent starts (its id goes in the settings store). Claude and OpenCode
+(v2, opencode2) both take every role; nothing is ever typed into a terminal. A project keeps the orchestrator it was
+set up with (the store, or a .cotal/ folder) unless --orchestrator names another. --host is not built for it yet.
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
@@ -2323,7 +2334,10 @@ def show(repo: Path) -> int:
         old.append(str(keyed_by_name_only(repo)))
     if old:
         print(f"not moved yet: {', '.join(old)} (project-setup moves them on its next run, also with --refresh)")
-    print("rendered personas: " + str(repo / ".cotal" / "agents") + " (Cotal reads them there)")
+    if ORCHESTRATOR == "native-orca":
+        print(f"rendered personas: {repo / ADAPTED} (<role>.md; additions in {repo / ADDITIONS})")
+    else:
+        print("rendered personas: " + str(repo / ".cotal" / "agents") + " (Cotal reads them there)")
     return 0
 
 
@@ -2589,12 +2603,24 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
     return True
 
 
+def recorded_session(checkout: Path, role: str, harness: str):
+    """The id the persona hook or plugin recorded for the checkout's <role> session, or None."""
+    load_harness(harness)
+    import harnesses
+    try:
+        return harnesses.read_session(checkout, role, harness)
+    except OSError:
+        return None
+
+
 def start_standing(place: Place, repo: Path, project: str, pins: dict, lead: bool, mode: str, repo_id: str,
-                   kickoffs: dict, resume: dict = None) -> bool:
-    """The coordinator, and the design lead in its own child worktree. True when the coordinator was started now."""
-    resume = resume or {}
+                   kickoffs: dict, resume: bool = False) -> bool:
+    """The coordinator, and the design lead in its own child worktree. True when the coordinator was started now.
+    resume: each continues its recorded session, when there is one."""
+    def sid(checkout, role):
+        return recorded_session(checkout, role, pins[role][0]) if resume else None
     started = start_session(place, repo, "coordinator", pins["coordinator"], mode, repo, project,
-                            kickoffs["coordinator"], resume.get("coordinator"))
+                            kickoffs["coordinator"], sid(repo, "coordinator"))
     if lead:
         wt, created = design_worktree(repo, repo_id)
         if created:
@@ -2603,11 +2629,99 @@ def start_standing(place: Place, repo: Path, project: str, pins: dict, lead: boo
         if pins["design-lead"][0] == "claude":
             persona_hooks(wt, {"claude"})
         start_session(place, repo, "design-lead", pins["design-lead"], mode, wt, project, kickoffs["design-lead"],
-                      resume.get("design-lead"))
+                      sid(wt, "design-lead"))
         if created:
             close_startup_tabs(wt, before, setup_done)
             place.jrun("terminal", "create", "--worktree", f"path:{wt}")  # the owner's shell
     return started
+
+
+def native_project(repo: Path, name: str = "") -> dict:
+    """A native project's stored choices, for refresh, pause and wake: pins, design lead, mode, project name."""
+    st = settings(repo)
+    validate_settings(repo, st)
+    if "models" not in st:
+        raise Fail(f"{repo} is not set up on native Orca yet (its settings store has no models): run project-setup "
+                   "on it first")
+    pins = {}
+    for role in ("coordinator", "design-lead", "reviewer"):
+        spec = st["models"].get(role) or DEFAULT_PINS[role]
+        try:
+            pins[role] = harness_model(spec)
+        except SystemExit:
+            raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is {spec!r}, expected <claude|opencode>/<model>")
+    mode = st.get("permission_mode") or "auto"
+    if mode not in NATIVE_MODES:
+        raise Fail(f"{store_dir(repo) / 'settings.json'}: permission_mode {mode!r} must be one of {', '.join(NATIVE_MODES)}")
+    return {"pins": pins, "lead": st.get("design_lead", True) is not False, "mode": mode,
+            "project": name or st.get("name") or repo.name, "attached": tuple(attached_of(st)), "st": st}
+
+
+def running_sessions(place: Place, project: str, lead: bool) -> dict:
+    """{role: terminal} of the standing sessions that run now."""
+    out = {}
+    for role in STANDING if lead else ("coordinator",):
+        t = session_terminal(place, session_title(role, project))
+        if t:
+            out[role] = t
+    return out
+
+
+def native_refresh(repo: Path, a, tiers: Path) -> int:
+    """Re-render the personas (stored pins, current additions) and the hooks. Nothing is adapted, started or
+    committed; a running session rereads its persona at its next compaction, or on a restart."""
+    root = attached_to(repo)
+    if root is not None:
+        raise Fail(f"{repo} is attached to the project at {root}, not a project of its own: run --refresh on {root}")
+    p = native_project(repo, a.name or "")
+    table = store_table(repo)
+    try:
+        tier_text = table.read_text() if table.exists() else tiers.read_text()
+        check_tier_table(tier_text)
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
+    pins = p["pins"]
+    changed = native_personas(repo, p["project"], pins, p["lead"], p["mode"], tier_text, p["attached"])
+    standing = {pins["coordinator"][0]} | ({pins["design-lead"][0]} if p["lead"] else set())
+    persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
+    lane_tools(Path(os.environ.get("HOME", str(Path.home()))))
+    place = Place()
+    try:
+        if p["lead"] and pins["design-lead"][0] == "claude":
+            for w in place.jrun("worktree", "list")["result"]["worktrees"]:
+                if w.get("displayName") == "design-lead" and (w.get("parentWorktreeId") or "").endswith("::" + str(repo)):
+                    persona_hooks(Path(w["path"]), {"claude"})
+        live = running_sessions(place, p["project"], p["lead"])
+    except Fail as e:
+        say("restart", "unknown", f"no Orca terminal list ({e}); restart these if running: {', '.join(changed) or 'none'}")
+        return 0
+    todo = [session_title(r, p["project"]) for r in changed if r in live]
+    if todo:
+        say("restart", "needed", "; ".join(todo) + ": the persona changed. It is given again at the next compaction; "
+            "to have it now, restart (project-pause stop, then start)")
+    else:
+        say("restart", "none", "no changed standing session is running")
+    if a.name:
+        settings(repo, name=a.name)
+    return 0
+
+
+def resume_standing(repo: Path) -> int:
+    """project-pause start on native Orca: start the standing sessions that are missing, each resuming its recorded
+    session (Claude --resume, OpenCode --session) when there is one, and mark the project awake."""
+    global ORCHESTRATOR, ORCA
+    ORCHESTRATOR = "native-orca"
+    add_orca_cli_to_path()
+    ORCA = orca_cli()
+    p = native_project(repo)
+    if not (repo / ADAPTED / "coordinator.md").is_file():
+        raise Fail(f"{repo} has no rendered persona in {ADAPTED}/: run project-setup on it first")
+    pins = p["pins"]
+    native_preflight({pins["coordinator"][0]} | ({pins["design-lead"][0]} if p["lead"] else set()))
+    kickoffs = {r: NATIVE_RESUME.format(persona=repo / ADAPTED / f"{r}.md") for r in STANDING}
+    start_standing(Place(), repo, p["project"], pins, p["lead"], p["mode"], orca_repo(repo), kickoffs, resume=True)
+    settings(repo, paused=False)
+    return 0
 
 
 def native_preflight(needed: set):
@@ -2633,6 +2747,22 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
     add_orca_cli_to_path()
     ORCA = orca_cli()
     base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
+    if a.show or a.refresh:
+        try:
+            d = Path(a.target).expanduser().resolve()
+            top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
+            if top is None or top.returncode != 0:
+                raise Fail(f"{d} is not an existing git repository; --{'show' if a.show else 'refresh'} only works on a "
+                           "set-up project")
+            repo = Path(top.stdout.strip())
+            if a.show:
+                return show(repo)
+            host_hygiene()
+            say("repo", "exists", str(repo))
+            return native_refresh(repo, a, tiers)
+        except Fail as e:
+            print(f"project-setup: {e}", file=sys.stderr)
+            return 1
     try:
         bad = own_check(flag_pins, own_models | known_own_models(peek_repo(a.target, Path(a.dest).expanduser(), slug(base))))
         if bad:

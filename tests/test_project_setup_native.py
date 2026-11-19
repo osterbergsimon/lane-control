@@ -55,6 +55,7 @@ class NativeEnv(Env):
         bd.write_text("#!/bin/sh\n[ \"$1\" = recall ] || exit 1\n"
                       f"cat '{self.home}/handover' 2>/dev/null\nexit 0\n")
         bd.chmod(0o755)
+        self.env.pop("COTAL_NAME", None)  # the tests may run inside an agent's shell
         self.env["XDG_CONFIG_HOME"] = str(self.home / ".config")
         self.env["XDG_STATE_HOME"] = str(self.home / ".local" / "state")
 
@@ -443,6 +444,159 @@ class StartTests(Case):
         self.assertEqual(r.returncode, 2)
         self.assertIn("phase 6", r.stderr)
         self.assertEqual(self.e.calls(), [])
+
+
+# --- Task 3.4 ------------------------------------------------------------------------------------------------------
+
+def session_record(e, checkout, role, harness):
+    """Where the persona hook (Claude) or plugin (OpenCode) records a marked session's id."""
+    core = str(ROOT / "core")
+    if core not in sys.path:
+        sys.path.insert(0, core)
+    import harnesses
+    with mock.patch.dict(os.environ, {"XDG_STATE_HOME": e.env["XDG_STATE_HOME"]}):
+        return harnesses.session_record(checkout, role, harness)
+
+
+class RefreshTests(Case):
+    def test_refresh_rerenders_with_the_stored_pins_and_hooks(self):
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        add = self.repo / ".lane-control" / "additions"
+        add.mkdir(parents=True)
+        (add / "coordinator.md").write_text("## First turn\nRead docs/refreshed.md.\n")
+        (self.repo / ".claude" / "settings.local.json").unlink(missing_ok=True)
+        self.e.log.unlink()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        text = (self.repo / ".lane-control" / "coordinator.md").read_text()
+        self.assertIn("agent: opencode\nmodel: gw/m1\n", text)  # the stored pin, kept
+        self.assertIn("Read docs/refreshed.md.", text)
+        plugin = Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "lane-persona.js"
+        self.assertTrue(plugin.is_file())
+        self.assertEqual(self.e.creates(), [])  # a refresh starts nothing
+        self.assertFalse([c for c in self.e.calls() if c.startswith("cotal")])
+
+    def test_refresh_names_running_sessions_to_restart(self):
+        self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
+        add = self.repo / ".lane-control" / "additions"
+        add.mkdir(parents=True)
+        (add / "coordinator.md").write_text("## First turn\nSomething new.\n")
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        line = next(l for l in r.stdout.splitlines() if l.startswith("restart:"))
+        self.assertIn("app coordinator", line)
+        self.assertNotIn("design lead", line)
+
+    def test_refresh_of_a_project_never_set_up_is_refused(self):
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not set up", r.stderr)
+
+
+class PauseTests(Case):
+    def setUp(self):
+        super().setUp()
+        r = self.e.run(str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+    def titles(self):
+        return sorted(t.get("title") for t in json.loads(self.e.state.read_text())["terminals"])
+
+    def test_rest_marks_the_project_paused_in_the_store(self):
+        r = self.e.pause("rest", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.e.settings(self.repo)["paused"])
+        self.assertIn("app coordinator", self.titles())  # rest stops nothing
+        self.assertFalse([c for c in self.e.calls() if c.startswith("cotal")])
+
+    def test_wake_unmarks_it(self):
+        self.e.pause("rest", str(self.repo))
+        r = self.e.pause("wake", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self.e.settings(self.repo)["paused"])
+
+    def test_wake_without_a_coordinator_keeps_it_paused_for_start(self):
+        self.e.pause("stop", str(self.repo), "--no-handover")
+        r = self.e.pause("wake", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.e.settings(self.repo)["paused"])
+        self.assertIn("project-pause start", r.stdout)
+
+    def test_stop_asks_for_a_handover_through_the_run_then_closes(self):
+        (self.e.home / "handover").write_text("old handover")
+        self.e.set_state(handover_on_send="new handover")
+        runs = self.e.settings(self.repo)["runs"]
+        start = len(self.e.calls())  # setup closed Orca's startup shell itself; only stop's calls count here
+        r = self.e.pause("stop", str(self.repo), "--wait", "5")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        sent = json.loads(self.e.state.read_text())["sent"]
+        self.assertEqual(sorted(x["to"] for x in sent), sorted(f"run:{runs[k]}" for k in ("coordinator", "design-lead")))
+        self.assertIn("handover", sent[0]["subject"].lower())
+        self.assertNotIn("app coordinator", self.titles())
+        self.assertNotIn("app design lead", self.titles())
+        self.assertTrue(self.e.settings(self.repo)["paused"])
+        calls = self.e.calls()[start:]
+        last_send = max(i for i, c in enumerate(calls) if c.startswith("orca orchestration send"))
+        first_close = min(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
+        self.assertLess(last_send, first_close)
+        self.assertFalse([c for c in calls if c.startswith("orca terminal send")])
+
+    def test_stop_keeps_the_terminal_when_no_handover_comes(self):
+        (self.e.home / "handover").write_text("old handover")
+        start = len(self.e.calls())
+        r = self.e.pause("stop", str(self.repo), "--wait", "1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("--no-handover", r.stderr)
+        self.assertIn("app coordinator", self.titles())
+        self.assertFalse([c for c in self.e.calls()[start:] if c.startswith("orca terminal close")])
+
+    def test_stop_no_handover_closes_without_asking(self):
+        r = self.e.pause("stop", str(self.repo), "--no-handover")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("sent", json.loads(self.e.state.read_text()))
+        self.assertNotIn("app coordinator", self.titles())
+
+    def test_start_resumes_the_recorded_session(self):
+        rec = session_record(self.e, self.repo, "coordinator", "claude")
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        rec.write_text("abc-123\n")
+        self.e.pause("stop", str(self.repo), "--no-handover")
+        r = self.e.pause("start", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        coord = [x for x in self.e.sessions() if x["role"] == "coordinator"]
+        self.assertEqual(len(coord), 2)
+        self.assertEqual(opt(coord[-1]["argv"], "--resume"), "abc-123")
+        self.assertIn("You are back after a pause", coord[-1]["argv"][-1])
+        lead = [x for x in self.e.sessions() if x["role"] == "design-lead"]
+        self.assertNotIn("--resume", lead[-1]["argv"])  # none recorded: a fresh session
+        self.assertFalse(self.e.settings(self.repo)["paused"])
+        self.assertEqual(len([c for c in self.e.calls() if c.startswith("orca worktree create")]), 1)
+
+    def test_start_resumes_an_opencode_session(self):
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = session_record(self.e, self.repo, "coordinator", "opencode")
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        rec.write_text("ses_42\n")
+        self.e.pause("stop", str(self.repo), "--no-handover")
+        r = self.e.pause("start", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        coord = [x for x in self.e.sessions() if x["role"] == "coordinator"][-1]
+        self.assertEqual((coord["bin"], opt(coord["argv"], "--session")), ("opencode2", "ses_42"))
+
+    def test_start_when_running_starts_nothing(self):
+        r = self.e.pause("start", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.e.sessions()), 2)
+
+    def test_status(self):
+        r = self.e.pause("status", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("running", r.stdout)
+        self.e.pause("stop", str(self.repo), "--no-handover")
+        r = self.e.pause("status", str(self.repo))
+        self.assertIn("paused", r.stdout)
 
 
 if __name__ == "__main__":
