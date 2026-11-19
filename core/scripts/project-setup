@@ -169,7 +169,7 @@ def free_port(start: int) -> int:
 
 
 SETTING_KEYS = ("root", "name", "models", "design_lead", "permission_mode", "private", "own_models", "port",
-                "claude_setup", "attached", "orchestrator", "runs", "paused")  # all that is ever written: names and choices, never a secret
+                "claude_setup", "attached", "orchestrator", "runs", "terminals", "paused")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "design-lead": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -1464,6 +1464,8 @@ def adapt(repo: Path, who: tuple, prompt: str, before: dict):
     run that gets to its end is recorded as finished (adapter_finished)."""
     check_limit()  # before the finished record is dropped: a stop here leaves the files reviewable
     forget_adapter(repo)
+    roles = [repo / ADAPTED / f"{r}.md" for r in ("coordinator", "design-lead", "reviewer")]
+    was = {f: fingerprint(f) for f in roles}  # on native Orca these may be rendered personas: only new writes move
     try:
         run_agent(repo, who, prompt, write=True)
     finally:  # also when the run failed: the suggestions are never left where a later run could commit them
@@ -1471,6 +1473,13 @@ def adapt(repo: Path, who: tuple, prompt: str, before: dict):
         if new.is_file():
             kept_suggestions(repo).write_bytes(new.read_bytes())
             new.unlink()
+        if ORCHESTRATOR == "native-orca":  # the base prompt says .lane-control/<name>: on native that is additions/
+            for f in roles:
+                if f.is_file() and not f.is_symlink() and fingerprint(f) != was[f]:
+                    dest = repo / ADDITIONS / f.name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(f, dest)
+                    say("adapt", "moved", f"{f.relative_to(repo)} -> {dest.relative_to(repo)} (native Orca)")
     check_scope(repo, before)
     d = store_dir(repo)
     d.mkdir(parents=True, exist_ok=True)
@@ -2191,7 +2200,7 @@ def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int, "orchestrator": str, "runs": dict, "paused": bool}
+            "permission_mode": str, "port": int, "orchestrator": str, "runs": dict, "terminals": dict, "paused": bool}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
@@ -2350,6 +2359,9 @@ ADDITIONS = f"{ADAPTED}/additions"  # the adapted text per role, kept and commit
 EXCLUDE_BEGIN = "# lane-control: begin (files project-setup writes in this checkout; never committed)"
 EXCLUDE_END = "# lane-control: end"
 LOCAL_FILES = ("/.claude/settings.local.json", *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
+NATIVE_REVIEW_NOTE = f"""
+Native Orca: the coordinator, design-lead and reviewer files are in {ADDITIONS}/ (appended to the rendered personas);
+{ADAPTED}/<role>.md are rendered personas, not adapted files: never ask for them there."""
 NATIVE_PLACEMENT = f"""
 - Native Orca: write the coordinator, design-lead and reviewer templates to {ADDITIONS}/<its name> (they are appended
   to the rendered personas there, which are {ADAPTED}/<role>.md and not yours to write); the other templates go to
@@ -2479,7 +2491,7 @@ def load_harness(name: str):
 
 TITLES = {"coordinator": "{project} coordinator", "design-lead": "{project} design lead"}  # peers find them by these
 STANDING = tuple(TITLES)
-RUN_WAIT = 20  # seconds to wait for a started session's terminal to make its Run
+RUN_WAIT = float(os.environ.get("LANE_RUN_WAIT") or 20)  # seconds a start waits for the session's Run (slow hosts: more)
 NATIVE_KICKOFF = {
     "coordinator": ("Read your persona, {persona}, then AGENTS.md and `bd recall handover-latest`; then tell the owner "
                     "in one line that you are ready, and wait for them."),
@@ -2487,8 +2499,9 @@ NATIVE_KICKOFF = {
                     "ready (the Messages part of your persona), and wait."),
 }
 NATIVE_RESUME = ("You are back after a pause. Reread your persona, {persona}; then resume from `bd recall "
-                 "handover-latest`, `orca-ide orchestration run-current` and `orca-ide worktree list`, and tell the "
+                 "{handover}`, `orca-ide orchestration run-current` and `orca-ide worktree list`, and tell the "
                  "owner in one line that you are back.")
+HANDOVERS = {"coordinator": "handover-latest", "design-lead": "handover-design-lead"}  # project-pause stop asks for these
 
 
 class Place:
@@ -2517,10 +2530,16 @@ def bare_title(title) -> str:
     return re.sub(r"^[^\w]+", "", title or "").strip()
 
 
-def session_terminal(place: Place, title: str):
-    """The Orca terminal of a running standing session (by its title), or None."""
+def session_terminal(place: Place, title: str, handle: "str | None" = None):
+    """The Orca terminal of a running standing session, or None: the handle recorded at its start, else its title (a
+    shell or OpenCode may retitle the tab; Claude keeps its --name)."""
     rows = place.jrun("terminal", "list")["result"]["terminals"]
-    return next((t for t in rows if bare_title(t.get("title")) == title), None)
+    return (next((t for t in rows if handle and t.get("handle") == handle), None)
+            or next((t for t in rows if bare_title(t.get("title")) == title), None))
+
+
+def stored_handle(repo: Path, role: str):
+    return (settings(repo).get("terminals") or {}).get(role)
 
 
 def run_id(obj):
@@ -2585,13 +2604,19 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
     """One standing session in its own Orca terminal; True when started now, False when its terminal already runs.
     Nothing is ever typed into a terminal: the first message is the start command's own prompt."""
     title = session_title(role, project)
-    if session_terminal(place, title):
+    if session_terminal(place, title, stored_handle(repo, role)):
         say(f"session {role}", "exists", title)
         return False
     f = launcher(repo, role, pin, mode, checkout, title, kickoff, resume)
     run_record(repo, role).unlink(missing_ok=True)
-    place.jrun("terminal", "create", "--worktree", f"path:{checkout}", "--title", title,
-               "--command", f"sh {shlex.quote(str(f))}")
+    st = settings(repo)  # an earlier start's Run and terminal are gone with it: never kept for this one
+    settings(repo, runs={k: v for k, v in (st.get("runs") or {}).items() if k != role},
+             terminals={k: v for k, v in (st.get("terminals") or {}).items() if k != role})
+    made = place.jrun("terminal", "create", "--worktree", f"path:{checkout}", "--title", title,
+                      "--command", f"sh {shlex.quote(str(f))}")
+    handle = ((made.get("result") or {}).get("terminal") or {}).get("handle") if isinstance(made, dict) else None
+    if handle:
+        settings(repo, terminals={**(settings(repo).get("terminals") or {}), role: handle})
     say(f"session {role}", "created", f"{'/'.join(pin)} in {checkout} ({title}" + (", resumed)" if resume else ")"))
     found = wait_run(repo, role)
     if found:
@@ -2657,11 +2682,11 @@ def native_project(repo: Path, name: str = "") -> dict:
             "project": name or st.get("name") or repo.name, "attached": tuple(attached_of(st)), "st": st}
 
 
-def running_sessions(place: Place, project: str, lead: bool) -> dict:
+def running_sessions(place: Place, repo: Path, project: str, lead: bool) -> dict:
     """{role: terminal} of the standing sessions that run now."""
     out = {}
     for role in STANDING if lead else ("coordinator",):
-        t = session_terminal(place, session_title(role, project))
+        t = session_terminal(place, session_title(role, project), stored_handle(repo, role))
         if t:
             out[role] = t
     return out
@@ -2691,7 +2716,7 @@ def native_refresh(repo: Path, a, tiers: Path) -> int:
             for w in place.jrun("worktree", "list")["result"]["worktrees"]:
                 if w.get("displayName") == "design-lead" and (w.get("parentWorktreeId") or "").endswith("::" + str(repo)):
                     persona_hooks(Path(w["path"]), {"claude"})
-        live = running_sessions(place, p["project"], p["lead"])
+        live = running_sessions(place, repo, p["project"], p["lead"])
     except Fail as e:
         say("restart", "unknown", f"no Orca terminal list ({e}); restart these if running: {', '.join(changed) or 'none'}")
         return 0
@@ -2718,7 +2743,7 @@ def resume_standing(repo: Path) -> int:
         raise Fail(f"{repo} has no rendered persona in {ADAPTED}/: run project-setup on it first")
     pins = p["pins"]
     native_preflight({pins["coordinator"][0]} | ({pins["design-lead"][0]} if p["lead"] else set()))
-    kickoffs = {r: NATIVE_RESUME.format(persona=repo / ADAPTED / f"{r}.md") for r in STANDING}
+    kickoffs = {r: NATIVE_RESUME.format(persona=repo / ADAPTED / f"{r}.md", handover=HANDOVERS[r]) for r in STANDING}
     start_standing(Place(), repo, p["project"], pins, p["lead"], p["mode"], orca_repo(repo), kickoffs, resume=True)
     settings(repo, paused=False)
     return 0
@@ -2799,9 +2824,11 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         if "claude" in standing and not a.no_start:
             ensure_claude_trust(repo, record=a.trust_folder)
         project = cfg["name"] or repo.name
-        global ADAPT_RULES
+        global ADAPT_RULES, REVIEW_RULES, CHECK_RULES
         if NATIVE_PLACEMENT not in ADAPT_RULES:
             ADAPT_RULES += NATIVE_PLACEMENT
+            REVIEW_RULES = NATIVE_REVIEW_NOTE + REVIEW_RULES
+            CHECK_RULES = NATIVE_REVIEW_NOTE + CHECK_RULES
         adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
         if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
             return STOPPED

@@ -16,8 +16,8 @@ status  running, resting or paused, and what else runs in the space.
 
 On native Orca (a project project-setup set up there) the verbs keep their meaning without Cotal: rest and wake mark
 and unmark the project paused in its settings store (the night manager skips it); stop also asks each standing
-session for its handover through its own Orca Run, waits (--wait SECONDS, default 600) until handover-latest changes,
-then closes their terminals (--no-handover closes them without asking); start starts the missing ones again, each
+session for its handover through its own Orca Run, waits (--wait SECONDS, default 600) until each one's handover memory changes
+(handover-latest, handover-design-lead), then closes their terminals (--no-handover closes them without asking); start starts the missing ones again, each
 resuming its recorded session. Nothing is typed into a session's terminal.
 
   project-pause stop <project> [--wait SECONDS] [--no-handover]
@@ -44,26 +44,16 @@ STANDING = ("coordinator", "design-lead")
 
 HANDOVER_WAIT = 600  # seconds stop waits for a new handover-latest
 HANDOVER_SUBJECT = "Write your handover now: project-pause is stopping this session"
-HANDOVER_BODY = ("The owner is pausing this project. Refresh `handover-latest` now (bd remember), then stop working. "
-                 "Your terminal is closed once the new handover is there.")
+HANDOVER_KEYS = ps.HANDOVERS  # one beads memory per standing session
+HANDOVER_BODY = ("The owner is pausing this project. Refresh your beads memory `{key}` now (bd remember), then stop "
+                 "working. Your terminal is closed once the new handover is there.")
 
 
-def handover(repo: Path) -> str:
+def handover(repo: Path, key: str) -> str:
     try:
-        return ps.run(["bd", "recall", "handover-latest"], cwd=repo, check=False, timeout=30).stdout
+        return ps.run(["bd", "recall", key], cwd=repo, check=False, timeout=30).stdout
     except ps.Fail:
         return ""
-
-
-def run_of(place, st: dict, role: str, title: str):
-    """The session's Run: the one recorded at its start, else the newest in run-list with its title as objective."""
-    rid = (st.get("runs") or {}).get(role)
-    if rid:
-        return rid
-    rows = place.jrun("orchestration", "run-list")["result"]
-    rows = rows.get("runs", rows.get("items", [])) if isinstance(rows, dict) else rows
-    found = [r.get("id") for r in rows if isinstance(r, dict) and r.get("objective") == title]
-    return found[-1] if found else None
 
 
 def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
@@ -76,7 +66,7 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
     ps.ORCA = ps.orca_cli()
     p = ps.native_project(repo)
     place = ps.Place()
-    live = ps.running_sessions(place, p["project"], p["lead"])
+    live = ps.running_sessions(place, repo, p["project"], p["lead"])
     if cmd == "rest":
         ps.settings(repo, paused=True)
         print(f"{p['project']} is resting: marked paused in its settings store, so the night manager leaves it alone; "
@@ -102,24 +92,31 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
         print(f"{p['project']} paused: no standing session was running.")
         return 0
     if ask:
-        before = handover(repo)
-        for role in live:
-            title = ps.session_title(role, p["project"])
-            rid = run_of(place, p["st"], role, title)
-            if not rid:
-                raise ps.Fail(f"no Run found for {title!r}, so it cannot be asked for its handover without typing "
-                              "into its terminal. Ask it yourself, then run project-pause stop --no-handover")
+        # The Run recorded at each session's start; an older one of the same name may be a dead terminal's. All are
+        # looked up before any session is told to stop working.
+        runs = {role: (p["st"].get("runs") or {}).get(role) for role in live}
+        missing = [ps.session_title(r, p["project"]) for r, rid in runs.items() if not rid]
+        if missing:
+            raise ps.Fail(f"no Run recorded for {', '.join(missing)}, so it cannot be asked for a handover without "
+                          "typing into its terminal; nothing was sent. Ask it yourself, then run project-pause stop "
+                          "--no-handover")
+        before = {role: handover(repo, HANDOVER_KEYS[role]) for role in live}
+        for role, rid in runs.items():
             place.jrun("orchestration", "send", "--to", f"run:{rid}", "--subject", HANDOVER_SUBJECT,
-                       "--body", HANDOVER_BODY)
-            ps.say(f"handover {role}", "asked", f"run:{rid}")
+                       "--body", HANDOVER_BODY.format(key=HANDOVER_KEYS[role]))
+            ps.say(f"handover {role}", "asked", f"run:{rid} ({HANDOVER_KEYS[role]})")
         end = time.time() + wait
-        while handover(repo) == before:
+        while True:
+            waiting = [r for r in live if handover(repo, HANDOVER_KEYS[r]) == before[r]]
+            if not waiting:
+                break
             if time.time() >= end:
-                raise ps.Fail(f"no new handover-latest after {int(wait)}s, so the sessions keep running (the project "
-                              "is marked paused). Run project-pause stop again later, or --no-handover to close them "
-                              "anyway")
+                raise ps.Fail("no new handover after " + f"{int(wait)}s from " + ", ".join(
+                    f"{ps.session_title(r, p['project'])} ({HANDOVER_KEYS[r]})" for r in waiting)
+                    + ", so every session keeps running (the project is marked paused). Run project-pause stop again "
+                    "later, or --no-handover to close them anyway")
             time.sleep(min(5, max(0.2, end - time.time())))
-        ps.say("handover", "written", "handover-latest changed")
+        ps.say("handover", "written", ", ".join(HANDOVER_KEYS[r] for r in live))
     for role, t in live.items():
         place.jrun("terminal", "close", "--terminal", t["handle"])
         ps.say(f"session {role}", "stopped", ps.session_title(role, p["project"]))

@@ -50,10 +50,10 @@ class NativeEnv(Env):
             p.unlink(missing_ok=True)
             p.write_text(SESSION)
             p.chmod(0o755)
-        # bd: `bd recall handover-latest` prints $STUB_STATE's handover (the stub file), `bd where` fails.
+        # bd: `bd recall <key>` prints $HOME/<key> (the stub's send writes it), `bd where` fails.
         bd = self.bin / "bd"
         bd.write_text("#!/bin/sh\n[ \"$1\" = recall ] || exit 1\n"
-                      f"cat '{self.home}/handover' 2>/dev/null\nexit 0\n")
+                      f"cat '{self.home}'/\"$2\" 2>/dev/null\nexit 0\n")
         bd.chmod(0o755)
         self.env.pop("COTAL_NAME", None)  # the tests may run inside an agent's shell
         self.env["XDG_CONFIG_HOME"] = str(self.home / ".config")
@@ -524,8 +524,8 @@ class PauseTests(Case):
         self.assertIn("project-pause start", r.stdout)
 
     def test_stop_asks_for_a_handover_through_the_run_then_closes(self):
-        (self.e.home / "handover").write_text("old handover")
-        self.e.set_state(handover_on_send="new handover")
+        (self.e.home / "handover-latest").write_text("old handover")
+        self.e.set_state(handover_on_send={"handover-latest": "new", "handover-design-lead": "new"})
         runs = self.e.settings(self.repo)["runs"]
         start = len(self.e.calls())  # setup closed Orca's startup shell itself; only stop's calls count here
         r = self.e.pause("stop", str(self.repo), "--wait", "5")
@@ -533,6 +533,9 @@ class PauseTests(Case):
         sent = json.loads(self.e.state.read_text())["sent"]
         self.assertEqual(sorted(x["to"] for x in sent), sorted(f"run:{runs[k]}" for k in ("coordinator", "design-lead")))
         self.assertIn("handover", sent[0]["subject"].lower())
+        bodies = {x["to"]: x["body"] for x in sent}
+        self.assertIn("handover-latest", bodies[f"run:{runs['coordinator']}"])
+        self.assertIn("handover-design-lead", bodies[f"run:{runs['design-lead']}"])
         self.assertNotIn("app coordinator", self.titles())
         self.assertNotIn("app design lead", self.titles())
         self.assertTrue(self.e.settings(self.repo)["paused"])
@@ -543,7 +546,7 @@ class PauseTests(Case):
         self.assertFalse([c for c in calls if c.startswith("orca terminal send")])
 
     def test_stop_keeps_the_terminal_when_no_handover_comes(self):
-        (self.e.home / "handover").write_text("old handover")
+        (self.e.home / "handover-latest").write_text("old handover")
         start = len(self.e.calls())
         r = self.e.pause("stop", str(self.repo), "--wait", "1")
         self.assertEqual(r.returncode, 1)
@@ -570,6 +573,7 @@ class PauseTests(Case):
         self.assertIn("You are back after a pause", coord[-1]["argv"][-1])
         lead = [x for x in self.e.sessions() if x["role"] == "design-lead"]
         self.assertNotIn("--resume", lead[-1]["argv"])  # none recorded: a fresh session
+        self.assertIn("handover-design-lead", lead[-1]["argv"][-1])  # its own handover memory (project-pause stop)
         self.assertFalse(self.e.settings(self.repo)["paused"])
         self.assertEqual(len([c for c in self.e.calls() if c.startswith("orca worktree create")]), 1)
 
@@ -635,6 +639,78 @@ class RerunTests(Case):
         self.assertIn("session coordinator: exists app coordinator", out)
         self.assertEqual((self.repo / ".git" / "info" / "exclude").read_text().count("lane-control: begin"), 1)
         self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
+
+
+# --- final review fixes ----------------------------------------------------------------------------------------------
+
+class ReviewFixTests(Case):
+    def titles(self):
+        return sorted(t.get("title") for t in json.loads(self.e.state.read_text())["terminals"])
+
+    def test_stop_waits_for_every_roles_own_handover(self):
+        # Important 1: the design lead writing first must not close the coordinator before its handover.
+        self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
+        self.e.set_state(handover_on_send={"handover-design-lead": "lead's handover"})
+        start = len(self.e.calls())
+        r = self.e.pause("stop", str(self.repo), "--wait", "1")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("app coordinator", r.stderr)
+        self.assertIn("app coordinator", self.titles())
+        self.assertFalse([c for c in self.e.calls()[start:] if c.startswith("orca terminal close")])
+
+    def test_a_start_whose_run_is_pending_drops_the_old_run_id(self):
+        # Important 2: never keep a dead Run's id and then send the handover request to it.
+        self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
+        self.e.pause("stop", str(self.repo), "--no-handover")
+        self.e.set_state(run_create_fails=True)
+        r = self.e.pause("start", str(self.repo), env_extra={"LANE_RUN_WAIT": "0"})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.e.settings(self.repo).get("runs", {}), {})
+        r = self.e.pause("stop", str(self.repo), "--wait", "1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("--no-handover", r.stderr)
+        self.assertNotIn("sent", json.loads(self.e.state.read_text()))
+
+    def test_every_run_is_found_before_any_session_is_asked(self):
+        self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
+        st_file = self.e.store(self.repo) / "settings.json"
+        st = json.loads(st_file.read_text())
+        del st["runs"]["design-lead"]
+        st_file.write_text(json.dumps(st))
+        r = self.e.pause("stop", str(self.repo), "--wait", "1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("app design lead", r.stderr)
+        self.assertNotIn("sent", json.loads(self.e.state.read_text()))  # the coordinator was not told to stop either
+
+    def test_a_session_whose_terminal_was_retitled_is_still_found(self):
+        # Important 3: the shell (fish) or OpenCode retitles the terminal; the stored handle still finds it.
+        self.e.set_state(retitle="fish /home")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-design-lead")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.titles(), ["fish /home"])
+        r = self.e.run(str(self.repo), "--no-design-lead")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(len([c for c in self.e.creates() if opt(c, "--title")]), 1)  # no second coordinator
+        r = self.e.pause("stop", str(self.repo), "--no-handover")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.titles(), [])
+
+    def test_role_files_written_where_the_base_prompt_says_land_in_additions(self):
+        # Important 4: the adapter follows the base prompt (.lane-control/<name>); they become the additions.
+        wrote = {"write": {".lane-control/coordinator.md": "## First turn\nRead docs/plan.md.\n",
+                           ".lane-control/project.md": "facts\n"}}
+        self.e.script_agents(sonnet=[wrote], opus=[PASS])
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", return_value="y"), contextlib.redirect_stdout(Tty()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            status = m.main([str(self.repo), "--no-start"])
+        self.assertEqual(status, 0, err.getvalue() + out.getvalue())
+        committed = git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
+        self.assertEqual(sorted(committed), sorted(["AGENTS.md", ADDITION, ".lane-control/project.md"]))
+        self.assertIn("Read docs/plan.md.", (self.repo / ".lane-control" / "coordinator.md").read_text())
+        review = [r for r in self.e.agent_runs() if "-p" in r["argv"]][1]["prompt"]
+        self.assertIn(".lane-control/additions/", review)
 
 
 if __name__ == "__main__":

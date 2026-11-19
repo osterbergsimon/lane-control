@@ -98,8 +98,14 @@ def orca():
             subprocess.run(["sh", "-c", command], cwd=t["worktreePath"])
             state.clear()
             state.update(json.loads(state_path.read_text()))
+            if state.get("retitle"):  # the shell or the program renames the tab, as fish and OpenCode do
+                for x in state["terminals"]:
+                    if x["handle"] == t["handle"]:
+                        x["title"] = state["retitle"]
         out({"ok": True, "result": {"terminal": t}})
     if cmd == "orchestration run-create":
+        if state.get("run_create_fails"):
+            out({"ok": False, "error": {"message": "stub: run-create failed"}}, 1)
         run = {"id": f"run_{len(state.setdefault('runs', [])) + 1:012x}", "objective": opt("--objective")}
         state["runs"].append(run)
         out({"ok": True, "result": {"run": run}})
@@ -107,8 +113,8 @@ def orca():
         out({"ok": True, "result": {"runs": state.get("runs", [])}})
     if cmd == "orchestration send":
         state.setdefault("sent", []).append({"to": opt("--to"), "subject": opt("--subject"), "body": opt("--body")})
-        if state.get("handover_on_send"):  # the session writes its handover when asked (bd stub reads this file)
-            Path(os.environ["HOME"], "handover").write_text(state["handover_on_send"])
+        for key, text in (state.get("handover_on_send") or {}).items():  # sessions write their handovers when asked
+            Path(os.environ["HOME"], key).write_text(text)  # (the tests' bd stub reads $HOME/<key>)
         out({"ok": True, "result": {"message": {"id": f"msg_{len(state['sent'])}"}}})
     out({"ok": False, "error": {"message": f"stub: unhandled orca {args}"}}, 9)
 
