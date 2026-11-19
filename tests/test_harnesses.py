@@ -77,5 +77,179 @@ class PersonaHookTests(TempDirTest):
         self.assertEqual((r.returncode, r.stdout), (0, PERSONA_TEXT))
 
 
+def load_harnesses_pkg():
+    """core/harnesses as the package `harnesses`, the way scripts import it (core/ on sys.path)."""
+    import importlib
+    import sys
+    core = str(ROOT / "core")
+    if core not in sys.path:
+        sys.path.insert(0, core)
+    return importlib.import_module("harnesses")
+
+
+class HomeTest(TempDirTest):
+    """HOME and XDG dirs point into the temp dir for the test's length."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.t / "home"
+        self.home.mkdir()
+        saved = {k: os.environ.get(k) for k in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME")}
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.addCleanup(restore)
+        os.environ["HOME"] = str(self.home)
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        os.environ.pop("XDG_DATA_HOME", None)
+        self.checkout = self.t / "code" / "shop.app"
+        self.checkout.mkdir(parents=True)
+        self.pkg = load_harnesses_pkg()
+
+
+class LoaderTests(HomeTest):
+    def test_load_harness_and_harnesses(self):
+        all_ = self.pkg.harnesses()
+        self.assertEqual(set(all_), {"claude"})
+        self.assertEqual(self.pkg.load_harness("claude").NAME, "claude")
+        for name in ("codex", "pi", "nope", "../claude", ""):
+            with self.assertRaises(ValueError, msg=name):
+                self.pkg.load_harness(name)
+
+    def test_every_adapter_has_the_interface(self):
+        for name, mod in self.pkg.harnesses().items():
+            self.assertEqual(mod.NAME, name)
+            self.assertIn(mod.STATUS, ("in use", "untested"))
+            self.assertIsInstance(mod.ORCA_AGENT_ID, str)
+            self.assertIsInstance(mod.MODEL_FLAGS, frozenset)
+            for fn in ("start_command", "install_persona_hook", "idle_minutes"):
+                self.assertTrue(callable(getattr(mod, fn)), (name, fn))
+
+
+class ClaudeAdapterTests(HomeTest):
+    def setUp(self):
+        super().setUp()
+        self.a = self.pkg.load_harness("claude")
+        self.settings = self.checkout / ".claude" / "settings.local.json"
+
+    def entries(self):
+        import json
+        return json.loads(self.settings.read_text())["hooks"]["SessionStart"]
+
+    def test_claude_constants(self):
+        self.assertEqual((self.a.NAME, self.a.STATUS, self.a.ORCA_AGENT_ID), ("claude", "in use", "claude"))
+        self.assertEqual(self.a.MODEL_FLAGS, frozenset({"model", "effort"}))
+
+    def test_claude_start_command_shape(self):
+        p = Path("/abs/.lane-control/coordinator.md")
+        self.assertEqual(self.a.start_command("coordinator", p, "opus", "auto"),
+                         ["env", "LANE_ROLE=coordinator", f"LANE_PERSONA={p}", "claude", "--model", "opus",
+                          "--permission-mode", "auto"])
+        self.assertEqual(self.a.start_command("reviewer", p, "sonnet", None),
+                         ["env", "LANE_ROLE=reviewer", f"LANE_PERSONA={p}", "claude", "--model", "sonnet"])
+        for role in ("design-lead", "debugger", "machine-coordinator"):
+            self.assertEqual(self.a.start_command(role, p, "opus", None)[1], f"LANE_ROLE={role}")
+        with self.assertRaises(ValueError):
+            self.a.start_command("worker", p, "opus", None)
+        with self.assertRaises(ValueError):
+            self.a.start_command("coordinator", Path("rel/coordinator.md"), "opus", None)
+
+    def test_claude_hook_added_once(self):
+        changes = self.a.install_persona_hook(self.checkout)
+        self.assertEqual(len(changes), 1)
+        self.assertIn("settings.local.json", changes[0])
+        self.assertEqual(self.entries(), [{"matcher": "startup|resume|compact",
+                                           "hooks": [{"type": "command", "command": str(HOOK)}]}])
+        before = self.settings.read_bytes()
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+        self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_claude_hook_keeps_other_settings(self):
+        import json
+        other_start = {"matcher": "startup", "hooks": [{"type": "command", "command": "/x/other.sh"}]}
+        pre = [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/x/guard.sh"}]}]
+        self.settings.parent.mkdir()
+        self.settings.write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}, "model": "opus",
+                                             "hooks": {"SessionStart": [other_start], "PreToolUse": pre}}))
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        data = json.loads(self.settings.read_text())
+        self.assertEqual(data["permissions"], {"allow": ["Bash(ls)"]})
+        self.assertEqual(data["model"], "opus")
+        self.assertEqual(data["hooks"]["PreToolUse"], pre)
+        self.assertEqual(data["hooks"]["SessionStart"][0], other_start)
+        self.assertEqual(len(data["hooks"]["SessionStart"]), 2)
+
+    def test_claude_hook_moves_stale_path(self):
+        import json
+        stale = {"matcher": "startup|resume|compact",
+                 "hooks": [{"type": "command", "command": "/old/lane-control/core/harnesses/persona-hook.sh"}]}
+        self.settings.parent.mkdir()
+        self.settings.write_text(json.dumps({"hooks": {"SessionStart": [stale]}}))
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertEqual(self.entries(), [{"matcher": "startup|resume|compact",
+                                           "hooks": [{"type": "command", "command": str(HOOK)}]}])
+
+    def test_claude_hook_refuses_bad_json(self):
+        self.settings.parent.mkdir()
+        self.settings.write_text("{not json")
+        with self.assertRaises(ValueError):
+            self.a.install_persona_hook(self.checkout)
+        self.assertEqual(self.settings.read_text(), "{not json")
+
+    def test_claude_project_dir_encoding(self):
+        self.assertEqual(self.a.project_dir(Path("/a/b.c/d_e")),
+                         self.home / ".claude" / "projects" / "-a-b-c-d-e")
+
+    def transcripts(self, checkout):
+        d = self.a.project_dir(checkout)
+        d.mkdir(parents=True)
+        return d
+
+    def test_claude_idle_from_newest_transcript(self):
+        now = 1_800_000_000.0
+        d = self.transcripts(self.checkout)
+        for name, age_min in (("old.jsonl", 300), ("new.jsonl", 50)):
+            f = d / name
+            f.write_text("{}\n")
+            os.utime(f, (now - age_min * 60, now - age_min * 60))
+        noise = d / "notes.txt"  # not a transcript
+        noise.write_text("x")
+        os.utime(noise, (now, now))
+        other = self.transcripts(self.t / "code" / "other")
+        f = other / "s.jsonl"
+        f.write_text("{}\n")
+        os.utime(f, (now - 60, now - 60))
+        self.assertEqual(self.a.idle_minutes(self.checkout, now), 50)
+        self.assertEqual(self.a.idle_minutes(self.checkout, now - 50 * 60 - 30), 0)  # clock skew is not negative
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads any folder")
+    def test_claude_idle_unreadable_folder_raises(self):
+        # Review Focus 4: an unreadable session folder is not "no session"; the night precheck must say why.
+        d = self.transcripts(self.checkout)
+        (d / "s.jsonl").write_text("{}\n")
+        d.chmod(0)
+        self.addCleanup(d.chmod, 0o700)
+        with self.assertRaises(OSError):
+            self.a.idle_minutes(self.checkout, 1_800_000_000.0)
+
+    def test_claude_hook_refuses_odd_shapes(self):
+        import json
+        self.settings.parent.mkdir()
+        for data in ([], {"hooks": []}, {"hooks": {"SessionStart": {}}}):
+            self.settings.write_text(json.dumps(data))
+            with self.assertRaises(ValueError, msg=data):
+                self.a.install_persona_hook(self.checkout)
+            self.assertEqual(json.loads(self.settings.read_text()), data)
+
+    def test_claude_idle_none_without_session(self):
+        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
+        self.transcripts(self.checkout)
+        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
+
+
 if __name__ == "__main__":
     unittest.main()
