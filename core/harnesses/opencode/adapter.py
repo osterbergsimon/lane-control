@@ -66,7 +66,8 @@ def install_persona_hook(checkout: Path) -> list:
     tmp = dest.with_name(dest.name + ".tmp")
     tmp.write_bytes(want)
     tmp.replace(dest)
-    return [f"{dest}: {what} the lane-persona plugin (acts only with LANE_ROLE and LANE_PERSONA set)"]
+    return [f"{dest}: {what} the lane-persona plugin; OpenCode loads it into every running OpenCode server of this "
+            "user at once, and it acts only in one started with LANE_ROLE and LANE_PERSONA set"]
 
 
 def db_path() -> Path:

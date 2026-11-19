@@ -484,6 +484,7 @@ class OpenCodeAdapterTests(HomeTest):
         dest = self.plugin_dir() / "lane-persona.js"
         self.assertEqual(len(changes), 1)
         self.assertIn(str(dest), changes[0])
+        self.assertIn("every running OpenCode server", changes[0])  # review m9: the owner's own sessions too
         self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
         self.assertEqual(self.a.install_persona_hook(self.checkout), [])
         dest.write_text("// an old copy\n")
