@@ -359,6 +359,254 @@ class NightPrecheckTests(MachineTest):
         self.assertEqual(self.run_script("night-precheck", env={"LANE_HOUR": "2"}).returncode, 1)
 
 
+# --- Task 4.3: lane-sweep ------------------------------------------------------------------------------------------
+
+def ms(hours_ago: float) -> int:
+    return int((time.time() - hours_ago * 3600) * 1000)
+
+
+class LaneSweepTests(MachineTest):
+    def setUp(self):
+        super().setUp()
+        self.env.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="t",
+                        GIT_COMMITTER_EMAIL="t@example.com", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+        self.origin = self.tmp / "origin.git"
+        self.git(self.tmp, "init", "-q", "--bare", "-b", "main", str(self.origin))
+        self.main = self.tmp / "main"
+        self.git(self.tmp, "clone", "-q", str(self.origin), str(self.main))
+        self.commit(self.main, "base")
+        self.git(self.main, "push", "-q", "origin", "HEAD:main")
+        self.state = {"worktrees": [{"id": f"repo1::{self.main}", "path": str(self.main), "branch": "refs/heads/main",
+                                     "isMainWorktree": True, "isArchived": False, "lastActivityAt": ms(0)}],
+                      "terminals": []}
+        self.prs = []
+        self.orca(self.state)
+        self.gh({"prs": self.prs})
+
+    def git(self, cwd, *args, hours_ago=None) -> str:
+        env = dict(self.env)
+        if hours_ago is not None:
+            d = f"@{int(time.time() - hours_ago * 3600)} +0000"
+            env.update(GIT_AUTHOR_DATE=d, GIT_COMMITTER_DATE=d)
+        return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def commit(self, cwd, name, hours_ago=0) -> str:
+        (Path(cwd) / f"{name}.txt").write_text(name)
+        self.git(cwd, "add", f"{name}.txt")
+        self.git(cwd, "commit", "-q", "-m", name, hours_ago=hours_ago)
+        return self.git(cwd, "rev-parse", "HEAD")
+
+    def lane(self, name, branch=None, push_as=None, hours_ago=0, activity_h=0, track=None):
+        """A lane worktree with one commit; pushed (with upstream) unless push_as is False."""
+        branch = branch or name
+        path = self.tmp / "wt" / name
+        if track:
+            self.git(self.main, "fetch", "-q", "origin")
+            self.git(self.main, "worktree", "add", "-q", "--track", "-b", branch, str(path), f"origin/{track}")
+            head = self.git(path, "rev-parse", "HEAD")
+        else:
+            self.git(self.main, "worktree", "add", "-q", "-b", branch, str(path))
+            head = self.commit(path, name, hours_ago)
+            if push_as is not False:
+                self.git(path, "push", "-q", "-u", "origin", f"{branch}:{push_as or branch}")
+        self.state["worktrees"].append({"id": f"repo1::{path}", "path": str(path), "branch": f"refs/heads/{branch}",
+                                        "isMainWorktree": False, "isArchived": False,
+                                        "lastActivityAt": ms(activity_h)})
+        self.orca(self.state)
+        return path, head
+
+    def pr(self, head_branch, state, oid, number=7):
+        self.prs.append({"head": head_branch, "state": state, "number": number, "headRefOid": oid})
+        self.gh({"prs": self.prs})
+
+    def terminal(self, path, out_h=2, connected=True, handle="term_9"):
+        self.state["terminals"].append({"handle": handle, "worktreePath": str(path), "lastOutputAt": ms(out_h),
+                                        "connected": connected, "title": "lane"})
+        self.orca(self.state)
+
+    def agent(self, path, argv=("claude", "--model", "sonnet"), pid=4242):
+        d = self.proc / str(pid)
+        d.mkdir()
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        (d / "cwd").symlink_to(path)
+
+    def sweep(self, *args):
+        return self.run_script("lane-sweep", *args)
+
+    def removed(self) -> list:
+        return [c for c in self.orca_calls() if c[:2] == ["worktree", "rm"]]
+
+    def test_nothing_found(self):
+        self.lane("busy")
+        r = self.sweep()
+        self.assertEqual((r.returncode, r.stdout), (0, "nothing found\n"), r.stderr)
+
+    def test_merged_clean_lane_reported(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        self.terminal(path)
+        r = self.sweep()
+        self.assertEqual(r.returncode, 10, r.stderr)
+        self.assertRegex(r.stdout, rf"^MERGED {path} \(#7 merged; would close 1 terminal")
+        self.assertEqual(self.removed(), [])
+
+    def test_merged_clean_lane_removed_with_apply(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        self.terminal(path)
+        r = self.sweep("--apply")
+        self.assertEqual(r.returncode, 10, r.stderr)
+        self.assertIn(f"REMOVED {path}", r.stdout)
+        self.assertIn(["terminal", "close", "--terminal", "term_9"], self.orca_calls())
+        self.assertEqual(self.removed(), [["worktree", "rm", "--worktree", f"id:repo1::{path}", "--delete-branch"]])
+
+    def test_merged_kept_untracked(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        (path / "notes.txt").write_text("x")
+        r = self.sweep("--apply")
+        self.assertIn(f"MERGED-KEEP {path}", r.stdout)
+        self.assertIn("uncommitted or untracked", r.stdout)
+        self.assertEqual(self.removed(), [])
+
+    def test_merged_kept_commits_after_pr_head(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        self.commit(path, "later")
+        r = self.sweep("--apply")
+        self.assertIn("commits after the merged PR head", r.stdout)
+        self.assertEqual(self.removed(), [])
+
+    def test_merged_behind_pr_head_is_removed(self):
+        path, head = self.lane("done")
+        self.commit(path, "later")
+        self.git(path, "push", "-q")
+        self.pr("done", "merged", self.git(path, "rev-parse", "HEAD"))
+        self.git(path, "reset", "-q", "--hard", head)
+        self.assertIn(f"REMOVED {path}", self.sweep("--apply").stdout)
+
+    def test_merged_kept_recent_terminal_output(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        self.terminal(path, out_h=0.1)
+        r = self.sweep("--apply")
+        self.assertIn("a terminal printed output in the last 30 min", r.stdout)
+        self.assertEqual(self.removed(), [])
+
+    def test_live_agent_keeps_lane(self):
+        for i, argv in enumerate((["claude"], ["node", "/x/bin/opencode", "--auto"], ["codex", "exec"])):
+            with self.subTest(argv=argv):
+                path, head = self.lane(f"done{i}")
+                self.pr(f"done{i}", "merged", head, number=10 + i)
+                self.agent(path / "sub" if i == 1 else path, argv, pid=100 + i)
+                (path / "sub").mkdir(exist_ok=True)
+                r = self.sweep("--apply")
+                self.assertIn(f"MERGED-KEEP {path}", r.stdout)
+                self.assertIn("an agent is still running in it", r.stdout)
+                self.assertNotIn(f"id:repo1::{path}", json.dumps(self.removed()))
+                (self.proc / str(100 + i) / "cwd").unlink()
+                (self.proc / str(100 + i) / "cmdline").write_bytes(b"")
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        self.agent(path, ["claude"], pid=200)
+        r = self.sweep("--apply")
+        self.assertNotIn(f"PR-REMOVED {path}", r.stdout)
+        self.assertNotIn(f"id:repo1::{path}", json.dumps(self.removed()))
+
+    def test_open_pr_pushed_clean_is_parked(self):
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        self.terminal(path, connected=True)
+        r = self.sweep()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"PR-PARKED {path} (#7 open", r.stdout)
+        r = self.sweep("--precheck")
+        self.assertEqual(r.returncode, 1)
+        r = self.sweep("--apply")
+        self.assertIn(f"PR-REMOVED {path}", r.stdout)
+        self.assertEqual(self.removed(), [["worktree", "rm", "--worktree", f"id:repo1::{path}", "--delete-branch"]])
+        self.assertIn("refs/heads/open", self.git(self.tmp, "ls-remote", str(self.origin)))  # remote branch kept
+        self.assertNotIn("close", (self.tmp / "gh.log").read_text())
+
+    def test_open_pr_with_local_commit_not_removed(self):
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        self.commit(path, "unpushed")
+        r = self.sweep("--apply")
+        self.assertNotIn("PR-", r.stdout)
+        self.assertEqual(self.removed(), [])
+
+    def test_base_branch_upstream_is_not_used(self):
+        main_head = self.git(self.main, "rev-parse", "HEAD")
+        self.pr("main", "merged", main_head, number=3)  # the base branch's old merged PR
+        path, _ = self.lane("feat", track="main")
+        r = self.sweep("--apply")
+        self.assertNotIn("MERGED", r.stdout)
+        self.assertEqual(self.removed(), [])
+
+    def test_same_branch_upstream_is_used(self):
+        path, head = self.lane("x", branch="user/x", push_as="x")
+        self.pr("x", "merged", head)
+        self.assertIn(f"MERGED {path}", self.sweep().stdout)
+
+    def test_stuck_lane(self):
+        path, _ = self.lane("old", hours_ago=7, activity_h=7)
+        r = self.sweep()
+        self.assertEqual(r.returncode, 10, r.stderr)
+        self.assertRegex(r.stdout, rf"STUCK +{path} \(branch old, .*7 h")
+        self.assertEqual(self.sweep("--stuck-hours", "8").returncode, 0)
+        self.assertEqual(self.sweep("--precheck").returncode, 0)
+
+    def test_recent_commit_is_activity(self):
+        path, _ = self.lane("old", hours_ago=1, activity_h=30)
+        self.assertEqual(self.sweep().returncode, 0)
+
+    def test_recent_terminal_output_is_activity(self):
+        path, _ = self.lane("old", hours_ago=9, activity_h=9)
+        self.terminal(path, out_h=1)
+        self.assertEqual(self.sweep().returncode, 0)
+
+    def test_parked_lane_not_stuck(self):
+        path, _ = self.lane("waiting", hours_ago=9, activity_h=9)
+        self.pr("waiting", "open", "f" * 40)
+        r = self.sweep()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_hold_file_skips(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        (self.conf_dir / "lane-sweep.hold").write_text(f"# kept for the owner\n{path}   # until Friday\n")
+        r = self.sweep("--apply")
+        self.assertEqual((r.returncode, r.stdout), (0, "nothing found\n"))
+        self.assertEqual(self.removed(), [])
+
+    def test_gone_and_detached(self):
+        self.state["worktrees"] += [
+            {"id": "repo1::/nope", "path": str(self.tmp / "nope"), "branch": "refs/heads/x", "isMainWorktree": False,
+             "isArchived": False, "lastActivityAt": ms(1)},
+            {"id": "repo1::det", "path": str(self.main), "branch": None, "isMainWorktree": False,
+             "isArchived": False, "lastActivityAt": ms(1)},
+            {"id": "repo1::arch", "path": str(self.tmp / "arch"), "branch": "refs/heads/y", "isMainWorktree": False,
+             "isArchived": True, "lastActivityAt": ms(1)}]
+        self.orca(self.state)
+        r = self.sweep()
+        self.assertEqual(r.returncode, 10)
+        self.assertIn(f"GONE   {self.tmp / 'nope'}", r.stdout)
+        self.assertIn(f"DETACH {self.main}", r.stdout)
+        self.assertNotIn("arch", r.stdout)
+
+    def test_owner_named_from_machine_conf(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        self.machine_conf(f'COORDINATORS="\nproj {self.main} claude proj coordinator\n"\n')
+        self.assertRegex(self.sweep().stdout, rf"MERGED {path} .* owner=proj\n")
+
+    def test_orca_down_exits_2(self):
+        self.state["down"] = True
+        self.orca(self.state)
+        self.assertEqual(self.sweep().returncode, 2)
+        self.assertEqual(self.sweep("--precheck").returncode, 2)
 
 if __name__ == "__main__":
     unittest.main()
