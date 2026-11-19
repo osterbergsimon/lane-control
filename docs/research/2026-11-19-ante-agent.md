@@ -38,7 +38,7 @@ Configuration, not code:
   MIT) drive it; `examples/mini-tui` shows building your own frontend.
 
 What it does **not** have: no extension or plugin API and no hooks. Nothing of ours runs inside the agent loop
-the way a Claude hook or a pi/OpenCode plugin does. (No hook mechanism appears in the CLI, settings, protocol or
+the way a Claude hook or an OpenCode plugin does. (No hook mechanism appears in the CLI, settings, protocol or
 storage references.)
 
 ## 3. Can a message from outside become a turn without typing?
@@ -70,8 +70,8 @@ From the Orca 1.4.250 app bundle:
   --prompt` is headless and exits, so it starts the TUI and types the prompt).
 - Full-access mode adds `--yolo`. No model or effort options: worker-start passes no `--model` for Ante, so it uses
   its own configured model.
-- No status hooks: `orca agent hooks status` does not list Ante, and Orca has no injected extension for it (as it
-  has for pi), so working/idle comes from Orca's generic terminal tracking, if at all (to confirm in a trial).
+- No status hooks: `orca agent hooks status` does not list Ante, and Orca injects no status extension for it,
+  so working/idle comes from Orca's generic terminal tracking, if at all (to confirm in a trial).
 - Wake: by typing into the terminal, like every agent.
 
 ## 6. Costs and risks
