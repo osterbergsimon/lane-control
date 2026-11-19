@@ -134,7 +134,7 @@ class MachineTest(unittest.TestCase):
         self.conf_dir = self.home / ".config" / "lane-control"
         self.conf_dir.mkdir(parents=True)
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith(("LANE_", "XDG_", "CLAUDE_CONFIG", "GITHUB_ACTIONS", "PLAYBOOK"))}
+                    if not k.startswith(("LANE_", "XDG_", "CLAUDE_CONFIG", "GITHUB_ACTIONS", "PLAYBOOK", "ORCA_"))}
         self.env.update(HOME=str(self.home), PATH=f"{self.bin}:{os.environ['PATH']}", LANE_PROC_DIR=str(self.proc),
                         LANE_STATE_DIR=str(self.tmp / "slots"), LANE_HOUR="12", PYTHONDONTWRITEBYTECODE="1")
 
@@ -722,6 +722,348 @@ class CiPresenceTests(MachineTest):
         self.assertIn("WantedBy=timers.target", timer)
 
 
+# --- Task 4.5: budget-state, machine-check, machine-setup ----------------------------------------------------------
+
+PLAYBOOK = """
+declare -A BUDGET_USAGE=( [main]="cat {feed}" [cheap]="" )
+declare -A BUDGET_RESET=( )
+declare -A BUDGET_CEILING=( [main]={ceiling} )
+DEFAULT_CEILING=40
+TIERS="swift standard"
+declare -A TIER_ENGINE=( [swift]=none [standard]=claude )
+declare -A TIER_BUDGET=( [swift]=cheap [standard]=main )
+STEP_NO_NEW=7
+STEP_WIP_STOP=4
+STEP_STOP_ALL=2
+PRESSURE_MARGIN=15
+WINDOW_STOP_PCT=98
+{extra}
+"""
+
+
+class BudgetTest(MachineTest):
+    def playbook(self, weekly, window, ceiling=93, extra=""):
+        feed = self.tmp / "feed"
+        if weekly is None:
+            feed.unlink(missing_ok=True)
+        else:
+            feed.write_text(f"{weekly} {window}\n")
+        conf = self.tmp / "playbook.conf.sh"
+        conf.write_text(PLAYBOOK.format(feed=feed, ceiling=ceiling, extra=extra))
+        self.env["PLAYBOOK_CONFIG"] = str(conf)
+
+    def marker(self) -> Path:
+        return self.conf_dir / "budget-stopped"
+
+
+class BudgetStateTests(BudgetTest):
+    def test_steps_from_ceiling(self):
+        for weekly, step in ((70, "step=0 none"), (78, "step=1 pressure"), (86, "step=2 no-new-work"),
+                             (89, "step=3 push-and-handover"), (91, "step=4 stop")):
+            with self.subTest(weekly=weekly):
+                self.playbook(weekly, 10)
+                r = self.run_script("budget-state")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout, f"main weekly={weekly} window=10 ceiling=93 {step}\n")
+        self.assertFalse(self.marker().exists())  # only --mark writes it
+
+    def test_mark_when_stopped_and_clear(self):
+        self.playbook(92, 10)
+        self.assertEqual(self.run_script("budget-state", "--mark").returncode, 0)
+        self.assertTrue(self.marker().is_file())
+        self.assertEqual(self.lane_limits("LANE_PRESENCE_WHY")["LANE_PRESENCE_WHY"], "budget stopped")
+        self.playbook(10, 10)
+        self.run_script("budget-state", "--mark")
+        self.assertFalse(self.marker().exists())
+
+    def test_window_stop_marks(self):
+        self.playbook(20, 98)
+        self.run_script("budget-state", "--mark")
+        self.assertTrue(self.marker().is_file())
+
+    def test_failed_feed_is_unknown_not_stopped(self):
+        self.marker().touch()
+        self.playbook(None, None)
+        r = self.run_script("budget-state", "--mark")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "main unknown (the usage feed gave no reading)\n")
+        self.assertFalse(self.marker().exists())
+
+    def test_ceiling_add_keeps_running(self):
+        self.playbook(92, 10, extra='declare -A COORD_CEILING_ADD=( [p]=10 )')
+        self.run_script("budget-state", "--mark")
+        self.assertFalse(self.marker().exists())
+
+    def test_no_config(self):
+        self.marker().touch()
+        self.env["PLAYBOOK_CONFIG"] = str(self.tmp / "none.sh")
+        r = self.run_script("budget-state", "--mark")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("none.sh", r.stderr)
+        self.assertFalse(self.marker().exists())
+        self.assertEqual(subprocess.run(["bash", "-n", str(SCRIPTS / "budget-state")]).returncode, 0)
+
+
+class MachineCheckTests(BudgetTest):
+    def setUp(self):
+        super().setUp()
+        self.playbook(20, 10)
+        self.gh({"runners": {}})
+
+    def check(self, *args):
+        return self.run_script("machine-check", *args)
+
+    def test_first_run_quiet(self):
+        r = self.check()
+        self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+        self.assertEqual(self.check().returncode, 1)
+
+    def test_step_change_wakes_once(self):
+        self.check()
+        self.playbook(86, 10)
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("CHANGED budget main: step 2 no-new-work (weekly 86%, ceiling 93; was step 0 none)", r.stdout)
+        self.assertEqual(self.check().returncode, 1)
+        self.playbook(None, None)
+        self.assertIn("CHANGED budget main: unknown", self.check().stdout)
+
+    def test_memory_low_wakes(self):
+        self.check()
+        (self.proc / "meminfo").write_text(MEMINFO_46G.replace("30000000", "2000000"))
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"CHANGED memory: low, 1G available \(lane-room holds new lanes under \d+G\)")
+        self.assertEqual(self.check().returncode, 1)
+        (self.proc / "meminfo").write_text(MEMINFO_46G)
+        self.assertIn("CHANGED memory: ok again", self.check().stdout)
+
+    def test_runner_offline_wakes(self):
+        self.machine_conf('COORDINATORS=""\nRUNNER_REPOS="o/r"\n')
+        self.gh({"runners": {"o/r": [{"name": "r1", "status": "online"}]}})
+        self.assertEqual(self.check().returncode, 1)
+        self.gh({"runners": {"o/r": [{"name": "r1", "status": "offline"}]}})
+        r = self.check()
+        self.assertIn("CHANGED runners o/r: offline r1 (was none)", r.stdout)
+        self.gh({})  # gh fails: the last known state stands, no flapping
+        self.assertEqual(self.check().returncode, 1)
+
+    def test_marks_budget_stopped(self):
+        self.playbook(92, 10)
+        self.check()
+        self.assertTrue(self.marker().is_file())
+
+    def test_last_prints_changes(self):
+        self.check()
+        self.playbook(86, 10)
+        changed = self.check().stdout
+        r = self.check("--last")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(changed.strip(), r.stdout)
+
+
+class MachineSetupTests(BudgetTest):
+    def setUp(self):
+        super().setUp()
+        self.orca()
+        self.systemctl()
+        self.gh({"runners": {}})
+        self.folder = self.home / "machine"
+        self.feed = self.home / ".claude" / "usage-history.jsonl"
+        self.feed.parent.mkdir(parents=True)
+        self.feed.write_text("{}\n")
+
+    def setup_machine(self, *args):
+        return self.run_script("machine-setup", "--folder", self.folder, "--trust-folder", *args)
+
+    def creates(self, what) -> list:
+        return [c for c in self.orca_calls() if c[:2] == what]
+
+    def test_writes_machine_conf_from_example(self):
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        conf = self.conf_dir / "machine.conf"
+        self.assertEqual(conf.read_text(), (ROOT / "core" / "templates" / "machine.conf.example").read_text())
+        self.assertEqual(stat.S_IMODE(conf.stat().st_mode), 0o600)
+        self.assertIn("machine.conf: created", r.stdout)
+        conf.write_text('COORDINATORS=""\nIDLE_MIN=50\n')
+        self.assertIn("machine.conf: exists", self.setup_machine("--no-start").stdout)
+        self.assertIn("IDLE_MIN=50", conf.read_text())
+
+    def test_example_conf_has_the_fixed_keys(self):
+        import machineconf
+        text = (ROOT / "core" / "templates" / "machine.conf.example").read_text()
+        for k in ("COORDINATORS", "RUNNER_REPOS", "NIGHT_START=23", "NIGHT_END=7", "IDLE_MIN=45", "RECHECK_MIN=120",
+                  "AWAY_HOURS=14"):
+            self.assertIn(k, text)
+        conf = machineconf.load(ROOT / "core" / "templates" / "machine.conf.example")
+        self.assertEqual(machineconf.coordinators(conf), [])
+        self.assertEqual((conf["IDLE_MIN"], conf["warnings"]), (45, []))
+
+    def test_usage_feed_check(self):
+        self.assertIn("usage feed: ok", self.setup_machine("--no-start").stdout)
+        age(self.feed, 90)
+        r = self.setup_machine("--no-start")
+        self.assertIn("usage feed: stale", r.stdout)
+        self.assertIn("unknown", r.stdout)
+        self.feed.unlink()
+        r = self.setup_machine("--no-start")
+        self.assertIn("usage feed: missing", r.stdout)
+        self.assertIn("status line", r.stdout)
+
+    def test_starts_claude_machine_coordinator(self):
+        r = self.setup_machine()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        persona = self.folder / ".lane-control" / "machine-coordinator.md"
+        text = persona.read_text()
+        self.assertNotIn("{{", text)
+        self.assertIn(str(self.folder / "notes.md"), text)
+        self.assertIn(str(ROOT), text)
+        self.assertTrue((self.folder / "notes.md").is_file())
+        settings = json.loads((self.folder / ".claude" / "settings.local.json").read_text())
+        self.assertIn("persona-hook.sh", json.dumps(settings["hooks"]["SessionStart"]))
+        self.assertEqual(self.creates(["repo", "add"]), [["repo", "add", "--path", str(self.folder), "--kind", "folder"]])
+        (create,) = self.creates(["terminal", "create"])
+        self.assertEqual(create[2:6], ["--worktree", f"path:{self.folder}", "--title", "machine coordinator"])
+        import shlex
+        cmd = shlex.split(create[create.index("--command") + 1])
+        self.assertEqual(cmd[:3], ["env", "LANE_ROLE=machine-coordinator", f"LANE_PERSONA={persona}"])
+        self.assertEqual(cmd[3:6], ["claude", "--model", "sonnet"])
+        self.assertEqual(cmd[-2:], ["--name", "machine coordinator"])
+        trust = json.loads((self.home / ".claude.json").read_text())
+        self.assertTrue(trust["projects"][str(self.folder.resolve())]["hasTrustDialogAccepted"])
+
+    def test_additions_appended_to_persona(self):
+        add = self.folder / ".lane-control" / "additions" / "machine-coordinator.md"
+        add.parent.mkdir(parents=True)
+        add.write_text("## This machine\n- Runner box: trial-vps.\n")
+        self.setup_machine("--no-start")
+        text = (self.folder / ".lane-control" / "machine-coordinator.md").read_text()
+        self.assertTrue(text.endswith("## This machine\n- Runner box: trial-vps.\n"))
+
+    def test_opencode_machine_coordinator(self):
+        r = self.setup_machine("--machine-coordinator", "opencode/anthropic/claude-sonnet-4-5")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        (create,) = self.creates(["terminal", "create"])
+        self.assertIn("opencode2 --standalone --auto", create[create.index("--command") + 1])
+        self.assertTrue((self.home / ".config" / "opencode" / "plugins" / "lane-persona.js").is_file())
+        for bad in ("opencode/opencode-go/deepseek-v4.1-flash", "opencode/opencode/big-pickle", "pi/x", "claude/"):
+            with self.subTest(bad=bad):
+                r = self.setup_machine("--machine-coordinator", bad)
+                self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("lane-tier", self.setup_machine("--machine-coordinator", "opencode/opencode-go/x").stderr)
+
+    def test_running_coordinator_not_restarted(self):
+        self.orca({"terminals": [{"handle": "term_1", "title": "machine coordinator", "worktreePath": str(self.folder)}]})
+        r = self.setup_machine()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.creates(["terminal", "create"]), [])
+        self.assertIn("machine coordinator: exists", r.stdout)
+
+    def automations(self) -> dict:
+        out = {}
+        for c in self.creates(["automations", "create"]):
+            out[c[c.index("--name") + 1]] = c
+        return out
+
+    def test_creates_three_automations(self):
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        a = self.automations()
+        self.assertEqual(set(a), {"night manager", "lane sweep", "machine check"})
+        triggers = {"night manager": "37 * * * *", "lane sweep": "17 */3 * * *", "machine check": "*/30 * * * *"}
+        import shlex
+        prechecks = {"night manager": shlex.quote(f"{SCRIPTS}/night-precheck"),
+                     "lane sweep": shlex.quote(f"{SCRIPTS}/lane-sweep") + " --precheck",
+                     "machine check": shlex.quote(f"{SCRIPTS}/machine-check")}
+        for name, c in a.items():
+            with self.subTest(name=name):
+                def opt(k):
+                    return c[c.index(k) + 1]
+                self.assertEqual(opt("--trigger"), triggers[name])
+                self.assertEqual(opt("--precheck"), prechecks[name])
+                self.assertEqual(opt("--provider"), "claude")
+                self.assertIn("--extra-agent-args=--model sonnet", c)
+                self.assertEqual(opt("--workspace"), f"path:{self.folder}")
+                self.assertEqual(opt("--workspace-mode"), "existing")
+                self.assertIn("--enabled", c)
+                self.assertNotIn("--apply", opt("--prompt"))
+        self.assertIn("night-manager.md", a["night manager"][a["night manager"].index("--prompt") + 1])
+
+    def test_rerun_is_idempotent(self):
+        self.setup_machine()
+        n = len(self.orca_calls())
+        self.assertEqual(len(self.automations()), 3)
+        r = self.setup_machine()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        later = self.orca_calls()[n:]
+        self.assertEqual([c for c in later if c[1:2] in (["create"], ["add"])], [])
+        for line in ("night manager: exists", "lane sweep: exists", "machine check: exists",
+                     "machine coordinator: exists", "ci-presence timer: exists"):
+            self.assertIn(line, r.stdout)
+
+    def test_installs_ci_presence_timer(self):
+        r = self.setup_machine("--no-start")
+        units = self.home / ".config" / "systemd" / "user"
+        svc = (units / "ci-presence.service").read_text()
+        self.assertIn(f'ExecStart=/usr/bin/env bash "{ROOT}/core/scripts/ci-presence"', svc)
+        self.assertNotIn("@REPO@", svc)
+        self.assertNotIn("@PATH@", svc)
+        self.assertTrue((units / "ci-presence.timer").is_file())
+        calls = self.systemctl_calls()
+        self.assertIn(["--user", "daemon-reload"], calls)
+        self.assertIn(["--user", "enable", "--now", "ci-presence.timer"], calls)
+        self.assertIn("ci-presence timer: created", r.stdout)
+
+    def test_no_systemd_warns_and_continues(self):
+        self.systemctl({"down": True})
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("ci-presence timer: skipped", r.stdout)
+        self.assertEqual(len(self.automations()), 3)
+        self.assertFalse((self.home / ".config" / "systemd" / "user" / "ci-presence.timer").exists())
+
+    def test_no_start(self):
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.creates(["terminal", "create"]), [])
+        self.assertIn("machine coordinator: skipped", r.stdout)
+        self.assertTrue((self.folder / ".lane-control" / "machine-coordinator.md").is_file())
+
+    def test_host_runs_there_over_ssh(self):
+        write_exec(self.bin / "ssh", """
+            #!/usr/bin/env python3
+            import json, os, sys
+            log = os.environ["SSH_STUB_LOG"]
+            data = sys.stdin.buffer.read() if not sys.stdin.isatty() else b""
+            n = len([x for x in os.listdir(os.path.dirname(log)) if x.startswith("ssh-in")])
+            open(os.path.join(os.path.dirname(log), f"ssh-in{n}"), "wb").write(data)
+            open(log, "a").write(json.dumps(sys.argv[1:]) + "\\n")
+            """)
+        self.env["SSH_STUB_LOG"] = str(self.tmp / "ssh.log")
+        r = self.run_script("machine-setup", "--host", "user@host", "--folder", "~/machine", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        calls = [json.loads(x) for x in (self.tmp / "ssh.log").read_text().splitlines()]
+        self.assertEqual(calls[0][0], "user@host")
+        self.assertIn("tar -C ~/.local/share/lane-control -xf -", calls[0][1])
+        listing = subprocess.run(["tar", "-tf", str(self.tmp / "ssh-in0")], capture_output=True, text=True).stdout
+        for f in ("core/scripts/machine-setup", "core/harnesses/persona-hook.sh", ".lane-control-root",
+                  "orchestrators/native-orca/personas/machine-coordinator.md"):
+            self.assertIn(f, listing)
+        self.assertNotIn("tests/", listing)
+        self.assertEqual(calls[1][-1], "~/.local/share/lane-control/core/scripts/machine-setup --folder ~/machine --no-start")
+        self.assertEqual(self.orca_calls(), [])  # nothing ran here
+
+
+class NightManagerDocTests(unittest.TestCase):
+    def test_night_manager_doc(self):
+        text = (ROOT / "orchestrators" / "native-orca" / "night-manager.md").read_text()
+        for needle in ("night-precheck", "--checked", "lane-sweep --stuck-hours 2", "SendMessage",
+                       "orchestration send --to run:", "no-new-work", "machine.conf", "nothing"):
+            self.assertIn(needle, text)
+        self.assertNotIn("--apply", text.replace("never `--apply`", "").replace("never --apply", ""))
+        for private in ("vellum", "calvin", "pasteur", "osterberg", "/home/", "10.10."):
+            self.assertNotIn(private, text.lower())
 
 if __name__ == "__main__":
     unittest.main()

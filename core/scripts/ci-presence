@@ -27,7 +27,8 @@ esac
 
 cpu=$LANE_CI_CPU_PCT
 want_cpu_us=$((cpu * 10000))   # 100 % is one second of CPU per second
-if [ "$LANE_CI_MEM_GB" -gt 0 ]; then mem=${LANE_CI_MEM_GB}G want_mem=$((LANE_CI_MEM_GB << 30)); else mem=infinity want_mem=infinity; fi
+mem=infinity want_mem=infinity
+[ "$LANE_CI_MEM_GB" -gt 0 ] && mem=${LANE_CI_MEM_GB}G want_mem=$((LANE_CI_MEM_GB << 30))
 why=$LANE_PRESENCE_WHY
 
 if ! cur=$(systemctl --user show "$LANE_CI_SLICE" -p CPUQuotaPerSecUSec -p MemoryMax --value 2>&1); then

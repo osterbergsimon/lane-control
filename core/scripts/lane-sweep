@@ -31,7 +31,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -48,13 +47,9 @@ class SweepError(Exception):
     pass
 
 
-def orca_cli() -> str:
-    return os.environ.get("ORCA_CLI") or shutil.which("orca-ide") or "orca-ide"
-
-
 def orca(*args) -> dict:
     try:
-        r = subprocess.run([orca_cli(), *args, "--json"], capture_output=True, text=True, timeout=120)
+        r = subprocess.run([machineconf.orca_cli(), *args, "--json"], capture_output=True, text=True, timeout=120)
         data = json.loads(r.stdout or "{}")
     except (OSError, subprocess.TimeoutExpired, ValueError) as e:
         raise SweepError(f"orca-ide {' '.join(args)}: {e}") from None
@@ -223,7 +218,8 @@ class Sweep:
                                 f"fix){tag}")
             return self.say(f"PR-FAIL {path} (#{n} open; worktree rm failed){tag}")
 
-        times = [(wt.get("lastActivityAt") or 0) / 1000, max([(t.get("lastOutputAt") or 0) / 1000 for t in mine] or [0])]
+        times = [(wt.get("lastActivityAt") or 0) / 1000,
+                 max([(t.get("lastOutputAt") or 0) / 1000 for t in mine] or [0])]
         commit = git(path, "log", "-1", "--format=%ct", "HEAD")
         times.append(int(commit) if commit and commit.isdigit() else 0)
         limit = self.stuck_hours * 3600

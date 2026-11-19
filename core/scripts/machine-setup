@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""machine-setup: set a machine up once for native Orca (spec sections 8 and 11): the machine coordinator, the night
+manager, lane sweep and machine check automations, the presence-based CI limits and the usage feed check.
+
+  machine-setup [--host H] [--folder DIR] [--machine-coordinator HARNESS/MODEL] [--permission-mode MODE]
+                [--trust-folder] [--no-start]
+
+Runs as a normal user on the machine whose coordinators it watches; with --host it copies what it needs to H over
+SSH (~/.local/share/lane-control, as project-setup does) and runs there with the same arguments, so a box gets its own
+machine coordinator, night manager and sweep. Every step is skipped when already done and says `exists`; nothing is
+started twice and an existing automation or machine.conf is never changed.
+
+1. ~/.config/lane-control/machine.conf (LANE_MACHINE_CONF) from core/templates/machine.conf.example, mode 0600, if
+   missing: fill in COORDINATORS and RUNNER_REPOS by hand.
+2. The usage feed (~/.claude/usage-history.jsonl, written by Claude's status line) must exist and be written in the
+   last hour; if not it says so and how to turn it on, and budget steps are unknown until it is.
+3. The machine coordinator's private folder (--folder, default ~/machine-coordinator; never push it to a public
+   remote) with notes.md, added to Orca as a folder project. Its persona (orchestrators/native-orca/personas/) is
+   rendered to <folder>/.lane-control/machine-coordinator.md, with <folder>/.lane-control/additions/
+   machine-coordinator.md appended when that exists; the harness's persona hook is installed.
+4. Unless --no-start, the machine coordinator starts in an Orca terminal titled `machine coordinator` (skipped when a
+   terminal with that title exists): `env LANE_ROLE=machine-coordinator LANE_PERSONA=... claude --model sonnet
+   --permission-mode auto --name "machine coordinator"` (default claude/sonnet; Claude's --name keeps the session
+   and terminal title, so peers find it by SendMessage). Claude's first-start folder question: --trust-folder answers
+   yes; otherwise it is asked in a terminal, as project-setup does.
+5. Orca automations in that folder (fresh Claude Sonnet sessions; each precheck runs first and costs nothing):
+   `night manager` hourly at :37 (night-precheck), `lane sweep` every 3 hours (lane-sweep --precheck, report only)
+   and `machine check` every 30 minutes (machine-check: budget step, memory or runner state changed). The machine
+   check's session passes the change on to the machine coordinator, since an automation cannot wake a session it
+   did not start.
+6. The ci-presence user timer (every 15 minutes and at boot), if systemd --user works; otherwise a warning and the
+   CI limits stay the slice unit's own.
+Exit: 0 done (warnings included); 1 a step failed; 2 usage or a refused harness/model.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+sys.path.insert(0, str(ROOT / "core"))
+import harnesses  # noqa: E402
+import machineconf  # noqa: E402
+
+ROLE = "machine-coordinator"
+TITLE = "machine coordinator"
+PERSONA = ROOT / "orchestrators" / "native-orca" / "personas" / f"{ROLE}.md"
+NIGHT_DOC = ROOT / "orchestrators" / "native-orca" / "night-manager.md"
+REMOTE = "~/.local/share/lane-control"
+HOST_FILES = [".lane-control-root", "core", "orchestrators/native-orca",
+              "orchestrators/orca-cotal/scripts/project-setup"]
+NOTES_STUB = ("# Machine coordinator notes\n\n"
+              "Private: owner decisions, caps, priorities. Never push this folder to a public remote.\n")
+FEED_MAX_AGE_MIN = 60
+AUTOMATION_MODEL = "sonnet"
+
+
+class Fail(Exception):
+    pass
+
+
+def say(step: str, what: str, detail: str = ""):
+    print(f"{step}: {what}" + (f" {detail}" if detail else ""), flush=True)
+
+
+def project_setup():
+    """project-setup as a module, for its folder-trust step (one implementation of Claude's trust question)."""
+    path = ROOT / "orchestrators" / "orca-cotal" / "scripts" / "project-setup"
+    loader = importlib.machinery.SourceFileLoader("project_setup", str(path))
+    spec = importlib.util.spec_from_loader("project_setup", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def orca(*args) -> dict:
+    cmd = [machineconf.orca_cli(), *args, "--json"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        data = json.loads(r.stdout or "{}")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+        raise Fail(f"orca-ide {' '.join(args[:2])}: {e}") from None
+    if r.returncode != 0 or not data.get("ok", False):
+        msg = (data.get("error") or {}).get("message") or r.stderr.strip() or f"exit {r.returncode}"
+        raise Fail(f"orca-ide {' '.join(args[:2])}: {msg}")
+    return data.get("result") or {}
+
+
+def harness_model(spec: str) -> tuple:
+    """claude/<model> or opencode/<provider/model>; OpenCode's own providers only where lane-tier allows (not here)."""
+    harness, _, model = spec.partition("/")
+    if harness not in harnesses.harnesses_names() or not model:
+        raise SystemExit2(f"--machine-coordinator: expected claude/<model> or opencode/<model>, got {spec!r}")
+    if harness == "opencode" and model.startswith(("opencode/", "opencode-go/")):
+        raise SystemExit2(f"--machine-coordinator {spec}: refused, as lane-tier refuses it: OpenCode's own providers "
+                          "(opencode/, opencode-go/) run only where lane-tier allows (model-routing.md, \"Sandbox per "
+                          "tier\"), never for the machine coordinator; choose a provider the owner allows")
+    return harness, model
+
+
+class SystemExit2(Exception):
+    pass
+
+
+# --- steps -----------------------------------------------------------------------------------------------------------
+
+def machine_conf():
+    p = machineconf.path()
+    if p.exists():
+        say("machine.conf", "exists", str(p))
+    else:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(machineconf.EXAMPLE.read_text())
+        say("machine.conf", "created", f"{p} (fill in COORDINATORS and RUNNER_REPOS)")
+    try:
+        conf = machineconf.load(p)
+        for w in conf["warnings"]:
+            say("machine.conf", "warning", w)
+        machineconf.coordinators(conf)
+    except machineconf.ConfError as e:
+        say("machine.conf", "warning", str(e))
+
+
+def usage_feed():
+    f = Path.home() / ".claude" / "usage-history.jsonl"
+    how = ("budget steps stay unknown until it is: Claude Code's status line must append each sample to it "
+           "(core/machine.md, \"Usage feeds\")")
+    try:
+        mins = int((time.time() - f.stat().st_mtime) // 60)
+    except FileNotFoundError:
+        return say("usage feed", "missing", f"{f}: {how}")
+    if mins > FEED_MAX_AGE_MIN:
+        return say("usage feed", "stale", f"{f} was last written {mins} min ago: {how}")
+    say("usage feed", "ok", f"{f} ({mins} min old)")
+
+
+def folder_step(folder: Path):
+    folder.mkdir(parents=True, exist_ok=True)
+    notes = folder / "notes.md"
+    if not notes.exists():
+        notes.write_text(NOTES_STUB)
+    repos = orca("repo", "list").get("repos", [])
+    if any(os.path.realpath(r.get("path", "")) == str(folder) for r in repos):
+        return say("orca folder", "exists", str(folder))
+    orca("repo", "add", "--path", str(folder), "--kind", "folder")
+    say("orca folder", "created", str(folder))
+
+
+def render(harness: str, model: str, folder: Path) -> str:
+    text = (PERSONA.read_text().replace("{{HARNESS}}", harness).replace("{{MODEL}}", model)
+            .replace("{{NOTES}}", str(folder / "notes.md")).replace("{{LANE_CONTROL}}", str(ROOT)))
+    left = sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", text)))
+    if left:
+        raise Fail(f"{PERSONA}: placeholders machine-setup does not fill: {', '.join(left)}")
+    add = folder / ".lane-control" / "additions" / f"{ROLE}.md"
+    if add.is_file():
+        text = text.rstrip("\n") + "\n\n" + add.read_text()
+    return text
+
+
+def persona_step(harness: str, model: str, folder: Path) -> Path:
+    dest = folder / ".lane-control" / f"{ROLE}.md"
+    text = render(harness, model, folder)
+    if dest.is_file() and dest.read_text() == text:
+        say("persona", "exists", str(dest))
+    else:
+        what = "updated" if dest.exists() else "created"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".tmp")
+        tmp.write_text(text)
+        tmp.replace(dest)
+        say("persona", what, str(dest))
+    changes = harnesses.load_harness(harness).install_persona_hook(folder)
+    for c in changes:
+        say("persona hook", "created", c)
+    if not changes:
+        say("persona hook", "exists", harness)
+    return dest
+
+
+def start_step(harness: str, model: str, mode: str, folder: Path, persona: Path, trust: bool):
+    terms = orca("terminal", "list").get("terminals", []) or []
+    if any(t.get("title") == TITLE for t in terms):
+        return say(TITLE, "exists", "(a terminal with that title is open; not started again)")
+    if harness == "claude":
+        ps = project_setup()
+        try:
+            ps.ensure_claude_trust(folder, record=trust)
+        except ps.Fail as e:
+            raise Fail(str(e)) from None
+    cmd = harnesses.load_harness(harness).start_command(ROLE, persona, model, mode)
+    if harness == "claude":
+        cmd += ["--name", TITLE]
+    orca("terminal", "create", "--worktree", f"path:{folder}", "--title", TITLE, "--command", shlex.join(cmd))
+    say(TITLE, "created", f"{harness}/{model} in {folder}")
+
+
+def automation_specs() -> list:
+    s = HERE
+    q = shlex.quote
+    night = (f"You are this machine's night manager. Follow {NIGHT_DOC} exactly; lane-control is {ROOT}. "
+             "Be brief: you spend budget nobody is watching.")
+    sweep = (f"Run {q(str(s / 'lane-sweep'))} as it is (report only: it removes nothing, and you add no flag). "
+             f"Send each finding line to the coordinator its owner= names, the way the Messages section of "
+             f"{NIGHT_DOC} says; a line without an owner goes to the machine coordinator. PR-PARKED lines need nothing. Then end.")
+    check = (f"Run {q(str(s / 'machine-check'))} --last and send its lines, unchanged, to the machine coordinator "
+             f"(session `{TITLE}`), the way the Messages section of {NIGHT_DOC} says. Do nothing else. Then end.")
+    return [("night manager", "37 * * * *", q(str(s / "night-precheck")), night),
+            ("lane sweep", "17 */3 * * *", q(str(s / "lane-sweep")) + " --precheck", sweep),
+            ("machine check", "*/30 * * * *", q(str(s / "machine-check")), check)]
+
+
+def automations_step(folder: Path):
+    have = {a.get("name") for a in orca("automations", "list").get("automations", []) or []}
+    for name, trigger, precheck, prompt in automation_specs():
+        if name in have:
+            say(name, "exists", "(automation; not changed)")
+            continue
+        orca("automations", "create", "--name", name, "--trigger", trigger, "--prompt", prompt, "--provider", "claude",
+             f"--extra-agent-args=--model {AUTOMATION_MODEL}", "--precheck", precheck,
+             "--workspace", f"path:{folder}", "--workspace-mode", "existing", "--enabled")
+        say(name, "created", f"(automation, {trigger}, precheck {precheck})")
+
+
+def systemctl(*args) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return subprocess.CompletedProcess(args, 1, "", str(e))
+
+
+def timer_step():
+    step = "ci-presence timer"
+    if not shutil.which("systemctl") or systemctl("show-environment").returncode != 0:
+        return say(step, "skipped", "(warning: no systemd user manager here; the CI slice keeps its unit's own "
+                                    "limits, the rest works)")
+    v = os.environ.get("XDG_CONFIG_HOME")
+    units = (Path(v) if v and os.path.isabs(v) else Path.home() / ".config") / "systemd" / "user"
+    units.mkdir(parents=True, exist_ok=True)
+    changed = False
+    for name in ("ci-presence.service", "ci-presence.timer"):
+        text = (ROOT / "core" / "templates" / name).read_text()
+        text = text.replace("@REPO@", str(ROOT)).replace("@PATH@", os.environ.get("PATH", "").replace("%", "%%"))
+        dest = units / name
+        if not (dest.is_file() and dest.read_text() == text):
+            dest.write_text(text)
+            changed = True
+    if changed and systemctl("daemon-reload").returncode != 0:
+        raise Fail("systemctl --user daemon-reload failed")
+    if not changed and systemctl("is-enabled", "ci-presence.timer").returncode == 0:
+        return say(step, "exists", str(units / "ci-presence.timer"))
+    r = systemctl("enable", "--now", "ci-presence.timer")
+    if r.returncode != 0:
+        raise Fail(f"systemctl --user enable --now ci-presence.timer failed: {r.stderr.strip()}")
+    say(step, "created", f"{units / 'ci-presence.timer'} (to keep it without a login session: loginctl "
+                         "enable-linger $USER)")
+
+
+# --- host ------------------------------------------------------------------------------------------------------------
+
+def ssh_base() -> list:
+    cfg = os.environ.get("LANE_SSH_CONFIG")
+    return ["ssh", "-F", os.path.expanduser(cfg)] if cfg else ["ssh"]
+
+
+def on_host(host: str, argv: list) -> int:
+    """Copy what machine-setup needs to the host and run it there with the same arguments minus --host."""
+    pack = subprocess.Popen(["tar", "-C", str(ROOT), "--exclude=__pycache__", "-cf", "-", *HOST_FILES],
+                            stdout=subprocess.PIPE)
+    copy = subprocess.run([*ssh_base(), host, f"mkdir -p {REMOTE} && tar -C {REMOTE} -xf -"], stdin=pack.stdout)
+    pack.stdout.close()
+    if pack.wait() != 0 or copy.returncode != 0:
+        print(f"machine-setup: copying lane-control to {host} failed", file=sys.stderr)
+        return 1
+    args, skip = [], False
+    for x in argv:
+        if skip:
+            skip = False
+        elif x == "--host":
+            skip = True
+        elif not x.startswith("--host="):
+            args.append(x)
+
+    def q(x):  # keep a leading ~/ for the remote shell to expand
+        return "~/" + shlex.quote(x[2:]) if x.startswith("~/") else shlex.quote(x)
+    cmd = f"{REMOTE}/core/scripts/machine-setup " + " ".join(q(x) for x in args)
+    tty = sys.stdin.isatty()
+    return subprocess.run([*ssh_base(), *(["-t"] if tty else []), host, cmd.rstrip()],
+                          stdin=None if tty else subprocess.DEVNULL).returncode
+
+
+def main(argv) -> int:
+    ap = argparse.ArgumentParser(prog="machine-setup", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--host")
+    ap.add_argument("--folder", default="~/machine-coordinator")
+    ap.add_argument("--machine-coordinator", default="claude/sonnet", metavar="HARNESS/MODEL")
+    ap.add_argument("--permission-mode", default="auto")
+    ap.add_argument("--trust-folder", action="store_true")
+    ap.add_argument("--no-start", action="store_true")
+    a = ap.parse_args(argv)
+    if os.geteuid() == 0:
+        print("machine-setup: refusing to run as root; agents run as a normal user", file=sys.stderr)
+        return 2
+    try:
+        harness, model = harness_model(a.machine_coordinator)
+        harnesses.load_harness(harness).start_command(ROLE, Path("/x"), model, a.permission_mode)
+    except (SystemExit2, ValueError) as e:
+        print(f"machine-setup: {e}", file=sys.stderr)
+        return 2
+    if a.host:
+        return on_host(a.host, argv)
+    folder = Path(os.path.expanduser(a.folder)).resolve()
+    try:
+        machine_conf()
+        usage_feed()
+        folder_step(folder)
+        persona = persona_step(harness, model, folder)
+        if a.no_start:
+            say(TITLE, "skipped", "(--no-start)")
+        else:
+            start_step(harness, model, a.permission_mode, folder, persona, a.trust_folder)
+        automations_step(folder)
+        timer_step()
+    except (Fail, ValueError, OSError) as e:
+        print(f"machine-setup: {e}", file=sys.stderr)
+        return 1
+    print(f"summary: machine coordinator folder {folder} · {harness}/{model} · automations night manager, lane sweep, "
+          "machine check")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

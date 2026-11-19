@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# budget-state: each metered budget's step now, from its usage feed and weekly ceiling (the config's budgets; lib.sh).
+#
+#   budget-state          one line per metered budget:
+#                           <budget> weekly=<w> window=<s> ceiling=<c> step=<n> <name>
+#                           <budget> unknown (the usage feed gave no reading)
+#                         steps from the ceiling: 0 none, 1 pressure (ceiling-PRESSURE_MARGIN), 2 no-new-work
+#                         (-STEP_NO_NEW), 3 push-and-handover (-STEP_WIP_STOP), 4 stop (-STEP_STOP_ALL)
+#   budget-state --mark   also writes the budget-stopped marker (LANE_BUDGET_STOPPED_FILE, default
+#                         ~/.config/lane-control/budget-stopped) while every metered budget a lane tier runs on is
+#                         stopped: weekly at its stop step (with the largest per-project COORD_CEILING_ADD, since one
+#                         raised project keeps working) or its window at WINDOW_STOP_PCT. Otherwise it removes it.
+#
+# The marker makes lane-limits.sh give CI the night-or-away limits (agents sit idle until the reset, so the machine is
+# CI's); it counts for one hour, so machine-check runs this every 30 minutes and a dead writer cannot leave CI on away
+# limits. It is never a reason to spend budget: the night manager reads LANE_OWNER_AWAY, not this. A feed that gives
+# no reading is unknown, never assumed stopped. Exit: 0; 2 no config (the marker is removed) or usage.
+set -u
+mark=
+case ${1:-} in
+  '') ;;
+  --mark) mark=1 ;;
+  -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$(readlink -f "$0")"; exit 0 ;;
+  *) echo "usage: budget-state [--mark]" >&2; exit 2 ;;
+esac
+marker=${LANE_BUDGET_STOPPED_FILE:-$HOME/.config/lane-control/budget-stopped}
+conf=${PLAYBOOK_CONFIG:-$HOME/.config/rove/playbook.conf.sh}
+if [ ! -r "$conf" ]; then
+  [ -z "$mark" ] || rm -f "$marker"
+  echo "budget-state: no config $conf (core/config.example.sh): every budget is unknown" >&2
+  exit 2
+fi
+here=$(dirname "$(readlink -f "$0")")
+set +u
+# shellcheck source=lib.sh
+. "$here/lib.sh"
+set -u
+margin=${PRESSURE_MARGIN:-15} no_new=${STEP_NO_NEW:-7} wip=${STEP_WIP_STOP:-4} stop=${STEP_STOP_ALL:-2}
+window_stop=${WINDOW_STOP_PCT:-98}
+names=(none pressure no-new-work push-and-handover stop)
+add=0
+for p in "${!COORD_CEILING_ADD[@]}"; do
+  [ "${COORD_CEILING_ADD[$p]:-0}" -gt "$add" ] 2>/dev/null && add=${COORD_CEILING_ADD[$p]}
+done
+lane_budgets=" "
+for t in ${TIERS:-}; do
+  [ "${TIER_ENGINE[$t]:-none}" = none ] || lane_budgets+="${TIER_BUDGET[$t]:-} "
+done
+
+all_stopped= any_lane=
+for b in $(metered | sort); do
+  reading=$(bash -c "${BUDGET_USAGE[$b]}" 2>/dev/null)
+  if ! [[ "$reading" =~ ^[0-9]+\ [0-9]+$ ]]; then
+    echo "$b unknown (the usage feed gave no reading)"
+    [[ "$lane_budgets" == *" $b "* ]] && { any_lane=1; all_stopped=no; }
+    continue
+  fi
+  read -r wk ss <<<"$reading"
+  ceil=$(budget_ceiling "$b")
+  [[ "$ceil" =~ ^[0-9]+$ ]] || ceil=${DEFAULT_CEILING:-40}
+  step=0
+  if [ "$wk" -ge $((ceil - stop)) ]; then step=4
+  elif [ "$wk" -ge $((ceil - wip)) ]; then step=3
+  elif [ "$wk" -ge $((ceil - no_new)) ]; then step=2
+  elif [ "$wk" -ge $((ceil - margin)) ]; then step=1
+  fi
+  echo "$b weekly=$wk window=$ss ceiling=$ceil step=$step ${names[$step]}"
+  if [[ "$lane_budgets" == *" $b "* ]]; then
+    any_lane=1
+    if [ "$wk" -lt $((ceil + add - stop)) ] && [ "$ss" -lt "$window_stop" ]; then all_stopped=no; fi
+  fi
+done
+if [ -n "$mark" ]; then
+  if [ -n "$any_lane" ] && [ -z "$all_stopped" ]; then
+    mkdir -p "$(dirname "$marker")" && touch "$marker"
+  else
+    rm -f "$marker"
+  fi
+fi
+exit 0

@@ -8,6 +8,7 @@ line, `<name> <checkout path> <harness> <Orca terminal title>` (the title may ha
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
@@ -107,3 +108,14 @@ def offline_runners(repo: str) -> list:
     except (ValueError, AttributeError):
         raise RunnerError(f"{repo}: gh api gave no runner list") from None
     return [x.get("name", "?") for x in runners if x.get("status") != "online"]
+
+
+def orca_cli() -> str:
+    """The Orca CLI: ORCA_CLI, the Orca host CLI (~/.orca/cli/bin/orca), `orca-ide` on PATH, then the desktop shim.
+    Plain `orca` may be another program, so it is never guessed."""
+    home = Path.home()
+    for c in (os.environ.get("ORCA_CLI"), home / ".orca" / "cli" / "bin" / "orca", shutil.which("orca-ide"),
+              home / ".config" / "orca" / "linux-orca-cli-shim" / "orca"):
+        if c and os.access(str(c), os.X_OK):
+            return str(c)
+    return "orca-ide"
