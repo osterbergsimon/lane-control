@@ -43,7 +43,10 @@ exec "$@"
 """
 SYSTEMCTL = """#!/usr/bin/env sh
 echo "$*" >> "$STUB_DIR/systemctl.log"
-case "$*" in *show*) [ -e "$STUB_DIR/scope-result" ] && cat "$STUB_DIR/scope-result" ;; esac
+case "$*" in
+  *MemoryMax*) if [ -e "$STUB_DIR/slice-unlimited" ]; then echo infinity; else echo 10737418240; fi ;;
+  *show*) [ -e "$STUB_DIR/scope-result" ] && cat "$STUB_DIR/scope-result" ;;
+esac
 exit 0
 """
 
@@ -69,8 +72,10 @@ class Machine(unittest.TestCase):
         self.stub("systemctl", SYSTEMCTL)
         self.env = dict(os.environ, PATH=f"{self.stubs}:{os.environ['PATH']}", STUB_DIR=str(self.stubs),
                         LANE_PROC_DIR=str(self.proc), LANE_STATE_DIR=str(self.dir / "state"),
-                        LANE_LIMITS_FILE=str(self.limits))
-        self.env.pop("LANE_HEAVY_HOLDS_SLOT", None)
+                        LANE_LIMITS_FILE=str(self.limits), LANE_AWAY_FILE=str(self.dir / "away"), LANE_HOUR="12",
+                        LANE_BUDGET_STOPPED_FILE=str(self.dir / "budget-stopped"))
+        for name in ("LANE_HEAVY_HOLDS_SLOT", "GITHUB_ACTIONS", "LANE_HEAVY_CI"):   # a CI run of this suite is no CI job
+            self.env.pop(name, None)
 
     def stub(self, name, body):
         path = self.stubs / name
@@ -97,12 +102,19 @@ class Machine(unittest.TestCase):
     def limits_seen(self, cores=12, mem_gb=64):
         self.stub("nproc", f"#!/usr/bin/env sh\necho {cores}\n")
         (self.proc / "meminfo").write_text(f"MemTotal: {mem_gb * 1048576} kB\nMemAvailable: 1048576 kB\n")
-        names = "LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD LANE_ROOM_MAX_AGENTS LANE_ROOM_SAMPLES".split()
-        show = "; ".join(f'echo "{n}=${n}"' for n in names)
+        names = ("LANE_RESERVE_GB LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_CI_SLOTS LANE_CI_MEM_GB LANE_CI_CPU_PCT "
+                 "LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD LANE_ROOM_MAX_AGENTS LANE_ROOM_SAMPLES").split()
+        show = "; ".join(f'echo "{n}=${n}"' for n in names) + '; echo "presence=$LANE_PRESENCE,$LANE_PRESENCE_WHY,$LANE_OWNER_AWAY"'
+
         r = subprocess.run(["bash", "-c", f". {LIMITS}; {show}"], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.stderr = r.stderr
-        return {k: int(v) for k, v in (l.split("=") for l in r.stdout.split())}
+        seen = dict(l.split("=", 1) for l in r.stdout.splitlines())
+        self.presence = seen.pop("presence")
+        return {k: int(v) for k, v in seen.items()}
+
+    def job_lines(self):
+        return [l for l in (self.stubs / "systemd-run.log").read_text().splitlines() if "-probe" not in l]
 
     def heavy(self, *cmd, **kw):
         return subprocess.run([str(HEAVY), *cmd], env=self.env, capture_output=True, text=True, timeout=TIMEOUT, **kw)
@@ -149,9 +161,6 @@ class HeavyTests(Machine):
         self.assertEqual(len(run), 1)
         for needle in ("--user --scope", "MemoryMax=3G", "MemorySwapMax=0", "nice -n 19", "ionice -t -c 2 -n 7"):
             self.assertIn(needle, run[0])
-
-    def job_lines(self):
-        return [l for l in (self.stubs / "systemd-run.log").read_text().splitlines() if "-probe" not in l]
 
     DOLLARS = 'x=kept; echo "$x $$"'
 
@@ -226,6 +235,124 @@ class HeavyTests(Machine):
         self.assertTrue(marker.exists())
         self.assertEqual(err.count("waiting for a turn"), 1, err)
         self.assertEqual(holder.wait(timeout=TIMEOUT), 0)
+
+    def test_a_waiter_takes_a_slot_that_opens_while_it_waits(self):
+        # Night starts, the owner leaves or the budget stops: the waiter does not keep looking for the day's slots.
+        holder, release = self.holder("first")
+        marker = self.dir / "second.ran"
+        waiter = self.start("sh", "-c", f"touch {marker}")
+        time.sleep(0.3)
+        self.assertFalse(marker.exists())
+        self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=3, LANE_HEAVY_POLL_SECS=0.05)
+        _, err = waiter.communicate(timeout=TIMEOUT)
+        self.assertEqual(waiter.returncode, 0)
+        self.assertTrue(marker.exists())
+        self.assertEqual(err.count("waiting for a turn"), 1, err)
+        self.assertIsNone(holder.poll())             # the first job still holds its slot
+        release.touch()
+        self.assertEqual(holder.wait(timeout=TIMEOUT), 0)
+
+    def assert_waits(self, p, marker, seconds=0.3):
+        time.sleep(seconds)
+        self.assertFalse(marker.exists())
+        self.assertIsNone(p.poll())
+
+    def test_when_night_begins_day_jobs_keep_their_memory_and_the_pool_holds(self):
+        # 2 x 12G running by day; night brings 3 x 8G (24G pool). The third slot is free, but 12 + 12 + 8 > 24.
+        self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=12, LANE_HEAVY_POLL_SECS=0.02)
+        (a, rel_a), (b, rel_b) = self.holder("day-a"), self.holder("day-b")
+        self.write_limits(LANE_HEAVY_SLOTS=3, LANE_HEAVY_MEM_GB=8, LANE_HEAVY_POLL_SECS=0.02)
+        m1, m2 = self.dir / "night-1.ran", self.dir / "night-2.ran"
+        n1 = self.start("sh", "-c", f"touch {m1}; until [ -e {self.dir}/night.release ]; do sleep 0.02; done")
+        self.assert_waits(n1, m1)
+        rel_a.touch()                                   # 12 + 8 = 20: fits
+        self.wait_for(m1)
+        n2 = self.start("sh", "-c", f"touch {m2}")
+        self.assert_waits(n2, m2)                       # 12 + 8 + 8 = 28: waits for the other day job
+        rel_b.touch()
+        _, err = n2.communicate(timeout=TIMEOUT)
+        self.assertEqual(n2.returncode, 0)
+        self.assertIn("hold 20G of the 24G pool", err)
+        (self.dir / "night.release").touch()
+        _, err = n1.communicate(timeout=TIMEOUT)
+        self.assertIn("hold 24G of the 24G pool", err)
+        self.assertEqual(err.count("waiting for a turn"), 1)
+        self.assertEqual((a.wait(timeout=TIMEOUT), b.wait(timeout=TIMEOUT)), (0, 0))
+
+    def test_when_day_begins_night_jobs_keep_their_memory_and_the_pool_holds(self):
+        self.write_limits(LANE_HEAVY_SLOTS=3, LANE_HEAVY_MEM_GB=8, LANE_HEAVY_POLL_SECS=0.02)
+        held = [self.holder(f"night-{i}") for i in range(3)]
+        self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=12, LANE_HEAVY_POLL_SECS=0.02)
+        marker = self.dir / "day.ran"
+        day = self.start("sh", "-c", f"touch {marker}")
+        held[0][1].touch()                              # slot 0 frees: 8 + 8 + 12 = 28 > 24
+        self.assert_waits(day, marker)
+        held[1][1].touch()                              # 8 + 12 = 20
+        _, err = day.communicate(timeout=TIMEOUT)
+        self.assertEqual(day.returncode, 0)
+        self.assertTrue(marker.exists())
+        held[2][1].touch()
+        for p, _ in held:
+            self.assertEqual(p.wait(timeout=TIMEOUT), 0)
+
+    def test_ci_admission_counts_slots_only_the_slice_holds_the_sum(self):
+        # Each CI job may use the whole CI budget; the CI slice's MemoryMax bounds them together, so two 10G CI jobs
+        # run at once in a 10G budget, and a third waits only for a slot.
+        self.env["LANE_HEAVY_CI"] = "1"
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_MEM_GB=10, LANE_HEAVY_POLL_SECS=0.02)
+        (a, rel_a), (b, rel_b) = self.holder("ci-a"), self.holder("ci-b")
+        self.assertTrue(all("MemoryMax=10G" in l for l in self.job_lines()))
+        marker = self.dir / "ci-c.ran"
+        c = self.start("sh", "-c", f"touch {marker}")
+        self.assert_waits(c, marker)
+        rel_a.touch()
+        _, err = c.communicate(timeout=TIMEOUT)
+        self.assertIn("all 2 CI heavy-work slot(s)", err)
+        self.assertNotIn("pool", err)
+        rel_b.touch()
+        self.assertEqual((a.wait(timeout=TIMEOUT), b.wait(timeout=TIMEOUT)), (0, 0))
+
+    def test_a_stale_size_on_a_free_slot_is_ignored(self):
+        # A job that ended left its size behind: its slot is free, so its size counts for nothing.
+        self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=12, LANE_HEAVY_POLL_SECS=0.02)
+        state = Path(self.env["LANE_STATE_DIR"])
+        state.mkdir(mode=0o700, parents=True)
+        for n in (0, 1):
+            (state / f"heavy.{n}").touch()
+            (state / f"heavy.{n}.gb").write_text("999\n")
+        r = self.heavy("true")
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        holder, release = self.holder("one")
+        r = self.heavy("true")                       # beside a running 12G job: 12 + 12 fits 24
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        release.touch()
+        self.assertEqual(holder.wait(timeout=TIMEOUT), 0)
+
+    def test_a_busy_slot_with_no_or_a_bad_size_counts_as_the_waiting_jobs_own(self):
+        # Counted as the waiting job's own 12G, a 12G job fits beside it: the pool never blocks for ever on a lost,
+        # junk or overlong size, and no wrapped number is printed.
+        self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=12, LANE_HEAVY_POLL_SECS=0.02)
+        gb = Path(self.env["LANE_STATE_DIR"]) / "heavy.0.gb"
+        for size in (None, "lots", "9" * 23):
+            holder, release = self.holder(f"busy-{size and len(size)}")
+            gb.unlink() if size is None else gb.write_text(size)
+            r = self.heavy("true")
+            self.assertEqual((r.returncode, r.stderr), (0, ""), size)
+            release.touch()
+            self.assertEqual(holder.wait(timeout=TIMEOUT), 0)
+
+    def test_an_older_lane_limits_beside_it_still_runs_ci(self):
+        # A hand copy of a new lane-heavy next to an old lane-limits.sh with none of the CI settings.
+        d = self.dir / "old-install"
+        d.mkdir()
+        shutil.copy(HEAVY, d / "lane-heavy")
+        (d / "lane-limits.sh").write_text(
+            "LANE_PROC_DIR=${LANE_PROC_DIR:-/proc}\nLANE_HEAVY_SLOTS=1\nLANE_HEAVY_MEM_GB=3\nLANE_HEAVY_POLL_SECS=2\n")
+        self.env["GITHUB_ACTIONS"] = "true"
+        r = subprocess.run([str(d / "lane-heavy"), "sh", "-c", "exit 4"], env=self.env, capture_output=True, text=True,
+                           timeout=TIMEOUT)
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertIn("--slice=ci.slice", self.job_lines()[0])
 
     def test_never_more_than_the_slots(self):
         self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=0, LANE_HEAVY_POLL_SECS=0.02)
@@ -352,6 +479,71 @@ class HeavyTests(Machine):
         self.assertEqual(self.heavy("true").returncode, 0)
         self.assertTrue((state / "heavy.0").is_file())
 
+    def test_a_ci_job_takes_a_ci_slot_in_the_ci_slice(self):
+        state = Path(self.env["LANE_STATE_DIR"])
+        for flag in ({"GITHUB_ACTIONS": "true"}, {"LANE_HEAVY_CI": "1"}):
+            env = {k: v for k, v in self.env.items() if k not in ("GITHUB_ACTIONS", "LANE_HEAVY_CI")}
+            self.env = {**env, **flag}
+            (self.stubs / "systemd-run.log").unlink(missing_ok=True)
+            r = self.heavy("sh", "-c", "exit 5")
+            self.assertEqual((r.returncode, r.stderr), (5, ""), flag)
+            self.assertIn("--slice=ci.slice", self.job_lines()[0])
+        self.assertTrue((state / "ci-heavy.0").is_file())
+        self.assertFalse((state / "heavy.0").exists())
+
+    def test_a_lane_job_stays_out_of_the_ci_slice(self):
+        self.env.pop("GITHUB_ACTIONS", None)
+        for off in ("", "0", "false", "no"):
+            self.env["LANE_HEAVY_CI"] = off
+            (self.stubs / "systemd-run.log").unlink(missing_ok=True)
+            self.assertEqual(self.heavy("true").returncode, 0)
+            self.assertNotIn("--slice", self.job_lines()[0])
+
+    def test_ci_never_waits_behind_lanes_and_has_its_own_limit(self):
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_CI_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_HEAVY_POLL_SECS=0.02)
+        holder, release = self.holder("lane")
+        self.env["GITHUB_ACTIONS"] = "true"
+        r = self.heavy("true")                       # the lane holds the only lane slot; CI goes straight in
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        ci, ci_release = self.holder("ci")           # the one CI slot is taken: the next CI job waits for it
+        marker = self.dir / "ci2.ran"
+        waiter = self.start("sh", "-c", f"touch {marker}")
+        time.sleep(0.3)
+        self.assertFalse(marker.exists())
+        ci_release.touch()
+        _, err = waiter.communicate(timeout=TIMEOUT)
+        self.assertTrue(marker.exists())
+        self.assertIn("all 1 CI heavy-work slot(s)", err)
+        release.touch()
+        self.assertEqual((holder.wait(timeout=TIMEOUT), ci.wait(timeout=TIMEOUT)), (0, 0))
+
+    def test_a_ci_job_has_the_ci_memory_limit_and_names_it_on_oom(self):
+        self.env["LANE_HEAVY_CI"] = "1"
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_MEM_GB=10)   # each CI job: the whole budget
+        (self.stubs / "scope-result").write_text("ActiveState=failed\nResult=oom-kill\n")
+        r = self.heavy("sh", "-c", "exit 137")
+        self.assertIn("MemoryMax=10G", self.job_lines()[0])
+        self.assertIn("hit its 10G limit", r.stderr)
+        self.assertIn("raise LANE_CI_MEM_GB", r.stderr)
+
+    def test_a_ci_slice_with_no_memory_limit_is_named(self):
+        self.env["LANE_HEAVY_CI"] = "1"
+        (self.stubs / "slice-unlimited").touch()
+        r = self.heavy("true")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stderr.count("ci.slice has no MemoryMax"), 1, r.stderr)
+
+    def test_the_ci_slice_is_a_setting_and_a_bad_one_falls_back(self):
+        self.env["LANE_HEAVY_CI"] = "1"
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_SLICE="runners.slice")
+        self.assertEqual(self.heavy("true").returncode, 0)
+        self.assertIn("--slice=runners.slice", self.job_lines()[-1])
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_SLICE="'x y'")
+        r = self.heavy("true")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("LANE_CI_SLICE", r.stderr)
+        self.assertIn("--slice=ci.slice", self.job_lines()[-1])
+
     def test_missing_command_takes_no_slot_and_exits_127(self):
         self.assertEqual(self.heavy("no-such-command-here").returncode, 127)
         self.assertFalse((self.dir / "state").exists())
@@ -382,6 +574,7 @@ class RoomTests(Machine):
         self.assertIn("on 12 cores", r.stdout)
         self.assertIn("0 lane agents", r.stdout)
         self.assertIn("0.0 runnable", r.stdout)
+        self.assertIn("limits  day (day): lane-heavy 1 x 3G; CI 2 in ci.slice", r.stdout)
 
     def test_too_little_memory(self):
         self.set_proc(avail_gb=3)
@@ -505,13 +698,94 @@ class RoomTests(Machine):
 class LimitsTests(Machine):
     def test_defaults_follow_the_machine_when_the_file_is_absent(self):
         self.limits.unlink()
-        self.assertEqual(self.limits_seen(12, 64), {"LANE_HEAVY_SLOTS": 2, "LANE_HEAVY_MEM_GB": 24,
-                                                    "LANE_ROOM_MIN_MEM_GB": 8, "LANE_ROOM_MAX_LOAD": 18,
-                                                    "LANE_ROOM_MAX_AGENTS": 12, "LANE_ROOM_SAMPLES": 5})
+        self.assertEqual(self.limits_seen(12, 64), {"LANE_RESERVE_GB": 10, "LANE_HEAVY_SLOTS": 2,
+                                                    "LANE_HEAVY_MEM_GB": 18, "LANE_CI_SLOTS": 2, "LANE_CI_MEM_GB": 16,
+                                                    "LANE_CI_CPU_PCT": 400, "LANE_ROOM_MIN_MEM_GB": 8,
+                                                    "LANE_ROOM_MAX_LOAD": 18, "LANE_ROOM_MAX_AGENTS": 12,
+                                                    "LANE_ROOM_SAMPLES": 5})
+        self.assertEqual((self.presence, self.stderr), ("day,day,", ""))
         small = self.limits_seen(2, 4)
         self.assertEqual(small["LANE_HEAVY_SLOTS"], 1)
         self.assertGreaterEqual(small["LANE_HEAVY_MEM_GB"], 1)
         self.assertEqual(small["LANE_ROOM_MAX_AGENTS"], 2)
+
+    def sizing(self, mem_gb=46):
+        s = self.limits_seen(12, mem_gb)
+        return (s["LANE_HEAVY_SLOTS"], s["LANE_HEAVY_MEM_GB"], s["LANE_CI_MEM_GB"], s["LANE_CI_CPU_PCT"])
+
+    def test_lanes_ci_and_the_reserve_fit_memory_by_day_and_night_or_away(self):
+        self.limits.unlink()
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))           # the owner's 46G example, day
+        self.env["LANE_HOUR"] = "02"
+        self.assertEqual(self.sizing(), (3, 8, 14, 800))            # night: one more slot, CI gets more
+        self.assertEqual(self.presence, "away,night,1")
+        for mem in (16, 32, 46, 64, 128):
+            for hour in ("12", "02"):
+                self.env["LANE_HOUR"] = hour
+                slots, job, ci, _ = self.sizing(mem)
+                reserve = min(10, mem // 4)
+                self.assertLessEqual(slots * job + ci + reserve - reserve // 5 * (hour == "02"), mem, (mem, hour))
+
+    def test_a_fresh_away_file_counts_and_a_stale_one_does_not(self):
+        self.limits.unlink()
+        away = Path(self.env["LANE_AWAY_FILE"])
+        away.touch()
+        self.assertEqual(self.sizing(), (3, 8, 14, 800))
+        self.assertEqual(self.presence, "away,owner away,1")
+        old = time.time() - 15 * 3600
+        os.utime(away, (old, old))
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))
+        self.assertEqual(self.presence, "day,day,")
+
+    def test_owner_away_is_never_a_stopped_budget(self):
+        self.limits.unlink()
+        Path(self.env["LANE_BUDGET_STOPPED_FILE"]).touch()
+        self.sizing()
+        self.assertEqual(self.presence, "away,budget stopped,")       # limits away, the owner not
+        self.env["LANE_HOUR"] = "01"
+        self.sizing()
+        self.assertEqual(self.presence, "away,night,1")
+        self.env["LANE_HOUR"] = "12"
+        Path(self.env["LANE_BUDGET_STOPPED_FILE"]).unlink()
+        Path(self.env["LANE_AWAY_FILE"]).touch()
+        self.sizing()
+        self.assertEqual(self.presence, "away,owner away,1")
+
+    def test_a_reserve_not_below_memory_falls_back_and_says_so(self):
+        self.write_limits(LANE_RESERVE_GB=46)
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))
+        self.assertIn("LANE_RESERVE_GB", self.stderr)
+        self.write_limits(LANE_RESERVE_GB=4)                           # smaller than the default is the owner's call
+        self.assertEqual(self.limits_seen(12, 46)["LANE_RESERVE_GB"], 4)
+        self.assertEqual(self.stderr, "")
+
+    def test_a_stopped_budget_gives_ci_the_away_limits_for_an_hour(self):
+        self.limits.unlink()
+        stopped = Path(self.env["LANE_BUDGET_STOPPED_FILE"])
+        stopped.touch()
+        self.assertEqual(self.sizing(), (3, 8, 14, 800))
+        self.assertEqual(self.presence, "away,budget stopped,")
+        old = time.time() - 61 * 60                                    # its writer stopped touching it
+        os.utime(stopped, (old, old))
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))
+        Path(self.env["LANE_AWAY_FILE"]).touch()                       # the owner's word is named first
+        stopped.touch()
+        self.sizing()
+        self.assertEqual(self.presence, "away,owner away,1")
+
+    def test_the_file_can_branch_on_presence_and_move_the_reserve(self):
+        self.limits.write_text('[ "$LANE_PRESENCE" = away ] && LANE_HEAVY_SLOTS=4\nLANE_RESERVE_GB=16\n')
+        self.assertEqual(self.sizing(), (2, 10, 7, 400))            # 30G past the reserve: 20 for lanes, 10 - 3 CI
+        self.env["LANE_HOUR"] = "23"
+        self.assertEqual(self.sizing(), (4, 5, 13, 800))
+
+    def test_settings_come_from_the_file_not_the_environment(self):
+        self.limits.unlink()
+        self.env.update(LANE_HEAVY_SLOTS="7", LANE_CI_MEM_GB="99", LANE_CI_SLICE="other.slice")
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))
+        self.env["LANE_HEAVY_CI"] = "1"
+        self.assertEqual(self.heavy("true").returncode, 0)
+        self.assertIn("--slice=ci.slice", self.job_lines()[-1])
 
     def test_memory_can_be_what_limits_the_slots(self):
         self.limits.unlink()
@@ -545,8 +819,11 @@ class LimitsTests(Machine):
 
 class ContentTests(unittest.TestCase):
     def test_every_setting_is_documented(self):
-        names = set(re.findall(r"^(LANE_(?:HEAVY|ROOM)_[A-Z_]+)=", LIMITS.read_text(), re.M))
-        self.assertEqual(len(names), 8)
+        text = LIMITS.read_text()
+        names = set(re.findall(r"^lane_(?:setting|seconds) (LANE_[A-Z_]+) ", text, re.M)) | {"LANE_CI_SLICE"}
+        self.assertEqual(len(names), 13)
+        unset = re.search(r"^unset (LANE_.*?)\n\n", text, re.M | re.S).group(1)
+        self.assertEqual(set(re.findall(r"LANE_[A-Z_]+", unset)), names)   # none comes from the environment
         example = EXAMPLE.read_text()
         for name in names:
             self.assertIn(f"# {name}=", example)

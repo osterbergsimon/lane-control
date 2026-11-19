@@ -168,7 +168,7 @@ Orchestrator: native Orca
 
 ## 31. Use idle machine time
 - **Rule:** use idle machine time: limits follow presence, day against night or away. Fixed day limits leave a machine idle while the owner sleeps or is away.
-- **How:** night is 23-07 by default; away is an away file that expires after 14 hours (`lane-away` writes it, added in phase 4 of the native-Orca plan). The CI slice is set with `systemctl --user set-property --runtime` from a user timer: day 400 % CPU / 10 G, night or away 800 % / 16 G (the memory figure is `MemoryMax`); `--runtime` means a reboot falls back to the day limits. `lane-heavy` slots are 2 x 17 G by day and 3 x 11 G at night or away, read from the machine's `limits.sh`, which a machine can make branch on presence (the example file gets such a branch in phase 4).
+- **How:** night is 23-07 by default; away is an away file that expires after 14 hours (`lane-away` writes it, added in phase 4 of the native-Orca plan). The CI slice is set with `systemctl --user set-property --runtime` from a user timer: day 400 % CPU / 10 G, night or away 800 % / 14 G (the memory figure is `MemoryMax`); `--runtime` means a reboot falls back to the day limits. `lane-heavy` slots are 2 x 12 G by day and 3 x 8 G at night or away, so lanes, the CI slice and about 10 G for the desktop and agents fit a 46 G machine (owner 2026-11-19). `lane-limits.sh` computes these from memory and presence (`LANE_CI_MEM_GB`, `LANE_CI_CPU_PCT` for the slice); a machine's `limits.sh` may override them.
 - **Note:** these are machine limits, not budget shares: the budget steps are the only budget limit (`model-routing.md`).
 
 ## 32. A CI gate must not hold a heavy slot while it waits

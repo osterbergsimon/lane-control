@@ -1093,8 +1093,8 @@ class LessonsDoctrineTests(unittest.TestCase):
     def test_use_idle_machine_time(self):
         t = reliability_entry(31)
         self.assertIn("use idle machine time: limits follow presence, day against night or away.", t)
-        for needle in ("`--runtime`", "a reboot falls back to the day limits", "400 % CPU / 10 G", "800 % / 16 G",
-                       "2 x 17 G", "3 x 11 G", "14 hours", "`MemoryMax`", "added in phase 4"):
+        for needle in ("`--runtime`", "a reboot falls back to the day limits", "400 % CPU / 10 G", "800 % / 14 G",
+                       "2 x 12 G", "3 x 8 G", "`lane-limits.sh` computes these", "14 hours", "`MemoryMax`", "added in phase 4"):
             self.assertIn(needle, t, needle)
 
     def test_ci_gate_waits_outside_the_heavy_slot(self):
