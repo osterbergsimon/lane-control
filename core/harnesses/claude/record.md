@@ -43,5 +43,5 @@ with the hook installed by the adapter, started with the markers.
   output reached its context).
 - Session record: pass — the hook recorded the session id from its JSON input, and that id's transcript exists.
 - Idle: pass — `idle_minutes` read that transcript (0 minutes).
-- Not checked live: `/compact` and `/clear` (an interactive session); the hook fires on the same `SessionStart`
-  event with another `source`, and the unit tests run it for each.
+- Not checked live: `/compact` and `/clear` (an interactive session). They fire the same `SessionStart` hook with
+  another `source`, which the hook does not look at; the matcher lists both.
