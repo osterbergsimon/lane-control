@@ -5,18 +5,22 @@ machine (spec section 8; reliability.md entry 30).
   lane-sweep                    report only
   lane-sweep --apply            also remove the lanes the rules below allow
   lane-sweep --stuck-hours N    stuck after N hours without activity (default 6; the night manager uses 2)
-  lane-sweep --precheck         for an Orca automation's precheck: exit 0 only when something is reported
+  lane-sweep --precheck         for an Orca automation's precheck: exit 0 only when a finding is new since the
+                                last --precheck run (a standing finding wakes nobody twice); prints the new ones
+  lane-sweep --changes          print the findings the last --precheck run found new (what its agent routes)
 
 A merged lane is removed (--apply) only if all hold: its branch has a merged PR and HEAD is that PR's head or behind
-it; `git status --porcelain` is empty, untracked files included; no Orca terminal of it printed anything for 30
+it; `git status --porcelain --untracked-files=normal` is empty, whatever git's config says; no Orca terminal of it printed anything for 30
 minutes; and no agent process (claude, opencode, codex) has its cwd inside the worktree. Otherwise MERGED-KEEP says
-why. An open-PR lane is removed the same way (owner, 2026-11-19) when its PR's head is exactly HEAD, the tree is
+why. When the sweep cannot tell (the process list or an agent's cwd cannot be read, a terminal has no
+lastOutputAt, Orca's terminal list is cut short), it keeps the lane: it fails closed. Right before removing it reads
+the lane again (HEAD, status, terminals, agents), so nothing it saw before its gh calls decides. An open-PR lane is removed the same way (owner, 2026-11-19) when its PR's head is exactly HEAD, the tree is
 clean, no terminal printed for 30 minutes and no agent runs in it: the worktree then holds nothing GitHub lacks, and a
 fix round checks the PR branch out into a new worktree. In report mode such a lane is listed as PR-PARKED, which is
 information only (it waits on the owner) and not a finding. Removing closes the lane's terminals and runs `orca-ide
 worktree rm --delete-branch`; the PR and the remote branch are kept. Nothing else is ever removed.
 
-The PR is looked up by the lane's upstream branch when the upstream is that same branch (`x` for a local `x` or
+The PR is looked up by the lane's upstream branch when the upstream is that same branch on a real remote (`x` for a local `x` or
 `<user>/x`), never by a base branch it tracks (a lane on `origin/develop` would match develop's old merged PRs).
 Stuck: no activity for --stuck-hours, where activity is the newest of Orca's lastActivityAt (which alone can be days
 old), the last push, the last commit and the last terminal output, and not parked. Parked: an open PR, HEAD equal to
@@ -24,9 +28,10 @@ or behind the pushed branch, a clean tree, and either no live terminal or the PR
 
 Worktrees on another Orca host (hostId not local) are left to that machine's sweep. Lanes listed in
 ~/.config/lane-control/lane-sweep.hold (one worktree path per line, `#` comments; LANE_SWEEP_HOLD)
+are skipped (`~` expands; an entry that matches no worktree is named on stderr). Folder workspaces (not git)
 are skipped. With machine.conf, each line ends `owner=<coordinator>`: the coordinator whose checkout the lane belongs
 to. Exit: 0 nothing found, 10 something reported; with --precheck 0 something reported, 1 nothing; 2 Orca or the
-machine could not be read.
+machine could not be read (Orca, the process list, the hold file).
 """
 import argparse
 import json
@@ -41,7 +46,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import machineconf  # noqa: E402
 
 QUIET_MIN = 30
-AGENT = re.compile(r"claude|opencode|codex")  # in any argv word's basename: wrappers and node scripts count too
+STATE = "lane-sweep.json"
+AGENT = re.compile(r"claude|opencode|codex")  # anywhere in the command line, as `pgrep -f` matched it
 
 
 class SweepError(Exception):
@@ -60,6 +66,14 @@ def orca(*args) -> dict:
     return data.get("result") or {}
 
 
+def terminals() -> list:
+    """Every Orca terminal; a list Orca cut short would make a lane's terminals look absent, so it stops the sweep."""
+    res = orca("terminal", "list", "--limit", "100000")
+    if res.get("truncated"):
+        raise SweepError(f"orca-ide terminal list is truncated ({res.get('totalCount', '?')} terminals): not sweeping")
+    return res.get("terminals") or []
+
+
 def git(path, *args, timeout=60) -> "str | None":
     try:
         r = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=timeout)
@@ -69,8 +83,15 @@ def git(path, *args, timeout=60) -> "str | None":
 
 
 def is_ancestor(path, a: str, b: str) -> bool:
-    return subprocess.run(["git", "-C", str(path), "merge-base", "--is-ancestor", a, b],
-                          capture_output=True).returncode == 0
+    return bool(a and b) and subprocess.run(["git", "-C", str(path), "merge-base", "--is-ancestor", a, b],
+                                            capture_output=True).returncode == 0
+
+
+def is_dirty(path) -> bool:
+    """Uncommitted or untracked files; untracked are listed whatever status.showUntrackedFiles says. True when git
+    cannot tell."""
+    out = git(path, "status", "--porcelain", "--untracked-files=normal")
+    return out is None or out != ""
 
 
 def pr_of(path, branch: str, state: str) -> "dict | None":
@@ -85,37 +106,69 @@ def pr_of(path, branch: str, state: str) -> "dict | None":
     return rows[0] if rows else None
 
 
-def live_agent_cwds() -> list:
-    """The cwd of every agent process of this user (LANE_PROC_DIR, default /proc)."""
-    proc, uid, out = Path(os.environ.get("LANE_PROC_DIR") or "/proc"), os.getuid(), []
-    try:
-        entries = [e for e in proc.iterdir() if e.name.isdigit()]
-    except OSError:
-        return out
-    for e in entries:
+class Agents:
+    """The cwd of every agent process of this user (LANE_PROC_DIR, default /proc). `unknown` is set when an agent's
+    cwd cannot be read: it could be in any lane, so every lane is kept."""
+
+    def __init__(self):
+        proc, uid = Path(os.environ.get("LANE_PROC_DIR") or "/proc"), os.getuid()
+        self.cwds, self.unknown = [], False
         try:
-            if e.stat().st_uid != uid:
+            entries = [e for e in proc.iterdir() if e.name.isdigit()]
+        except OSError as e:
+            raise SweepError(f"cannot list processes in {proc} ({e}): cannot tell where agents run") from None
+        for e in entries:
+            try:
+                if e.stat().st_uid != uid or int(e.name) == os.getpid():
+                    continue
+                cmd = (e / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            except (FileNotFoundError, ProcessLookupError, ValueError):
+                continue  # gone while we looked
+            except OSError:
+                self.unknown = True
                 continue
-            argv = (e / "cmdline").read_bytes().split(b"\0")
-            if any(AGENT.search(os.path.basename(a.decode(errors="replace"))) for a in argv if a):
-                out.append(os.readlink(e / "cwd").removesuffix(" (deleted)"))
-        except OSError:
-            continue
-    return out
+            if not AGENT.search(cmd):
+                continue
+            try:
+                self.cwds.append(os.readlink(e / "cwd").removesuffix(" (deleted)"))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                self.unknown = True
+
+    def why(self, path: str) -> str:
+        """Why an agent keeps this lane, or ''."""
+        real = os.path.realpath(path)
+        if any(inside(c, real) or inside(c, path) for c in self.cwds):
+            return "an agent is still running in it"
+        if self.unknown:
+            return "cannot tell: an agent process's cwd cannot be read"
+        return ""
 
 
 def inside(cwd: str, path: str) -> bool:
     return cwd == path or cwd.startswith(path.rstrip("/") + "/")
 
 
-def held() -> set:
+def hold_entries() -> list:
     f = Path(os.environ.get("LANE_SWEEP_HOLD") or Path.home() / ".config" / "lane-control" / "lane-sweep.hold")
     try:
         lines = f.read_text().splitlines()
     except FileNotFoundError:
-        return set()
-    paths = {re.sub(r"\s*#.*", "", x).strip() for x in lines}
-    return {p for p in paths if p} | {os.path.realpath(p) for p in paths if p}
+        return []
+    except OSError as e:
+        raise SweepError(f"cannot read the hold file {f} ({e}): not sweeping") from None
+    entries = [re.sub(r"\s*#.*", "", x).strip() for x in lines]
+    return [e for e in entries if e]
+
+
+def held(path: str, entries: list) -> "str | None":
+    real = os.path.realpath(path)
+    for e in entries:
+        x = os.path.expanduser(e)
+        if x == path or os.path.realpath(x) == real:
+            return e
+    return None
 
 
 def owners() -> dict:
@@ -135,12 +188,19 @@ def owner_of(path: str, table: dict) -> str:
 
 
 def upstream(path: str, branch: str) -> tuple:
-    """(remote, branch on the remote) to look PRs and pushes up by: the upstream only when it names this branch."""
-    remote = git(path, "config", f"branch.{branch}.remote") or "origin"
+    """(remote, branch on the remote) to look PRs and pushes up by: the upstream only when it is this branch on a real
+    remote (a local upstream, remote ".", is another branch here, like a base branch)."""
+    remote = git(path, "config", f"branch.{branch}.remote") or ""
     merge = (git(path, "config", f"branch.{branch}.merge") or "").removeprefix("refs/heads/")
-    if merge and merge in (branch, branch.rsplit("/", 1)[-1]):
+    if remote and remote != "." and merge in (branch, branch.rsplit("/", 1)[-1]):
         return remote, merge
-    return ("origin" if remote == "." else remote), branch
+    return (remote if remote and remote != "." else "origin"), branch
+
+
+def quiet(mine: list, now: float) -> bool:
+    """No terminal printed for QUIET_MIN minutes; one whose last output is unknown counts as active."""
+    since = (now - QUIET_MIN * 60) * 1000
+    return all(t.get("lastOutputAt") is not None and t["lastOutputAt"] <= since for t in mine)
 
 
 class Sweep:
@@ -152,6 +212,25 @@ class Sweep:
     def say(self, line: str, finding: bool = True):
         self.lines.append(line)
         self.found = self.found or finding
+
+    def recheck(self, wt: dict, path: str, head: str, want_head: str) -> tuple:
+        """Read the lane again right before removing it: (why it stays, or '', its terminal handles now)."""
+        try:
+            mine = [t for t in terminals() if t.get("worktreePath") == path]
+            agents = Agents()
+        except SweepError as e:
+            return f"cannot tell ({e})", []
+        now_head = git(path, "rev-parse", "HEAD") or ""
+        if now_head != head or (want_head and now_head != want_head and not is_ancestor(path, now_head, want_head)):
+            return "HEAD moved during the sweep", []
+        if is_dirty(path):
+            return "uncommitted or untracked files", []
+        if not quiet(mine, time.time()):
+            return f"a terminal printed output in the last {QUIET_MIN} min (or its last output is unknown)", []
+        why = agents.why(path)
+        if why:
+            return why, []
+        return "", [t["handle"] for t in mine if t.get("handle")]
 
     def remove(self, wt: dict, handles: list) -> bool:
         for h in handles:
@@ -165,55 +244,66 @@ class Sweep:
         except SweepError:
             return False
 
-    def lane(self, wt: dict, terms: list, agents: list, own: dict):
+    def lane(self, wt: dict, terms: list, agents: Agents, own: dict):
         path = wt.get("path") or ""
         branch = (wt.get("branch") or "").removeprefix("refs/heads/")
         if not os.path.isdir(path):
             return self.say(f"GONE   {path} (worktree path missing; Orca entry left)")
+        if not branch and git(path, "rev-parse", "--git-dir") is None:
+            return  # a folder workspace: no git, nothing to sweep
         tag = owner_of(path, own)
         if not branch:
             return self.say(f"DETACH {path} (no branch){tag}")
         mine = [t for t in terms if t.get("worktreePath") == path]
         handles = [t["handle"] for t in mine if t.get("handle")]
-        quiet_since = (self.now - QUIET_MIN * 60) * 1000
-        recent_output = any((t.get("lastOutputAt") or 0) > quiet_since for t in mine)
-        real = os.path.realpath(path)
-        agent = any(inside(c, real) or inside(c, path) for c in agents)
+        is_quiet = quiet(mine, self.now)
+        agent = agents.why(path)
         head = git(path, "rev-parse", "HEAD") or ""
-        dirty = git(path, "status", "--porcelain")
-        dirty = dirty is None or dirty != ""
+        dirty = is_dirty(path)
         remote, rb = upstream(path, branch)
-        terminals = f"{len(handles)} terminal(s)"
+        terminals_n = f"{len(handles)} terminal(s)"
         try:
             merged = pr_of(path, rb, "merged")
-            opened = None if merged else pr_of(path, rb, "open")
+            opened = None
+            reused = merged and head != merged.get("headRefOid") and not is_ancestor(path, head,
+                                                                                       merged.get("headRefOid", ""))
+            if not merged or reused:
+                opened = pr_of(path, rb, "open")
         except SweepError as e:
             return self.say(f"CHECK  {path} (could not look up its PRs: {e}){tag}")
+        if reused and opened:
+            merged = None  # the branch was reused after its merge: its new open PR decides
 
         if merged:
             n, prhead = merged["number"], merged.get("headRefOid", "")
             why = ""
-            if head != prhead and not is_ancestor(path, head, prhead):
+            if not head or (head != prhead and not is_ancestor(path, head, prhead)):
                 why = "commits after the merged PR head"
             elif dirty:
                 why = "uncommitted or untracked files"
-            elif recent_output:
-                why = f"a terminal printed output in the last {QUIET_MIN} min"
+            elif not is_quiet:
+                why = f"a terminal printed output in the last {QUIET_MIN} min (or its last output is unknown)"
             elif agent:
-                why = "an agent is still running in it"
+                why = agent
             if why:
                 return self.say(f"MERGED-KEEP {path} (#{n} merged; kept: {why}){tag}")
             if not self.apply:
-                return self.say(f"MERGED {path} (#{n} merged; would close {terminals} and remove){tag}")
+                return self.say(f"MERGED {path} (#{n} merged; would close {terminals_n} and remove){tag}")
+            why, handles = self.recheck(wt, path, head, prhead)
+            if why:
+                return self.say(f"MERGED-KEEP {path} (#{n} merged; kept: {why}){tag}")
             if self.remove(wt, handles):
-                return self.say(f"REMOVED {path} (#{n} merged; {terminals} closed){tag}")
+                return self.say(f"REMOVED {path} (#{n} merged; {len(handles)} terminal(s) closed){tag}")
             return self.say(f"MERGED-FAIL {path} (#{n} merged; worktree rm failed){tag}")
 
-        if opened and opened.get("headRefOid") == head and not dirty and not recent_output and not agent:
+        if opened and head and opened.get("headRefOid") == head and not dirty and is_quiet and not agent:
             n = opened["number"]
             if not self.apply:
-                return self.say(f"PR-PARKED {path} (#{n} open, pushed and clean; --apply would close {terminals} and "
-                                f"remove it){tag}", finding=False)
+                return self.say(f"PR-PARKED {path} (#{n} open, pushed and clean; --apply would close {terminals_n} "
+                                f"and remove it){tag}", finding=False)
+            why, handles = self.recheck(wt, path, head, head)
+            if why:
+                return self.say(f"PR-KEEP {path} (#{n} open; kept: {why}){tag}", finding=False)
             if self.remove(wt, handles):
                 return self.say(f"PR-REMOVED {path} (#{n} open, pushed and clean; recreate from its branch for a "
                                 f"fix){tag}")
@@ -240,35 +330,74 @@ class Sweep:
                  f"no merged PR){tag}")
 
 
+def state_file() -> Path:
+    v = os.environ.get("XDG_CACHE_HOME")
+    base = Path(v) if v and os.path.isabs(v) else Path.home() / ".cache"
+    return base / "lane-control" / STATE
+
+
+def key(line: str) -> str:
+    """A finding's identity across runs: its tag and path (the hours of a STUCK line change every run)."""
+    return " ".join(line.split()[:2])
+
+
 def main(argv) -> int:
     ap = argparse.ArgumentParser(prog="lane-sweep", description=__doc__.split("\n\n")[0])
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--precheck", action="store_true")
+    ap.add_argument("--changes", action="store_true")
     ap.add_argument("--stuck-hours", type=float, default=6)
     a = ap.parse_args(argv)
-    if a.apply and a.precheck:
-        ap.error("--precheck only reports")
+    if a.apply and (a.precheck or a.changes):
+        ap.error("--precheck and --changes only report")
+    sf = state_file()
+    try:
+        last = json.loads(sf.read_text())
+    except (OSError, ValueError):
+        last = {}
+    if a.changes:
+        print("\n".join(last.get("new", [])) or "no new findings")
+        return 0
     sweep = Sweep(a.apply, a.stuck_hours)
     try:
         wts = orca("worktree", "list").get("worktrees", [])
-        terms = orca("terminal", "list").get("terminals", []) or []
+        terms = terminals()
+        hold, own, agents = hold_entries(), owners(), Agents()
     except SweepError as e:
         print(f"lane-sweep: {e}", file=sys.stderr)
         return 2
-    hold, own, agents = held(), owners(), live_agent_cwds()
+    used = set()
     for wt in wts:
         if wt.get("isMainWorktree") or wt.get("isArchived") or wt.get("hostId") not in (None, "", "local"):
             continue  # a worktree on another Orca host (an SSH box) is that machine's own sweep's
-        p = wt.get("path") or ""
-        if p in hold or os.path.realpath(p) in hold:
+        h = held(wt.get("path") or "", hold)
+        if h:
+            used.add(h)
             continue
         sweep.lane(wt, terms, agents, own)
+    if agents.unknown:
+        print("lane-sweep: cannot tell where every agent runs (a process's cwd or command line cannot be read): "
+              "no lane was removed for that reason", file=sys.stderr)
+    for e in hold:
+        if e not in used:
+            print(f"lane-sweep: hold entry {e!r} matches no lane", file=sys.stderr)
+    findings = [x for x in sweep.lines if not x.startswith(("PR-PARKED", "PR-KEEP"))]
+    if a.precheck:
+        before = set(last.get("findings", []))
+        new = [x for x in findings if key(x) not in before]
+        try:
+            sf.parent.mkdir(parents=True, exist_ok=True)
+            keep = new or last.get("new", [])  # what the last waking run found, for its agent's --changes
+            sf.write_text(json.dumps({"findings": sorted({key(x) for x in findings}), "new": keep}, indent=1) + "\n")
+        except OSError as e:
+            print(f"lane-sweep: cannot write {sf} ({e})", file=sys.stderr)
+            return 2
+        print("\n".join(new) or "nothing new")
+        return 0 if new else 1
     for line in sweep.lines:
         print(line)
     if not sweep.found:
         print("nothing found")
-    if a.precheck:
-        return 0 if sweep.found else 1
     return 10 if sweep.found else 0
 
 

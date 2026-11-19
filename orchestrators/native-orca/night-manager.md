@@ -7,10 +7,12 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
 
 ## Each run
 1. **What is due.** Run `<lc>/core/scripts/night-precheck`. Each `DUE <name> idle=<n>min` line is a coordinator to
-   check in on; each `OFFLINE <runners> repo=<repo>` line is a runner down. Exit 1 means nothing is due now: end.
-2. **Budget gate.** Run `<lc>/core/scripts/budget-state`. At step 2 no-new-work or 3 push-and-handover, a check-in
-   asks only for push and handover. At step 4 stop, or when the budget is unknown, send coordinators nothing; tell
-   the machine coordinator once and end.
+   check in on; each `OFFLINE <runners> repo=<repo>` line is a runner down; a `BUDGET unknown` line means no
+   check-ins tonight: pass that line to the machine coordinator once. Exit 1 means nothing is due now: end.
+2. **Budget gate.** The precheck already holds check-ins back at or above the no-new-work step and while the budget
+   is unknown. Still run `<lc>/core/scripts/budget-state`: if it now shows step 2 no-new-work or higher, or unknown,
+   stand down: send no check-in, but run `--checked <name>` (step 3) for each due coordinator all the same, so it is
+   not due again for two hours.
 3. **Check-ins.** For each `DUE` coordinator, find its line in `~/.config/lane-control/machine.conf`
    (`COORDINATORS`: name, checkout, harness, terminal title) and send it one message:
    "night manager: check-in (owner away). You have been idle <n> min. Check your lanes (workers done, stuck or
@@ -18,9 +20,9 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    nothing needs doing, reply 'nothing' in one line."
    Then run `<lc>/core/scripts/night-precheck --checked <name>`, so it is not due again for two hours.
 4. **Runners.** Send each `OFFLINE` line to the machine coordinator. Never restart a runner yourself.
-5. **Lanes.** Run `<lc>/core/scripts/lane-sweep --stuck-hours 2` (report only, never `--apply`). Send each finding to
-   the coordinator its `owner=` names; a line without one goes to the machine coordinator. `PR-PARKED` lines wait on
-   the owner and need nothing.
+5. **Lanes.** Before sending the check-ins, run `<lc>/core/scripts/lane-sweep --stuck-hours 2` (report only,
+   never `--apply`) and add each `STUCK` line whose `owner=` is a coordinator you check in on to that coordinator's
+   check-in. Send nothing else from it: the lane sweep automation routes the rest, once each.
 6. **Record.** If you sent anything, add one dated line to `notes.md` in your folder: whom you checked in on and
    what you routed. Then end; you do not wait for replies.
 

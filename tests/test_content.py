@@ -1094,6 +1094,8 @@ class LessonsDoctrineTests(unittest.TestCase):
         self.assertIn("the PR and the remote branch are kept", t)
         self.assertIn("Never remove a lane, merged or open-PR, while an agent process (claude, opencode, codex) has its "
                       "cwd inside the worktree", t)
+        self.assertIn("When the sweep cannot tell", t)  # PR #38 review M1: fail closed
+        self.assertIn("it keeps the lane", t)
 
     def test_use_idle_machine_time(self):
         t = reliability_entry(31)

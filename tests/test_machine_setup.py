@@ -48,6 +48,10 @@ if a[:1] == ["api"]:
         print("HTTP 404: Not Found", file=sys.stderr); sys.exit(1)
     print(json.dumps({"total_count": len(state["runners"][repo]), "runners": state["runners"][repo]})); sys.exit(0)
 if a[:2] == ["pr", "list"]:
+    mk = state.get("make_agent")
+    if mk and not os.path.exists(mk["dir"]):
+        os.makedirs(mk["dir"]); open(os.path.join(mk["dir"], "cmdline"), "wb").write(b"claude\\0")
+        os.symlink(mk["cwd"], os.path.join(mk["dir"], "cwd"))
     rows = [p for p in state.get("prs", []) if p["head"] == opt("--head") and p["state"] == opt("--state", "open")]
     print(json.dumps([{"number": p["number"], "headRefOid": p["headRefOid"], "url": "u"} for p in rows][:1])); sys.exit(0)
 print("gh stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
@@ -74,7 +78,8 @@ if state.get("down"):
     print(json.dumps({"ok": False, "error": {"message": "runtime not reachable"}})); sys.exit(1)
 cmd = " ".join(a[:2])
 if cmd == "worktree list": out({"worktrees": state["worktrees"]})
-if cmd == "terminal list": out({"terminals": state["terminals"]})
+if cmd == "terminal list":
+    out({"terminals": state["terminals"], "totalCount": len(state["terminals"]), "truncated": bool(state.get("truncated"))})
 if cmd == "terminal close": out({"closed": opt("--terminal")})
 if cmd == "worktree rm":
     if state.get("rm_fails"): out({}, 1)
@@ -85,8 +90,14 @@ if cmd == "terminal create":
     state["terminals"].append(t); out({"terminal": t})
 if cmd == "automations list": out({"automations": state["automations"]})
 if cmd == "automations create":
-    x = {"id": "auto-%d" % (len(state["automations"]) + 1), "name": opt("--name")}
+    x = {"id": "auto-%d" % (len(state["automations"]) + 1), "name": opt("--name"), "prompt": opt("--prompt"),
+         "precheck": {"command": opt("--precheck"), "timeoutSeconds": int(opt("--precheck-timeout", "60"))}}
     state["automations"].append(x); out({"automation": x})
+if cmd == "automations edit":
+    x = [x for x in state["automations"] if x["id"] == a[2]][0]
+    if "--prompt" in a: x["prompt"] = opt("--prompt")
+    if "--precheck" in a: x["precheck"] = {"command": opt("--precheck"), "timeoutSeconds": int(opt("--precheck-timeout", "60"))}
+    out({"automation": x})
 if cmd == "repo list": out({"repos": state["repos"]})
 if cmd == "repo add":
     r = {"id": "repo-%d" % (len(state["repos"]) + 1), "path": opt("--path"), "kind": opt("--kind", "git")}
@@ -106,9 +117,10 @@ state = json.load(open(sp)) if os.path.exists(sp) else {}
 if state.get("down") or a[:1] != ["--user"]:
     print("Failed to connect to bus: No medium found", file=sys.stderr); sys.exit(1)
 if a[1:2] == ["show"]:
-    s = state.get("slices", {}).get(a[2], {"CPUQuotaPerSecUSec": "infinity", "MemoryMax": "infinity"})
+    s = {"CPUQuotaPerSecUSec": "infinity", "MemoryMax": "infinity", "LoadState": "not-found",
+         **state.get("slices", {}).get(a[2], {})}
     props = [a[i + 1] for i, x in enumerate(a) if x == "-p"]
-    print("\\n".join(s[k] for k in props)); sys.exit(0)
+    print("\\n".join(s.get(k, "") for k in props)); sys.exit(0)
 sys.exit(0)
 """
 
@@ -117,6 +129,23 @@ OPENCODE_SCHEMA = ("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT
                    " time_updated INTEGER NOT NULL);"
                    "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,"
                    " time_updated INTEGER NOT NULL);")
+
+PLAYBOOK = """
+declare -A BUDGET_USAGE=( [main]="cat {feed}" [cheap]="" )
+declare -A BUDGET_RESET=( )
+declare -A BUDGET_CEILING=( [main]={ceiling} )
+DEFAULT_CEILING=40
+TIERS="swift standard"
+declare -A TIER_ENGINE=( [swift]=none [standard]=claude )
+declare -A TIER_BUDGET=( [swift]=cheap [standard]=main )
+STEP_NO_NEW=7
+STEP_WIP_STOP=4
+STEP_STOP_ALL=2
+PRESSURE_MARGIN=15
+WINDOW_STOP_PCT=98
+{extra}
+"""
+
 
 class MachineTest(unittest.TestCase):
     """A temp HOME, a stub bin first on PATH, a fake /proc and a fixed hour (LANE_HOUR)."""
@@ -217,6 +246,22 @@ class MachineTest(unittest.TestCase):
         f = self.tmp / "systemctl.log"
         return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
 
+    def playbook(self, weekly, window, ceiling=93, extra=""):
+        feed = self.tmp / "feed"
+        if weekly is None:
+            feed.unlink(missing_ok=True)
+        else:
+            feed.write_text(f"{weekly} {window}\n")
+        conf = self.tmp / "playbook.conf.sh"
+        conf.write_text(PLAYBOOK.format(feed=feed, ceiling=ceiling, extra=extra))
+        self.env["PLAYBOOK_CONFIG"] = str(conf)
+
+    def marker(self) -> Path:
+        return self.conf_dir / "budget-stopped"
+
+
+BudgetTest = MachineTest
+
 
 # --- Task 4.1: lane-away and the night hours -----------------------------------------------------------------------
 
@@ -291,6 +336,10 @@ class LaneAwayTests(MachineTest):
 # --- Task 4.2: night-precheck --------------------------------------------------------------------------------------
 
 class NightPrecheckTests(MachineTest):
+    def setUp(self):
+        super().setUp()
+        self.playbook(20, 10)  # step 0: check-ins allowed
+
     def conf(self, coordinators: str, extra: str = ""):
         self.machine_conf(f'COORDINATORS="\n{coordinators}\n"\nRUNNER_REPOS=""\n{extra}')
 
@@ -375,6 +424,43 @@ class NightPrecheckTests(MachineTest):
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("proj", r.stderr)
         self.assertIn("ermission", r.stderr)
+
+    def test_no_check_ins_at_no_new_work_or_above(self):
+        co = self.claude_coordinator("proj", 90)
+        self.conf(f"proj {co} claude proj coordinator")
+        for weekly in (86, 89, 92):
+            with self.subTest(weekly=weekly):
+                self.playbook(weekly, 10)
+                r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+                self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+                self.assertIn("no check-ins", r.stderr)
+        self.gh({"runners": {"o/r": [{"name": "r1", "status": "offline"}]}})
+        self.conf(f"proj {co} claude proj coordinator", 'RUNNER_REPOS="o/r"\n')
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+        self.assertEqual(r.stdout, "OFFLINE r1 repo=o/r\n")  # a runner down still counts
+
+    def test_unknown_budget_said_once_per_night(self):
+        co = self.claude_coordinator("proj", 90)
+        self.conf(f"proj {co} claude proj coordinator")
+        self.playbook(None, None)
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"^BUDGET unknown .*no check-ins")
+        self.assertNotIn("DUE", r.stdout)
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "3"})
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("unknown", r.stderr)
+        age(self.home / ".cache" / "lane-control" / "night" / ".budget-unknown", 17 * 60)
+        self.assertIn("BUDGET unknown", self.run_script("night-precheck", env={"LANE_HOUR": "2"}).stdout)
+        self.env["PLAYBOOK_CONFIG"] = str(self.tmp / "none.sh")  # no budget config at all: the same
+        age(self.home / ".cache" / "lane-control" / "night" / ".budget-unknown", 17 * 60)
+        self.assertIn("BUDGET unknown", self.run_script("night-precheck", env={"LANE_HOUR": "2"}).stdout)
+
+    def test_no_coordinators_named_on_stderr(self):
+        self.machine_conf((ROOT / "core" / "templates" / "machine.conf.example").read_text())
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no coordinators", r.stderr)
 
     def test_offline_runner_due(self):
         self.gh({"runners": {"o/r": [{"name": "r1", "status": "offline"}, {"name": "r2", "status": "online"}]}})
@@ -638,6 +724,155 @@ class LaneSweepTests(MachineTest):
         r = self.sweep()
         self.assertEqual((r.returncode, r.stdout), (0, "nothing found\n"))
 
+    # --- review of PR #38: fail closed, re-read before acting, findings once ---
+
+    def test_unreadable_proc_dir_exits_2(self):
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        self.env["LANE_PROC_DIR"] = str(self.tmp / "no-proc")
+        r = self.sweep("--apply")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("cannot tell", r.stderr)
+        self.assertEqual(self.removed(), [])
+
+    def test_agent_cwd_unreadable_keeps_every_lane(self):
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        d = self.proc / "300"
+        d.mkdir()
+        (d / "cmdline").write_bytes(b"claude\0")
+        (d / "cwd").mkdir()  # readlink fails: where it runs cannot be told
+        r = self.sweep("--apply")
+        self.assertIn("cannot tell", r.stderr)
+        self.assertEqual(self.removed(), [])
+
+    def test_agent_tool_shell_keeps_lane(self):
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        self.agent(path, ["bash", "-c", "source ~/.claude/shell-snapshots/s.sh && make test"])
+        self.sweep("--apply")
+        self.assertEqual(self.removed(), [])
+
+    def test_untracked_counts_whatever_git_config_says(self):
+        for state in ("open", "merged"):
+            with self.subTest(state=state):
+                path, head = self.lane(f"u-{state}")
+                self.pr(f"u-{state}", state, head)
+                self.git(path, "config", "status.showUntrackedFiles", "no")
+                (path / "scratch.txt").write_text("x")
+                self.sweep("--apply")
+                self.assertNotIn(f"id:repo1::{path}", json.dumps(self.removed()))
+
+    def test_unknown_last_output_counts_active(self):
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        self.terminal(path)
+        self.state["terminals"][-1]["lastOutputAt"] = None
+        self.orca(self.state)
+        self.sweep("--apply")
+        self.assertEqual(self.removed(), [])
+
+    def test_local_upstream_is_not_the_same_branch(self):
+        self.git(self.main, "branch", "x")
+        x_head = self.git(self.main, "rev-parse", "x")
+        self.pr("x", "merged", x_head, number=5)
+        path = self.tmp / "wt" / "user-x"
+        self.git(self.main, "worktree", "add", "-q", "--track", "-b", "user/x", str(path), "x")
+        self.state["worktrees"].append({"id": f"repo1::{path}", "path": str(path), "branch": "refs/heads/user/x",
+                                        "isMainWorktree": False, "isArchived": False, "lastActivityAt": ms(0)})
+        self.orca(self.state)
+        r = self.sweep("--apply")
+        self.assertNotIn("MERGED", r.stdout)
+        self.assertEqual(self.removed(), [])
+
+    def test_hold_entry_with_tilde_and_unknown_entry(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        rel = os.path.relpath(path, self.home)
+        (self.conf_dir / "lane-sweep.hold").write_text(f"~/{rel}\n~/nowhere/lane\n")
+        r = self.sweep("--apply")
+        self.assertEqual(self.removed(), [])
+        self.assertIn("~/nowhere/lane", r.stderr)
+        self.assertNotIn(rel, r.stderr)
+
+    def test_unreadable_hold_file_exits_2(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads any file")
+        hold = self.conf_dir / "lane-sweep.hold"
+        hold.write_text("x\n")
+        hold.chmod(0)
+        self.assertEqual(self.sweep("--apply").returncode, 2)
+        self.assertEqual(self.sweep("--precheck").returncode, 2)
+
+    def test_truncated_terminal_list_exits_2(self):
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        self.state["truncated"] = True
+        self.orca(self.state)
+        r = self.sweep("--apply")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("truncated", r.stderr)
+        self.assertEqual(self.removed(), [])
+        self.assertIn(["terminal", "list", "--limit", "100000"], self.orca_calls())
+
+    def test_reads_the_lane_again_before_removing(self):
+        path, head = self.lane("open")
+        self.pr("open", "open", head)
+        state = json.loads((self.tmp / "gh.json").read_text())
+        state["make_agent"] = {"dir": str(self.proc / "500"), "cwd": str(path)}
+        (self.tmp / "gh.json").write_text(json.dumps(state))
+        r = self.sweep("--apply")
+        self.assertIn("PR-KEEP", r.stdout)
+        self.assertIn("an agent is still running in it", r.stdout)
+        self.assertEqual(self.removed(), [])
+
+    def test_open_pr_untracked_output_or_hold_keeps(self):
+        path, head = self.lane("a")
+        self.pr("a", "open", head, number=1)
+        (path / "new.txt").write_text("x")
+        path2, head2 = self.lane("b")
+        self.pr("b", "open", head2, number=2)
+        self.terminal(path2, out_h=0.1)
+        path3, head3 = self.lane("c")
+        self.pr("c", "open", head3, number=3)
+        (self.conf_dir / "lane-sweep.hold").write_text(f"{path3}\n")
+        r = self.sweep("--apply")
+        self.assertEqual(self.removed(), [], r.stdout)
+
+    def test_precheck_wakes_only_on_new_findings(self):
+        path, _ = self.lane("old", hours_ago=7, activity_h=7)
+        r = self.sweep("--precheck")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("STUCK", r.stdout)
+        self.assertEqual(self.sweep("--precheck").returncode, 1)  # the same finding: nobody woken again
+        self.assertIn(f"STUCK  {path}", self.sweep("--changes").stdout)
+        done, head = self.lane("done")
+        self.pr("done", "merged", head)
+        r = self.sweep("--precheck")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(f"MERGED {done}", r.stdout)
+        self.assertNotIn("STUCK", r.stdout)
+        self.assertNotIn("STUCK", self.sweep("--changes").stdout)
+        self.assertEqual(self.sweep("--precheck").returncode, 1)
+
+    def test_folder_workspace_skipped(self):
+        folder = self.tmp / "folder-ws"
+        folder.mkdir()
+        self.state["worktrees"].append({"id": "f::x", "path": str(folder), "branch": "", "isMainWorktree": False,
+                                        "isArchived": False, "lastActivityAt": ms(30)})
+        self.orca(self.state)
+        self.assertEqual(self.sweep().stdout, "nothing found\n")
+
+    def test_branch_reused_after_merge_uses_its_open_pr(self):
+        path, old = self.lane("reuse")
+        self.pr("reuse", "merged", old, number=4)
+        new = self.commit(path, "second")
+        self.git(path, "push", "-q")
+        self.pr("reuse", "open", new, number=9)
+        r = self.sweep()
+        self.assertIn(f"PR-PARKED {path} (#9 open", r.stdout)
+        self.assertNotIn("MERGED-KEEP", r.stdout)
+
     def test_orca_down_exits_2(self):
         self.state["down"] = True
         self.orca(self.state)
@@ -731,38 +966,6 @@ class CiPresenceTests(MachineTest):
 
 
 # --- Task 4.5: budget-state, machine-check, machine-setup ----------------------------------------------------------
-
-PLAYBOOK = """
-declare -A BUDGET_USAGE=( [main]="cat {feed}" [cheap]="" )
-declare -A BUDGET_RESET=( )
-declare -A BUDGET_CEILING=( [main]={ceiling} )
-DEFAULT_CEILING=40
-TIERS="swift standard"
-declare -A TIER_ENGINE=( [swift]=none [standard]=claude )
-declare -A TIER_BUDGET=( [swift]=cheap [standard]=main )
-STEP_NO_NEW=7
-STEP_WIP_STOP=4
-STEP_STOP_ALL=2
-PRESSURE_MARGIN=15
-WINDOW_STOP_PCT=98
-{extra}
-"""
-
-
-class BudgetTest(MachineTest):
-    def playbook(self, weekly, window, ceiling=93, extra=""):
-        feed = self.tmp / "feed"
-        if weekly is None:
-            feed.unlink(missing_ok=True)
-        else:
-            feed.write_text(f"{weekly} {window}\n")
-        conf = self.tmp / "playbook.conf.sh"
-        conf.write_text(PLAYBOOK.format(feed=feed, ceiling=ceiling, extra=extra))
-        self.env["PLAYBOOK_CONFIG"] = str(conf)
-
-    def marker(self) -> Path:
-        return self.conf_dir / "budget-stopped"
-
 
 class BudgetStateTests(BudgetTest):
     def test_steps_from_ceiling(self):
@@ -861,6 +1064,25 @@ class MachineCheckTests(BudgetTest):
         self.check()
         self.assertTrue(self.marker().is_file())
 
+    def test_failed_budget_state_reported_once(self):
+        self.check()
+        self.env["PLAYBOOK_CONFIG"] = str(self.tmp / "none.sh")
+        r = self.check()
+        self.assertIn("CHANGED budget every budget: unknown", r.stdout)
+        self.assertNotIn("no longer metered", r.stdout)
+        self.playbook(20, 10)
+        r = self.check()
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+
+    def test_bad_machine_conf_is_an_error(self):
+        import machineconf
+        bad = self.conf_dir / 'odd "$name.conf'
+        bad.write_text('COORDINATORS="\nunterminated\n')
+        with self.assertRaises(machineconf.ConfError):
+            machineconf.load(bad)
+        bad.write_text("IDLE_MIN=30\n")
+        self.assertEqual(machineconf.load(bad)["IDLE_MIN"], 30)
+
     def test_last_prints_changes(self):
         self.check()
         self.playbook(86, 10)
@@ -918,6 +1140,7 @@ class MachineSetupTests(BudgetTest):
         r = self.setup_machine("--no-start")
         self.assertIn("usage feed: missing", r.stdout)
         self.assertIn("status line", r.stdout)
+        self.assertIn("night check-ins stay off", r.stdout)
 
     def test_starts_claude_machine_coordinator(self):
         r = self.setup_machine()
@@ -1057,6 +1280,55 @@ class MachineSetupTests(BudgetTest):
         self.assertIn(str(main), ms_.lane_worktree_warning(self.tmp / "lane"))
         self.assertIsNone(ms_.lane_worktree_warning(self.tmp))  # not git at all (a copy on a host)
 
+    def test_existing_automation_with_an_old_path_is_repaired(self):
+        self.orca({"automations": [{"id": "a1", "name": "lane sweep", "prompt": "old prompt",
+                                    "precheck": {"command": "/gone/lane-sweep --precheck", "timeoutSeconds": 60}}]})
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        (edit,) = self.creates(["automations", "edit"])
+        self.assertEqual(edit[2], "a1")
+        import shlex
+        self.assertEqual(edit[edit.index("--precheck") + 1], shlex.quote(f"{SCRIPTS}/lane-sweep") + " --precheck")
+        self.assertEqual(edit[edit.index("--precheck-timeout") + 1], "600")
+        self.assertIn("lane-sweep", edit[edit.index("--prompt") + 1])
+        self.assertIn("lane sweep: repaired", r.stdout)
+        self.assertNotIn("lane sweep", self.automations())
+        n = len(self.orca_calls())
+        self.assertIn("lane sweep: exists", self.setup_machine("--no-start").stdout)
+        self.assertEqual([c for c in self.orca_calls()[n:] if c[1:2] in (["edit"], ["create"])], [])
+
+    def test_older_automations_are_reported_not_doubled(self):
+        self.orca({"automations": [{"id": "old-nm", "name": "night-manager", "prompt": "x", "precheck": None},
+                                   {"id": "old-ls", "name": "lane-sweep", "prompt": "x", "precheck": None}]})
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(set(self.automations()), {"machine check"})
+        self.assertEqual(self.creates(["automations", "edit"]), [])
+        self.assertIn("orca-ide automations remove old-nm", r.stdout)
+        self.assertIn("orca-ide automations remove old-ls", r.stdout)
+        self.assertIn("night manager: found older", r.stdout)
+
+    def test_older_ci_timer_is_reported_not_fought(self):
+        self.systemctl({"slices": {"ci-cpu.timer": {"LoadState": "loaded"}}})
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("ci-presence timer: found older", r.stdout)
+        self.assertIn("systemctl --user disable --now ci-cpu.timer", r.stdout)
+        self.assertFalse((self.home / ".config" / "systemd" / "user" / "ci-presence.timer").exists())
+        self.assertNotIn(["--user", "enable", "--now", "ci-presence.timer"], self.systemctl_calls())
+
+    def test_unfilled_machine_conf_is_named(self):
+        r = self.setup_machine("--no-start")
+        self.assertIn("lists no coordinators", r.stdout)
+
+    def test_path_change_does_not_rewrite_the_unit(self):
+        self.setup_machine("--no-start")
+        n = len(self.systemctl_calls())
+        self.env["PATH"] = f"{self.tmp / 'other'}:{self.env['PATH']}"
+        r = self.setup_machine("--no-start")
+        self.assertIn("ci-presence timer: exists", r.stdout)
+        self.assertNotIn(["--user", "daemon-reload"], self.systemctl_calls()[n:])
+
     def test_host_runs_there_over_ssh(self):
         write_exec(self.bin / "ssh", """
             #!/usr/bin/env python3
@@ -1086,7 +1358,8 @@ class NightManagerDocTests(unittest.TestCase):
     def test_night_manager_doc(self):
         text = (ROOT / "orchestrators" / "native-orca" / "night-manager.md").read_text()
         for needle in ("night-precheck", "--checked", "lane-sweep --stuck-hours 2", "SendMessage",
-                       "orchestration send --to run:", "no-new-work", "machine.conf", "nothing"):
+                       "orchestration send --to run:", "no-new-work", "machine.conf", "nothing", "BUDGET unknown",
+                       "stand down"):
             self.assertIn(needle, text)
         self.assertNotIn("--apply", text.replace("never `--apply`", "").replace("never --apply", ""))
         for private in ("vellum", "calvin", "pasteur", "osterberg", "/home/", "10.10."):

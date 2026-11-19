@@ -48,10 +48,13 @@ every step says `exists` on a re-run):
   Orca terminal titled `machine coordinator` with its persona and hook.
 - Three Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
   manager` hourly (`night-precheck`; the agent follows `night-manager.md`), `lane sweep` every 3 hours
-  (`lane-sweep --precheck`, report only) and `machine check` every 30 minutes (`machine-check`: a budget step,
+  (`lane-sweep --precheck`, report only, waking its agent only for findings new since the last run) and `machine check` every 30 minutes (`machine-check`: a budget step,
   memory or runner state changed; it also keeps the `budget-stopped` marker for the CI limits).
 - The `ci-presence` user timer: the CI slice's CPU and memory follow presence (`lane-limits.sh`).
-- The usage feed check: without `~/.claude/usage-history.jsonl` written in the last hour, budget steps are unknown.
+- On a machine set up by hand before: automations named `night-manager` or `lane-sweep` and an older CI timer
+  (`ci-cpu`) are reported with the commands to remove them; nothing is doubled or replaced without the owner.
+- The usage feed check: without `~/.claude/usage-history.jsonl` written in the last hour, budget steps are unknown
+  and night check-ins stay off (the night precheck says so once a night).
 
 The owner says they leave or return with `core/scripts/lane-away on|off|status` (or asks the machine coordinator).
 A coordinator gets night check-ins only when it was started with `LANE_ROLE`/`LANE_PERSONA` (project-setup does

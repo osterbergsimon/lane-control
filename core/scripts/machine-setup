@@ -24,12 +24,15 @@ started twice and an existing automation or machine.conf is never changed.
    and terminal title, so peers find it by SendMessage). Claude's first-start folder question: --trust-folder answers
    yes; otherwise it is asked in a terminal, as project-setup does.
 5. Orca automations in that folder (fresh Claude Sonnet sessions; each precheck runs first and costs nothing):
-   `night manager` hourly at :37 (night-precheck), `lane sweep` every 3 hours (lane-sweep --precheck, report only)
-   and `machine check` every 30 minutes (machine-check: budget step, memory or runner state changed). The machine
-   check's session passes the change on to the machine coordinator, since an automation cannot wake a session it
-   did not start.
+   `night manager` hourly at :37 (night-precheck), `lane sweep` every 3 hours (lane-sweep --precheck: new findings
+   only, report only) and `machine check` every 30 minutes (machine-check: budget step, memory or runner state
+   changed). The machine check's session passes the change on to the machine coordinator, since an automation
+   cannot wake a session it did not start. An automation of ours whose precheck or prompt points elsewhere (a moved
+   checkout) is repaired in place. One an earlier hand-made setup made (`night-manager`, `lane-sweep`) is reported
+   with the command to remove it, and no second one is added.
 6. The ci-presence user timer (every 15 minutes and at boot), if systemd --user works; otherwise a warning and the
-   CI limits stay the slice unit's own.
+   CI limits stay the slice unit's own. An older timer that sets the CI slice (ci-cpu) is reported with the command
+   to stop it, and ci-presence is not installed beside it.
 Exit: 0 done (warnings included); 1 a step failed; 2 usage or a refused harness/model.
 """
 import argparse
@@ -127,15 +130,17 @@ def machine_conf():
         conf = machineconf.load(p)
         for w in conf["warnings"]:
             say("machine.conf", "warning", w)
-        machineconf.coordinators(conf)
+        if not machineconf.coordinators(conf):
+            say("machine.conf", "warning", f"{p} lists no coordinators yet (still the example?): fill in "
+                                           "COORDINATORS, or the night manager has nobody to check in on")
     except machineconf.ConfError as e:
         say("machine.conf", "warning", str(e))
 
 
 def usage_feed():
     f = Path.home() / ".claude" / "usage-history.jsonl"
-    how = ("budget steps stay unknown until it is: Claude Code's status line must append each sample to it "
-           "(core/machine.md, \"Usage feeds\")")
+    how = ("budget steps stay unknown, and night check-ins stay off, until it is: Claude Code's status line must "
+           "append each sample to it (core/machine.md, \"Usage feeds\")")
     try:
         mins = int((time.time() - f.stat().st_mtime) // 60)
     except FileNotFoundError:
@@ -211,9 +216,9 @@ def automation_specs() -> list:
     q = shlex.quote
     night = (f"You are this machine's night manager. Follow {NIGHT_DOC} exactly; lane-control is {ROOT}. "
              "Be brief: you spend budget nobody is watching.")
-    sweep = (f"Run {q(str(s / 'lane-sweep'))} as it is (report only: it removes nothing, and you add no flag). "
-             f"Send each finding line to the coordinator its owner= names, the way the Messages section of "
-             f"{NIGHT_DOC} says; a line without an owner goes to the machine coordinator. PR-PARKED lines need nothing. Then end.")
+    sweep = (f"Run {q(str(s / 'lane-sweep'))} --changes: the lane findings that are new since the last sweep "
+             f"(it removes nothing). Send each line to the coordinator its owner= names, the way the Messages "
+             f"section of {NIGHT_DOC} says; a line without an owner goes to the machine coordinator. Then end.")
     check = (f"Run {q(str(s / 'machine-check'))} --last and send its lines, unchanged, to the machine coordinator "
              f"(session `{TITLE}`), the way the Messages section of {NIGHT_DOC} says. Do nothing else. Then end.")
     # Orca's default precheck timeout is 60 s and a timeout skips the run; the sweep asks gh about every lane.
@@ -222,11 +227,31 @@ def automation_specs() -> list:
             ("machine check", "*/30 * * * *", q(str(s / "machine-check")), 120, check)]
 
 
+# Names an earlier hand-made setup used: found, reported with the commands to switch, never doubled.
+OLDER_AUTOMATIONS = {"night manager": ("night-manager",), "lane sweep": ("lane-sweep",),
+                     "machine check": ("machine-check",)}
+OLDER_CI_TIMERS = ("ci-cpu.timer", "ci-cpu-mode.timer")
+
+
 def automations_step(folder: Path):
-    have = {a.get("name") for a in orca("automations", "list").get("automations", []) or []}
+    have = {a.get("name"): a for a in orca("automations", "list").get("automations", []) or []}
     for name, trigger, precheck, timeout, prompt in automation_specs():
         if name in have:
-            say(name, "exists", "(automation; not changed)")
+            a = have[name]
+            pc = a.get("precheck") or {}
+            if pc.get("command") == precheck and pc.get("timeoutSeconds") == timeout and a.get("prompt") == prompt:
+                say(name, "exists", "(automation)")
+                continue
+            orca("automations", "edit", a["id"], "--precheck", precheck, "--precheck-timeout", str(timeout),
+                 "--prompt", prompt)
+            say(name, "repaired", f"(automation {a['id']}: precheck and prompt now point at {ROOT}; was "
+                                  f"{pc.get('command') or 'no precheck'})")
+            continue
+        older = [have[o] for o in OLDER_AUTOMATIONS[name] if o in have]
+        if older:
+            o = older[0]
+            say(name, "found older", f"automation {o.get('name')!r} ({o['id']}) does this job; not adding a second. "
+                                     f"To switch: orca-ide automations remove {o['id']}  then run machine-setup again")
             continue
         orca("automations", "create", "--name", name, "--trigger", trigger, "--prompt", prompt, "--provider", "claude",
              f"--extra-agent-args=--model {AUTOMATION_MODEL}", "--precheck", precheck,
@@ -247,15 +272,24 @@ def timer_step():
     if not shutil.which("systemctl") or systemctl("show-environment").returncode != 0:
         return say(step, "skipped", "(warning: no systemd user manager here; the CI slice keeps its unit's own "
                                     "limits, the rest works)")
+    for old in OLDER_CI_TIMERS:
+        r = systemctl("show", old, "-p", "LoadState", "--value")
+        if r.returncode == 0 and r.stdout.strip() not in ("", "not-found"):
+            return say(step, "found older", f"{old} also sets the CI slice's limits; two would fight, so ci-presence "
+                                            f"is not installed. To switch: systemctl --user disable --now {old}  "
+                                            "(and drop it from wherever it is defined), then run machine-setup again")
     v = os.environ.get("XDG_CONFIG_HOME")
     units = (Path(v) if v and os.path.isabs(v) else Path.home() / ".config") / "systemd" / "user"
     units.mkdir(parents=True, exist_ok=True)
     changed = False
+
+    def no_path(text):  # the PATH a unit was written with is the caller's; another shell's is no change
+        return re.sub(r'(?m)^Environment="PATH=.*"$', "", text)
     for name in ("ci-presence.service", "ci-presence.timer"):
         text = (ROOT / "core" / "templates" / name).read_text()
         text = text.replace("@REPO@", str(ROOT)).replace("@PATH@", os.environ.get("PATH", "").replace("%", "%%"))
         dest = units / name
-        if not (dest.is_file() and dest.read_text() == text):
+        if not (dest.is_file() and no_path(dest.read_text()) == no_path(text)):
             dest.write_text(text)
             changed = True
     if changed and systemctl("daemon-reload").returncode != 0:

@@ -81,7 +81,10 @@ def main(argv) -> int:
         return 2
     changes, new = [], {"budgets": {}, "runners": dict(old.get("runners", {}))}
 
-    for name, b in sorted(budgets().items()):
+    now_budgets = budgets()
+    if "*" in now_budgets:  # budget-state itself failed: keep what is known per budget, report the failure once
+        now_budgets = {**{k: v for k, v in old.get("budgets", {}).items() if k != "*"}, "*": now_budgets["*"]}
+    for name, b in sorted(now_budgets.items()):
         new["budgets"][name] = b
         was = old.get("budgets", {}).get(name, {"step": 0, "name": "none"})
         if b.get("step") == was.get("step"):
@@ -92,7 +95,7 @@ def main(argv) -> int:
         else:
             changes.append(f"CHANGED budget {label}: {step_text(b)} (weekly {b['weekly']}%, ceiling {b['ceiling']}; "
                            f"was {step_text(was)})")
-    for name in set(old.get("budgets", {})) - set(new["budgets"]):
+    for name in sorted(set(old.get("budgets", {})) - set(new["budgets"]) - {"*"}):
         changes.append(f"CHANGED budget {name}: no longer metered")
 
     try:
