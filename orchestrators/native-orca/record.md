@@ -12,8 +12,8 @@ Orca worktrees and Orca's own orchestration (run, task, worker, check), with no 
 
 ## Lessons
 What running lanes natively taught us, as the places they are written down:
-- An idle coordinator with pending work is stuck; the night manager wakes it (`core/reliability.md` entries 29 and 30
-  hold it and the lane sweep). Idle is the newest write of the coordinator's session transcript: Orca's terminal
+- An idle coordinator with pending work is stuck; the night manager (phase 4 of the native-Orca plan) wakes it
+  (`core/reliability.md` entries 29 and 30 hold it and the lane sweep). Idle is the newest write of the coordinator's session transcript: Orca's terminal
   `lastOutputAt` is no idle signal (status-line redraws keep it fresh), and a worktree's `lastActivityAt` can be days
   old, so the sweep uses the newest of push, commit and terminal output.
 - Presence-based limits, CI waiting outside the heavy slot, the runner and Nix items, the test time-scale and
