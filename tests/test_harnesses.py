@@ -818,6 +818,8 @@ class RecordTests(unittest.TestCase):
         for needle in ("10,000 characters", "lane-control/sessions/", "<role>.claude", "subagents"):
             self.assertIn(needle, cl, needle)
         self.assertIn("<role>.opencode", " ".join(oc.split()))
+        pi = " ".join(self.status("pi")[1].split())
+        self.assertIn("Unconfirmed: that omp is a separate program built on pi", pi)  # review m8: inference marked
 
     def test_records_are_public_safe(self):
         for f in HARNESSES.glob("*/record.md"):
