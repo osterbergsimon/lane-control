@@ -832,6 +832,7 @@ class RecordTests(unittest.TestCase):
         for point in ("start", "messages", "wake", "compaction", "cost"):
             self.assertIn(point, section, point)
         self.assertIn("core/harnesses/<name>/record.md", section)
+        self.assertIn("inherit", section)  # review m7: what a marked session starts gets the markers too
 
 
 if __name__ == "__main__":

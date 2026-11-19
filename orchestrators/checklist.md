@@ -63,5 +63,7 @@ An agent harness (Claude, OpenCode, Codex, pi, ...) is tried on its own points, 
   recognises it (agent id and status).
 - H2. Messages: Orca's messages reach it and its replies reach the sender.
 - H3. Wake: a worker's report wakes it as a coordinator, with no nudge.
-- H4. Compaction: its persona is back after a compaction, and a session without the markers never gets it.
+- H4. Compaction: its persona is back after a compaction, and a session without the markers never gets it. The
+  markers are environment variables: say what a marked session's own children inherit (sub-agents, a one-shot run
+  from its shell, a worker it starts) and whether they get the persona.
 - H5. Cost: what a day of coordinating costs, and whether the usage shows in budget steps.
