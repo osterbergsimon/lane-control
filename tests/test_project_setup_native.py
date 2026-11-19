@@ -599,5 +599,43 @@ class PauseTests(Case):
         self.assertIn("paused", r.stdout)
 
 
+# --- Task 3.5: Review Focus 3 ----------------------------------------------------------------------------------------
+
+class RerunTests(Case):
+    def setup_in_terminal(self):
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", return_value="y"), contextlib.redirect_stdout(Tty()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            status = m.main([str(self.repo)])
+        self.assertEqual(status, 0, err.getvalue() + out.getvalue())
+        return out.getvalue()
+
+    def test_a_rerun_adds_nothing_twice(self):
+        self.e.script_agents(sonnet=[WRITE_NATIVE], opus=[PASS])
+        self.setup_in_terminal()
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        out = self.setup_in_terminal()  # onboarded and running: every step finds itself done
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+        # tests/stubs/fake_agent.py stands in for claude both headless (-p) and as a started session
+        headless = [r for r in self.e.agent_runs() if "-p" in r["argv"]]
+        started = [r for r in self.e.agent_runs() if "-p" not in r["argv"]]
+        self.assertEqual(len(headless), 2)  # the first run's adapter and reviewer only
+        agents = (self.repo / "AGENTS.md").read_text()
+        self.assertEqual(agents.count("<!-- lane-control:begin -->"), 1)
+        self.assertEqual(agents.count("<!-- orchestrator: native-orca -->"), 1)
+        lead_wt = Path(opt(next(c for c in self.e.creates() if opt(c, "--title") == "app design lead"),
+                           "--worktree").split(":", 1)[1])
+        for checkout in (self.repo, lead_wt):
+            cfg = json.loads((checkout / ".claude" / "settings.local.json").read_text())
+            self.assertEqual(len(cfg["hooks"]["SessionStart"]), 1, checkout)
+        titles = [opt(c, "--title") for c in self.e.creates() if opt(c, "--title")]
+        self.assertEqual(sorted(titles), ["app coordinator", "app design lead"])
+        self.assertEqual(len(started), 2)
+        self.assertIn("session coordinator: exists app coordinator", out)
+        self.assertEqual((self.repo / ".git" / "info" / "exclude").read_text().count("lane-control: begin"), 1)
+        self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
+
+
 if __name__ == "__main__":
     unittest.main()
