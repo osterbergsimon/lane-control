@@ -194,6 +194,18 @@ class ClaudeAdapterTests(HomeTest):
         self.assertEqual(self.entries(), [{"matcher": "startup|resume|compact",
                                            "hooks": [{"type": "command", "command": str(HOOK)}]}])
 
+    def test_claude_hook_command_quotes_odd_paths(self):
+        import shlex
+        from unittest import mock
+        odd = self.t / "lane control" / "core" / "harnesses" / "persona-hook.sh"
+        with mock.patch.object(self.pkg, "PERSONA_HOOK", odd):
+            self.assertTrue(self.a.install_persona_hook(self.checkout))
+            command = self.entries()[0]["hooks"][0]["command"]
+            self.assertEqual(shlex.split(command), [str(odd)])
+            self.assertEqual(self.a.install_persona_hook(self.checkout), [])  # still recognised as ours
+        self.assertTrue(self.a.install_persona_hook(self.checkout))  # back to the real path: moved, not added
+        self.assertEqual(len(self.entries()), 1)
+
     def test_claude_hook_refuses_bad_json(self):
         self.settings.parent.mkdir()
         self.settings.write_text("{not json")

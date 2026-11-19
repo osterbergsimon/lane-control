@@ -1,12 +1,13 @@
 """Claude Code harness adapter (core/harnesses/__init__.py has the interface).
 
 Persona: a SessionStart hook (matchers startup|resume|compact) in the checkout's uncommitted
-.claude/settings.local.json runs core/harnesses/persona-hook.sh, which prints $LANE_PERSONA for the session started
-with the markers and nothing for any other. Idle: the newest transcript write in ~/.claude/projects/<encoded path>/.
+.claude/settings.local.json runs core/harnesses/persona-hook.sh (path shell-quoted: Claude runs hook commands in a
+shell), which prints $LANE_PERSONA for the session started with the markers and nothing for any other. Idle: the newest transcript write in ~/.claude/projects/<encoded path>/.
 """
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -30,7 +31,13 @@ def start_command(role: str, persona: Path, model: str, permission_mode: "str | 
 
 
 def _ours(hook) -> bool:
-    return isinstance(hook, dict) and Path(str(hook.get("command", ""))).name == HOOK_NAME
+    if not isinstance(hook, dict):
+        return False
+    try:
+        words = shlex.split(str(hook.get("command", "")))
+    except ValueError:
+        return False
+    return len(words) == 1 and Path(words[0]).name == HOOK_NAME
 
 
 def install_persona_hook(checkout: Path) -> list:
@@ -47,7 +54,7 @@ def install_persona_hook(checkout: Path) -> list:
     starts = hooks.get("SessionStart", []) if isinstance(hooks, dict) else None
     if not isinstance(starts, list):
         raise ValueError(f"{path}: not an object with hooks.SessionStart a list; fix it by hand, it was left as it is")
-    want = {"matcher": MATCHER, "hooks": [{"type": "command", "command": str(harnesses.PERSONA_HOOK)}]}
+    want = {"matcher": MATCHER, "hooks": [{"type": "command", "command": shlex.quote(str(harnesses.PERSONA_HOOK))}]}
     mine = [e for e in starts if isinstance(e, dict) and any(_ours(h) for h in e.get("hooks") or [])]
     if mine == [want]:
         return []
