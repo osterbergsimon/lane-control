@@ -8,7 +8,7 @@ from pathlib import Path
 from test_project_setup import Env
 
 ROOT = Path(__file__).resolve().parent.parent
-PAUSE = ROOT / "scripts" / "project-pause"
+PAUSE = ROOT / "core" / "scripts" / "project-pause"
 
 
 class PauseTest(unittest.TestCase):

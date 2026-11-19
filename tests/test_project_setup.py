@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "project-setup"
+SCRIPT = ROOT / "core" / "scripts" / "project-setup"
 STUB = ROOT / "tests" / "stubs" / "fake.py"
 FAKE_AGENT = ROOT / "tests" / "stubs" / "fake_agent.py"
 
@@ -25,6 +25,7 @@ def load():
     spec = importlib.util.spec_from_loader("project_setup", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
+    mod.DEFAULT_ORCHESTRATOR = "orca-cotal"  # these tests are the Orca + Cotal path's (native: test_project_setup_native)
     return mod
 
 
@@ -78,6 +79,8 @@ class Env:
     def run(self, *args, adapt=False, env_extra=None):
         """adapt False: only today's Orca setup steps; True: the onboarding flow in front of them too."""
         args = [*args, *([] if adapt else ["--skip-adapt"])]
+        if not any(x == "--orchestrator" or x.startswith("--orchestrator=") for x in args):
+            args += ["--orchestrator", "orca-cotal"]  # the Orca + Cotal path's tests; native is the default
         return subprocess.run([sys.executable, str(SCRIPT), *args], env={**self.env, **(env_extra or {})},
                               capture_output=True, text=True)
 
