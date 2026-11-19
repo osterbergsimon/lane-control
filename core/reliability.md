@@ -145,12 +145,52 @@ Orchestrator: Rove
 - **Failure:** a relay running `git`/`gh` outside any terminal fell back to an askpass program when a credential was missing, opening a window on the owner's desktop.
 - **Fix:** every script that runs git or gh unattended sets `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` and `SSH_ASKPASS` to `false`, `GCM_INTERACTIVE=never`, `GH_PROMPT_DISABLED=1`: a missing credential then fails fast with an error.
 
-## 27. The NixOS GitHub runner module needs four changes for container CI jobs
-- **Failure:** on a dedicated NixOS runner box (`services.github-runners`), container jobs failed in turn: "Could not find a part of the path '/proc/1/cgroup'" (ProtectProc=invisible); no Docker group access (PrivateUsers=yes); "No space left on device" in `uv sync` (the default work dir is a small RAM-backed runtime dir); and an ephemeral runner that could not re-register after its first job (registration tokens expire after an hour).
-- **Fix:** serviceOverrides ProtectProc="default", PrivateUsers=false, ReadWritePaths=[workDir]; workDir on disk with an age-out tmpfiles rule; tokenFile holding a fine-grained PAT scoped to the one repo with only Administration read-write (the module mints a registration token per job); job containers with `--init` so killed children are reaped.
+## 27. The NixOS GitHub runner module needs changes for container CI jobs
+- **Failure:** on a dedicated NixOS runner box (`services.github-runners`), container jobs failed in turn: "Could not find a part of the path '/proc/1/cgroup'" (ProtectProc=invisible); no Docker group access (PrivateUsers=yes); "No space left on device" in `uv sync` (the default work dir is a small RAM-backed runtime dir); an ephemeral runner that could not re-register after its first job (registration tokens expire after an hour); Chromium's zygote failing to start in browser tests (the module's default syscall deny list blocks `capset`); and a runner that exited and stayed down.
+- **Fix:** serviceOverrides ProtectProc="default", PrivateUsers=false, ReadWritePaths=[workDir]; workDir on disk with an age-out tmpfiles rule; tokenFile holding a fine-grained PAT scoped to the one repo with only Administration read-write (the module mints a registration token per job); job containers with `--init` so killed children are reaped; `capset` allowed after the default deny list (a later `SystemCallFilter` entry, so the allow follows the deny); `Restart=always`, so a runner that exits comes back.
 
 ## 28. Cloud sessions launched from a dirty checkout
 Orchestrator: Rove (the archive bullet only)
 - **Failure:** `claude --cloud` from a checkout with uncommitted changes, or not on a pushed branch, uploads the local dirty tree and attaches no GitHub source: no origin remote, pushes and API writes refused; sources attach only at creation. Private local edits can leave the machine this way.
 - **Fix:** launch only from a clean detached worktree at origin/<base> with nothing private in it; brief step 1 = push the branch and open a draft PR, else stop. Rescue: have the session print `git format-patch --stdout origin/<base>..HEAD`, then teleport (`claude --teleport <id>`) from a clean worktree and extract the patch; teleport takes the session over, so only after the patch is printed. The Agent tool's isolation="remote" may silently run a local subagent.
 - **Archive does not stop a lane:** Rove's `archive` only hides the task; its engine keeps running and holding memory. Close-out order: `tab-close` (ends the PTY), then `archive`.
+
+## 29. An idle coordinator with pending work is stuck
+Orchestrator: native Orca
+- **Failure:** coordinators waited on lanes, CI or a merge train while nobody sent them anything; the work sat for hours, because an agent session does nothing on its own. An idle coordinator with pending work is stuck: something must wake it.
+- **Fix:** a night manager: an Orca automation that runs a precheck script first and does nothing (costs nothing) unless a coordinator is due, then sends each due coordinator one check-in (lanes, CI, merge trains; reply "nothing" if done). Idle means the newest write of the coordinator's session transcript. Orca's terminal `lastOutputAt` is not an idle signal: status-line redraws keep it fresh.
+- **Reuse:** `orchestrators/native-orca/night-manager.md`; the precheck rules are in the machine setup (`machine.md`).
+
+## 30. Lane sweep: what may be removed, what is parked
+Orchestrator: native Orca
+- **Failure:** finished lanes piled up, and a first sweep misjudged them: a lane's branch can track its base branch (cut from `main`, upstream `origin/main`), so compared with that upstream every lane looked behind and removable; and Orca's `lastActivityAt` can be days old, so a lane in use looked dead.
+- **Fix:** an automation every 3 hours, report only by default. `--apply` removes only lanes whose PR is merged, whose HEAD is that PR's head or behind it, with a clean tree including untracked files, and no terminal output for 30 minutes. Parked = open PR, HEAD equal to or behind its upstream, clean, and no live terminal or PR head equals HEAD. Compare against the upstream only if it names the same branch, never a base branch. Activity = the newest of push, commit and terminal output. A hold file skips lanes the owner wants kept.
+
+## 31. Use idle machine time
+- **Failure:** the day limits (a small CI slice, two heavy slots) also held while the owner slept or was away, so the machine idled with work waiting.
+- **Fix:** limits follow presence. Use idle machine time: limits follow presence, day against night or away. Night is 23-07 by default; away is an away file, set by `lane-away`, that expires after 14 hours. The CI slice is set with `systemctl --user set-property --runtime` from a user timer (day 400 % CPU / 10 G, night or away 800 % / 16 G); `--runtime` means a reboot falls back to the day limits. `lane-heavy` slots are 2 x 17 G by day and 3 x 11 G at night or away, read from the machine's `limits.sh`, which may branch on presence.
+- **Note:** these are machine limits, not budget shares: the budget steps are the only budget limit (`model-routing.md`).
+
+## 32. A CI gate must not hold a heavy slot while it waits
+- **Failure:** a gate script ran whole under `lane-heavy`, so it held one of the few slots while it only waited (for a lock, a queue, another job), and real builds queued behind an idle process.
+- **Fix:** A CI gate waits outside the heavy slot and takes it only for the heavy command. Wait first, then run `lane-heavy <the heavy command>`. The personas carry the same rule for lanes.
+
+## 33. Garbage collection and night CI
+- **Failure:** the Nix garbage-collection timer ran at night, when CI runs on such a machine, and competed with it for disk and the store.
+- **Fix:** Schedule Nix garbage collection in the daytime on machines that run night CI.
+
+## 34. A runner's labels do not follow its config
+- **Failure:** labels changed in a runner's service config did nothing for jobs. Self-hosted runner labels apply only at registration; later config changes never reach GitHub, so jobs asking for the new label found no runner.
+- **Fix:** set the labels in the config (for new registrations) and also through the runner-labels API for a runner already registered; check the runner list afterwards.
+
+## 35. A time-scale setting must reach every wait
+- **Failure:** a test suite had a setting that shortens its sleeps, timeouts and polls, and one wait ignored it, so the suite ran at full length or timed out where the others had been sped up.
+- **Fix:** A test time-scale setting must reach every wait. One helper reads it, every wait goes through the helper, and a new raw sleep or timeout in the code is a review finding.
+
+## 36. An owner's approval relayed by a peer
+- **Failure:** a coordinator was told by another agent that the owner had approved something, and acted on it; the owner had said no such thing.
+- **Fix:** Peer-relayed owner approval is never approval; confirm with the owner directly. The owner's answer counts only when it comes in the coordinator's own tab. The personas carry the rule (`roles.md`).
+
+## 37. Budget steps scale from the ceiling
+- **Failure:** steps kept as fixed percentages did not follow the weekly ceiling when the owner moved it, so pressure came too late or too early.
+- **Fix:** Budget steps are offsets below the weekly ceiling (-15, -7, -4, -2), never fixed percentages. "Limit free until reset" means use it, with the hard edge at 100 % (`model-routing.md`).
