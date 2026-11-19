@@ -114,8 +114,9 @@ class HomeTest(TempDirTest):
 class LoaderTests(HomeTest):
     def test_load_harness_and_harnesses(self):
         all_ = self.pkg.harnesses()
-        self.assertEqual(set(all_), {"claude"})
+        self.assertEqual(set(all_), {"claude", "opencode"})
         self.assertEqual(self.pkg.load_harness("claude").NAME, "claude")
+        self.assertEqual(self.pkg.load_harness("opencode").NAME, "opencode")
         for name in ("codex", "pi", "nope", "../claude", ""):
             with self.assertRaises(ValueError, msg=name):
                 self.pkg.load_harness(name)
@@ -249,6 +250,144 @@ class ClaudeAdapterTests(HomeTest):
         self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
         self.transcripts(self.checkout)
         self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
+
+
+PLUGIN = HARNESSES / "opencode" / "lane-persona.js"
+NODE = __import__("shutil").which("node")
+SCHEMA = ("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);"
+          "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_updated INTEGER NOT NULL);")
+
+
+class OpenCodeAdapterTests(HomeTest):
+    def setUp(self):
+        super().setUp()
+        self.a = self.pkg.load_harness("opencode")
+
+    def test_opencode_constants(self):
+        self.assertEqual((self.a.NAME, self.a.STATUS, self.a.ORCA_AGENT_ID), ("opencode", "in use", "opencode2"))
+        self.assertEqual(self.a.MODEL_FLAGS, frozenset({"model"}))
+
+    def test_opencode_start_command_shape(self):
+        import json
+        p = Path("/abs/.lane-control/coordinator.md")
+        cmd = self.a.start_command("coordinator", p, "opencode-go/deepseek-v4.1-flash", None)
+        self.assertEqual(cmd[:3], ["env", "LANE_ROLE=coordinator", f"LANE_PERSONA={p}"])
+        conf = [a for a in cmd if a.startswith("OPENCODE_CONFIG_CONTENT=")]
+        self.assertEqual(len(conf), 1)
+        self.assertEqual(json.loads(conf[0].split("=", 1)[1]), {"model": "opencode-go/deepseek-v4.1-flash"})
+        self.assertEqual(cmd[cmd.index(conf[0]) + 1:], ["opencode", "--standalone"])
+        self.assertEqual(self.a.start_command("coordinator", p, "m/x", "default")[-1], "--standalone")
+        for mode in ("auto", "bypassPermissions"):
+            self.assertEqual(self.a.start_command("reviewer", p, "m/x", mode)[-2:], ["--standalone", "--auto"])
+        with self.assertRaises(ValueError):
+            self.a.start_command("reviewer", p, "m/x", "plan")
+        with self.assertRaises(ValueError):
+            self.a.start_command("worker", p, "m/x", None)
+
+    def plugin_dir(self):
+        return self.home / ".config" / "opencode" / "plugins"
+
+    def test_opencode_plugin_installed_once(self):
+        changes = self.a.install_persona_hook(self.checkout)
+        dest = self.plugin_dir() / "lane-persona.js"
+        self.assertEqual(len(changes), 1)
+        self.assertIn(str(dest), changes[0])
+        self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+        dest.write_text("// an old copy\n")
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
+        self.assertEqual(list(self.checkout.iterdir()), [])  # nothing written into the project
+
+    def test_opencode_plugin_dir_follows_xdg(self):
+        os.environ["XDG_CONFIG_HOME"] = str(self.t / "xdg")
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertTrue((self.t / "xdg" / "opencode" / "plugins" / "lane-persona.js").is_file())
+        self.assertFalse(self.plugin_dir().exists())
+
+    def db(self, rows, messages=()):
+        import sqlite3
+        path = self.home / ".local" / "share" / "opencode" / "opencode.db"
+        path.parent.mkdir(parents=True)
+        c = sqlite3.connect(path)
+        c.executescript(SCHEMA)
+        c.executemany("INSERT INTO session_v2 VALUES (?, ?, ?)", rows)
+        c.executemany("INSERT INTO session_message VALUES (?, ?, ?)", messages)
+        c.commit()
+        c.close()
+        return path
+
+    def test_opencode_idle_from_session_store(self):
+        now = 1_800_000_000.0
+        ms = lambda age_min: int((now - age_min * 60) * 1000)  # noqa: E731
+        here = str(self.checkout.resolve())
+        self.db([("s1", here, ms(300)), ("s2", here, ms(90)), ("s3", str(self.t / "other"), ms(1))],
+                [("m1", "s2", ms(40)), ("m2", "s3", ms(0))])
+        self.assertEqual(self.a.idle_minutes(self.checkout, now), 40)
+
+    def test_opencode_idle_none_without_session(self):
+        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
+        self.db([("s1", str(self.t / "other"), 1)])
+        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
+
+    def test_opencode_idle_db_follows_xdg(self):
+        os.environ["XDG_DATA_HOME"] = str(self.t / "data")
+        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class OpenCodePluginTests(TempDirTest):
+    """lane-persona.js run under node with the two hooks OpenCode calls."""
+
+    DRIVER = """
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.argv[2]).href);
+const plugins = Object.values(mod).filter((f) => typeof f === "function");
+const out = { count: plugins.length, system: [], context: [] };
+for (const p of plugins) {
+  const hooks = await p({ directory: process.cwd() });
+  await hooks["experimental.chat.system.transform"]({ model: {} }, { system: out.system });
+  await hooks["experimental.session.compacting"]({ sessionID: "s" }, { context: out.context });
+  await hooks["experimental.chat.system.transform"]({ model: {} }, {});  // a shape it does not know: no throw
+}
+console.log(JSON.stringify(out));
+"""
+
+    def setUp(self):
+        super().setUp()
+        self.persona = self.t / "coordinator.md"
+        self.persona.write_text(PERSONA_TEXT)
+        # .mjs so node loads it as a module whatever its default; same bytes as the shipped plugin.
+        self.copy = self.t / "lane-persona.mjs"
+        self.copy.write_bytes(PLUGIN.read_bytes())
+        self.driver = self.t / "driver.mjs"
+        self.driver.write_text(self.DRIVER)
+
+    def run_plugin(self, env):
+        import json
+        r = subprocess.run([NODE, str(self.driver), str(self.copy)], capture_output=True, text=True, cwd=self.t,
+                           env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "")
+        return json.loads(r.stdout)
+
+    def test_plugin_syntax(self):
+        r = subprocess.run([NODE, "--check", str(self.copy)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_plugin_appends_persona_with_markers(self):
+        out = self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona)))
+        self.assertEqual(out, {"count": 1, "system": [PERSONA_TEXT], "context": [PERSONA_TEXT]})
+
+    def test_plugin_silent_without_markers(self):
+        for env in (clean_env(), clean_env(LANE_ROLE="coordinator"), clean_env(LANE_PERSONA=str(self.persona))):
+            self.assertEqual(self.run_plugin(env), {"count": 1, "system": [], "context": []})
+
+    def test_plugin_silent_missing_file(self):
+        (self.t / "a-dir.md").mkdir()
+        for path in (self.t / "missing.md", self.t / "a-dir.md"):
+            out = self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(path)))
+            self.assertEqual(out, {"count": 1, "system": [], "context": []})
 
 
 if __name__ == "__main__":

@@ -62,6 +62,10 @@ is silent).
 - Personas: `orchestrators/native-orca/personas/{coordinator,design-lead,reviewer,debugger,machine-coordinator}.md`,
   with the same render placeholders `project-setup` already uses for the Cotal personas.
 - `project-setup` native path writes rendered personas to `<checkout>/.lane-control/<role>.md`.
+- Peer discovery (NO-2, 2026-11-19): Orca terminal titles `<project> coordinator`, `<project> design lead`,
+  `machine coordinator`. Claude overwrites a terminal's title with its session title, so phases 3, 4 and 6 set the
+  title and, for Claude, also send `/rename <title>`; personas fall back to the terminal whose `worktreePath` is the
+  project's main checkout.
 - Machine config `~/.config/lane-control/machine.conf` (shell-sourceable `KEY=value`): `COORDINATORS` (lines of
   `<name> <checkout path> <harness> <orca terminal title>`), `RUNNER_REPOS`, `NIGHT_START=23`, `NIGHT_END=7`,
   `IDLE_MIN=45`, `RECHECK_MIN=120`, `AWAY_HOURS=14`. Example: `core/templates/machine.conf.example`.
