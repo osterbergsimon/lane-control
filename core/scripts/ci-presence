@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# ci-presence: give the CI slice the CPU and memory limits that fit presence now (spec section 8; reliability.md
+# entry 31). Run every 15 minutes and at boot by the ci-presence user timer (machine-setup installs it).
+#
+#   ci-presence             set the slice when it differs; prints one line when it changed anything
+#   ci-presence --dry-run   print what it would set
+#
+# The values are lane-limits.sh's, the same ones lane-heavy sizes its CI pool by: LANE_CI_CPU_PCT for CPUQuota and
+# LANE_CI_MEM_GB for MemoryMax (0 = no limit) on LANE_CI_SLICE (default ci.slice). They follow presence: day, or night
+# or away (the away file, or a stopped budget: limits only). A machine's limits.sh may set its own. It sets them with
+# `systemctl --user set-property --runtime`, so nothing persists: a reboot falls back to the slice unit's own values
+# until the timer's boot run. A MemoryHigh in the slice's own unit is left alone; keep it at or above the night
+# MemoryMax, or unset, or it throttles CI below its limit.
+# Exit: 0 set or already right; 1 no systemd user manager, or systemd refused; 2 usage.
+set -u
+self=$(readlink -f "$0")
+# shellcheck source=lane-limits.sh
+. "${self%/*}/lane-limits.sh"
+
+dry=
+case ${1:-} in
+  '') ;;
+  --dry-run) dry=1 ;;
+  -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self"; exit 0 ;;
+  *) echo "usage: ci-presence [--dry-run]" >&2; exit 2 ;;
+esac
+
+cpu=$LANE_CI_CPU_PCT
+want_cpu_us=$((cpu * 10000))   # 100 % is one second of CPU per second
+if [ "$LANE_CI_MEM_GB" -gt 0 ]; then mem=${LANE_CI_MEM_GB}G want_mem=$((LANE_CI_MEM_GB << 30)); else mem=infinity want_mem=infinity; fi
+why=$LANE_PRESENCE_WHY
+
+if ! cur=$(systemctl --user show "$LANE_CI_SLICE" -p CPUQuotaPerSecUSec -p MemoryMax --value 2>&1); then
+  echo "ci-presence: no systemd user manager (systemctl --user failed: ${cur##*$'\n'}); CI limits not set" >&2
+  exit 1
+fi
+{ IFS= read -r cur_cpu; IFS= read -r cur_mem; } <<<"$cur"
+# systemd shows the quota as a time span ("4s", "3s 500ms", "infinity"): back to microseconds
+cur_cpu_us=$(awk '{
+  if ($0 == "infinity" || $0 == "") { print "infinity"; exit }
+  t = 0
+  for (i = 1; i <= NF; i++) {
+    n = $i + 0; u = $i; sub(/^[0-9.]+/, "", u)
+    if (u == "min") t += n * 60000000; else if (u == "s") t += n * 1000000
+    else if (u == "ms") t += n * 1000; else if (u == "us") t += n; else { print "?"; exit }
+  }
+  printf "%d\n", t }' <<<"${cur_cpu:-}")
+
+if [ "$cur_cpu_us" = "$want_cpu_us" ] && [ "${cur_mem:-}" = "$want_mem" ]; then
+  exit 0
+fi
+if [ -n "$dry" ]; then
+  echo "ci-presence: would set $LANE_CI_SLICE CPUQuota=${cpu}% MemoryMax=$mem ($why)"
+  exit 0
+fi
+if ! out=$(systemctl --user set-property --runtime "$LANE_CI_SLICE" "CPUQuota=${cpu}%" "MemoryMax=$mem" 2>&1); then
+  echo "ci-presence: systemctl --user set-property $LANE_CI_SLICE failed: $out" >&2
+  exit 1
+fi
+echo "ci-presence: $LANE_CI_SLICE -> CPU ${cpu}%, memory $mem ($why)"

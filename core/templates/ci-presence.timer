@@ -1,0 +1,11 @@
+# Rendered and installed by core/scripts/machine-setup. Do not edit the installed copy: rerun machine-setup.
+[Unit]
+Description=lane-control ci-presence every 15 minutes and at boot
+
+[Timer]
+OnBootSec=1min
+OnCalendar=*:0/15
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

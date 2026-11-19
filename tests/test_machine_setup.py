@@ -94,6 +94,24 @@ if cmd == "repo add":
 print("orca stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 """
 
+SYSTEMCTL_STUB = """
+#!/usr/bin/env python3
+# systemctl stand-in (--user only): logs argv as JSON lines to $SYSTEMCTL_LOG; `show` answers from $SYSTEMCTL_STATE.
+import json, os, sys
+a = sys.argv[1:]
+with open(os.environ["SYSTEMCTL_LOG"], "a") as f:
+    f.write(json.dumps(a) + "\\n")
+sp = os.environ["SYSTEMCTL_STATE"]
+state = json.load(open(sp)) if os.path.exists(sp) else {}
+if state.get("down") or a[:1] != ["--user"]:
+    print("Failed to connect to bus: No medium found", file=sys.stderr); sys.exit(1)
+if a[1:2] == ["show"]:
+    s = state.get("slices", {}).get(a[2], {"CPUQuotaPerSecUSec": "infinity", "MemoryMax": "infinity"})
+    props = [a[i + 1] for i, x in enumerate(a) if x == "-p"]
+    print("\\n".join(s[k] for k in props)); sys.exit(0)
+sys.exit(0)
+"""
+
 TRANSCRIPT_SID = "11111111-2222-3333-4444-555555555555"
 OPENCODE_SCHEMA = ("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL,"
                    " time_updated INTEGER NOT NULL);"
@@ -188,6 +206,16 @@ class MachineTest(unittest.TestCase):
         f = self.tmp / "orca.log"
         calls = [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
         return [[a for a in c if a != "--json"] for c in calls]
+
+
+    def systemctl(self, state: dict = None):
+        write_exec(self.bin / "systemctl", SYSTEMCTL_STUB)
+        self.env.update(SYSTEMCTL_STATE=str(self.tmp / "systemctl.json"), SYSTEMCTL_LOG=str(self.tmp / "systemctl.log"))
+        (self.tmp / "systemctl.json").write_text(json.dumps(state or {}))
+
+    def systemctl_calls(self) -> list:
+        f = self.tmp / "systemctl.log"
+        return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
 
 
 # --- Task 4.1: lane-away and the night hours -----------------------------------------------------------------------
@@ -607,6 +635,93 @@ class LaneSweepTests(MachineTest):
         self.orca(self.state)
         self.assertEqual(self.sweep().returncode, 2)
         self.assertEqual(self.sweep("--precheck").returncode, 2)
+
+
+# --- Task 4.4: ci-presence -----------------------------------------------------------------------------------------
+
+class CiPresenceTests(MachineTest):
+    def setUp(self):
+        super().setUp()
+        self.systemctl()
+
+    def expected(self, env=None):
+        v = self.lane_limits("LANE_CI_CPU_PCT", "LANE_CI_MEM_GB", "LANE_CI_SLICE", env=env)
+        return v["LANE_CI_SLICE"], int(v["LANE_CI_CPU_PCT"]), int(v["LANE_CI_MEM_GB"])
+
+    def sets(self):
+        return [c for c in self.systemctl_calls() if c[1:2] == ["set-property"]]
+
+    def test_day_limits_from_lane_limits(self):
+        r = self.run_script("ci-presence")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        slice_, cpu, mem = self.expected()
+        self.assertEqual(slice_, "ci.slice")
+        self.assertEqual(mem, 10)  # 46G, day: the owner's numbers (HEAVY-1)
+        self.assertEqual(self.sets(), [["--user", "set-property", "--runtime", "ci.slice", f"CPUQuota={cpu}%",
+                                        f"MemoryMax={mem}G"]])
+        self.assertIn("day", r.stdout)
+
+    def test_night_and_away_limits(self):
+        night = {"LANE_HOUR": "2"}
+        self.run_script("ci-presence", env=night)
+        _, cpu, mem = self.expected(night)
+        self.assertEqual(mem, 14)
+        self.assertEqual(self.sets()[-1][-2:], [f"CPUQuota={cpu}%", "MemoryMax=14G"])
+        self.assertGreater(cpu, self.expected()[1])
+        (self.conf_dir / "away").touch()
+        self.run_script("ci-presence")
+        self.assertEqual(self.sets()[-1][-1], "MemoryMax=14G")
+
+    def test_budget_stopped_gives_away_limits(self):
+        (self.conf_dir / "budget-stopped").touch()
+        r = self.run_script("ci-presence")
+        self.assertEqual(self.sets()[-1][-1], "MemoryMax=14G")
+        self.assertIn("budget stopped", r.stdout)
+
+    def test_limits_file_override(self):
+        (self.conf_dir / "limits.sh").write_text("LANE_CI_CPU_PCT=300\nLANE_CI_SLICE=ci-other.slice\n")
+        self.run_script("ci-presence")
+        self.assertEqual(self.sets()[-1][3:5], ["ci-other.slice", "CPUQuota=300%"])
+
+    def test_no_change_no_call(self):
+        slice_, cpu, mem = self.expected()
+        whole, rest = divmod(cpu, 100)
+        shown = f"{whole}s" + (f" {rest * 10}ms" if rest else "")
+        self.systemctl({"slices": {slice_: {"CPUQuotaPerSecUSec": shown, "MemoryMax": str(mem << 30)}}})
+        r = self.run_script("ci-presence")
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        self.assertEqual(self.sets(), [])
+
+    def test_zero_memory_is_infinity(self):
+        (self.conf_dir / "limits.sh").write_text("LANE_CI_MEM_GB=0\n")
+        self.run_script("ci-presence")
+        self.assertEqual(self.sets()[-1][-1], "MemoryMax=infinity")
+
+    def test_no_systemd_says_so(self):
+        self.systemctl({"down": True})
+        r = self.run_script("ci-presence")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("systemd user manager", r.stderr)
+
+    def test_dry_run_and_usage(self):
+        r = self.run_script("ci-presence", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("would set", r.stdout)
+        self.assertEqual(self.sets(), [])
+        self.assertEqual(self.run_script("ci-presence", "--nope").returncode, 2)
+        self.assertEqual(subprocess.run(["bash", "-n", str(SCRIPTS / "ci-presence")]).returncode, 0)
+
+    def test_timer_templates(self):
+        svc = (ROOT / "core" / "templates" / "ci-presence.service").read_text()
+        timer = (ROOT / "core" / "templates" / "ci-presence.timer").read_text()
+        self.assertIn("Type=oneshot", svc)
+        self.assertIn('ExecStart=/usr/bin/env bash "@REPO@/core/scripts/ci-presence"', svc)
+        self.assertIn('Environment="PATH=@PATH@"', svc)
+        self.assertIn("OnCalendar=*:0/15", timer)
+        self.assertIn("OnBootSec=", timer)
+        self.assertIn("WantedBy=timers.target", timer)
+
+
 
 if __name__ == "__main__":
     unittest.main()
