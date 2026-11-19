@@ -27,8 +27,8 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   store, `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/`), tables `session_v2` and
   `session_message`, times in milliseconds. Other sessions in the checkout do not count; no record means no marked
   session (`None`). The record is kept under the folder the server was started in (the checkout, as Orca's
-  terminal starts it); a server started in a sub-folder is not found. The older `session` table and `storage/` folder are not v2's; a store with only those raises "not an
-  OpenCode 2 store".
+  terminal starts it); a server started in a sub-folder is not found. The older `session` table and `storage/`
+  folder are not v2's; a store with only those raises "not an OpenCode 2 store".
 - Folders come from the caller's environment (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`). A server
   started with other ones (an Orca-managed account with private XDG folders, or `OPENCODE_CONFIG_DIR`) loads
   plugins from and writes its store to places the adapter does not look: the plugin is then not installed for it,
