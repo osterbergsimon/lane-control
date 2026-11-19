@@ -28,8 +28,10 @@ where the handovers live. The project's own facts stay in its AGENTS.md.
   also coordinates its own run seems not to get a reply, nudge it to run `check` (`record.md`, point 3).
 - **Nesting:** a worker may not start its own worker until the owner raises Settings > Orchestration > Nested worker
   depth (default 1). Prefer one coordinator level, or raise the depth knowingly.
-- **Nudging another tab:** `orca-ide terminal send --terminal <handle> --text "<line>" --enter` types a line into
-  another agent's terminal (for example to tell a coordinator a worker is done).
+- **Between sessions:** never type into another session's terminal (`orca-ide terminal send`): it disturbs what the
+  owner types (owner, 2026-11-19). Claude sessions on one machine message each other with SendMessage; everything
+  else goes to the peer's own Run (`orca-ide orchestration run-create` from its own terminal, then `send --to
+  run:<id>`).
 
 ## Heavy work
 Every build and full test suite runs through `~/.agents/bin/lane-heavy <command>`, one machine-wide gate for every

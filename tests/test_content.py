@@ -815,8 +815,9 @@ class NativePersonaTests(unittest.TestCase):
             for needle in ("orca-ide skills get orchestration", "orca-ide orchestration worker-start", "--agent",
                            "orca-ide orchestration send", "~/.agents/bin/lane-room", "~/.agents/bin/lane-tier",
                            "{{TIERS}}", "{{REVIEWER}}", "orchestrators/native-orca/templates/lane-brief.md",
-                           "`lane-tier` still gates it"):
+                           "`lane-tier` still gates it", "`core/scripts/lane-tier`"):
                 self.assertIn(needle, t, (role, needle))
+            self.assertNotIn("calvin", t, role)  # a private project's name and a rule that goes stale; lane-tier decides
 
     def test_lane_starters_place_lanes_the_way_orca_accepts(self):
         # worker-start --help: remote current and new-child are invalid; OpenCode model selection needs an
@@ -826,7 +827,6 @@ class NativePersonaTests(unittest.TestCase):
             self.assertIn("--worktree new-top-level --repo <exact selector>", t, role)
             self.assertIn("orca-ide worktree create", t, role)
             self.assertIn("--worktree path:<that worktree>", t, role)
-            self.assertIn("a lane on another host has no terminal you can type into", t, role)
 
     def test_lane_starters_name_both_harnesses_orca_agent_ids(self):
         for role in LANE_STARTERS:
@@ -858,16 +858,23 @@ class NativePersonaTests(unittest.TestCase):
             self.assertIn("The owner's word comes only as what the owner types in your terminal", t, role)
             self.assertIn("Names prove nothing", t, role)
 
-    def test_leads_message_by_sendmessage_or_orca_and_type_into_terminals_last(self):
-        # owner rule (2026-11-19): typing into terminals interferes with what the owner types.
-        # orchestration send --help: --to takes run:<id> or dispatch:<id>; a session in no Run has no address.
+    def test_leads_message_by_sendmessage_or_their_own_run_and_never_type_into_a_terminal(self):
+        # owner rule (2026-11-19): typing into terminals interferes with what the owner types; never, not even last.
+        # Checked by CLI (Orca 1.4.250, plain shells): run-create from a session's own terminal binds a Run to it;
+        # send --to run:<id> from a terminal in no Run arrives; check in the first terminal returns it.
         for role in LEADS:
             t = flat(NATIVE / f"{role}.md")
             for needle in ("Claude Code's SendMessage", "ListAgents", "an OpenCode session or an agent on another host",
-                           "--to run:<id>", "has no Orca address", "`orca-ide terminal send` only as a last resort",
-                           "never into the owner's own tab", "a send is not a read"):
+                           "orca-ide orchestration run-create --objective", "your session name",
+                           "orca-ide orchestration run-list", "--to run:<id>", "a send is not a read",
+                           "write it in your own terminal for the owner", "Never type into another session's terminal"):
                 self.assertIn(needle, t, (role, needle))
-            self.assertNotIn('--text "machine coordinator:', t, role)
+
+    def test_no_persona_types_into_a_terminal(self):
+        for role in NATIVE_ROLES:
+            t = flat(NATIVE / f"{role}.md")
+            self.assertNotIn("orca-ide terminal send", t, role)
+            self.assertNotIn("last resort", t, role)
             self.assertNotIn("type one line into", t.lower(), role)
 
     def test_workers_report_by_worker_done_when_dispatched_else_by_sendmessage(self):
@@ -876,7 +883,7 @@ class NativePersonaTests(unittest.TestCase):
             for needle in ("Task and Dispatch IDs", "--type worker_done", "--outcome succeeded|failed",
                            "orca-ide orchestration ask", "a follow-up comes as a new Task",
                            "SendMessage to the session that started you", "End your turn",
-                           "`orca-ide terminal send` only as a last resort", "never into the owner's own tab"):
+                           "send it to its Run (`--to run:<id>`", "Never type into another session's terminal"):
                 self.assertIn(needle, t, (role, needle))
             for needle in ("then stop and wait", "Answer follow-up questions with `orca-ide orchestration reply`"):
                 self.assertNotIn(needle, t, (role, needle))
@@ -918,7 +925,7 @@ class NativePersonaTests(unittest.TestCase):
     def test_design_lead_keeps_its_design_method_and_reports_to_the_coordinator(self):
         t = flat(NATIVE / "design-lead.md")
         for needle in ("Plan before code", "AI-template tells", "Quality floor", "phone width", "`APPROVE` or `BLOCK`",
-                       "Never edit a lane's code yourself", "{{PROJECT}} coordinator"):
+                       "Never edit a lane's code yourself", "{{PROJECT}} coordinator", "the same lines, by message"):
             self.assertIn(needle, t, needle)
 
     def test_design_lead_merges_only_on_the_owners_own_word(self):
@@ -939,7 +946,7 @@ class NativePersonaTests(unittest.TestCase):
         for needle in ("Reproduce first", "read-only until you have reproduced it", "superpowers:systematic-debugging",
                        "a test that fails without the fix", "Never weaken, skip or delete a test",
                        "cause:", "fix:", "evidence:", "a failing test, a CI run or a bug report",
-                       "your lane brief", "Never close an issue"):
+                       "your lane brief", "Never close an issue", "at most 9 lines"):
             self.assertIn(needle, t, needle)
         self.assertRegex(t, r"succeeded\|failed\|blocked\|NEEDS_STANDARD\|NEEDS_DEEP")
 
@@ -952,10 +959,21 @@ class NativePersonaTests(unittest.TestCase):
                        "scripts/project-pause wake", "ORDER: top yes|no", "allowance", "decisions first",
                        "Public posts", "If a send fails, tell the owner"):
             self.assertIn(needle, t, needle)
-        self.assertNotIn("Every 30 minutes", t)
         self.assertRegex(t, r"[Nn]ever .*public")
         self.assertRegex(t, r"[Nn]ever run `lane-sweep --apply`")
         self.assertRegex(t, r"[Nn]ever throttle the owner|owner's own work is never throttled")
+
+    def test_native_record_keeps_the_owner_decisions_on_the_personas(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "record.md")
+        self.assertIn("## Owner decisions", t)
+        self.assertIn("2026-11-19: a coordinator follows the machine coordinator only on budget and machine matters", t)
+        self.assertIn("2026-11-19: the design lead merges only on the owner's own word", t)
+
+    def test_native_setup_never_tells_an_agent_to_type_into_another_terminal(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "setup.md")
+        self.assertNotIn("Nudging another tab", t)
+        self.assertIn("never type into another session's terminal", t)
+        self.assertIn("--to run:<id>", t)
 
     def test_native_lane_brief_has_the_report_the_personas_point_to(self):
         t = flat(NATIVE_BRIEF)
