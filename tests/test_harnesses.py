@@ -63,6 +63,37 @@ class PersonaHookTests(TempDirTest):
             r = self.hook(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(path)))
             self.assertEqual((r.returncode, r.stdout), (0, ""), path)
 
+    CLAUDE_HOOK_CAP = 10_000  # Claude Code keeps at most this many characters of a hook's output
+
+    def test_hook_persona_under_cap_printed_whole(self):
+        text = "".join(f"rule {i:04d}: keep it short\n" for i in range(350))  # about 9,450 characters
+        self.assertLess(len(text), 9_800)
+        self.persona.write_text(text)
+        r = self.hook(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona)))
+        self.assertEqual((r.returncode, r.stdout), (0, text))
+
+    def test_hook_long_persona_points_to_file(self):
+        text = "".join(f"rule {i:05d}: keep it short\n" for i in range(1000))  # about 28,000 characters
+        self.persona.write_text(text)
+        r = self.hook(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona)))
+        self.assertEqual(r.returncode, 0)
+        self.assertLessEqual(len(r.stdout), self.CLAUDE_HOOK_CAP)
+        head, _, body = r.stdout.partition("\n\n")
+        self.assertIn(str(self.persona), head)
+        self.assertIn("Read the whole file now", head)
+        self.assertTrue(body.startswith("rule 00000"))
+        self.assertTrue(text.startswith(body))
+        self.assertTrue(body.endswith("\n"))  # cut at a line end
+        self.assertGreater(len(body), 8_000)
+
+    def test_hook_long_multibyte_persona_stays_valid(self):
+        self.persona.write_text("Österberg möter Öland på väg.\n" * 700)  # under 22,000 characters, more bytes
+        r = subprocess.run([str(HOOK)], capture_output=True, cwd=self.t, timeout=10, input=b"",
+                           env=clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona)))
+        out = r.stdout.decode("utf-8")  # strict: no character cut in half
+        self.assertLessEqual(len(out), self.CLAUDE_HOOK_CAP)
+        self.assertIn(str(self.persona), out)
+
     def test_hook_exit_zero_always(self):
         unreadable = self.t / "secret.md"
         unreadable.write_text(PERSONA_TEXT)
