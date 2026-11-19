@@ -56,8 +56,9 @@ is silent).
     Claude `{"model","effort"}`, OpenCode `{"model"}`)
 - `core/harnesses/persona-hook.sh` — Claude `SessionStart` hook (matchers `startup|resume|compact`): prints
   `$LANE_PERSONA`'s contents when both markers are set and the file exists; exit 0 always.
-- `core/harnesses/opencode/lane-persona.js` — OpenCode plugin: `experimental.chat.system.transform` appends the
-  persona; `experimental.session.compacting` pushes it into `output.context`; both only with the markers set.
+- `core/harnesses/opencode/lane-persona.js` — OpenCode v2 plugin (`export default { id, setup }`): `setup` registers
+  `ctx.session.hook("context")` and `ctx.session.hook("compaction")`, each pushing the persona onto `input.system`;
+  only with the markers set (NO-1 review 1: 2.2.1 has no `experimental.*` hooks).
 - `core/harnesses/__init__.py`: `load_harness(name: str) -> module` and `harnesses() -> dict[str, module]`.
 - Personas: `orchestrators/native-orca/personas/{coordinator,design-lead,reviewer,debugger,machine-coordinator}.md`,
   with the same render placeholders `project-setup` already uses for the Cotal personas.

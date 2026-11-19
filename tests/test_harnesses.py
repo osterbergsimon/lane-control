@@ -5,7 +5,9 @@ Temp dirs only: HOME and XDG_* point into them, so no real Claude, OpenCode or O
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -420,19 +422,31 @@ class OpenCodeAdapterTests(HomeTest):
 
 @unittest.skipUnless(NODE, "node is not installed")
 class OpenCodePluginTests(TempDirTest):
-    """lane-persona.js run under node with the two hooks OpenCode calls."""
+    """lane-persona.js under node, called the way OpenCode 2.2.1 calls a plugin: its default export's setup(ctx),
+    then the hooks it registered with ctx.session.hook(name, fn). OpenCodeLiveTests checks the real thing."""
 
     DRIVER = """
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.argv[2]).href);
-const plugins = Object.values(mod).filter((f) => typeof f === "function");
-const out = { count: plugins.length, system: [], context: [] };
-for (const p of plugins) {
-  const hooks = await p({ directory: process.cwd() });
-  await hooks["experimental.chat.system.transform"]({ model: {} }, { system: out.system });
-  await hooks["experimental.session.compacting"]({ sessionID: "s" }, { context: out.context });
-  await hooks["experimental.chat.system.transform"]({ model: {} }, {});  // a shape it does not know: no throw
-}
+const def = mod.default;
+const out = { id: def?.id, setup: typeof def?.setup, named: Object.keys(mod).filter((k) => k !== "default"),
+              hooks: [], turn: null, compaction: null, disposed: 0, tui: null };
+const registered = {};
+const ctx = { session: { hook: async (name, fn) => {
+  out.hooks.push(name);
+  registered[name] = fn;
+  return { dispose: async () => { out.disposed++; } };
+} } };
+const dispose = await def.setup(ctx);
+const turn = { sessionID: "ses_1", system: [{ type: "text", text: "base" }], messages: [] };
+await registered.context?.(turn);
+const compaction = { sessionID: "ses_1", system: [], messages: [] };
+await registered.compaction?.(compaction);
+await registered.context?.({ sessionID: "ses_1" });  // a shape it does not know: no throw
+out.turn = turn.system;
+out.compaction = compaction.system;
+out.tui = typeof (await def.setup({ ui: {} }));  // OpenCode's TUI context has no session hooks
+if (typeof dispose === "function") await dispose();
 console.log(JSON.stringify(out));
 """
 
@@ -458,19 +472,159 @@ console.log(JSON.stringify(out));
         r = subprocess.run([NODE, "--check", str(self.copy)], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_plugin_is_a_v2_definition(self):
+        out = self.run_plugin(clean_env())
+        self.assertEqual((out["id"], out["setup"], out["named"]), ("lane-persona", "function", []))
+
     def test_plugin_appends_persona_with_markers(self):
         out = self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona)))
-        self.assertEqual(out, {"count": 1, "system": [PERSONA_TEXT], "context": [PERSONA_TEXT]})
+        part = {"type": "text", "text": PERSONA_TEXT}
+        self.assertEqual(out["hooks"], ["context", "compaction"])
+        self.assertEqual(out["turn"], [{"type": "text", "text": "base"}, part])
+        self.assertEqual(out["compaction"], [part])
+        self.assertEqual(out["disposed"], 2)
+        self.assertEqual(out["tui"], "undefined")
 
     def test_plugin_silent_without_markers(self):
         for env in (clean_env(), clean_env(LANE_ROLE="coordinator"), clean_env(LANE_PERSONA=str(self.persona))):
-            self.assertEqual(self.run_plugin(env), {"count": 1, "system": [], "context": []})
+            out = self.run_plugin(env)
+            self.assertEqual(out["hooks"], [])
+            self.assertEqual((out["turn"], out["compaction"]), ([{"type": "text", "text": "base"}], []))
 
     def test_plugin_silent_missing_file(self):
         (self.t / "a-dir.md").mkdir()
         for path in (self.t / "missing.md", self.t / "a-dir.md"):
             out = self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(path)))
-            self.assertEqual(out, {"count": 1, "system": [], "context": []})
+            self.assertEqual((out["turn"], out["compaction"]), ([{"type": "text", "text": "base"}], []))
+
+
+OPENCODE2 = shutil.which("opencode2")
+LIVE = os.environ.get("LANE_LIVE_OPENCODE") == "1"
+
+
+@unittest.skipUnless(LIVE and OPENCODE2, "opt-in: LANE_LIVE_OPENCODE=1 and opencode2 on PATH")
+class OpenCodeLiveTests(HomeTest):
+    """The real opencode2 (2.x) with the plugin installed by the adapter, in temp HOME/XDG folders, talking to
+    tests/stubs/fake_llm.py on 127.0.0.1 (no real provider, no sign-in). Checks the plugin loads without error and
+    the persona is in the system prompt of a turn, of the compaction request, and of the turn after it; and that a
+    server without the markers never gets it. About 30 s. Run: LANE_LIVE_OPENCODE=1 python3 -m unittest
+    tests.test_harnesses.OpenCodeLiveTests"""
+
+    MARK = "LANE-PERSONA-LIVE-CHECK"
+
+    def setUp(self):
+        super().setUp()
+        import json
+        v = subprocess.run([OPENCODE2, "--version"], capture_output=True, text=True, timeout=30).stdout
+        if "v2." not in v and not v.strip().startswith("2."):
+            self.skipTest(f"opencode2 is not 2.x: {v.strip()}")
+        self.version = v.strip()
+        for d in ("config", "data", "state", "cache"):
+            (self.t / d).mkdir()
+        os.environ["XDG_CONFIG_HOME"] = str(self.t / "config")
+        self.assertTrue(self.pkg.load_harness("opencode").install_persona_hook(self.checkout))
+        self.persona = self.t / "coordinator.md"
+        self.persona.write_text(f"# Coordinator\n{self.MARK}\n")
+        self.reqlog = self.t / "requests.jsonl"
+        self.reqlog.write_text("")
+        self.fake = subprocess.Popen([sys.executable, str(ROOT / "tests" / "stubs" / "fake_llm.py"), str(self.reqlog)],
+                                     stdout=subprocess.PIPE, text=True)
+        self.addCleanup(self.stop, self.fake)
+        port = int(self.fake.stdout.readline())
+        self.conf = json.dumps({"model": "lanetest/m", "provider": {"lanetest": {
+            "npm": "@ai-sdk/openai-compatible", "name": "lanetest", "models": {"m": {"name": "m"}},
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "unused"}}}})
+
+    @staticmethod
+    def stop(proc):
+        proc.terminate()
+        try:
+            proc.wait(15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    def serve(self, markers: bool):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.t / "config"),
+               "XDG_DATA_HOME": str(self.t / "data"), "XDG_STATE_HOME": str(self.t / "state"),
+               "XDG_CACHE_HOME": str(self.t / "cache"), "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               "OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_DISABLE_CLAUDE_CODE": "1",
+               "OPENCODE_DISABLE_FREE_MODELS": "1", "OPENCODE_SERVER_PASSWORD": "live-check",
+               "OPENCODE_CONFIG_CONTENT": self.conf}
+        if markers:
+            env.update(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona))
+        self.log = self.t / ("serve-markers.log" if markers else "serve-plain.log")
+        proc = subprocess.Popen([OPENCODE2, "serve", "--hostname", "127.0.0.1", "--port", str(port), "--print-logs"],
+                                cwd=self.checkout, env=env, stdout=subprocess.DEVNULL, stderr=self.log.open("w"))
+        self.addCleanup(self.stop, proc)
+        for _ in range(120):
+            try:
+                socket.create_connection(("127.0.0.1", port), 0.5).close()
+                break
+            except OSError:
+                time.sleep(0.5)
+        self.port = port
+        return proc
+
+    def api(self, method, path, body=None):
+        import base64
+        import json
+        import urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method=method,
+                                     data=json.dumps(body or {}).encode(),
+                                     headers={"content-type": "application/json", "authorization": "Basic " +
+                                              base64.b64encode(b"opencode:live-check").decode()})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())["data"]
+
+    def requests(self):
+        import json
+        out = []
+        for line in self.reqlog.read_text().splitlines():
+            msgs = json.loads(json.loads(line)["body"]).get("messages", [])
+            out.append((json.dumps(msgs[:1]), msgs[-1].get("content", "") if msgs else ""))
+        return out
+
+    def wait_for(self, last_content_has, n_before):
+        for _ in range(120):
+            new = self.requests()[n_before:]
+            if any(last_content_has in last for _, last in new):
+                return
+            time.sleep(0.5)
+        self.fail(f"no model request with {last_content_has!r}; log: {self.log.read_text()[-2000:]}")
+
+    def session_round(self):
+        sid = self.api("POST", "/api/session")["id"]
+        n = len(self.requests())
+        self.api("POST", f"/api/session/{sid}/prompt", {"text": "first turn"})
+        self.wait_for("first turn", n)
+        n = len(self.requests())
+        self.api("POST", f"/api/session/{sid}/compact")
+        self.wait_for("summar", n)
+        time.sleep(1)
+        n = len(self.requests())
+        self.api("POST", f"/api/session/{sid}/prompt", {"text": "after compaction"})
+        self.wait_for("after compaction", n)
+        return {last.split("\n")[0][:40]: self.MARK in system for system, last in self.requests()}
+
+    def test_live_plugin_loads_and_persona_survives_compaction(self):
+        self.serve(markers=True)
+        seen = self.session_round()
+        log = self.log.read_text()
+        self.assertIn("lane-persona.js", log)
+        self.assertNotIn("failed to load plugin", log)
+        self.assertTrue(seen.get("first turn"), seen)
+        self.assertTrue([v for k, v in seen.items() if "summar" in k.lower()][0], seen)
+        self.assertTrue(seen.get("after compaction"), seen)
+
+    def test_live_no_persona_without_markers(self):
+        self.serve(markers=False)
+        seen = self.session_round()
+        self.assertFalse(any(seen.values()), seen)
 
 
 class RecordTests(unittest.TestCase):
@@ -495,8 +649,11 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(status, "untested", name)
             self.assertFalse((HARNESSES / name / "adapter.py").exists(), name)
             self.assertIn("1.4.250", text, name)
-        self.assertIn("--standalone", self.status("opencode")[1])
-        self.assertIn("manual check", self.status("opencode")[1].lower())
+        oc = self.status("opencode")[1]
+        for needle in ("opencode2 --standalone", "LANE_LIVE_OPENCODE=1", "export default", '"context"',
+                       '"compaction"', "### 2026-11-19 live check (OpenCode 2.2.1)"):
+            self.assertIn(needle, " ".join(oc.split()), needle)
+        self.assertNotIn("experimental.", oc)  # the v1 hook names do not exist in v2
 
     def test_records_are_public_safe(self):
         for f in HARNESSES.glob("*/record.md"):
