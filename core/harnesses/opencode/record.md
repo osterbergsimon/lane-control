@@ -4,8 +4,9 @@ Status: in use
 
 Adapter: `adapter.py`, plugin `lane-persona.js`. Orca agent id `opencode2`; Orca passes `--model` only. The model
 must be one the tier rules allow for the project (`core/scripts/lane-tier`).
-- Start: `env LANE_ROLE=<role> LANE_PERSONA=<persona> OPENCODE_CONFIG_CONTENT={"model":"<provider/model>"} opencode
-  --standalone [--auto]`. OpenCode 2.2.1's interactive command has no `--model` flag; Orca 1.4.250 sets the model the
+- Start: `env LANE_ROLE=<role> LANE_PERSONA=<persona> OPENCODE_CONFIG_CONTENT={"model":"<provider/model>"} opencode2
+  --standalone [--auto]`. `opencode2` is the v2 package's own command and what Orca detects as `opencode2` (a plain
+  `opencode` may be v1 on some PATHs). OpenCode 2.2.1's interactive command has no `--model` flag; Orca 1.4.250 sets the model the
   same way for its own opencode2 agent. `--standalone` runs a private server started from that command, so the
   markers reach the plugin; the shared background service would not see them. `--auto` stands for project-setup's
   `auto` and `bypassPermissions`.

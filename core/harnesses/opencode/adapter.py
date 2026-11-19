@@ -1,6 +1,8 @@
 """OpenCode (v2) harness adapter (core/harnesses/__init__.py has the interface).
 
-Start: `env LANE_ROLE=... LANE_PERSONA=... OPENCODE_CONFIG_CONTENT={"model": ...} opencode --standalone [--auto]`.
+Start: `env LANE_ROLE=... LANE_PERSONA=... OPENCODE_CONFIG_CONTENT={"model": ...} opencode2 --standalone [--auto]`.
+`opencode2` is the v2 package's own command (a plain `opencode` may be v1 on some PATHs) and what Orca detects as its
+opencode2 agent.
 v2's interactive command has no --model flag; the model goes in through OPENCODE_CONFIG_CONTENT, as Orca does for
 its own opencode2 agent. --standalone runs the session in a private server started from this command, so the
 markers reach the plugin; the shared background service would not see them.
@@ -33,7 +35,7 @@ def start_command(role: str, persona: Path, model: str, permission_mode: "str | 
         raise ValueError(f"OpenCode has no permission mode {permission_mode!r} "
                          f"(it takes {', '.join(sorted(AUTO_MODES))} as --auto, or default)")
     cmd = harnesses.env_prefix(role, persona) + [
-        "OPENCODE_CONFIG_CONTENT=" + json.dumps({"model": model}), "opencode", "--standalone"]
+        "OPENCODE_CONFIG_CONTENT=" + json.dumps({"model": model}), "opencode2", "--standalone"]
     if permission_mode in AUTO_MODES:
         cmd.append("--auto")
     return cmd

@@ -289,7 +289,8 @@ class OpenCodeAdapterTests(HomeTest):
         conf = [a for a in cmd if a.startswith("OPENCODE_CONFIG_CONTENT=")]
         self.assertEqual(len(conf), 1)
         self.assertEqual(json.loads(conf[0].split("=", 1)[1]), {"model": "opencode-go/deepseek-v4.1-flash"})
-        self.assertEqual(cmd[cmd.index(conf[0]) + 1:], ["opencode", "--standalone"])
+        self.assertEqual(cmd[cmd.index(conf[0]) + 1:], ["opencode2", "--standalone"])
+        self.assertEqual(cmd[cmd.index(conf[0]) + 1], self.a.ORCA_AGENT_ID)  # the v2 command, as Orca detects it
         self.assertEqual(self.a.start_command("coordinator", p, "m/x", "default")[-1], "--standalone")
         for mode in ("auto", "bypassPermissions"):
             self.assertEqual(self.a.start_command("reviewer", p, "m/x", mode)[-2:], ["--standalone", "--auto"])
