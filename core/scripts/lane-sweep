@@ -22,7 +22,8 @@ Stuck: no activity for --stuck-hours, where activity is the newest of Orca's las
 old), the last push, the last commit and the last terminal output, and not parked. Parked: an open PR, HEAD equal to
 or behind the pushed branch, a clean tree, and either no live terminal or the PR's head is HEAD.
 
-Lanes listed in ~/.config/lane-control/lane-sweep.hold (one worktree path per line, `#` comments; LANE_SWEEP_HOLD)
+Worktrees on another Orca host (hostId not local) are left to that machine's sweep. Lanes listed in
+~/.config/lane-control/lane-sweep.hold (one worktree path per line, `#` comments; LANE_SWEEP_HOLD)
 are skipped. With machine.conf, each line ends `owner=<coordinator>`: the coordinator whose checkout the lane belongs
 to. Exit: 0 nothing found, 10 something reported; with --precheck 0 something reported, 1 nothing; 2 Orca or the
 machine could not be read.
@@ -256,8 +257,8 @@ def main(argv) -> int:
         return 2
     hold, own, agents = held(), owners(), live_agent_cwds()
     for wt in wts:
-        if wt.get("isMainWorktree") or wt.get("isArchived"):
-            continue
+        if wt.get("isMainWorktree") or wt.get("isArchived") or wt.get("hostId") not in (None, "", "local"):
+            continue  # a worktree on another Orca host (an SSH box) is that machine's own sweep's
         p = wt.get("path") or ""
         if p in hold or os.path.realpath(p) in hold:
             continue

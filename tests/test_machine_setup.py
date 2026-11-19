@@ -630,6 +630,14 @@ class LaneSweepTests(MachineTest):
         self.machine_conf(f'COORDINATORS="\nproj {self.main} claude proj coordinator\n"\n')
         self.assertRegex(self.sweep().stdout, rf"MERGED {path} .* owner=proj\n")
 
+    def test_other_host_worktrees_skipped(self):
+        self.state["worktrees"].append({"id": "box::/srv/x", "path": "/srv/box-only/x", "branch": "refs/heads/x",
+                                        "isMainWorktree": False, "isArchived": False, "lastActivityAt": ms(30),
+                                        "hostId": "ssh:box"})
+        self.orca(self.state)
+        r = self.sweep()
+        self.assertEqual((r.returncode, r.stdout), (0, "nothing found\n"))
+
     def test_orca_down_exits_2(self):
         self.state["down"] = True
         self.orca(self.state)
@@ -986,6 +994,7 @@ class MachineSetupTests(BudgetTest):
                 self.assertIn("--extra-agent-args=--model sonnet", c)
                 self.assertEqual(opt("--workspace"), f"path:{self.folder}")
                 self.assertEqual(opt("--workspace-mode"), "existing")
+                self.assertGreaterEqual(int(opt("--precheck-timeout")), 120)
                 self.assertIn("--enabled", c)
                 self.assertNotIn("--apply", opt("--prompt"))
         self.assertIn("night-manager.md", a["night manager"][a["night manager"].index("--prompt") + 1])
@@ -1029,6 +1038,24 @@ class MachineSetupTests(BudgetTest):
         self.assertEqual(self.creates(["terminal", "create"]), [])
         self.assertIn("machine coordinator: skipped", r.stdout)
         self.assertTrue((self.folder / ".lane-control" / "machine-coordinator.md").is_file())
+
+    def test_warns_when_run_from_a_lane_worktree(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("machine_setup", str(SCRIPTS / "machine-setup"))
+        spec = importlib.util.spec_from_loader("machine_setup", loader)
+        ms_ = importlib.util.module_from_spec(spec)
+        loader.exec_module(ms_)
+        git = dict(self.env, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@e", GIT_CONFIG_GLOBAL="/dev/null")
+        main = self.tmp / "lc"
+        subprocess.run(["git", "init", "-q", str(main)], check=True, env=git)
+        subprocess.run(["git", "-C", str(main), "commit", "-q", "--allow-empty", "-m", "x"], check=True, env=git)
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(self.tmp / "lane"), "-b", "l"],
+                       check=True, env=git)
+        self.assertIsNone(ms_.lane_worktree_warning(main))
+        self.assertIn(str(main), ms_.lane_worktree_warning(self.tmp / "lane"))
+        self.assertIsNone(ms_.lane_worktree_warning(self.tmp))  # not git at all (a copy on a host)
 
     def test_host_runs_there_over_ssh(self):
         write_exec(self.bin / "ssh", """

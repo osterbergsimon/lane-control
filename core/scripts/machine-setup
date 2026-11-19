@@ -216,19 +216,21 @@ def automation_specs() -> list:
              f"{NIGHT_DOC} says; a line without an owner goes to the machine coordinator. PR-PARKED lines need nothing. Then end.")
     check = (f"Run {q(str(s / 'machine-check'))} --last and send its lines, unchanged, to the machine coordinator "
              f"(session `{TITLE}`), the way the Messages section of {NIGHT_DOC} says. Do nothing else. Then end.")
-    return [("night manager", "37 * * * *", q(str(s / "night-precheck")), night),
-            ("lane sweep", "17 */3 * * *", q(str(s / "lane-sweep")) + " --precheck", sweep),
-            ("machine check", "*/30 * * * *", q(str(s / "machine-check")), check)]
+    # Orca's default precheck timeout is 60 s and a timeout skips the run; the sweep asks gh about every lane.
+    return [("night manager", "37 * * * *", q(str(s / "night-precheck")), 120, night),
+            ("lane sweep", "17 */3 * * *", q(str(s / "lane-sweep")) + " --precheck", 600, sweep),
+            ("machine check", "*/30 * * * *", q(str(s / "machine-check")), 120, check)]
 
 
 def automations_step(folder: Path):
     have = {a.get("name") for a in orca("automations", "list").get("automations", []) or []}
-    for name, trigger, precheck, prompt in automation_specs():
+    for name, trigger, precheck, timeout, prompt in automation_specs():
         if name in have:
             say(name, "exists", "(automation; not changed)")
             continue
         orca("automations", "create", "--name", name, "--trigger", trigger, "--prompt", prompt, "--provider", "claude",
              f"--extra-agent-args=--model {AUTOMATION_MODEL}", "--precheck", precheck,
+             "--precheck-timeout", str(timeout),
              "--workspace", f"path:{folder}", "--workspace-mode", "existing", "--enabled")
         say(name, "created", f"(automation, {trigger}, precheck {precheck})")
 
@@ -265,6 +267,21 @@ def timer_step():
         raise Fail(f"systemctl --user enable --now ci-presence.timer failed: {r.stderr.strip()}")
     say(step, "created", f"{units / 'ci-presence.timer'} (to keep it without a login session: loginctl "
                          "enable-linger $USER)")
+
+
+def lane_worktree_warning(root: Path) -> "str | None":
+    """A warning when lane-control runs from a linked worktree (a lane): the automations and the timer call scripts by
+    this path, and a lane is removed when its PR merges. None for a main checkout or a copy that is not git."""
+    def rev(*a):
+        r = subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", *a], capture_output=True,
+                           text=True)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    git_dir, common = rev("--git-dir"), rev("--git-common-dir")
+    if not git_dir or os.path.realpath(git_dir) == os.path.realpath(common):
+        return None
+    main = os.path.dirname(os.path.realpath(common))
+    return (f"{root} is a lane worktree; the automations and the timer will call scripts there, and it goes when the "
+            f"lane does. Run machine-setup from the main checkout ({main}) instead")
 
 
 # --- host ------------------------------------------------------------------------------------------------------------
@@ -322,6 +339,9 @@ def main(argv) -> int:
     if a.host:
         return on_host(a.host, argv)
     folder = Path(os.path.expanduser(a.folder)).resolve()
+    warning = lane_worktree_warning(ROOT)
+    if warning:
+        say("lane-control", "warning", warning)
     try:
         machine_conf()
         usage_feed()
