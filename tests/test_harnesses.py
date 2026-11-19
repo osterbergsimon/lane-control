@@ -148,7 +148,8 @@ class HomeTest(TempDirTest):
         super().setUp()
         self.home = self.t / "home"
         self.home.mkdir()
-        saved = {k: os.environ.get(k) for k in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")}
+        saved = {k: os.environ.get(k) for k in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+                                                "CLAUDE_CONFIG_DIR")}
 
         def restore():
             for k, v in saved.items():
@@ -161,6 +162,7 @@ class HomeTest(TempDirTest):
         os.environ.pop("XDG_CONFIG_HOME", None)
         os.environ.pop("XDG_DATA_HOME", None)
         os.environ.pop("XDG_STATE_HOME", None)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
         self.checkout = self.t / "code" / "shop.app"
         self.checkout.mkdir(parents=True)
         self.pkg = load_harnesses_pkg()
@@ -375,6 +377,13 @@ class ClaudeAdapterTests(HomeTest):
     def test_claude_project_dir_encoding(self):
         self.assertEqual(self.a.project_dir(Path("/a/b.c/d_e")),
                          self.home / ".claude" / "projects" / "-a-b-c-d-e")
+
+    def test_claude_project_dir_follows_config_dir(self):
+        # Review m5: a Claude started with CLAUDE_CONFIG_DIR keeps its transcripts there.
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.t / "profile")
+        self.assertEqual(self.a.project_dir(Path("/a/b")), self.t / "profile" / "projects" / "-a-b")
+        os.environ["CLAUDE_CONFIG_DIR"] = "relative/dir"  # not absolute: ignored
+        self.assertEqual(self.a.project_dir(Path("/a/b")), self.home / ".claude" / "projects" / "-a-b")
 
     def transcripts(self, checkout):
         d = self.a.project_dir(checkout)

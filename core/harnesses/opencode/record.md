@@ -27,6 +27,10 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   store, `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/`), tables `session_v2` and
   `session_message`, times in milliseconds. Other sessions in the checkout do not count; no record means no marked
   session (`None`). The older `session` table and `storage/` folder are not v2's.
+- Folders come from the caller's environment (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`). A server
+  started with other ones (an Orca-managed account with private XDG folders, or `OPENCODE_CONFIG_DIR`) loads
+  plugins from and writes its store to places the adapter does not look: the plugin is then not installed for it,
+  and idle reads as `None`.
 - Wake: Orca types reports into an OpenCode terminal as for Claude; not yet confirmed for an OpenCode coordinator.
 - Markers are environment variables: everything in a marked server gets the persona, child (sub-agent) sessions
   included, and so does an OpenCode the coordinator starts from its own shell.

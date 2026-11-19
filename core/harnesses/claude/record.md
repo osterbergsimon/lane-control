@@ -16,8 +16,10 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
   JSON input in `${XDG_STATE_HOME:-~/.local/state}/lane-control/sessions/<checkout>/<role>.claude`; idle is the
   newest write of that transcript (`~/.claude/projects/<checkout path, every non-alphanumeric as ->/<id>.jsonl`) and
   of its sub-agents' transcripts (`<id>/subagents/`). Other sessions in the checkout do not count; no record means
-  no marked session (`None`). Anything the coordinator starts from its own shell inherits the markers (a `claude -p`
-  one-shot, for example) and records itself instead, until the coordinator's next start, resume or compaction.
+  no marked session (`None`). The folder is under `$CLAUDE_CONFIG_DIR` when the caller has it set; a coordinator
+  started with a config folder the caller does not know (an Orca-managed profile) reads as `None`. Anything the
+  coordinator starts from its own shell inherits the markers (a `claude -p` one-shot, for example) and records
+  itself instead, until the coordinator's next start, resume, clear or compaction.
 - Wake: Orca types worker reports into a Claude coordinator (native-orca record, ORCH-1).
 
 ## History

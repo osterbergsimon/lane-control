@@ -102,8 +102,12 @@ def _write_atomic(path: Path, text: str):
 
 
 def project_dir(checkout: Path) -> Path:
-    """Claude's transcript folder for a working directory: every character but letters and digits becomes '-'."""
-    return Path.home() / ".claude" / "projects" / harnesses.encode_path(checkout)
+    """Claude's transcript folder for a working directory: every character but letters and digits becomes '-'. The
+    base is $CLAUDE_CONFIG_DIR when it is set (absolute), else ~/.claude, read from this process's environment: a
+    session started with another config folder (an Orca-managed profile) keeps its transcripts there."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(base) if base and os.path.isabs(base) else Path.home() / ".claude"
+    return base / "projects" / harnesses.encode_path(checkout)
 
 
 def _mtime(path: Path) -> "float | None":
