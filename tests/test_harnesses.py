@@ -530,6 +530,19 @@ class OpenCodeAdapterTests(HomeTest):
         self.record("opencode", "not-in-store")
         self.assertIsNone(self.a.idle_minutes(self.checkout, now))
 
+    def test_opencode_idle_v1_store_says_so(self):
+        # Review m6: a store with only OpenCode 1.x tables is named as such, not as an unreadable store.
+        import sqlite3
+        path = self.home / ".local" / "share" / "opencode" / "opencode.db"
+        path.parent.mkdir(parents=True)
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER)")
+        c.commit()
+        c.close()
+        self.record("opencode", "s1")
+        with self.assertRaisesRegex(sqlite3.DatabaseError, "not an OpenCode 2 store"):
+            self.a.idle_minutes(self.checkout, 1_800_000_000.0)
+
     def test_opencode_idle_db_follows_xdg(self):
         self.db([("s1", None, str(self.checkout.resolve()), 1)])
         self.record("opencode", "s1")

@@ -96,6 +96,9 @@ def idle_minutes(checkout: Path, now: float, role: str = "coordinator") -> "int 
         return None
     con = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
     try:
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if not {"session_v2", "session_message"} <= tables:
+            raise sqlite3.DatabaseError(f"{db}: not an OpenCode 2 store (no session_v2 or session_message table)")
         (newest,) = con.execute(NEWEST, (sid,)).fetchone()
     finally:
         con.close()
