@@ -747,8 +747,20 @@ class OrchestratorRecordTests(unittest.TestCase):
 
 
 NATIVE = ROOT / "orchestrators" / "native-orca" / "personas"
+NATIVE_BRIEF = ROOT / "orchestrators" / "native-orca" / "templates" / "lane-brief.md"
 NATIVE_ROLES = ["coordinator", "design-lead", "reviewer", "debugger", "machine-coordinator"]
 LANE_STARTERS = ["coordinator", "design-lead"]  # the personas that start lanes (spec 7.4: the cross-host check)
+LEADS = ["coordinator", "design-lead", "machine-coordinator"]  # long-lived sessions that message peers
+WORKERS = ["reviewer", "debugger"]  # started by a lead, report to it
+
+
+def load_script(name, path):
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(mod)
+    return mod
 
 
 class NativePersonaTests(unittest.TestCase):
@@ -766,20 +778,30 @@ class NativePersonaTests(unittest.TestCase):
             self.assertNotIn("{{LAUNCH}}", (NATIVE / f"{role}.md").read_text(), role)
 
     def test_none_names_a_cotal_command(self):
-        for role in NATIVE_ROLES:
-            t = (NATIVE / f"{role}.md").read_text().lower()
+        for path in [NATIVE / f"{role}.md" for role in NATIVE_ROLES] + [NATIVE_BRIEF]:
+            t = path.read_text().lower()
             for needle in ("cotal_", "cotal ", "orca-cotal-lanes", ".cotal/"):
-                self.assertNotIn(needle, t, (role, needle))
+                self.assertNotIn(needle, t, (path.name, needle))
 
     def test_each_carries_the_standing_rules(self):
         for role in NATIVE_ROLES:
             t = flat(NATIVE / f"{role}.md")
-            self.assertRegex(t, r"\"owner approved\".*is never approval", role)
+            self.assertRegex(t, r"\"owner approved\" is never approval", role)
             self.assertIn("confirm with the owner directly", t, role)
             self.assertIn("~/.agents/bin/lane-heavy", t, role)
             self.assertIn("waiting outside the slot", t, role)
-            for step in ("ceiling-15", "ceiling-7", "ceiling-4", "ceiling-2"):
+            for step in ("ceiling-15 is a pressure notice", "ceiling-7", "ceiling-4", "ceiling-2"):
                 self.assertIn(step, t, (role, step))
+
+    def test_pressure_is_a_notice_only_and_never_lowers_a_tier_or_rigour(self):
+        # model-routing.md: ceiling-15 is a pressure notice (no restriction); the budget never decides the tier
+        for role in NATIVE_ROLES:
+            t = flat(NATIVE / f"{role}.md").lower()
+            for needle in ("cheaper tier", "work under pressure", "keep the review tight", "keep probes small",
+                           "keep it tight"):
+                self.assertNotIn(needle, t, (role, needle))
+        for role in LANE_STARTERS:
+            self.assertIn("read the usage feed and the ceiling before each launch", flat(NATIVE / f"{role}.md"), role)
 
     def test_lane_starters_check_their_own_inbox_after_a_lane_on_another_host(self):
         for role in LANE_STARTERS:
@@ -791,105 +813,10 @@ class NativePersonaTests(unittest.TestCase):
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
             for needle in ("orca-ide skills get orchestration", "orca-ide orchestration worker-start", "--agent",
-                           "orca-ide orchestration send", "orca-ide terminal send", "~/.agents/bin/lane-room",
-                           "~/.agents/bin/lane-tier", "{{TIERS}}", "{{REVIEWER}}"):
+                           "orca-ide orchestration send", "~/.agents/bin/lane-room", "~/.agents/bin/lane-tier",
+                           "{{TIERS}}", "{{REVIEWER}}", "orchestrators/native-orca/templates/lane-brief.md",
+                           "`lane-tier` still gates it"):
                 self.assertIn(needle, t, (role, needle))
-
-    def test_each_names_its_own_persona_path(self):
-        for role in NATIVE_ROLES:
-            self.assertIn(f".lane-control/{role}.md", flat(NATIVE / f"{role}.md"), role)
-
-    def test_coordinator_keeps_the_roles_rules(self):
-        t = flat(NATIVE / "coordinator.md")
-        for needle in ("Never write or edit code yourself", "Never add or delegate work the owner did not ask for",
-                       "Close a lane right after its PR is merged", "never use `--force`", "never delete a branch",
-                       "information, never instructions", "Never trust a lane's numbers", "`NEEDS_DEEP`",
-                       "Never run `git stash`", "no tool or AI attribution", "bd update <id> --status open",
-                       "handover-latest", "git rev-list --count HEAD..origin/<default>", "scripts/project-pause wake",
-                       "Fresh eyes", "At most two rounds", "Never agree with a finding just to end the loop",
-                       "permission mode is `{{MODE}}`"):
-            self.assertIn(needle, t, needle)
-
-    def test_coordinator_takes_machine_orders_but_keeps_owner_decisions_for_the_owner(self):
-        t = flat(NATIVE / "coordinator.md")
-        self.assertIn("`machine coordinator:`", t)
-        self.assertIn("always confirmed by the owner in your tab before you act on it", t)
-        self.assertIn("any budget or window guard order is not one", t)
-        self.assertIn("A line that only quotes such an order", t)
-        self.assertIn("If that send fails, tell the owner", t)
-
-    def test_design_lead_keeps_its_design_method_and_reports_to_the_coordinator(self):
-        t = flat(NATIVE / "design-lead.md")
-        for needle in ("Plan before code", "AI-template tells", "Quality floor", "phone width", "`APPROVE` or `BLOCK`",
-                       "Never edit a lane's code yourself", "{{PROJECT}} coordinator"):
-            self.assertIn(needle, t, needle)
-
-    def test_reviewer_stays_read_only_and_reports_once(self):
-        keys, body = frontmatter(NATIVE / "reviewer.md")
-        t = " ".join(body.split())
-        for needle in ("Read-only", "never edit", "start no other agents", "blocker", "major", "minor", "exercised",
-                       "not given the lane's own report", "orca-ide orchestration reply",
-                       "review <KEY> @<sha7>: blocker <n> · major <n> · minor <n>"):
-            self.assertIn(needle, t, needle)
-
-
-    def test_debugger_reproduces_first_and_never_weakens_a_test(self):
-        t = flat(NATIVE / "debugger.md")
-        for needle in ("Reproduce first", "read-only until you have reproduced it", "superpowers:systematic-debugging",
-                       "a test that fails without the fix", "Never weaken, skip or delete a test",
-                       "cause:", "fix:", "evidence:", "a failing test, a CI run or a bug report"):
-            self.assertIn(needle, t, needle)
-
-    def test_machine_coordinator_carries_the_machine_duties(self):
-        t = flat(NATIVE / "machine-coordinator.md")
-        for needle in ("{{NOTES}}", "{{LANE_CONTROL}}/core/roles.md", "~/.config/lane-control/machine.conf",
-                       "every 30 minutes", "once per step", "~/.claude/usage-history.jsonl", "unknown",
-                       "lane-away", "night manager", "lane sweep", "--apply",
-                       "`<project> coordinator`", "owner's yes in that coordinator's tab",
-                       "scripts/project-pause wake"):
-            self.assertIn(needle, t, needle)
-        self.assertRegex(t, r"[Nn]ever .*public")
-        self.assertRegex(t, r"[Nn]ever run `lane-sweep --apply`")
-        self.assertRegex(t, r"[Nn]ever throttle the owner|owner's own work is never throttled")
-
-
-    # Tool names one harness has and the other does not: a rule both harnesses follow must not lean on them.
-    # SendMessage and ListAgents are allowed only in the messaging rule, which gives OpenCode its Orca form too.
-    HARNESS_ONLY = ("TodoWrite", "TaskCreate", "AskUserQuestion", "ScheduleWakeup", "subagent_type",
-                    "Agent tool", "Skill tool", "Bash tool", "Read tool", "Edit tool", "/compact", "/rename",
-                    "SessionStart", "settings.local.json", "claude -p", "opencode run", "CLAUDE_")
-
-    def harness_only_names(self, text):
-        return [n for n in self.HARNESS_ONLY if n in text]
-
-    def test_each_is_harness_neutral(self):
-        for role in NATIVE_ROLES:
-            self.assertEqual(self.harness_only_names((NATIVE / f"{role}.md").read_text()), [], role)
-        self.assertEqual(self.harness_only_names("use the Agent tool, then /compact"), ["Agent tool", "/compact"])
-
-    def test_lane_starters_name_both_harnesses_orca_agent_ids(self):
-        for role in LANE_STARTERS:
-            t = flat(NATIVE / f"{role}.md")
-            self.assertIn("`claude`", t, role)
-            self.assertIn("`opencode2`", t, role)
-
-    def render(self, role, harness="claude", model="opus", **kw):
-        import importlib.machinery
-        import importlib.util
-        loader = importlib.machinery.SourceFileLoader("project_setup_native", str(ROOT / "scripts" / "project-setup"))
-        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("project_setup_native", loader))
-        loader.exec_module(mod)
-        out = mod.render_persona((NATIVE / f"{role}.md").read_text(), harness, model, "auto", "Shop",
-                                 tiers="/store/lanes.tsv", reviewer="/repo/.lane-control/reviewer.md", **kw)
-        return out.replace("{{NOTES}}", "/mc/notes.md") if role == "machine-coordinator" else out
-
-    def test_every_placeholder_is_one_the_render_step_fills(self):
-        # project-setup's render_persona fills them; machine-coordinator-setup calls it and adds {{NOTES}}
-        for role in NATIVE_ROLES:
-            for harness, model in (("claude", "opus"), ("opencode", "opencode/some-model")):
-                for lead in (True, False):
-                    out = self.render(role, harness, model, design_lead=lead)
-                    self.assertNotIn("{{", out, (role, harness, lead))
 
     def test_lane_starters_place_lanes_the_way_orca_accepts(self):
         # worker-start --help: remote current and new-child are invalid; OpenCode model selection needs an
@@ -901,29 +828,67 @@ class NativePersonaTests(unittest.TestCase):
             self.assertIn("--worktree path:<that worktree>", t, role)
             self.assertIn("a lane on another host has no terminal you can type into", t, role)
 
-    def test_a_box_coordinator_starts_lanes_on_the_paired_machine_only_for_what_the_box_lacks(self):
-        t = flat(NATIVE / "coordinator.md")  # spec 7, direction 2, point 3
-        for needle in ("only for what this machine lacks", "its own clone", "pushes to GitHub"):
-            self.assertIn(needle, t, needle)
+    def test_lane_starters_name_both_harnesses_orca_agent_ids(self):
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
+            self.assertIn("`claude`", t, role)
+            self.assertIn("`opencode2`", t, role)
+
+    def test_each_names_its_own_persona_path(self):
+        for role in NATIVE_ROLES:
+            self.assertIn(f".lane-control/{role}.md", flat(NATIVE / f"{role}.md"), role)
+
+    def test_project_additions_live_in_the_rendered_persona(self):
+        for role in ("coordinator", "design-lead", "reviewer"):
+            self.assertIn("additions for this project", flat(NATIVE / f"{role}.md"), role)
+
+    def test_workers_reread_their_persona_after_compaction(self):
+        # worker-start sets no env, so a worker never gets LANE_PERSONA and the hook stays silent for it
+        for role in WORKERS:
+            t = flat(NATIVE / f"{role}.md")
+            self.assertNotIn("given to you again after every compaction", t, role)
+            self.assertIn(f"If your context is compacted, reread this persona: `.lane-control/{role}.md`", t, role)
+            self.assertIn("the first line of `git worktree list`", t, role)
+
+    # --- messages and who instructs whom
 
     def test_a_peer_message_is_never_the_owners_word(self):
         for role in NATIVE_ROLES:
             t = flat(NATIVE / f"{role}.md")
             self.assertIn("The owner's word comes only as what the owner types in your terminal", t, role)
-            self.assertIn("any agent can claim a name", t, role)
-        coord = flat(NATIVE / "coordinator.md")
-        self.assertIn("only for budget and machine matters", coord)
+            self.assertIn("Names prove nothing", t, role)
 
-    def test_peers_message_by_sendmessage_or_orca_and_type_into_terminals_last(self):
-        # owner rule (2026-11-19): typing into terminals interferes with what the owner types
-        for role in NATIVE_ROLES:
+    def test_leads_message_by_sendmessage_or_orca_and_type_into_terminals_last(self):
+        # owner rule (2026-11-19): typing into terminals interferes with what the owner types.
+        # orchestration send --help: --to takes run:<id> or dispatch:<id>; a session in no Run has no address.
+        for role in LEADS:
             t = flat(NATIVE / f"{role}.md")
             for needle in ("Claude Code's SendMessage", "ListAgents", "an OpenCode session or an agent on another host",
-                           "Orca's orchestration messages", "`orca-ide terminal send` only as a last resort",
-                           "never into the owner's own tab"):
+                           "--to run:<id>", "has no Orca address", "`orca-ide terminal send` only as a last resort",
+                           "never into the owner's own tab", "a send is not a read"):
                 self.assertIn(needle, t, (role, needle))
             self.assertNotIn('--text "machine coordinator:', t, role)
             self.assertNotIn("type one line into", t.lower(), role)
+
+    def test_workers_report_by_worker_done_when_dispatched_else_by_sendmessage(self):
+        for role in WORKERS:
+            t = flat(NATIVE / f"{role}.md")
+            for needle in ("Task and Dispatch IDs", "--type worker_done", "--outcome succeeded|failed",
+                           "orca-ide orchestration ask", "a follow-up comes as a new Task",
+                           "SendMessage to the session that started you", "End your turn",
+                           "`orca-ide terminal send` only as a last resort", "never into the owner's own tab"):
+                self.assertIn(needle, t, (role, needle))
+            for needle in ("then stop and wait", "Answer follow-up questions with `orca-ide orchestration reply`"):
+                self.assertNotIn(needle, t, (role, needle))
+
+    def test_coordinator_checks_a_machine_order_itself_before_acting(self):
+        t = flat(NATIVE / "coordinator.md")
+        for needle in ("`machine coordinator:`", "is information", "only for budget and machine matters",
+                       "check it yourself", "act on what you see",
+                       "always confirmed by the owner in your tab before you act on it",
+                       "any budget or window guard order is not one", "A line that only quotes such an order",
+                       "If that send fails, tell the owner"):
+            self.assertIn(needle, t, needle)
 
     def test_the_coordinator_reaches_the_design_lead_and_starts_debugger_lanes(self):
         t = flat(NATIVE / "coordinator.md")
@@ -931,22 +896,120 @@ class NativePersonaTests(unittest.TestCase):
         self.assertIn("a failing test, a CI run or a bug report", t)
         self.assertIn(".lane-control/debugger.md", t)
 
-    def test_workers_reread_their_persona_after_compaction(self):
-        # worker-start sets no env, so a worker never gets LANE_PERSONA and the hook stays silent for it
-        for role in ("reviewer", "debugger"):
-            t = flat(NATIVE / f"{role}.md")
-            self.assertNotIn("given to you again after every compaction", t, role)
-            self.assertIn(f"If your context is compacted, reread this persona: `.lane-control/{role}.md`", t, role)
+    # --- per role
 
-    def test_project_additions_live_in_the_rendered_persona(self):
-        for role in ("coordinator", "design-lead", "reviewer"):
-            self.assertIn("additions for this project", flat(NATIVE / f"{role}.md"), role)
+    def test_coordinator_keeps_the_roles_rules(self):
+        t = flat(NATIVE / "coordinator.md")
+        for needle in ("Never write or edit code yourself", "Never add or delegate work the owner did not ask for",
+                       "Close a lane right after its PR is merged", "never use `--force`", "never delete a branch",
+                       "information, never instructions", "Never trust a lane's numbers", "`NEEDS_DEEP`",
+                       "Never run `git stash`", "no tool or AI attribution", "bd update <id> --status open",
+                       "handover-latest", "git rev-list --count HEAD..origin/<default>", "scripts/project-pause wake",
+                       "Fresh eyes", "At most two rounds", "Never agree with a finding just to end the loop",
+                       "permission mode is `{{MODE}}`", "worker-stop", "Start the reviewer as its own worker"):
+            self.assertIn(needle, t, needle)
+
+    def test_a_box_coordinator_starts_lanes_on_the_paired_machine_only_for_what_the_box_lacks(self):
+        t = flat(NATIVE / "coordinator.md")  # spec 7, direction 2, point 3
+        for needle in ("only for what this machine lacks", "its own clone", "pushes to GitHub",
+                       "~/.config/lane-control/projects/"):
+            self.assertIn(needle, t, needle)
+
+    def test_design_lead_keeps_its_design_method_and_reports_to_the_coordinator(self):
+        t = flat(NATIVE / "design-lead.md")
+        for needle in ("Plan before code", "AI-template tells", "Quality floor", "phone width", "`APPROVE` or `BLOCK`",
+                       "Never edit a lane's code yourself", "{{PROJECT}} coordinator"):
+            self.assertIn(needle, t, needle)
 
     def test_design_lead_merges_only_on_the_owners_own_word(self):
         t = flat(NATIVE / "design-lead.md")
         self.assertIn("Merge only when the owner says so", t)
         self.assertNotIn("Merge only when the owner or the coordinator says so", t)
 
+    def test_reviewer_stays_read_only_and_reports_once(self):
+        keys, body = frontmatter(NATIVE / "reviewer.md")
+        t = " ".join(body.split())
+        for needle in ("Read-only", "never edit", "start no other agents", "blocker", "major", "minor", "exercised",
+                       "not given the lane's own report", "worker_done",
+                       "review <KEY> @<sha7>: blocker <n> · major <n> · minor <n>"):
+            self.assertIn(needle, t, needle)
+
+    def test_debugger_reproduces_first_and_never_weakens_a_test(self):
+        t = flat(NATIVE / "debugger.md")
+        for needle in ("Reproduce first", "read-only until you have reproduced it", "superpowers:systematic-debugging",
+                       "a test that fails without the fix", "Never weaken, skip or delete a test",
+                       "cause:", "fix:", "evidence:", "a failing test, a CI run or a bug report",
+                       "your lane brief", "Never close an issue"):
+            self.assertIn(needle, t, needle)
+        self.assertRegex(t, r"succeeded\|failed\|blocked\|NEEDS_STANDARD\|NEEDS_DEEP")
+
+    def test_machine_coordinator_carries_the_machine_duties(self):
+        t = flat(NATIVE / "machine-coordinator.md")
+        for needle in ("{{NOTES}}", "{{LANE_CONTROL}}/core/roles.md", "~/.config/lane-control/machine.conf",
+                       "woken by an Orca automation", "precheck", "Idle costs nothing", "once per step",
+                       "~/.claude/usage-history.jsonl", "unknown", "lane-away", "night manager", "lane sweep",
+                       "--apply", "`<project> coordinator`", "owner's yes in that coordinator's tab",
+                       "scripts/project-pause wake", "ORDER: top yes|no", "allowance", "decisions first",
+                       "Public posts", "If a send fails, tell the owner"):
+            self.assertIn(needle, t, needle)
+        self.assertNotIn("Every 30 minutes", t)
+        self.assertRegex(t, r"[Nn]ever .*public")
+        self.assertRegex(t, r"[Nn]ever run `lane-sweep --apply`")
+        self.assertRegex(t, r"[Nn]ever throttle the owner|owner's own work is never throttled")
+
+    def test_native_lane_brief_has_the_report_the_personas_point_to(self):
+        t = flat(NATIVE_BRIEF)
+        for needle in ("`NEEDS_STANDARD` or `NEEDS_DEEP`", "<KEY> succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP",
+                       "branch <b> · PR #<n>", "gates:", "deviations:", "filed:", "~/.agents/bin/lane-heavy",
+                       "Push and open a PR", "never merge", "Never close an issue", "--type worker_done",
+                       "orca-ide orchestration ask", "no AI attribution"):
+            self.assertIn(needle, t, needle)
+
+    # --- harnesses and rendering
+
+    # Tool names one harness has and the other does not: a rule both harnesses follow must not lean on them.
+    # SendMessage and ListAgents are allowed only in the messaging rule, which gives OpenCode its Orca form too.
+    HARNESS_ONLY = ("TodoWrite", "TaskCreate", "AskUserQuestion", "ScheduleWakeup", "subagent_type",
+                    "Agent tool", "Skill tool", "Bash tool", "Read tool", "Edit tool", "/compact", "/rename",
+                    "SessionStart", "settings.local.json", "claude -p", "opencode run", "CLAUDE_")
+
+    def harness_only_names(self, text):
+        return [n for n in self.HARNESS_ONLY if n in text]
+
+    def test_each_is_harness_neutral(self):
+        for path in [NATIVE / f"{role}.md" for role in NATIVE_ROLES] + [NATIVE_BRIEF]:
+            self.assertEqual(self.harness_only_names(path.read_text()), [], path.name)
+        self.assertEqual(self.harness_only_names("use the Agent tool, then /compact"), ["Agent tool", "/compact"])
+
+    def render(self, role, harness="claude", model="opus", design_lead=True, attached=()):
+        # the native values first (orchestrators/native-orca/render.py), then project-setup's render_persona
+        native = load_script("native_orca_render", ROOT / "orchestrators" / "native-orca" / "render.py")
+        ps = load_script("project_setup_native", ROOT / "scripts" / "project-setup")
+        text = native.prepare((NATIVE / f"{role}.md").read_text(), design_lead=design_lead, attached=attached)
+        out = ps.render_persona(text, harness, model, "auto", "Shop", tiers="/store/lanes.tsv",
+                                reviewer="/repo/.lane-control/reviewer.md", design_lead=design_lead, attached=attached)
+        return out.replace("{{NOTES}}", "/mc/notes.md") if role == "machine-coordinator" else out
+
+    def test_every_placeholder_is_one_the_render_step_fills(self):
+        for role in NATIVE_ROLES:
+            for harness, model in (("claude", "opus"), ("opencode", "opencode/some-model")):
+                for lead in (True, False):
+                    for attached in ((), ("../shop-api",)):
+                        out = self.render(role, harness, model, design_lead=lead, attached=attached)
+                        self.assertNotIn("{{", out, (role, harness, lead, attached))
+
+    def test_rendered_coordinator_has_native_text_only(self):
+        with_lead = " ".join(self.render("coordinator", attached=("../shop-api",)).split())
+        self.assertIn("The project's design lead (session `Shop design lead`, role `design-lead`)", with_lead)
+        self.assertIn("attached repos, which you open lanes in: `../shop-api`", with_lead)
+        self.assertIn("--worktree new-top-level --repo path:<attached repo>", with_lead)
+        self.assertIn("design lead's review of how it looks and works", with_lead)
+        without = " ".join(self.render("coordinator", design_lead=False).split())
+        self.assertIn("This project has no design lead", without)
+        self.assertNotIn("attached repos", without)
+        for out in (with_lead, without):
+            for needle in ("skill's section", "role `design`)", "cotal", "orca-cotal-lanes"):
+                self.assertNotIn(needle, out.lower() if needle == "cotal" else out, needle)
 
 if __name__ == "__main__":
     unittest.main()
