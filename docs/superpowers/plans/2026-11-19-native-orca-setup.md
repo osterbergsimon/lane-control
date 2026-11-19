@@ -174,8 +174,8 @@ coordinator's working files (the brief gives their location); generalize, copy n
   feed (spec section 11), starts the machine coordinator (persona from phase 2) with `start_command`, creates the
   night manager (`37 * * * *`, precheck, `--extra-agent-args="--model sonnet"`) and lane-sweep (every 3 h, report
   only), and machine-check (every 30 min, waking the machine coordinator's session with a precheck that exits 0
-  only when a budget step, memory or runner state changed) Orca automations if absent, installs the ci-presence timer if systemd --user works (warn and skip if not).
-  Idempotent. Open PR 4.
+  only when a budget step, memory or runner state changed) Orca automations if absent, installs the ci-presence
+  timer if systemd --user works (warn and skip if not). Idempotent. Open PR 4.
 
 ## Phase 5: Lessons into doctrine (PR 5, parallel with phases 1 and 2)
 
