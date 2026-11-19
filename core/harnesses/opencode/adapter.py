@@ -25,6 +25,9 @@ ORCA_AGENT_ID = "opencode2"
 MODEL_FLAGS = frozenset({"model"})
 PLUGIN = Path(__file__).resolve().parent / "lane-persona.js"
 # project-setup's permission modes (Claude's names); OpenCode has only ask (no flag) and --auto.
+# A model pinned on the primary agent in the user's own config beats the top-level one, so it is pinned there too
+# (as Orca does). OpenCode's primary agent is `build` unless the user's config names another default agent.
+PRIMARY_AGENT = "build"
 AUTO_MODES = {"auto", "bypassPermissions"}
 ASK_MODES = {None, "", "default"}
 
@@ -35,7 +38,8 @@ def start_command(role: str, persona: Path, model: str, permission_mode: "str | 
         raise ValueError(f"OpenCode has no permission mode {permission_mode!r} "
                          f"(it takes {', '.join(sorted(AUTO_MODES))} as --auto, or default)")
     cmd = harnesses.env_prefix(role, persona) + [
-        "OPENCODE_CONFIG_CONTENT=" + json.dumps({"model": model}), "opencode2", "--standalone"]
+        "OPENCODE_CONFIG_CONTENT=" + json.dumps({"model": model, "agents": {PRIMARY_AGENT: {"model": model}}}),
+        "opencode2", "--standalone"]
     if permission_mode in AUTO_MODES:
         cmd.append("--auto")
     return cmd

@@ -4,13 +4,16 @@ Status: in use
 
 Adapter: `adapter.py`, plugin `lane-persona.js`. Orca agent id `opencode2`; Orca passes `--model` only. The model
 must be one the tier rules allow for the project (`core/scripts/lane-tier`).
-- Start: `env LANE_ROLE=<role> LANE_PERSONA=<persona> OPENCODE_CONFIG_CONTENT={"model":"<provider/model>"}
-  opencode2 --standalone [--auto]`. `opencode2` is the v2 package's own command and what Orca detects as `opencode2`
-  (a plain `opencode` may be v1 on some PATHs). OpenCode 2.2.1's interactive command has no `--model` flag; the model
-  goes in through `OPENCODE_CONFIG_CONTENT`, as Orca 1.4.250 does for its own opencode2 agent (Orca also merges into
-  a value already set and pins the model on the primary agent; the adapter sets the top-level `model` only).
-  `--standalone` runs a private server started from that command, so the markers reach the plugin; the shared
-  background service would not see them. `--auto` stands for project-setup's `auto` and `bypassPermissions`.
+- Start: `env LANE_ROLE=<role> LANE_PERSONA=<persona> OPENCODE_CONFIG_CONTENT=<config> opencode2 --standalone
+  [--auto]`, `<config>` being `{"model": "<provider/model>", "agents": {"build": {"model": "<provider/model>"}}}`.
+  `opencode2` is the v2 package's own command and what Orca detects as `opencode2` (a plain `opencode` may be v1 on
+  some PATHs). OpenCode 2.2.1's interactive command has no `--model` flag; the model goes in through
+  `OPENCODE_CONFIG_CONTENT`, as Orca 1.4.250 does for its own opencode2 agent, and is pinned on the primary agent
+  `build` too, as Orca does: a model pinned on that agent in the user's own config would win otherwise (checked
+  live). Unlike Orca, the adapter does not merge into an `OPENCODE_CONFIG_CONTENT` already in the terminal's
+  environment; it replaces it. `--standalone` runs a private server started from that command, so the markers reach
+  the plugin; the shared background service would not see them. `--auto` stands for project-setup's `auto` and
+  `bypassPermissions`.
 - Persona after compaction: `lane-persona.js` in `$XDG_CONFIG_HOME/opencode/plugins/` (default
   `~/.config/opencode/plugins/`), one copy per user. It uses the v2 plugin API: `export default { id: "lane-persona",
   setup }`, and `setup(ctx)` registers two session hooks with `ctx.session.hook`: `"context"` adds the persona to
@@ -52,6 +55,8 @@ server's API (prompt, compact, prompt).
 - No markers: pass — a server started without them sends no persona.
 - Idle: pass — the plugin recorded the session it served, and `idle_minutes` read it from the store the server
   wrote.
-- The top-level `model` in `OPENCODE_CONFIG_CONTENT` selects the model (the prompts carried none).
+- Model: pass — the model from `start_command`'s `OPENCODE_CONFIG_CONTENT` is the one used (the prompts carried
+  none), also when the user's config pins another model on `build`; with the top-level `model` alone the pinned one
+  won every request.
 - Not checked: the TUI (`opencode2 --standalone` in a terminal) itself; the server, the plugin loader and the hooks
   are the same ones it runs.

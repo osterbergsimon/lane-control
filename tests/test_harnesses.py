@@ -454,7 +454,9 @@ class OpenCodeAdapterTests(HomeTest):
         self.assertEqual(cmd[:3], ["env", "LANE_ROLE=coordinator", f"LANE_PERSONA={p}"])
         conf = [a for a in cmd if a.startswith("OPENCODE_CONFIG_CONTENT=")]
         self.assertEqual(len(conf), 1)
-        self.assertEqual(json.loads(conf[0].split("=", 1)[1]), {"model": "opencode-go/deepseek-v4.1-flash"})
+        self.assertEqual(json.loads(conf[0].split("=", 1)[1]),
+                         {"model": "opencode-go/deepseek-v4.1-flash",
+                          "agents": {"build": {"model": "opencode-go/deepseek-v4.1-flash"}}})
         self.assertEqual(cmd[cmd.index(conf[0]) + 1:], ["opencode2", "--standalone"])
         self.assertEqual(cmd[cmd.index(conf[0]) + 1], self.a.ORCA_AGENT_ID)  # the v2 command, as Orca detects it
         self.assertEqual(self.a.start_command("coordinator", p, "m/x", "default")[-1], "--standalone")
@@ -638,18 +640,20 @@ class OpenCodeLiveTests(HomeTest):
         self.version = v.strip()
         for d in ("config", "data", "state", "cache"):
             (self.t / d).mkdir()
-        os.environ["XDG_CONFIG_HOME"] = str(self.t / "config")
-        self.assertTrue(self.pkg.load_harness("opencode").install_persona_hook(self.checkout))
         self.persona = self.t / "coordinator.md"
         self.persona.write_text(f"# Coordinator\n{self.MARK}\n")
+        os.environ["XDG_CONFIG_HOME"] = str(self.t / "config")
+        self.assertTrue(self.pkg.load_harness("opencode").install_persona_hook(self.checkout))
         self.reqlog = self.t / "requests.jsonl"
         self.reqlog.write_text("")
         self.fake = subprocess.Popen([sys.executable, str(ROOT / "tests" / "stubs" / "fake_llm.py"), str(self.reqlog)],
                                      stdout=subprocess.PIPE, text=True)
         self.addCleanup(self.stop, self.fake)
         port = int(self.fake.stdout.readline())
-        self.conf = json.dumps({"model": "lanetest/m", "provider": {"lanetest": {
-            "npm": "@ai-sdk/openai-compatible", "name": "lanetest", "models": {"m": {"name": "m"}},
+        cmd = self.pkg.load_harness("opencode").start_command("coordinator", self.persona, "lanetest/m", None)
+        from_start = json.loads([a for a in cmd if a.startswith("OPENCODE_CONFIG_CONTENT=")][0].split("=", 1)[1])
+        self.conf = json.dumps({**from_start, "provider": {"lanetest": {
+            "npm": "@ai-sdk/openai-compatible", "name": "lanetest", "models": {"m": {"name": "m"}, "pinned": {}},
             "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "unused"}}}})
 
     @staticmethod
@@ -743,6 +747,17 @@ class OpenCodeLiveTests(HomeTest):
         os.environ["XDG_DATA_HOME"] = str(self.t / "data")
         self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "opencode"), self.sid)
         self.assertIn(self.pkg.load_harness("opencode").idle_minutes(self.checkout, time.time()), (0, 1))
+
+    def test_live_model_wins_over_a_pinned_agent_model(self):
+        # Review m4: a model pinned on the primary agent in the user's own config must not win over the chosen one.
+        import json
+        (self.t / "config" / "opencode" / "opencode.json").write_text(
+            json.dumps({"agents": {"build": {"model": "lanetest/pinned"}}}))
+        self.serve(markers=True)
+        self.session_round()
+        models = {json.loads(json.loads(line)["body"]).get("model") for line in self.reqlog.read_text().splitlines()}
+        self.assertNotIn("pinned", models)
+        self.assertIn("m", models)
 
     def test_live_no_persona_without_markers(self):
         self.serve(markers=False)
