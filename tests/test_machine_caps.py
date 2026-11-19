@@ -72,7 +72,8 @@ class Machine(unittest.TestCase):
         self.stub("systemctl", SYSTEMCTL)
         self.env = dict(os.environ, PATH=f"{self.stubs}:{os.environ['PATH']}", STUB_DIR=str(self.stubs),
                         LANE_PROC_DIR=str(self.proc), LANE_STATE_DIR=str(self.dir / "state"),
-                        LANE_LIMITS_FILE=str(self.limits), LANE_AWAY_FILE=str(self.dir / "away"), LANE_HOUR="12")
+                        LANE_LIMITS_FILE=str(self.limits), LANE_AWAY_FILE=str(self.dir / "away"), LANE_HOUR="12",
+                        LANE_BUDGET_STOPPED_FILE=str(self.dir / "budget-stopped"))
         for name in ("LANE_HEAVY_HOLDS_SLOT", "GITHUB_ACTIONS", "LANE_HEAVY_CI"):   # a CI run of this suite is no CI job
             self.env.pop(name, None)
 
@@ -617,6 +618,20 @@ class LimitsTests(Machine):
         os.utime(away, (old, old))
         self.assertEqual(self.sizing(), (2, 12, 10, 400))
         self.assertEqual(self.presence, "day,day")
+
+    def test_a_stopped_budget_gives_ci_the_away_limits_for_an_hour(self):
+        self.limits.unlink()
+        stopped = Path(self.env["LANE_BUDGET_STOPPED_FILE"])
+        stopped.touch()
+        self.assertEqual(self.sizing(), (3, 8, 14, 800))
+        self.assertEqual(self.presence, "away,budget stopped")
+        old = time.time() - 61 * 60                                    # its writer stopped touching it
+        os.utime(stopped, (old, old))
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))
+        Path(self.env["LANE_AWAY_FILE"]).touch()                       # the owner's word is named first
+        stopped.touch()
+        self.sizing()
+        self.assertEqual(self.presence, "away,owner away")
 
     def test_the_file_can_branch_on_presence_and_move_the_reserve(self):
         self.limits.write_text('[ "$LANE_PRESENCE" = away ] && LANE_HEAVY_SLOTS=4\nLANE_RESERVE_GB=16\n')

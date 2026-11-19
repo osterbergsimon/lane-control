@@ -5,8 +5,12 @@
 # memory and presence for whatever the file left unset:
 #   LANE_LIMITS_FILE   the file (default ~/.config/lane-control/limits.sh; absent is fine)
 #   LANE_AWAY_FILE     the owner is away while it is younger than 14 h (default ~/.config/lane-control/away)
-# Presence, for the file to branch on: LANE_PRESENCE is day or away (night 23-07, or the away file), and
-# LANE_PRESENCE_WHY says which. A job keeps the limits it started with.
+#   LANE_BUDGET_STOPPED_FILE  the budget is at its stop step while it is younger than 1 h: agents sit idle until the
+#                      reset, so the machine is CI's (default ~/.config/lane-control/budget-stopped). Its writer
+#                      touches it on every check while the budget stays stopped and removes it after the reset.
+# Presence, for the file to branch on: LANE_PRESENCE is day or away (night 23-07, the away file, or the budget
+# stopped), and LANE_PRESENCE_WHY says which. A job keeps the limits it started with. Budget stopped is away for
+# limits only, never for anything that would spend budget (a night check-in).
 # Not settings; for tests:
 #   LANE_PROC_DIR      /proc to read (default /proc)   LANE_STATE_DIR   where slots live (default below)
 #   LANE_HOUR          the hour of the day (default: now)
@@ -14,6 +18,7 @@
 LANE_PROC_DIR=${LANE_PROC_DIR:-/proc}
 LANE_LIMITS_FILE=${LANE_LIMITS_FILE:-$HOME/.config/lane-control/limits.sh}
 LANE_AWAY_FILE=${LANE_AWAY_FILE:-$HOME/.config/lane-control/away}
+LANE_BUDGET_STOPPED_FILE=${LANE_BUDGET_STOPPED_FILE:-$HOME/.config/lane-control/budget-stopped}
 
 # `--all`: plain nproc shrinks with OMP_NUM_THREADS and affinity, so two lanes could compute different limits.
 LANE_CORES=$(nproc --all 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
@@ -30,6 +35,8 @@ lane_hour=$((10#${lane_hour:-12}))
 LANE_PRESENCE=day LANE_PRESENCE_WHY=day
 if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -840 2>/dev/null)" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY="owner away"
+elif [ -n "$(find "$LANE_BUDGET_STOPPED_FILE" -maxdepth 0 -mmin -60 2>/dev/null)" ]; then
+  LANE_PRESENCE=away LANE_PRESENCE_WHY="budget stopped"
 elif [ "$lane_hour" -ge 23 ] || [ "$lane_hour" -lt 7 ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY=night
 fi
