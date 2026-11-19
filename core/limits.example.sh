@@ -5,17 +5,21 @@
 #
 # Presence: $LANE_PRESENCE is `day`, or `away` at night (23-07), while ~/.config/lane-control/away is younger than
 # 14 h, or while ~/.config/lane-control/budget-stopped is younger than 1 h (the budget is at its stop step and agents
-# sit idle until the reset, so CI gets the machine); $LANE_PRESENCE_WHY says which. Defaults already follow it; to
-# set your own per presence, branch on it:
+# sit idle until the reset, so CI gets the machine); $LANE_PRESENCE_WHY says which. $LANE_PRESENCE is for limits only:
+# $LANE_OWNER_AWAY is 1 only at night or with the away file, and anything that spends budget reads that one. Defaults
+# already follow presence; to set your own per presence, branch on it:
 #   if [ "$LANE_PRESENCE" = away ]; then LANE_HEAVY_SLOTS=3; fi
 # Settings come only from this file; the same names in the environment are ignored.
 #
-# Memory: lane slots, the CI slice and LANE_RESERVE_GB fit in memory together. Slots keep the machine out of OOM
-# (mostly CI's); the budget is guarded by the agent caps and budget steps, not by slots. On 46G the defaults are
-# day 2 x 12G lanes + CI 10G, night or away 3 x 8G lanes + CI 14G.
+# Memory: lane slots, the CI slice and LANE_RESERVE_GB fit in memory together (from about 4G of memory up). Slots
+# keep the machine out of OOM (mostly CI's); the budget is guarded by the agent caps and budget steps, not by slots.
+# On 46G the defaults are day 2 x 12G lanes + CI 10G, night or away 3 x 8G lanes + CI 14G. A running job keeps its
+# limit when presence changes; a new one also waits until its limit fits beside the running ones in its pool
+# (slots x limit), so a mix of day and night jobs stays within it. The fit assumes the CI slice's MemoryMax is
+# LANE_CI_MEM_GB; lane-heavy does not set the slice, and says so when it has none.
 
 # --- Memory kept for the desktop and agent sessions ---
-# LANE_RESERVE_GB=10         # Default: 10, or memory GB/4 if that is lower. Two thirds of the rest go to lane slots,
+# LANE_RESERVE_GB=10         # Default: 10, or memory GB/4 if that is lower; one not below memory is refused. Two thirds of the rest go to lane slots,
 #                            # one third to CI; at night or away CI also takes a fifth of the reserve (the desktop
 #                            # is idle), by day it gives a fifth back.
 
@@ -30,8 +34,9 @@
 # LANE_CI_SLOTS=2            # CI jobs running at once, beside the lane slots. Default 2.
 # LANE_CI_SLICE=ci.slice     # systemd user slice a CI job's scope joins; its MemoryMax and CPUQuota hold all CI
 #                            # together. Default ci.slice.
-# LANE_CI_MEM_GB=10          # memory for all CI together: what the CI slice's MemoryMax should be, and each CI
-#                            # job's own limit (one job alone may use it all); 0 = no limit. Default: CI's share.
+# LANE_CI_MEM_GB=10          # memory for all CI together: what the CI slice's MemoryMax should be. Each CI job's
+#                            # own limit is its share, LANE_CI_MEM_GB / LANE_CI_SLOTS; 0 = no limit. Default: CI's
+#                            # share of memory.
 # LANE_CI_CPU_PCT=400        # CPU for all CI together, for the slice's CPUQuota. Default: a third of the cores by
 #                            # day, two thirds at night or away (100 per core). lane-heavy does not set the slice;
 #                            # whatever does (a user timer, `systemctl --user set-property --runtime`) reads these two.

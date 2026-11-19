@@ -16,8 +16,11 @@
 # - CI has its own pool: a CI job (GITHUB_ACTIONS=true, or LANE_HEAVY_CI set and not 0) takes one of LANE_CI_SLOTS
 #   slots instead of a lane slot, so it never waits behind lanes, and its scope joins the CI slice (LANE_CI_SLICE),
 #   whose memory and CPU limits hold all CI together. A self-hosted runner's scope would otherwise escape that slice.
-#   A CI job's own memory limit is LANE_CI_MEM_GB, the whole CI budget, so one job alone may use it; when the slice
-#   has no MemoryMax of its own, it says so: CI jobs together could then take more than that.
+#   A CI job's own memory limit is its share of the CI budget, LANE_CI_MEM_GB / LANE_CI_SLOTS; when the slice has no
+#   MemoryMax of its own, it says so. LANE_HEAVY_CI=0, false or no is not CI.
+# - Memory: a job also waits while the running jobs' memory limits and its own would be more than its pool
+#   (slots x limit). A running job keeps the limit it started with, so when night or a day begins, a mixed set of
+#   old and new sizes cannot go over the pool; the next job waits until enough of the old ones are done.
 # - Out of memory: when the scope was OOM-killed it prints `OUT OF MEMORY` and keeps the exit code (often 137 or 143,
 #   which otherwise look like a hang or a crash; reliability.md section 17). When only the kernel's machine-wide OOM
 #   counter moved during a failed job, it prints `POSSIBLE OUT OF MEMORY`.
@@ -51,10 +54,18 @@ type -P -- "$1" >/dev/null || { say "$1: command not found or not executable"; e
 # CI's own pool (owner 2026-11-19: "separate slots for ci"); lane slots are sized so lanes and the CI slice fit together.
 ci=
 [ "${GITHUB_ACTIONS:-}" = true ] && ci=1
-case ${LANE_HEAVY_CI:-} in '' | 0) ;; *) ci=1 ;; esac
+case ${LANE_HEAVY_CI:-} in '' | 0 | false | no) ;; *) ci=1 ;; esac
 slot_prefix=heavy mem_setting=LANE_HEAVY_MEM_GB
 [ -z "$ci" ] || slot_prefix=ci-heavy mem_setting=LANE_CI_MEM_GB
-pool_limits() { [ -z "$ci" ] || LANE_HEAVY_SLOTS=$LANE_CI_SLOTS LANE_HEAVY_MEM_GB=$LANE_CI_MEM_GB; }
+# A CI job gets its share of the CI budget. The fallbacks keep an older lane-limits.sh (a hand copy of lane-heavy
+# alone) from ending every CI job under set -u.
+pool_limits() {
+  [ -n "$ci" ] || return 0
+  LANE_HEAVY_SLOTS=${LANE_CI_SLOTS:-2}
+  LANE_HEAVY_MEM_GB=$((${LANE_CI_MEM_GB:-$((LANE_HEAVY_MEM_GB * LANE_HEAVY_SLOTS))} / LANE_HEAVY_SLOTS))
+  [ "$LANE_HEAVY_MEM_GB" -gt 0 ] || [ "${LANE_CI_MEM_GB:-1}" -eq 0 ] || LANE_HEAVY_MEM_GB=1
+  LANE_CI_SLICE=${LANE_CI_SLICE:-ci.slice}
+}
 pool_limits
 
 exec {slot_fd}</dev/null   # replaced by a real slot; a valid fd keeps the job's "close the slot" redirect harmless
@@ -65,10 +76,54 @@ take_slot() {
     # flock needs no write access, so a read-only slot file still works; the first gate here creates them
     { [ -e "$LANE_STATE_DIR/$slot_prefix.$i" ] || : >>"$LANE_STATE_DIR/$slot_prefix.$i"; } 2>/dev/null
     { exec {fd}<"$LANE_STATE_DIR/$slot_prefix.$i"; } 2>/dev/null || continue   # on exec itself, 2> would stick to the gate
-    if flock -n "$fd"; then slot_fd=$fd; return 0; fi
+    if flock -n "$fd"; then slot_fd=$fd slot_no=$i; return 0; fi
     exec {fd}>&-
   done
   return 1
+}
+
+# held_gb: the memory limits of the pool's other running jobs. A job writes its limit beside its slot (slot.N.gb)
+# while it holds the admission lock; a busy slot with no readable size counts as this job's size.
+held_gb() {
+  local f n gb fd sum=0
+  for f in "$LANE_STATE_DIR/$slot_prefix".*; do
+    n=${f##*.}
+    case $n in '' | *[!0-9]*) continue ;; esac
+    [ "$n" != "$slot_no" ] || continue
+    { exec {fd}<"$f"; } 2>/dev/null || continue
+    if flock -n "$fd"; then exec {fd}>&-; continue; fi   # free
+    exec {fd}>&-
+    gb=$(cat "$f.gb" 2>/dev/null)
+    case $gb in '' | *[!0-9]*) gb=$LANE_HEAVY_MEM_GB ;; esac
+    sum=$((sum + 10#$gb))
+  done
+  echo "$sum"
+}
+
+# admit: a free slot, and room in the pool's memory beside the running jobs' limits. A job that took its slot under
+# other limits (a day job of 12G when night brings 3 x 8G) keeps its limit, so at 23:00 or 07:00 the counts alone
+# could put more limits than the pool on the machine. One admission at a time per pool, under a lock of its own.
+admit() {
+  local lock held pool=$((LANE_HEAVY_SLOTS * LANE_HEAVY_MEM_GB)) ok=1
+  local f="$LANE_STATE_DIR/$slot_prefix.admit"
+  { [ -e "$f" ] || : >>"$f"; } 2>/dev/null
+  { exec {lock}<"$f"; } 2>/dev/null || lock=   # without it, admission still works, only unserialized
+  [ -z "$lock" ] || flock "$lock"
+  if ! take_slot; then
+    why="all $LANE_HEAVY_SLOTS ${ci:+CI }heavy-work slot(s) on this machine are busy"; ok=
+  elif [ "$LANE_HEAVY_MEM_GB" -gt 0 ]; then
+    held=$(held_gb)
+    if [ $((held + LANE_HEAVY_MEM_GB)) -gt "$pool" ]; then
+      why="running ${ci:+CI }jobs hold ${held}G of the ${pool}G pool, no room for ${LANE_HEAVY_MEM_GB}G more"; ok=
+      exec {slot_fd}>&-; exec {slot_fd}</dev/null
+    else
+      echo "$LANE_HEAVY_MEM_GB" >"$LANE_STATE_DIR/$slot_prefix.$slot_no.gb" 2>/dev/null
+    fi
+  else
+    rm -f -- "$LANE_STATE_DIR/$slot_prefix.$slot_no.gb" 2>/dev/null   # no limit: counts as this pool's size
+  fi
+  [ -z "$lock" ] || exec {lock}>&-
+  [ -n "$ok" ]
 }
 
 # A slot in a directory someone else controls is no slot (the /tmp fallback is shared with other users).
@@ -77,15 +132,16 @@ state_dir_usable() {
     chmod 700 -- "$LANE_STATE_DIR" 2>/dev/null
 }
 
+slot_no= why=
 if ! command -v flock >/dev/null; then
   say "no flock on this host: running without the machine-wide limit"
 elif ! state_dir_usable; then
   say "cannot use $LANE_STATE_DIR: running without the machine-wide limit"
-elif ! take_slot; then
-  say "all $LANE_HEAVY_SLOTS ${ci:+CI }heavy-work slot(s) on this machine are busy: waiting for a turn"
+elif ! admit; then
+  say "$why: waiting for a turn"
   # Limits are read again on each poll (quietly: the first read said what was wrong): a slot that opens at night,
   # when the owner leaves or when the budget stops is one this waiter can take.
-  until take_slot; do
+  until admit; do
     sleep "$LANE_HEAVY_POLL_SECS"
     . "${self%/*}/lane-limits.sh" 2>/dev/null
     pool_limits

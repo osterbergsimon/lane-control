@@ -9,8 +9,10 @@
 #                      reset, so the machine is CI's (default ~/.config/lane-control/budget-stopped). Its writer
 #                      touches it on every check while the budget stays stopped and removes it after the reset.
 # Presence, for the file to branch on: LANE_PRESENCE is day or away (night 23-07, the away file, or the budget
-# stopped), and LANE_PRESENCE_WHY says which. A running job keeps the limits it started with. Budget stopped is away for
-# limits only, never for anything that would spend budget (a night check-in).
+# stopped), and LANE_PRESENCE_WHY says which. It is for limits only. LANE_OWNER_AWAY is 1 only at night or with the
+# away file, whatever the budget: anything that would spend budget (a night check-in) reads that one, never
+# LANE_PRESENCE, since a stopped budget makes the machine CI's, not the owner absent. A running job keeps the limits
+# it started with.
 # Not settings; for tests:
 #   LANE_PROC_DIR      /proc to read (default /proc)   LANE_STATE_DIR   where slots live (default below)
 #   LANE_HOUR          the hour of the day (default: now)
@@ -32,13 +34,13 @@ lane_at_most() { if [ "$1" -lt "$2" ]; then echo "$1"; else echo "$2"; fi; }
 # Day, or night-or-away: the owner is not using the machine, so heavy work and CI may take more of it.
 lane_hour=${LANE_HOUR:-$(date +%H)}
 lane_hour=$((10#${lane_hour:-12}))
-LANE_PRESENCE=day LANE_PRESENCE_WHY=day
+LANE_PRESENCE=day LANE_PRESENCE_WHY=day LANE_OWNER_AWAY=
 if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -840 2>/dev/null)" ]; then
-  LANE_PRESENCE=away LANE_PRESENCE_WHY="owner away"
+  LANE_PRESENCE=away LANE_PRESENCE_WHY="owner away" LANE_OWNER_AWAY=1
+elif [ "$lane_hour" -ge 23 ] || [ "$lane_hour" -lt 7 ]; then
+  LANE_PRESENCE=away LANE_PRESENCE_WHY=night LANE_OWNER_AWAY=1
 elif [ -n "$(find "$LANE_BUDGET_STOPPED_FILE" -maxdepth 0 -mmin -60 2>/dev/null)" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY="budget stopped"
-elif [ "$lane_hour" -ge 23 ] || [ "$lane_hour" -lt 7 ]; then
-  LANE_PRESENCE=away LANE_PRESENCE_WHY=night
 fi
 
 # Slot files live on the per-user tmpfs. Deliberately not $XDG_RUNTIME_DIR or $TMPDIR: they differ between a lane's
@@ -87,7 +89,12 @@ lane_seconds() {   # lane_seconds <name> <default>: decimals allowed
 # Memory: a reserve for the desktop and the agent sessions, two thirds of the rest for lane slots and one third for
 # the CI slice. At night or away the desktop is idle, so CI takes a fifth of the reserve on top; by day it gives that
 # fifth back. On 46G: day 2 x 12G + CI 10G, night or away 3 x 8G + CI 14G (owner 2026-11-19).
-lane_setting LANE_RESERVE_GB "$(lane_at_most 10 $((LANE_MEM_GB / 4)))"
+lane_reserve=$(lane_at_most 10 $((LANE_MEM_GB / 4)))
+lane_setting LANE_RESERVE_GB "$lane_reserve"
+if [ "$LANE_RESERVE_GB" -ge "$LANE_MEM_GB" ] && [ "$LANE_RESERVE_GB" -gt "$lane_reserve" ]; then
+  echo "lane-limits: ignoring LANE_RESERVE_GB='$LANE_RESERVE_GB' in $LANE_LIMITS_FILE (not below ${LANE_MEM_GB}G of memory), using $lane_reserve" >&2
+  LANE_RESERVE_GB=$lane_reserve
+fi
 lane_rest=$(lane_at_least $((LANE_MEM_GB - LANE_RESERVE_GB)) 1)
 lane_lanes_gb=$((lane_rest * 2 / 3))
 lane_ci_gb=$((lane_rest - lane_lanes_gb - LANE_RESERVE_GB / 5))
