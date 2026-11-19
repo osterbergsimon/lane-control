@@ -26,7 +26,7 @@ is silent).
 - Public repo: no hostnames, IPs, usernames, repo owners, private paths or keys. Per-machine values live in
   `~/.config/lane-control/machine.conf` (example in the repo).
 - Claude and OpenCode are first-class for every role, coordinator included; every feature has both forms and both
-  are tested.
+  are tested. The targets are Claude Code and OpenCode v2 (`opencode2`) (owner, 2026-11-19).
 - Owner model rule: OpenCode with `opencode/` or `opencode-go/` models only where `core/scripts/lane-tier` allows
   (calvin only today); `project-setup` refuses a role/model pair lane-tier refuses.
 - Never privileged containers, extra capabilities or device passthrough; ports on 127.0.0.1 only.
@@ -67,6 +67,11 @@ is silent).
 - `project-setup` native path writes rendered personas to `<checkout>/.lane-control/<role>.md`: the persona with the
   project's additions appended. The adaptation agent writes the additions to `.lane-control/additions/<role>.md`
   (the kept source), and every setup and refresh re-renders the combined file from both (NO-2, 2026-11-19).
+- Messaging (owner, 2026-11-19: typing into terminals interferes with what the owner types): Claude to Claude on
+  one machine uses Claude Code's SendMessage (address = session name from ListAgents; phase 3 starts Claude with
+  `--name`); OpenCode sessions and other hosts use Orca's orchestration messages (dispatch, ask, reply,
+  worker_done, check, `send --to run:<id>`); never type into a session the owner uses. Each standing session
+  (coordinator, design lead, machine coordinator) owns an Orca Run so peers can reach it with `--to run:<id>`.
 - Peer discovery (NO-2, 2026-11-19): Orca terminal titles `<project> coordinator`, `<project> design lead`,
   `machine coordinator`. Claude overwrites a terminal's title with its session title, so phases 3, 4 and 6 set the
   title and, for Claude, also send `/rename <title>`; personas fall back to the terminal whose `worktreePath` is the
@@ -168,7 +173,8 @@ coordinator's working files (the brief gives their location); generalize, copy n
 - [ ] Task 4.5: `machine-setup [--host <h>]`: writes `machine.conf` from the example if missing, checks the usage
   feed (spec section 11), starts the machine coordinator (persona from phase 2) with `start_command`, creates the
   night manager (`37 * * * *`, precheck, `--extra-agent-args="--model sonnet"`) and lane-sweep (every 3 h, report
-  only) Orca automations if absent, installs the ci-presence timer if systemd --user works (warn and skip if not).
+  only), and machine-check (every 30 min, waking the machine coordinator's session with a precheck that exits 0
+  only when a budget step, memory or runner state changed) Orca automations if absent, installs the ci-presence timer if systemd --user works (warn and skip if not).
   Idempotent. Open PR 4.
 
 ## Phase 5: Lessons into doctrine (PR 5, parallel with phases 1 and 2)
