@@ -747,7 +747,7 @@ class OrchestratorRecordTests(unittest.TestCase):
 
 
 NATIVE = ROOT / "orchestrators" / "native-orca" / "personas"
-NATIVE_ROLES = ["coordinator", "design-lead", "reviewer"]
+NATIVE_ROLES = ["coordinator", "design-lead", "reviewer", "debugger", "machine-coordinator"]
 LANE_STARTERS = ["coordinator", "design-lead"]  # the personas that start lanes (spec 7.4: the cross-host check)
 
 
@@ -831,6 +831,26 @@ class NativePersonaTests(unittest.TestCase):
                        "not given the lane's own report", "orca-ide orchestration reply",
                        "review <KEY> @<sha7>: blocker <n> · major <n> · minor <n>"):
             self.assertIn(needle, t, needle)
+
+
+    def test_debugger_reproduces_first_and_never_weakens_a_test(self):
+        t = flat(NATIVE / "debugger.md")
+        for needle in ("Reproduce first", "read-only until you have reproduced it", "superpowers:systematic-debugging",
+                       "a test that fails without the fix", "Never weaken, skip or delete a test",
+                       "cause:", "fix:", "evidence:", "a failing test, a CI run or a bug report"):
+            self.assertIn(needle, t, needle)
+
+    def test_machine_coordinator_carries_the_machine_duties(self):
+        t = flat(NATIVE / "machine-coordinator.md")
+        for needle in ("{{NOTES}}", "{{LANE_CONTROL}}/core/roles.md", "~/.config/lane-control/machine.conf",
+                       "every 30 minutes", "once per step", "~/.claude/usage-history.jsonl", "unknown",
+                       "lane-away", "night manager", "lane sweep", "--apply",
+                       '--text "machine coordinator: ', "owner's yes in that coordinator's tab",
+                       "scripts/project-pause wake"):
+            self.assertIn(needle, t, needle)
+        self.assertRegex(t, r"[Nn]ever .*public")
+        self.assertRegex(t, r"[Nn]ever run `lane-sweep --apply`")
+        self.assertRegex(t, r"[Nn]ever throttle the owner|owner's own work is never throttled")
 
 
 if __name__ == "__main__":
