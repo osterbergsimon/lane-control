@@ -61,6 +61,8 @@ Do not over-optimize on token cost: correctness and coordinator attention are th
 - Read the usage feed and ceiling before every launch on a metered budget.
 - A tier with no feed (manual or unlimited) has no automatic thresholds: its caps are the limit, and the owner reports vendor usage. The scripts skip it.
 - The ceiling steps are the only budget limit: no per-day or per-night share. Day or night, caps apply.
+- The steps are offsets below the weekly ceiling (defaults -15, -7, -4, -2; set in the config), so they follow the ceiling when the owner moves it; never write them as fixed percentages.
+- "Limit free until reset" means use it: no steps apply and the hard edge is 100 %.
 
 ## Unattended limits
 - **Wall clock per lane:** swift 2 h, standard 4 h, deep 8 h, checked by the project coordinator (and by the night routine, where the orchestrator has one).
