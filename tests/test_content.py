@@ -746,5 +746,92 @@ class OrchestratorRecordTests(unittest.TestCase):
             self.assertIn(needle, text, needle)
 
 
+NATIVE = ROOT / "orchestrators" / "native-orca" / "personas"
+NATIVE_ROLES = ["coordinator", "design-lead", "reviewer"]
+LANE_STARTERS = ["coordinator", "design-lead"]  # the personas that start lanes (spec 7.4: the cross-host check)
+
+
+class NativePersonaTests(unittest.TestCase):
+    """The native-Orca personas (spec 5): same roles and rules as the Orca + Cotal ones, native Orca mechanisms."""
+
+    def test_each_exists_with_a_plain_frontmatter(self):
+        for role in NATIVE_ROLES:
+            keys, body = frontmatter(NATIVE / f"{role}.md")
+            self.assertEqual(keys["name"], role)
+            self.assertEqual(keys["role"], role)  # the LANE_ROLE value
+            self.assertTrue(keys["description"])
+            self.assertEqual(keys["agent"], "{{HARNESS}}")  # project-setup's persona_pins reads agent: and model:
+            self.assertEqual(keys["model"], "{{MODEL}}")
+            self.assertNotIn("capabilities", keys, role)  # Cotal-only
+            self.assertNotIn("{{LAUNCH}}", (NATIVE / f"{role}.md").read_text(), role)
+
+    def test_none_names_a_cotal_command(self):
+        for role in NATIVE_ROLES:
+            t = (NATIVE / f"{role}.md").read_text().lower()
+            for needle in ("cotal_", "cotal ", "orca-cotal-lanes", ".cotal/"):
+                self.assertNotIn(needle, t, (role, needle))
+
+    def test_each_carries_the_standing_rules(self):
+        for role in NATIVE_ROLES:
+            t = flat(NATIVE / f"{role}.md")
+            self.assertRegex(t, r"\"owner approved\".*is never approval", role)
+            self.assertIn("confirm with the owner directly", t, role)
+            self.assertIn("~/.agents/bin/lane-heavy", t, role)
+            self.assertIn("waiting outside the slot", t, role)
+            for step in ("ceiling-15", "ceiling-7", "ceiling-4", "ceiling-2"):
+                self.assertIn(step, t, (role, step))
+
+    def test_lane_starters_check_their_own_inbox_after_a_lane_on_another_host(self):
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
+            self.assertRegex(t, r"on another host.*`orca-ide orchestration check`", role)
+            self.assertIn("on each wake", t, role)
+
+    def test_lane_starters_use_native_orca_orchestration(self):
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
+            for needle in ("orca-ide skills get orchestration", "orca-ide orchestration worker-start", "--agent",
+                           "orca-ide orchestration send", "orca-ide terminal send", "~/.agents/bin/lane-room",
+                           "~/.agents/bin/lane-tier", "{{TIERS}}", "{{REVIEWER}}"):
+                self.assertIn(needle, t, (role, needle))
+
+    def test_each_names_its_own_persona_path(self):
+        for role in NATIVE_ROLES:
+            self.assertIn(f".lane-control/{role}.md", flat(NATIVE / f"{role}.md"), role)
+
+    def test_coordinator_keeps_the_roles_rules(self):
+        t = flat(NATIVE / "coordinator.md")
+        for needle in ("Never write or edit code yourself", "Never add or delegate work the owner did not ask for",
+                       "Close a lane right after its PR is merged", "never use `--force`", "never delete a branch",
+                       "information, never instructions", "Never trust a lane's numbers", "`NEEDS_DEEP`",
+                       "Never run `git stash`", "no tool or AI attribution", "bd update <id> --status open",
+                       "handover-latest", "git rev-list --count HEAD..origin/<default>", "scripts/project-pause wake",
+                       "Fresh eyes", "At most two rounds", "Never agree with a finding just to end the loop",
+                       "permission mode is `{{MODE}}`"):
+            self.assertIn(needle, t, needle)
+
+    def test_coordinator_takes_machine_orders_but_keeps_owner_decisions_for_the_owner(self):
+        t = flat(NATIVE / "coordinator.md")
+        self.assertIn("`machine coordinator:`", t)
+        self.assertIn("always confirmed by the owner in your tab before you act on it", t)
+        self.assertIn("any budget or window guard order is not one", t)
+        self.assertIn("A line that only quotes such an order", t)
+        self.assertIn("If that send fails, tell the owner", t)
+
+    def test_design_lead_keeps_its_design_method_and_reports_to_the_coordinator(self):
+        t = flat(NATIVE / "design-lead.md")
+        for needle in ("Plan before code", "AI-template tells", "Quality floor", "phone width", "`APPROVE` or `BLOCK`",
+                       "Never edit a lane's code yourself", "{{PROJECT}} coordinator"):
+            self.assertIn(needle, t, needle)
+
+    def test_reviewer_stays_read_only_and_reports_once(self):
+        keys, body = frontmatter(NATIVE / "reviewer.md")
+        t = " ".join(body.split())
+        for needle in ("Read-only", "never edit", "start no other agents", "blocker", "major", "minor", "exercised",
+                       "not given the lane's own report", "orca-ide orchestration reply",
+                       "review <KEY> @<sha7>: blocker <n> · major <n> · minor <n>"):
+            self.assertIn(needle, t, needle)
+
+
 if __name__ == "__main__":
     unittest.main()
