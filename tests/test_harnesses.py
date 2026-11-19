@@ -390,5 +390,45 @@ console.log(JSON.stringify(out));
             self.assertEqual(out, {"count": 1, "system": [], "context": []})
 
 
+class RecordTests(unittest.TestCase):
+    """Task 1.4: every harness has a dated record; the checklist has the harness points."""
+
+    def status(self, name):
+        import re
+        text = (HARNESSES / name / "record.md").read_text()
+        m = re.search(r"^Status: (.+)$", text, re.M)
+        self.assertIsNotNone(m, name)
+        return m.group(1).strip(), text
+
+    def test_records_exist_with_status(self):
+        pkg = load_harnesses_pkg()
+        for name in ("claude", "opencode"):
+            status, text = self.status(name)
+            self.assertEqual(status, "in use", name)
+            self.assertEqual(pkg.load_harness(name).STATUS, status, name)
+            self.assertIn("## Trials", text)
+        for name in ("codex", "pi"):
+            status, text = self.status(name)
+            self.assertEqual(status, "untested", name)
+            self.assertFalse((HARNESSES / name / "adapter.py").exists(), name)
+            self.assertIn("1.4.250", text, name)
+        self.assertIn("--standalone", self.status("opencode")[1])
+        self.assertIn("manual check", self.status("opencode")[1].lower())
+
+    def test_records_are_public_safe(self):
+        for f in HARNESSES.glob("*/record.md"):
+            text = f.read_text()
+            for private in ("/home/", "/mnt/", "/nix/store", "~/code/", "tux"):
+                self.assertNotIn(private, text, (f, private))
+
+    def test_checklist_has_harness_points(self):
+        text = (ROOT / "orchestrators" / "checklist.md").read_text()
+        self.assertIn("## Harness trials", text)
+        section = text.split("## Harness trials", 1)[1].lower()
+        for point in ("start", "messages", "wake", "compaction", "cost"):
+            self.assertIn(point, section, point)
+        self.assertIn("core/harnesses/<name>/record.md", section)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,3 +54,14 @@ off. Fail: unknown.
 ## 9. Fit with the core
 Budget steps, the heavy-work gate, beads, roles (`core/`). Pass: each works without changing a core rule. Partial: a
 rule needs a per-orchestrator note (`notes.md`). Fail: a core rule cannot be kept.
+
+## Harness trials
+An agent harness (Claude, OpenCode, Codex, pi, ...) is tried on its own points, with the tier rules
+(`core/scripts/lane-tier`: the provider must be one the owner allows). Each trial adds a dated block to
+`core/harnesses/<name>/record.md`, under `## Trials`, one line per point, in the result format above.
+- H1. Start: it starts in an Orca terminal with `LANE_ROLE`/`LANE_PERSONA` and the chosen model, and Orca
+  recognises it (agent id and status).
+- H2. Messages: Orca's messages reach it and its replies reach the sender.
+- H3. Wake: a worker's report wakes it as a coordinator, with no nudge.
+- H4. Compaction: its persona is back after a compaction, and a session without the markers never gets it.
+- H5. Cost: what a day of coordinating costs, and whether the usage shows in budget steps.
