@@ -43,7 +43,10 @@ exec "$@"
 """
 SYSTEMCTL = """#!/usr/bin/env sh
 echo "$*" >> "$STUB_DIR/systemctl.log"
-case "$*" in *show*) [ -e "$STUB_DIR/scope-result" ] && cat "$STUB_DIR/scope-result" ;; esac
+case "$*" in
+  *MemoryMax*) if [ -e "$STUB_DIR/slice-unlimited" ]; then echo infinity; else echo 10737418240; fi ;;
+  *show*) [ -e "$STUB_DIR/scope-result" ] && cat "$STUB_DIR/scope-result" ;;
+esac
 exit 0
 """
 
@@ -69,7 +72,7 @@ class Machine(unittest.TestCase):
         self.stub("systemctl", SYSTEMCTL)
         self.env = dict(os.environ, PATH=f"{self.stubs}:{os.environ['PATH']}", STUB_DIR=str(self.stubs),
                         LANE_PROC_DIR=str(self.proc), LANE_STATE_DIR=str(self.dir / "state"),
-                        LANE_LIMITS_FILE=str(self.limits))
+                        LANE_LIMITS_FILE=str(self.limits), LANE_AWAY_FILE=str(self.dir / "away"), LANE_HOUR="12")
         for name in ("LANE_HEAVY_HOLDS_SLOT", "GITHUB_ACTIONS", "LANE_HEAVY_CI"):   # a CI run of this suite is no CI job
             self.env.pop(name, None)
 
@@ -98,12 +101,19 @@ class Machine(unittest.TestCase):
     def limits_seen(self, cores=12, mem_gb=64):
         self.stub("nproc", f"#!/usr/bin/env sh\necho {cores}\n")
         (self.proc / "meminfo").write_text(f"MemTotal: {mem_gb * 1048576} kB\nMemAvailable: 1048576 kB\n")
-        names = "LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD LANE_ROOM_MAX_AGENTS LANE_ROOM_SAMPLES".split()
-        show = "; ".join(f'echo "{n}=${n}"' for n in names)
+        names = ("LANE_RESERVE_GB LANE_HEAVY_SLOTS LANE_HEAVY_MEM_GB LANE_CI_SLOTS LANE_CI_MEM_GB LANE_CI_CPU_PCT "
+                 "LANE_ROOM_MIN_MEM_GB LANE_ROOM_MAX_LOAD LANE_ROOM_MAX_AGENTS LANE_ROOM_SAMPLES").split()
+        show = "; ".join(f'echo "{n}=${n}"' for n in names) + '; echo "presence=$LANE_PRESENCE,$LANE_PRESENCE_WHY"'
+
         r = subprocess.run(["bash", "-c", f". {LIMITS}; {show}"], env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.stderr = r.stderr
-        return {k: int(v) for k, v in (l.split("=") for l in r.stdout.split())}
+        seen = dict(l.split("=", 1) for l in r.stdout.splitlines())
+        self.presence = seen.pop("presence")
+        return {k: int(v) for k, v in seen.items()}
+
+    def job_lines(self):
+        return [l for l in (self.stubs / "systemd-run.log").read_text().splitlines() if "-probe" not in l]
 
     def heavy(self, *cmd, **kw):
         return subprocess.run([str(HEAVY), *cmd], env=self.env, capture_output=True, text=True, timeout=TIMEOUT, **kw)
@@ -150,9 +160,6 @@ class HeavyTests(Machine):
         self.assertEqual(len(run), 1)
         for needle in ("--user --scope", "MemoryMax=3G", "MemorySwapMax=0", "nice -n 19", "ionice -t -c 2 -n 7"):
             self.assertIn(needle, run[0])
-
-    def job_lines(self):
-        return [l for l in (self.stubs / "systemd-run.log").read_text().splitlines() if "-probe" not in l]
 
     DOLLARS = 'x=kept; echo "$x $$"'
 
@@ -391,6 +398,22 @@ class HeavyTests(Machine):
         release.touch()
         self.assertEqual((holder.wait(timeout=TIMEOUT), ci.wait(timeout=TIMEOUT)), (0, 0))
 
+    def test_a_ci_job_has_the_ci_memory_limit_and_names_it_on_oom(self):
+        self.env["LANE_HEAVY_CI"] = "1"
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_MEM_GB=5)
+        (self.stubs / "scope-result").write_text("ActiveState=failed\nResult=oom-kill\n")
+        r = self.heavy("sh", "-c", "exit 137")
+        self.assertIn("MemoryMax=5G", self.job_lines()[0])
+        self.assertIn("hit its 5G limit", r.stderr)
+        self.assertIn("raise LANE_CI_MEM_GB", r.stderr)
+
+    def test_a_ci_slice_with_no_memory_limit_is_named(self):
+        self.env["LANE_HEAVY_CI"] = "1"
+        (self.stubs / "slice-unlimited").touch()
+        r = self.heavy("true")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stderr.count("ci.slice has no MemoryMax"), 1, r.stderr)
+
     def test_the_ci_slice_is_a_setting_and_a_bad_one_falls_back(self):
         self.env["LANE_HEAVY_CI"] = "1"
         self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_SLICE="runners.slice")
@@ -432,6 +455,7 @@ class RoomTests(Machine):
         self.assertIn("on 12 cores", r.stdout)
         self.assertIn("0 lane agents", r.stdout)
         self.assertIn("0.0 runnable", r.stdout)
+        self.assertIn("limits  day (day): lane-heavy 1 x 3G; CI 2 in ci.slice", r.stdout)
 
     def test_too_little_memory(self):
         self.set_proc(avail_gb=3)
@@ -555,13 +579,58 @@ class RoomTests(Machine):
 class LimitsTests(Machine):
     def test_defaults_follow_the_machine_when_the_file_is_absent(self):
         self.limits.unlink()
-        self.assertEqual(self.limits_seen(12, 64), {"LANE_HEAVY_SLOTS": 2, "LANE_HEAVY_MEM_GB": 24,
-                                                    "LANE_ROOM_MIN_MEM_GB": 8, "LANE_ROOM_MAX_LOAD": 18,
-                                                    "LANE_ROOM_MAX_AGENTS": 12, "LANE_ROOM_SAMPLES": 5})
+        self.assertEqual(self.limits_seen(12, 64), {"LANE_RESERVE_GB": 10, "LANE_HEAVY_SLOTS": 2,
+                                                    "LANE_HEAVY_MEM_GB": 18, "LANE_CI_SLOTS": 2, "LANE_CI_MEM_GB": 16,
+                                                    "LANE_CI_CPU_PCT": 400, "LANE_ROOM_MIN_MEM_GB": 8,
+                                                    "LANE_ROOM_MAX_LOAD": 18, "LANE_ROOM_MAX_AGENTS": 12,
+                                                    "LANE_ROOM_SAMPLES": 5})
+        self.assertEqual((self.presence, self.stderr), ("day,day", ""))
         small = self.limits_seen(2, 4)
         self.assertEqual(small["LANE_HEAVY_SLOTS"], 1)
         self.assertGreaterEqual(small["LANE_HEAVY_MEM_GB"], 1)
         self.assertEqual(small["LANE_ROOM_MAX_AGENTS"], 2)
+
+    def sizing(self, mem_gb=46):
+        s = self.limits_seen(12, mem_gb)
+        return (s["LANE_HEAVY_SLOTS"], s["LANE_HEAVY_MEM_GB"], s["LANE_CI_MEM_GB"], s["LANE_CI_CPU_PCT"])
+
+    def test_lanes_ci_and_the_reserve_fit_memory_by_day_and_night_or_away(self):
+        self.limits.unlink()
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))           # the owner's 46G example, day
+        self.env["LANE_HOUR"] = "02"
+        self.assertEqual(self.sizing(), (3, 8, 14, 800))            # night: one more slot, CI gets more
+        self.assertEqual(self.presence, "away,night")
+        for mem in (16, 32, 46, 64, 128):
+            for hour in ("12", "02"):
+                self.env["LANE_HOUR"] = hour
+                slots, job, ci, _ = self.sizing(mem)
+                reserve = min(10, mem // 4)
+                self.assertLessEqual(slots * job + ci + reserve - reserve // 5 * (hour == "02"), mem, (mem, hour))
+
+    def test_a_fresh_away_file_counts_and_a_stale_one_does_not(self):
+        self.limits.unlink()
+        away = Path(self.env["LANE_AWAY_FILE"])
+        away.touch()
+        self.assertEqual(self.sizing(), (3, 8, 14, 800))
+        self.assertEqual(self.presence, "away,owner away")
+        old = time.time() - 15 * 3600
+        os.utime(away, (old, old))
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))
+        self.assertEqual(self.presence, "day,day")
+
+    def test_the_file_can_branch_on_presence_and_move_the_reserve(self):
+        self.limits.write_text('[ "$LANE_PRESENCE" = away ] && LANE_HEAVY_SLOTS=4\nLANE_RESERVE_GB=16\n')
+        self.assertEqual(self.sizing(), (2, 10, 7, 400))            # 30G past the reserve: 20 for lanes, 10 - 3 CI
+        self.env["LANE_HOUR"] = "23"
+        self.assertEqual(self.sizing(), (4, 5, 13, 800))
+
+    def test_settings_come_from_the_file_not_the_environment(self):
+        self.limits.unlink()
+        self.env.update(LANE_HEAVY_SLOTS="7", LANE_CI_MEM_GB="99", LANE_CI_SLICE="other.slice")
+        self.assertEqual(self.sizing(), (2, 12, 10, 400))
+        self.env["LANE_HEAVY_CI"] = "1"
+        self.assertEqual(self.heavy("true").returncode, 0)
+        self.assertIn("--slice=ci.slice", self.job_lines()[-1])
 
     def test_memory_can_be_what_limits_the_slots(self):
         self.limits.unlink()
@@ -595,8 +664,11 @@ class LimitsTests(Machine):
 
 class ContentTests(unittest.TestCase):
     def test_every_setting_is_documented(self):
-        names = set(re.findall(r"^(LANE_(?:HEAVY|ROOM|CI)_[A-Z_]+)=", LIMITS.read_text(), re.M))
-        self.assertEqual(len(names), 10)
+        text = LIMITS.read_text()
+        names = set(re.findall(r"^lane_(?:setting|seconds) (LANE_[A-Z_]+) ", text, re.M)) | {"LANE_CI_SLICE"}
+        self.assertEqual(len(names), 13)
+        unset = re.search(r"^unset (LANE_.*?)\n\n", text, re.M | re.S).group(1)
+        self.assertEqual(set(re.findall(r"LANE_[A-Z_]+", unset)), names)   # none comes from the environment
         example = EXAMPLE.read_text()
         for name in names:
             self.assertIn(f"# {name}=", example)

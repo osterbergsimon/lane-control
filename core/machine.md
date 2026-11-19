@@ -12,6 +12,8 @@ Check each item on a new box before adopting the playbook.
 The limit on heavy work is per machine, across every project and lane, not per project: several lanes building at once overwhelm a machine (load 23 on 12 cores with four lanes). `lane-heavy` runs its jobs at nice 19, so its slots are what limit lane builds; `lane-room` leaves nice-19 tasks out and counts the rest.
 - **Heavy work:** every build or full test suite runs through `~/.agents/bin/lane-heavy <command>`, the per-machine install of `scripts/lane-heavy` (a lane in another project has no `scripts/` of ours). A fixed number run at once; the rest wait, at low priority, with a memory limit where the host supports one.
 - **Opening a lane:** `~/.agents/bin/lane-room` first. If it exits non-zero, hold the lane and tell the owner. Its limit is looser than the heavy-work gate: idle agents cost little. It holds a lane on available memory, on the number of lane agents, and on CPU contention: runnable tasks averaged over a few seconds, leaving out SCHED_IDLE and nice-19 tasks (idle-priority CI), not the 5-minute load average, which stays high for minutes after a burst and counts that CI.
+- **CI has its own pool:** a CI job (`GITHUB_ACTIONS=true`, or `LANE_HEAVY_CI=1`) goes through the same `lane-heavy` but takes a CI slot, so it never waits behind lane builds, and its scope joins the CI slice, whose limits hold all CI together.
+- **What slots are for:** OOM safety, mostly from CI, not budget fairness: the budget is guarded by the agent caps and the budget steps. So lane slots, the CI slice and a reserve of about 10G for the desktop and agent sessions fit in memory together (on 46G: day 2 x 12G lanes + CI 10G, night or away 3 x 8G + CI 14G). The defaults compute this from memory and presence.
 - **Settings:** one per-machine file outside any repo, `~/.config/lane-control/limits.sh` (`limits.example.sh`); without it the defaults follow cores and memory. `MEM_LOW_GB` and `SWAP_HIGH_GB` in the config are the window guard's memory check, a separate thing.
 
 ## Usage feeds (per metered budget)
@@ -37,7 +39,7 @@ Gates that need local data or minutes the hosted CI does not have run on self-ho
 
 ### A. Runner on the shared workstation, in a capped user slice
 - Run the runner as the owner's user, inside a systemd user slice with low priority and hard caps: `CPUWeight=idle` (the owner's work wins every contention), `CPUQuota=<n>00%`, `MemoryHigh`/`MemoryMax` for all runners together, a low `IOWeight`. One job at a time per runner.
-- Anything a job starts outside the slice (container service daemons, `systemd-run` scopes) escapes the caps: give it its own.
+- Anything a job starts outside the slice (container service daemons, `systemd-run` scopes) escapes the caps: give it its own. `lane-heavy` puts a CI job's scope in the slice (`LANE_CI_SLICE`); the slice needs a `MemoryMax` (`LANE_CI_MEM_GB`), or it says so.
 - Pin the runner image or OS version; treat a sudden repo-wide red as environment drift first (`reliability.md`).
 - Do not let the runner share state with the owner's dev stack (ports, caches, credentials); a job must not need the owner's logged-in session.
 

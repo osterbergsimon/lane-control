@@ -15,6 +15,8 @@
 # - CI has its own pool: a CI job (GITHUB_ACTIONS=true, or LANE_HEAVY_CI set and not 0) takes one of LANE_CI_SLOTS
 #   slots instead of a lane slot, so it never waits behind lanes, and its scope joins the CI slice (LANE_CI_SLICE),
 #   whose memory and CPU limits hold all CI together. A self-hosted runner's scope would otherwise escape that slice.
+#   A CI job's own memory limit is LANE_CI_MEM_GB, the whole CI budget, so one job alone may use it; when the slice
+#   has no MemoryMax of its own, it says so: CI jobs together could then take more than that.
 # - Out of memory: when the scope was OOM-killed it prints `OUT OF MEMORY` and keeps the exit code (often 137 or 143,
 #   which otherwise look like a hang or a crash; reliability.md section 17). When only the kernel's machine-wide OOM
 #   counter moved during a failed job, it prints `POSSIBLE OUT OF MEMORY`.
@@ -49,8 +51,11 @@ type -P -- "$1" >/dev/null || { say "$1: command not found or not executable"; e
 ci=
 [ "${GITHUB_ACTIONS:-}" = true ] && ci=1
 case ${LANE_HEAVY_CI:-} in '' | 0) ;; *) ci=1 ;; esac
-slot_prefix=heavy
-if [ -n "$ci" ]; then slot_prefix=ci-heavy; LANE_HEAVY_SLOTS=$LANE_CI_SLOTS; fi
+slot_prefix=heavy mem_setting=LANE_HEAVY_MEM_GB
+if [ -n "$ci" ]; then
+  slot_prefix=ci-heavy mem_setting=LANE_CI_MEM_GB
+  LANE_HEAVY_SLOTS=$LANE_CI_SLOTS LANE_HEAVY_MEM_GB=$LANE_CI_MEM_GB
+fi
 
 exec {slot_fd}</dev/null   # replaced by a real slot; a valid fd keeps the job's "close the slot" redirect harmless
 
@@ -117,10 +122,15 @@ scope_works() {
 
 scoped=
 if [ "$LANE_HEAVY_MEM_GB" -eq 0 ]; then
-  say "no memory limit: LANE_HEAVY_MEM_GB is 0"
+  say "no memory limit: $mem_setting is 0"
 elif scope_works; then
   scoped=1
   job=(systemd-run "${scope_args[@]}" --unit="$unit" "${scope_props[@]}" -- "${job[@]}")
+  if [ -n "$ci" ]; then
+    case $(systemctl --user show -p MemoryMax --value "$LANE_CI_SLICE" 2>/dev/null) in
+      '' | infinity) say "$LANE_CI_SLICE has no MemoryMax: each CI job is held to ${LANE_HEAVY_MEM_GB}G, but CI jobs together are not" ;;
+    esac
+  fi
 else
   say "no memory limit: this host has no working systemd user scope; running without one"
 fi
@@ -176,7 +186,7 @@ if [ -n "$scoped" ]; then
 fi
 
 if [ "$result" = oom-kill ]; then
-  say "OUT OF MEMORY: the job hit its ${LANE_HEAVY_MEM_GB}G limit and was killed; exit $rc is that kill, not a test failure or a hang. Use fewer threads, or raise LANE_HEAVY_MEM_GB."
+  say "OUT OF MEMORY: the job hit its ${LANE_HEAVY_MEM_GB}G limit and was killed; exit $rc is that kill, not a test failure or a hang. Use fewer threads, or raise $mem_setting."
 elif [ "$rc" -ne 0 ]; then
   oom_after=$(oom_kills)
   if [ "${oom_after:-0}" -gt "${oom_before:-0}" ]; then
