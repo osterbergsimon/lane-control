@@ -242,7 +242,7 @@ class ClaudeAdapterTests(HomeTest):
         changes = self.a.install_persona_hook(self.checkout)
         self.assertEqual(len(changes), 1)
         self.assertIn("settings.local.json", changes[0])
-        self.assertEqual(self.entries(), [{"matcher": "startup|resume|compact",
+        self.assertEqual(self.entries(), [{"matcher": "startup|resume|clear|compact",
                                            "hooks": [{"type": "command", "command": str(HOOK)}]}])
         before = self.settings.read_bytes()
         self.assertEqual(self.a.install_persona_hook(self.checkout), [])
@@ -270,16 +270,24 @@ class ClaudeAdapterTests(HomeTest):
         self.settings.parent.mkdir()
         self.settings.write_text(json.dumps({"hooks": {"SessionStart": [stale]}}))
         self.assertTrue(self.a.install_persona_hook(self.checkout))
-        self.assertEqual(self.entries(), [{"matcher": "startup|resume|compact",
+        self.assertEqual(self.entries(), [{"matcher": "startup|resume|clear|compact",
                                            "hooks": [{"type": "command", "command": str(HOOK)}]}])
 
     def ours(self):
-        return {"matcher": "startup|resume|compact", "hooks": [{"type": "command", "command": str(HOOK)}]}
+        return {"matcher": "startup|resume|clear|compact", "hooks": [{"type": "command", "command": str(HOOK)}]}
 
     def write_starts(self, starts):
         import json
         self.settings.parent.mkdir(exist_ok=True)
         self.settings.write_text(json.dumps({"hooks": {"SessionStart": starts}}))
+
+    def test_claude_hook_matcher_covers_clear(self):
+        # Review m1: after /clear the context is empty; the persona must come back then too.
+        self.a.install_persona_hook(self.checkout)
+        self.assertEqual(set(self.entries()[0]["matcher"].split("|")), {"startup", "resume", "clear", "compact"})
+        self.write_starts([{"matcher": "startup|resume|compact", "hooks": [{"type": "command", "command": str(HOOK)}]}])
+        self.assertTrue(self.a.install_persona_hook(self.checkout))  # an older matcher is brought up to date
+        self.assertEqual(self.entries(), [self.ours()])
 
     def test_claude_hook_beside_foreign_same_matcher(self):
         foreign = {"matcher": "startup|resume|compact", "hooks": [{"type": "command", "command": "/x/other.sh"}]}

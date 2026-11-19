@@ -1,6 +1,6 @@
 """Claude Code harness adapter (core/harnesses/__init__.py has the interface).
 
-Persona: a SessionStart hook (matchers startup|resume|compact) in the checkout's uncommitted
+Persona: a SessionStart hook (matchers startup|resume|clear|compact) in the checkout's uncommitted
 .claude/settings.local.json runs core/harnesses/persona-hook.sh (path shell-quoted: Claude runs hook commands in a
 shell), which prints $LANE_PERSONA for the session started with the markers and nothing for any other.
 Idle: the newest transcript write in ~/.claude/projects/<encoded path>/.
@@ -18,7 +18,7 @@ NAME = "claude"
 STATUS = "in use"
 ORCA_AGENT_ID = "claude"
 MODEL_FLAGS = frozenset({"model", "effort"})
-MATCHER = "startup|resume|compact"
+MATCHER = "startup|resume|clear|compact"
 HOOK_TAIL = ("core", "harnesses", "persona-hook.sh")
 
 

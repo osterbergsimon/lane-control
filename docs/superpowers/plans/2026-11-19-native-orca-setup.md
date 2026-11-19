@@ -56,7 +56,7 @@ is silent).
     if no marked session is recorded; an unreadable folder or store raises (NO-1 review 1)
   - `ORCA_AGENT_ID: str` (`claude`, `opencode2`) and `MODEL_FLAGS: frozenset[str]` (what Orca accepts:
     Claude `{"model","effort"}`, OpenCode `{"model"}`)
-- `core/harnesses/persona-hook.sh` — Claude `SessionStart` hook (matchers `startup|resume|compact`): prints
+- `core/harnesses/persona-hook.sh` — Claude `SessionStart` hook (matchers `startup|resume|clear|compact`): prints
   `$LANE_PERSONA`'s contents when both markers are set and the file exists; exit 0 always.
 - `core/harnesses/opencode/lane-persona.js` — OpenCode v2 plugin (`export default { id, setup }`): `setup` registers
   `ctx.session.hook("context")` and `ctx.session.hook("compaction")`, each pushing the persona onto `input.system`;
@@ -98,7 +98,7 @@ is silent).
 - [ ] Task 1.1: hook script. Tests: `test_hook_prints_persona_with_markers`, `test_hook_silent_without_markers`,
   `test_hook_silent_missing_file`, `test_hook_exit_zero_always`.
 - [ ] Task 1.2: Claude adapter. `install_persona_hook` adds one `SessionStart` entry (matcher
-  `startup|resume|compact`, command = absolute path of `persona-hook.sh`) to `<checkout>/.claude/settings.local.json`,
+  `startup|resume|clear|compact`, command = absolute path of `persona-hook.sh`) to `<checkout>/.claude/settings.local.json`,
   keeping other keys; idempotent. `idle_minutes` reads the newest `*.jsonl` mtime in
   `~/.claude/projects/<checkout path with / and . replaced by ->`. Tests: idempotence, other settings kept,
   idle from a fake projects dir (HOME in a temp dir), `start_command` shape.
