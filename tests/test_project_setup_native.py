@@ -76,7 +76,9 @@ class NativeEnv(Env):
 
     def creates(self):
         """The argv of every `orca terminal create`, parsed back from the log."""
-        return [shlex.split(c)[1:] for c in self.calls() if c.startswith("orca terminal create")]
+        f = Path(str(self.log) + ".argv")
+        rows = [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+        return [r[1:] for r in rows if r[:3] == ["orca", "terminal", "create"]]
 
 
 def opt(argv, name):

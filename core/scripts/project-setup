@@ -2463,6 +2463,153 @@ def load_harness(name: str):
     return harnesses.load_harness(name)
 
 
+TITLES = {"coordinator": "{project} coordinator", "design-lead": "{project} design lead"}  # peers find them by these
+STANDING = tuple(TITLES)
+RUN_WAIT = 20  # seconds to wait for a started session's terminal to make its Run
+NATIVE_KICKOFF = {
+    "coordinator": ("Read your persona, {persona}, then AGENTS.md and `bd recall handover-latest`; then tell the owner "
+                    "in one line that you are ready, and wait for them."),
+    "design-lead": ("Read your persona, {persona}, then AGENTS.md; then tell the coordinator in one line that you are "
+                    "ready (the Messages part of your persona), and wait."),
+}
+NATIVE_RESUME = ("You are back after a pause. Reread your persona, {persona}; then resume from `bd recall "
+                 "handover-latest`, `orca-ide orchestration run-current` and `orca-ide worktree list`, and tell the "
+                 "owner in one line that you are back.")
+
+
+class Place:
+    """Where the native steps run: this machine, or a saved Orca SSH host (phase 6 of the native-Orca plan, not built
+    yet). Every Orca call of the native path goes through one, so the host path changes this and nothing else."""
+
+    def __init__(self, host: "str | None" = None):
+        if host is not None:
+            raise NotImplementedError(f"native-Orca setup on the SSH host {host!r} is phase 6 of the native-Orca plan "
+                                      "and is not built yet")
+        self.host = host
+
+    def argv(self, *args) -> list:
+        return [ORCA, *args]
+
+    def jrun(self, *args):
+        return jrun(self.argv(*args, "--json"))
+
+
+def session_title(role: str, project: str) -> str:
+    return TITLES[role].format(project=project)
+
+
+def bare_title(title) -> str:
+    """A terminal title without what Claude puts in front of its session name (a spinner or a mark)."""
+    return re.sub(r"^[^\w]+", "", title or "").strip()
+
+
+def session_terminal(place: Place, title: str):
+    """The Orca terminal of a running standing session (by its title), or None."""
+    rows = place.jrun("terminal", "list")["result"]["terminals"]
+    return next((t for t in rows if bare_title(t.get("title")) == title), None)
+
+
+def run_id(obj):
+    """The Run id in what `orchestration run-create --json` printed (the first run_... id in it), or None."""
+    if isinstance(obj, dict):
+        for k in ("runId", "id"):
+            v = obj.get(k)
+            if isinstance(v, str) and v.startswith("run_"):
+                return v
+        obj = list(obj.values())
+    if isinstance(obj, list):
+        for v in obj:
+            found = run_id(v)
+            if found:
+                return found
+    return None
+
+
+def run_record(repo: Path, role: str) -> Path:
+    return store_dir(repo) / "runs" / f"{role}.json"
+
+
+def launcher(repo: Path, role: str, pin: tuple, mode: str, checkout: Path, title: str, kickoff: str,
+             resume: "str | None" = None) -> Path:
+    """The session's start script, in the settings store: its own Run first (Orca binds a Run to the terminal that
+    makes it), then the harness with the markers, started as the adapter says. Orca types --command into the login
+    shell, so it only gets `sh <this file>`; the first message and the JSON go in here, quoted for sh."""
+    harness, model = pin
+    cmd = load_harness(harness).start_command(role, repo / ADAPTED / f"{role}.md", model, mode)
+    if harness == "claude":  # --name: SendMessage addresses the session by it
+        cmd += ["--name", title] + (["--resume", resume] if resume else []) + [kickoff]
+    else:
+        cmd += (["--session", resume] if resume else []) + ["--prompt", kickoff]
+    rec, q = run_record(repo, role), shlex.quote
+    script = (f"#!/bin/sh\n# {title}: written by project-setup at each start. The session's own Run, then the agent.\n"
+              f"cd {q(str(checkout))} || exit 1\n"
+              f"{q(ORCA)} orchestration run-create --objective {q(title)} --json >{q(str(rec))}.tmp 2>/dev/null &&\n"
+              f"    mv -f {q(str(rec))}.tmp {q(str(rec))}\n"
+              f"exec {shlex.join(cmd)}\n")
+    f = store_dir(repo) / "launch" / f"{role}.sh"
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    store_dir(repo).chmod(0o700)
+    write_atomic(f, script.encode(), 0o700)
+    return f
+
+
+def wait_run(repo: Path, role: str, timeout: float = None):
+    f = run_record(repo, role)
+    end = time.time() + (RUN_WAIT if timeout is None else timeout)
+    while True:
+        try:
+            found = run_id(json.loads(f.read_text()))
+        except (OSError, ValueError):
+            found = None
+        if found or time.time() >= end:
+            return found
+        time.sleep(1)
+
+
+def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, checkout: Path, project: str,
+                  kickoff: str, resume: "str | None" = None) -> bool:
+    """One standing session in its own Orca terminal; True when started now, False when its terminal already runs.
+    Nothing is ever typed into a terminal: the first message is the start command's own prompt."""
+    title = session_title(role, project)
+    if session_terminal(place, title):
+        say(f"session {role}", "exists", title)
+        return False
+    f = launcher(repo, role, pin, mode, checkout, title, kickoff, resume)
+    run_record(repo, role).unlink(missing_ok=True)
+    place.jrun("terminal", "create", "--worktree", f"path:{checkout}", "--title", title,
+               "--command", f"sh {shlex.quote(str(f))}")
+    say(f"session {role}", "created", f"{'/'.join(pin)} in {checkout} ({title}" + (", resumed)" if resume else ")"))
+    found = wait_run(repo, role)
+    if found:
+        settings(repo, runs={**(settings(repo).get("runs") or {}), role: found})
+        say(f"run {role}", "created", f"{found} (objective {title!r}; recorded in the settings store)")
+    else:
+        say(f"run {role}", "pending", f"no Run from its terminal after {RUN_WAIT}s; peers find it in `orca-ide "
+            f"orchestration run-list` by the objective {title!r}, and the session makes one itself if it has none")
+    return True
+
+
+def start_standing(place: Place, repo: Path, project: str, pins: dict, lead: bool, mode: str, repo_id: str,
+                   kickoffs: dict, resume: dict = None) -> bool:
+    """The coordinator, and the design lead in its own child worktree. True when the coordinator was started now."""
+    resume = resume or {}
+    started = start_session(place, repo, "coordinator", pins["coordinator"], mode, repo, project,
+                            kickoffs["coordinator"], resume.get("coordinator"))
+    if lead:
+        wt, created = design_worktree(repo, repo_id)
+        if created:
+            setup_done = wait_for_setup(wt, "design-lead")
+            before = {t["handle"] for t in worktree_terminals(wt)}
+        if pins["design-lead"][0] == "claude":
+            persona_hooks(wt, {"claude"})
+        start_session(place, repo, "design-lead", pins["design-lead"], mode, wt, project, kickoffs["design-lead"],
+                      resume.get("design-lead"))
+        if created:
+            close_startup_tabs(wt, before, setup_done)
+            place.jrun("terminal", "create", "--worktree", f"path:{wt}")  # the owner's shell
+    return started
+
+
 def native_preflight(needed: set):
     """Orca's runtime reachable and each standing role's harness on PATH; no Cotal."""
     if not shutil.which(ORCA):
@@ -2547,12 +2694,30 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
+            if changed:
+                say("restart", "maybe", "the personas of " + ", ".join(changed) + " changed: a running session "
+                    "rereads it at its next compaction, or restart it (project-pause stop, then start)")
             say("start", "skipped", "--no-start")
             return 0
+        global COORDINATOR_KICKOFF, LEFTOVER_DELIVERED
+        persona = {r: repo / ADAPTED / f"{r}.md" for r in STANDING}
+        COORDINATOR_KICKOFF = NATIVE_KICKOFF["coordinator"].format(persona=persona["coordinator"])
+        kickoffs = {"coordinator": coordinator_kickoff(),
+                    "design-lead": NATIVE_KICKOFF["design-lead"].format(persona=persona["design-lead"])}
+        LEFTOVER_DELIVERED = start_standing(Place(), repo, project, pins, lead is not None, cfg["mode"], repo_id,
+                                            kickoffs)
+        print(f"summary: {project} · native Orca · orca repo {repo_id} · sessions "
+              + ", ".join(session_title(r, project) for r in STANDING if r == "coordinator" or lead))
         return 0
     except Fail as e:
         print(f"project-setup: {e}", file=sys.stderr)
         return 1
+    finally:
+        if LEFTOVER and not LEFTOVER_DELIVERED:
+            print("\nLeft open at the commit and not given to a coordinator in this run (it was not started now). "
+                  "Bring it to the coordinator yourself:\n" + LEFTOVER, file=sys.stderr)
+        if agent_spent:
+            print(f"agent time used: {minutes(agent_spent)} of {minutes(AGENT_LIMIT)}")
 
 
 def main(argv=None) -> int:

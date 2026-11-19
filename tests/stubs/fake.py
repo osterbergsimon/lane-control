@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Stand-in for the `orca` and `cotal` CLIs in project-setup tests.
 
-Invoked through symlinks named orca/cotal. Appends `<tool> <args>` to $STUB_LOG and answers from the JSON state in
+Invoked through symlinks named orca/cotal. Appends `<tool> <args>` to $STUB_LOG (and the argv as JSON to
+$STUB_LOG.argv) and answers from the JSON state in
 $STUB_STATE (created with defaults on first use). Only the calls project-setup makes are modelled.
 """
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +24,8 @@ state.setdefault("agents", [])
 state.setdefault("terminals", [])
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write(tool + " " + " ".join(args) + "\n")
+with open(os.environ["STUB_LOG"] + ".argv", "a") as log:  # the same call with its words kept apart
+    log.write(json.dumps([tool, *args]) + "\n")
 
 
 def out(obj, code=0):
@@ -86,7 +90,26 @@ def orca():
         t = {"handle": f"term_{sum(t['handle'].startswith('term_') for t in state['terminals']) + 1}", "title": opt("--title", "shell"),
              "worktreePath": opt("--worktree").split(":", 1)[1]}
         state["terminals"].append(t)
+        command = opt("--command")
+        if command and not state.get("no_exec"):
+            # Like Orca: the command runs in the new terminal's shell (here at once, to its end). It may call this
+            # stub itself, so the state is written first and read back after.
+            state_path.write_text(json.dumps(state))
+            subprocess.run(["sh", "-c", command], cwd=t["worktreePath"])
+            state.clear()
+            state.update(json.loads(state_path.read_text()))
         out({"ok": True, "result": {"terminal": t}})
+    if cmd == "orchestration run-create":
+        run = {"id": f"run_{len(state.setdefault('runs', [])) + 1:012x}", "objective": opt("--objective")}
+        state["runs"].append(run)
+        out({"ok": True, "result": {"run": run}})
+    if cmd == "orchestration run-list":
+        out({"ok": True, "result": {"runs": state.get("runs", [])}})
+    if cmd == "orchestration send":
+        state.setdefault("sent", []).append({"to": opt("--to"), "subject": opt("--subject"), "body": opt("--body")})
+        if state.get("handover_on_send"):  # the session writes its handover when asked (bd stub reads this file)
+            Path(os.environ["HOME"], "handover").write_text(state["handover_on_send"])
+        out({"ok": True, "result": {"message": {"id": f"msg_{len(state['sent'])}"}}})
     out({"ok": False, "error": {"message": f"stub: unhandled orca {args}"}}, 9)
 
 
