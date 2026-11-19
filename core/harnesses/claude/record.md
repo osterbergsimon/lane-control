@@ -34,5 +34,14 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
 - Claude Code changes its hook events or its transcript folder layout.
 
 ## Trials
-None yet as a harness trial (in use for every role since 2026-11-15). The compaction check is a manual check: start a
-session with the markers, run `/compact`, and ask for the persona's first line.
+
+### 2026-11-19 live check (Claude Code 2.1.328)
+`LANE_LIVE_CLAUDE=1 python3 -m unittest tests.test_harnesses.ClaudeLiveTests` (opt-in, one `claude -p --model haiku`
+run, about 10 s, on the owner's own sign-in; it leaves that one transcript in `~/.claude/projects/`): a temp checkout
+with the hook installed by the adapter, started with the markers.
+- Persona at start: pass — asked to quote its persona's first line, the session did, word for word (the hook's
+  output reached its context).
+- Session record: pass — the hook recorded the session id from its JSON input, and that id's transcript exists.
+- Idle: pass — `idle_minutes` read that transcript (0 minutes).
+- Not checked live: `/compact` and `/clear` (an interactive session); the hook fires on the same `SessionStart`
+  event with another `source`, and the unit tests run it for each.

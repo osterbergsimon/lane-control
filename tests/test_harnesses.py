@@ -795,6 +795,49 @@ class OpenCodeLiveTests(HomeTest):
         self.assertFalse(any(seen.values()), seen)
 
 
+CLAUDE = shutil.which("claude")
+LIVE_CLAUDE = os.environ.get("LANE_LIVE_CLAUDE") == "1"
+
+
+@unittest.skipUnless(LIVE_CLAUDE and CLAUDE, "opt-in: LANE_LIVE_CLAUDE=1 and claude on PATH")
+class ClaudeLiveTests(TempDirTest):
+    """One real non-interactive Claude run (Haiku, the owner's own sign-in) in a temp checkout with the hook
+    installed by the adapter: the persona reaches the session, the hook records the session, and the idle signal
+    reads its transcript. It leaves that one transcript in ~/.claude/projects/. Run: LANE_LIVE_CLAUDE=1 python3 -m
+    unittest tests.test_harnesses.ClaudeLiveTests"""
+
+    MARK = "LANE-PERSONA-LIVE-CLAUDE-4821"
+
+    def test_live_persona_session_record_and_idle(self):
+        pkg = load_harnesses_pkg()
+        a = pkg.load_harness("claude")
+        checkout = self.t / "checkout"
+        checkout.mkdir()
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        self.assertTrue(a.install_persona_hook(checkout))
+        persona = checkout / ".lane-control" / "coordinator.md"
+        persona.parent.mkdir()
+        persona.write_text(f"# Persona {self.MARK}\n\nYou are a test coordinator. Answer in one line.\n")
+        state = self.t / "state"
+        env = clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(persona), XDG_STATE_HOME=str(state))
+        r = subprocess.run([CLAUDE, "-p", "--model", "haiku", "Quote the first line of your persona exactly, "
+                            "nothing else."], cwd=checkout, env=env, capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertIn(self.MARK, r.stdout)
+        saved = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(state)
+        try:
+            sid = pkg.read_session(checkout, "coordinator", "claude")
+            self.assertIsNotNone(sid, sorted(p.name for p in state.rglob("*")))
+            self.assertTrue((a.project_dir(checkout.resolve()) / f"{sid}.jsonl").is_file())
+            self.assertIn(a.idle_minutes(checkout, time.time()), (0, 1))
+        finally:
+            if saved is None:
+                os.environ.pop("XDG_STATE_HOME")
+            else:
+                os.environ["XDG_STATE_HOME"] = saved
+
+
 class RecordTests(unittest.TestCase):
     """Task 1.4: every harness has a dated record; the checklist has the harness points."""
 
@@ -823,7 +866,8 @@ class RecordTests(unittest.TestCase):
             self.assertIn(needle, " ".join(oc.split()), needle)
         self.assertNotIn("experimental.", oc)  # the v1 hook names do not exist in v2
         cl = " ".join(self.status("claude")[1].split())
-        for needle in ("10,000 characters", "lane-control/sessions/", "<role>.claude", "subagents"):
+        for needle in ("10,000 characters", "lane-control/sessions/", "<role>.claude", "subagents",
+                       "LANE_LIVE_CLAUDE=1", "### 2026-11-19 live check (Claude Code"):
             self.assertIn(needle, cl, needle)
         self.assertIn("<role>.opencode", " ".join(oc.split()))
         pi = " ".join(self.status("pi")[1].split())
