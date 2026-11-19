@@ -3,6 +3,7 @@
 Temp dirs only: HOME and XDG_* point into them, so no real Claude, OpenCode or Orca state is read or written.
 """
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -265,9 +266,10 @@ class ClaudeAdapterTests(HomeTest):
 
 
 PLUGIN = HARNESSES / "opencode" / "lane-persona.js"
-NODE = __import__("shutil").which("node")
+NODE = shutil.which("node")
 SCHEMA = ("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);"
-          "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_updated INTEGER NOT NULL);")
+          "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,"
+          " time_updated INTEGER NOT NULL);")
 
 
 class OpenCodeAdapterTests(HomeTest):

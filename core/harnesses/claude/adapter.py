@@ -2,7 +2,8 @@
 
 Persona: a SessionStart hook (matchers startup|resume|compact) in the checkout's uncommitted
 .claude/settings.local.json runs core/harnesses/persona-hook.sh (path shell-quoted: Claude runs hook commands in a
-shell), which prints $LANE_PERSONA for the session started with the markers and nothing for any other. Idle: the newest transcript write in ~/.claude/projects/<encoded path>/.
+shell), which prints $LANE_PERSONA for the session started with the markers and nothing for any other.
+Idle: the newest transcript write in ~/.claude/projects/<encoded path>/.
 """
 import json
 import os
