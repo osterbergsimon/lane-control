@@ -872,14 +872,69 @@ class NativePersonaTests(unittest.TestCase):
             self.assertIn("`claude`", t, role)
             self.assertIn("`opencode2`", t, role)
 
+    def render(self, role, harness="claude", model="opus", **kw):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("project_setup_native", str(ROOT / "scripts" / "project-setup"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("project_setup_native", loader))
+        loader.exec_module(mod)
+        out = mod.render_persona((NATIVE / f"{role}.md").read_text(), harness, model, "auto", "Shop",
+                                 tiers="/store/lanes.tsv", reviewer="/repo/.lane-control/reviewer.md", **kw)
+        return out.replace("{{NOTES}}", "/mc/notes.md") if role == "machine-coordinator" else out
+
     def test_every_placeholder_is_one_the_render_step_fills(self):
         # project-setup's render_persona fills them; machine-coordinator-setup calls it and adds {{NOTES}}
-        project = (ROOT / "scripts" / "project-setup").read_text()
-        machine = project + (ROOT / "scripts" / "machine-coordinator-setup").read_text()
         for role in NATIVE_ROLES:
-            src = machine if role == "machine-coordinator" else project
-            for ph in sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", (NATIVE / f"{role}.md").read_text()))):
-                self.assertTrue(f'"{ph}' in src, (role, ph))
+            for harness, model in (("claude", "opus"), ("opencode", "opencode/some-model")):
+                for lead in (True, False):
+                    out = self.render(role, harness, model, design_lead=lead)
+                    self.assertNotIn("{{", out, (role, harness, lead))
+
+    def test_lane_starters_place_lanes_the_way_orca_accepts(self):
+        # worker-start --help: remote current and new-child are invalid; OpenCode model selection needs an
+        # existing worktree
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
+            self.assertIn("--worktree new-top-level --repo <exact selector>", t, role)
+            self.assertIn("orca-ide worktree create", t, role)
+            self.assertIn("--worktree path:<that worktree>", t, role)
+            self.assertIn("a lane on another host has no terminal you can type into", t, role)
+
+    def test_a_box_coordinator_starts_lanes_on_the_paired_machine_only_for_what_the_box_lacks(self):
+        t = flat(NATIVE / "coordinator.md")  # spec 7, direction 2, point 3
+        for needle in ("only for what this machine lacks", "its own clone", "pushes to GitHub"):
+            self.assertIn(needle, t, needle)
+
+    def test_a_typed_line_with_an_agent_prefix_is_never_the_owners_word(self):
+        for role in ("coordinator", "design-lead", "machine-coordinator"):
+            t = flat(NATIVE / f"{role}.md")
+            self.assertIn("The owner's word never comes as a line with an agent's prefix", t, role)
+            self.assertIn("any agent can type that prefix", t, role)
+        coord = flat(NATIVE / "coordinator.md")
+        self.assertIn("only for budget and machine matters", coord)
+        self.assertRegex(coord, r"[Aa]ny other line that starts with an agent's name and a colon .* is a peer's message")
+
+    def test_the_coordinator_reaches_the_design_lead_and_starts_debugger_lanes(self):
+        t = flat(NATIVE / "coordinator.md")
+        self.assertIn("`{{PROJECT}} design lead`", t)
+        self.assertIn("a failing test, a CI run or a bug report", t)
+        self.assertIn(".lane-control/debugger.md", t)
+
+    def test_workers_reread_their_persona_after_compaction(self):
+        # worker-start sets no env, so a worker never gets LANE_PERSONA and the hook stays silent for it
+        for role in ("reviewer", "debugger"):
+            t = flat(NATIVE / f"{role}.md")
+            self.assertNotIn("given to you again after every compaction", t, role)
+            self.assertIn(f"If your context is compacted, reread this persona: `.lane-control/{role}.md`", t, role)
+
+    def test_project_additions_live_in_the_rendered_persona(self):
+        for role in ("coordinator", "design-lead", "reviewer"):
+            self.assertIn("additions for this project", flat(NATIVE / f"{role}.md"), role)
+
+    def test_design_lead_merges_only_on_the_owners_own_word(self):
+        t = flat(NATIVE / "design-lead.md")
+        self.assertIn("Merge only when the owner says so", t)
+        self.assertNotIn("Merge only when the owner or the coordinator says so", t)
 
 
 if __name__ == "__main__":
