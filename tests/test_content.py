@@ -768,6 +768,8 @@ class LessonsDoctrineTests(unittest.TestCase):
         self.assertIn("night manager (phase 4 of the native-Orca plan)", t)
         self.assertIn("lastOutputAt", t)  # not an idle signal
         for needle in ("idle at least 45 minutes", "not checked in on for 2 hours", "a runner is offline",
+                       "AND either some coordinator has been idle at least 45 minutes",
+                       "sat idle from shortly after midnight until the owner came back",
                        "above the no-new-work step, check-ins ask only for push and handover"):
             self.assertIn(needle, t, needle)
 
@@ -776,7 +778,8 @@ class LessonsDoctrineTests(unittest.TestCase):
         self.assertIn("Orchestrator: native Orca", t)
         self.assertIn("Compare against the upstream only if it names the same branch, never a base branch.", t)
         for needle in ("whose PR is merged", "clean tree including untracked files", "no terminal output for 30 minutes",
-                       "newest of push, commit and terminal output", "`lastActivityAt`", "hold file", "report only",
+                       "newest of Orca's `lastActivityAt` (which alone can be days old), push, commit and terminal output", "`lastActivityAt`", "hold file", "report only",
+                       "no activity for 6 hours (2 in the night manager's run) is reported stuck unless it is parked",
                        "Terminal output can only keep a lane, never mark it idle", "a local `<user>/x` can push to `origin/x`",
                        "base branch's old merged PR"):
             self.assertIn(needle, t, needle)
@@ -792,6 +795,7 @@ class LessonsDoctrineTests(unittest.TestCase):
         t = reliability_entry(32)
         self.assertIn("a CI gate waits outside the heavy slot and takes it only for the heavy command.", t)
         self.assertIn("(phase 2 of the plan)", t)
+        self.assertIn("one of them held a `lane-heavy` slot while it slept", t)
 
     def test_nix_gc_runs_in_the_daytime(self):
         t = reliability_entry(33)
