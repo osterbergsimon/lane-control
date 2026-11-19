@@ -50,8 +50,10 @@ is silent).
     an Orca terminal's `--command`, beginning with `env LANE_ROLE=<role> LANE_PERSONA=<persona>`
   - `install_persona_hook(checkout: Path) -> list[str]` — edits files under `checkout` (or the harness's config
     dir for OpenCode), idempotent, returns change lines; empty = already in place
-  - `idle_minutes(checkout: Path, now: float) -> int | None` — minutes since the newest session write for that
-    checkout; `None` if no session found
+  - `idle_minutes(checkout: Path, now: float, role: str = "coordinator") -> int | None` — minutes since the newest
+    write of that checkout's `<role>` session (the one started with the markers, recorded by the hook or plugin in
+    `~/.local/state/lane-control/sessions/`) and its sub-agents; other sessions in the checkout do not count. `None`
+    if no marked session is recorded; an unreadable folder or store raises (NO-1 review 1)
   - `ORCA_AGENT_ID: str` (`claude`, `opencode2`) and `MODEL_FLAGS: frozenset[str]` (what Orca accepts:
     Claude `{"model","effort"}`, OpenCode `{"model"}`)
 - `core/harnesses/persona-hook.sh` — Claude `SessionStart` hook (matchers `startup|resume|compact`): prints

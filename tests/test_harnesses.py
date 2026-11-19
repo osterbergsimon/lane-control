@@ -65,6 +65,26 @@ class PersonaHookTests(TempDirTest):
             r = self.hook(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(path)))
             self.assertEqual((r.returncode, r.stdout), (0, ""), path)
 
+    def test_hook_records_own_session(self):
+        # Review M4: the marked session says which transcript is the coordinator's.
+        pkg = load_harnesses_pkg()
+        checkout = self.t / "shop.app"
+        checkout.mkdir()
+        state = self.t / "state"
+        start = ('{"session_id": "4f1c2e9a-0b7d-4c55-9a8e-1d2f3a4b5c6d", "hook_event_name": "SessionStart",'
+                 ' "source": "compact"}')
+        env = clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona), XDG_STATE_HOME=str(state),
+                        CLAUDE_PROJECT_DIR=str(checkout))
+        r = self.hook(env, stdin=start)
+        self.assertEqual((r.returncode, r.stdout), (0, PERSONA_TEXT))
+        record = state / "lane-control" / "sessions" / pkg.encode_path(checkout.resolve()) / "coordinator.claude"
+        self.assertEqual(record.read_text(), "4f1c2e9a-0b7d-4c55-9a8e-1d2f3a4b5c6d\n")
+        r = self.hook(clean_env(XDG_STATE_HOME=str(self.t / "state2"), CLAUDE_PROJECT_DIR=str(checkout)), stdin=start)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertFalse((self.t / "state2").exists())  # no markers: nothing recorded
+        r = self.hook(env, stdin='{"session_id": "../../x"}')
+        self.assertEqual(record.read_text(), "4f1c2e9a-0b7d-4c55-9a8e-1d2f3a4b5c6d\n")  # not an id: kept
+
     CLAUDE_HOOK_CAP = 10_000  # Claude Code keeps at most this many characters of a hook's output
 
     def test_hook_persona_under_cap_printed_whole(self):
@@ -128,7 +148,7 @@ class HomeTest(TempDirTest):
         super().setUp()
         self.home = self.t / "home"
         self.home.mkdir()
-        saved = {k: os.environ.get(k) for k in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME")}
+        saved = {k: os.environ.get(k) for k in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")}
 
         def restore():
             for k, v in saved.items():
@@ -140,9 +160,17 @@ class HomeTest(TempDirTest):
         os.environ["HOME"] = str(self.home)
         os.environ.pop("XDG_CONFIG_HOME", None)
         os.environ.pop("XDG_DATA_HOME", None)
+        os.environ.pop("XDG_STATE_HOME", None)
         self.checkout = self.t / "code" / "shop.app"
         self.checkout.mkdir(parents=True)
         self.pkg = load_harnesses_pkg()
+
+    def record(self, harness, sid, role="coordinator"):
+        """What the hook or plugin writes when a marked session starts or takes a turn."""
+        path = self.pkg.session_record(self.checkout, role, harness)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(sid + "\n")
+        return path
 
 
 class LoaderTests(HomeTest):
@@ -154,6 +182,23 @@ class LoaderTests(HomeTest):
         for name in ("codex", "pi", "nope", "../claude", ""):
             with self.assertRaises(ValueError, msg=name):
                 self.pkg.load_harness(name)
+
+    def test_session_record_path(self):
+        self.assertEqual(self.pkg.session_record(self.checkout, "coordinator", "claude"),
+                         self.home / ".local" / "state" / "lane-control" / "sessions" /
+                         self.pkg.encode_path(self.checkout.resolve()) / "coordinator.claude")
+        self.assertEqual(self.pkg.encode_path(Path("/a/b.c/d_e")), "-a-b-c-d-e")
+        odd = self.t / "Öland"
+        odd.mkdir()
+        self.assertEqual(self.pkg.session_record(odd, "coordinator", "claude").parent.name[-6:], "--land")  # per byte
+        os.environ["XDG_STATE_HOME"] = str(self.t / "state")
+        self.assertEqual(self.pkg.session_record(self.checkout, "reviewer", "opencode").parent.parent,
+                         self.t / "state" / "lane-control" / "sessions")
+        self.assertIsNone(self.pkg.read_session(self.checkout, "coordinator", "claude"))
+        self.record("claude", "abc-123")
+        self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "claude"), "abc-123")
+        self.record("claude", "../../etc/passwd")
+        self.assertIsNone(self.pkg.read_session(self.checkout, "coordinator", "claude"))  # not an id
 
     def test_every_adapter_has_the_interface(self):
         for name, mod in self.pkg.harnesses().items():
@@ -293,28 +338,31 @@ class ClaudeAdapterTests(HomeTest):
         d.mkdir(parents=True)
         return d
 
-    def test_claude_idle_from_newest_transcript(self):
+    def transcript(self, d, name, age_min, now):
+        f = d / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("{}\n")
+        os.utime(f, (now - age_min * 60, now - age_min * 60))
+
+    def test_claude_idle_own_session_only(self):
+        # Review M4: another session in the coordinator's checkout (a worker, a reviewer) does not count.
         now = 1_800_000_000.0
         d = self.transcripts(self.checkout)
-        for name, age_min in (("old.jsonl", 300), ("new.jsonl", 50)):
-            f = d / name
-            f.write_text("{}\n")
-            os.utime(f, (now - age_min * 60, now - age_min * 60))
-        noise = d / "notes.txt"  # not a transcript
-        noise.write_text("x")
-        os.utime(noise, (now, now))
-        other = self.transcripts(self.t / "code" / "other")
-        f = other / "s.jsonl"
-        f.write_text("{}\n")
-        os.utime(f, (now - 60, now - 60))
-        self.assertEqual(self.a.idle_minutes(self.checkout, now), 50)
-        self.assertEqual(self.a.idle_minutes(self.checkout, now - 50 * 60 - 30), 0)  # clock skew is not negative
+        self.transcript(d, "coord-1.jsonl", 200, now)
+        self.transcript(d, "worker-2.jsonl", 3, now)
+        self.record("claude", "coord-1")
+        self.assertEqual(self.a.idle_minutes(self.checkout, now), 200)
+        self.assertEqual(self.a.idle_minutes(self.checkout, now - 200 * 60 - 30), 0)  # clock skew is not negative
+        self.transcript(d, "coord-1/subagents/agent-a.jsonl", 30, now)  # its own sub-agents are its activity
+        self.assertEqual(self.a.idle_minutes(self.checkout, now), 30)
+        self.assertEqual(self.a.idle_minutes(self.checkout, now, role="design-lead"), None)
 
     @unittest.skipIf(os.geteuid() == 0, "root reads any folder")
     def test_claude_idle_unreadable_folder_raises(self):
         # Review Focus 4: an unreadable session folder is not "no session"; the night precheck must say why.
         d = self.transcripts(self.checkout)
         (d / "s.jsonl").write_text("{}\n")
+        self.record("claude", "s")
         d.chmod(0)
         self.addCleanup(d.chmod, 0o700)
         with self.assertRaises(OSError):
@@ -330,14 +378,19 @@ class ClaudeAdapterTests(HomeTest):
             self.assertEqual(json.loads(self.settings.read_text()), data)
 
     def test_claude_idle_none_without_session(self):
-        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
-        self.transcripts(self.checkout)
-        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
+        now = 1_800_000_000.0
+        self.assertIsNone(self.a.idle_minutes(self.checkout, now))
+        d = self.transcripts(self.checkout)
+        self.transcript(d, "unmarked.jsonl", 5, now)  # a session that never had the markers
+        self.assertIsNone(self.a.idle_minutes(self.checkout, now))
+        self.record("claude", "gone")  # recorded, transcript removed since
+        self.assertIsNone(self.a.idle_minutes(self.checkout, now))
 
 
 PLUGIN = HARNESSES / "opencode" / "lane-persona.js"
 NODE = shutil.which("node")
-SCHEMA = ("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);"
+SCHEMA = ("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL,"
+          " time_updated INTEGER NOT NULL);"
           "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,"
           " time_updated INTEGER NOT NULL);")
 
@@ -396,26 +449,37 @@ class OpenCodeAdapterTests(HomeTest):
         path.parent.mkdir(parents=True)
         c = sqlite3.connect(path)
         c.executescript(SCHEMA)
-        c.executemany("INSERT INTO session_v2 VALUES (?, ?, ?)", rows)
+        c.executemany("INSERT INTO session_v2 VALUES (?, ?, ?, ?)", rows)
         c.executemany("INSERT INTO session_message VALUES (?, ?, ?)", messages)
         c.commit()
         c.close()
         return path
 
-    def test_opencode_idle_from_session_store(self):
+    def test_opencode_idle_own_session_and_its_children(self):
+        # Review M4: only the recorded session's family (it, its root, its sub-agent sessions) counts.
         now = 1_800_000_000.0
         ms = lambda age_min: int((now - age_min * 60) * 1000)  # noqa: E731
         here = str(self.checkout.resolve())
-        self.db([("s1", here, ms(300)), ("s2", here, ms(90)), ("s3", str(self.t / "other"), ms(1))],
-                [("m1", "s2", ms(40)), ("m2", "s3", ms(0))])
+        self.db([("coord", None, here, ms(300)), ("child", "coord", here, ms(90)), ("grand", "child", here, ms(250)),
+                 ("worker", None, here, ms(3)), ("far", None, str(self.t / "other"), ms(1))],
+                [("m1", "child", ms(40)), ("m2", "worker", ms(0)), ("m3", "coord", ms(280))])
+        self.record("opencode", "coord")
+        self.assertEqual(self.a.idle_minutes(self.checkout, now), 40)
+        self.record("opencode", "grand")  # a sub-agent's turn was recorded last: same family
         self.assertEqual(self.a.idle_minutes(self.checkout, now), 40)
 
     def test_opencode_idle_none_without_session(self):
-        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
-        self.db([("s1", str(self.t / "other"), 1)])
-        self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
+        now = 1_800_000_000.0
+        self.assertIsNone(self.a.idle_minutes(self.checkout, now))
+        self.db([("s1", None, str(self.checkout.resolve()), 1)])
+        self.assertIsNone(self.a.idle_minutes(self.checkout, now))  # sessions, but none recorded
+        self.record("opencode", "not-in-store")
+        self.assertIsNone(self.a.idle_minutes(self.checkout, now))
 
     def test_opencode_idle_db_follows_xdg(self):
+        self.db([("s1", None, str(self.checkout.resolve()), 1)])
+        self.record("opencode", "s1")
+        self.assertIsNotNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
         os.environ["XDG_DATA_HOME"] = str(self.t / "data")
         self.assertIsNone(self.a.idle_minutes(self.checkout, 1_800_000_000.0))
 
@@ -490,6 +554,16 @@ console.log(JSON.stringify(out));
             out = self.run_plugin(env)
             self.assertEqual(out["hooks"], [])
             self.assertEqual((out["turn"], out["compaction"]), ([{"type": "text", "text": "base"}], []))
+
+    def test_plugin_records_own_session(self):
+        # Review M4: the marked server says which session is the coordinator's (the idle signal reads it).
+        pkg = load_harnesses_pkg()
+        state = self.t / "state"
+        self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona), XDG_STATE_HOME=str(state)))
+        record = state / "lane-control" / "sessions" / pkg.encode_path(self.t.resolve()) / "coordinator.opencode"
+        self.assertEqual(record.read_text(), "ses_1\n")
+        self.run_plugin(clean_env(XDG_STATE_HOME=str(self.t / "state2")))
+        self.assertFalse((self.t / "state2").exists())
 
     def test_plugin_silent_missing_file(self):
         (self.t / "a-dir.md").mkdir()
@@ -609,6 +683,7 @@ class OpenCodeLiveTests(HomeTest):
         n = len(self.requests())
         self.api("POST", f"/api/session/{sid}/prompt", {"text": "after compaction"})
         self.wait_for("after compaction", n)
+        self.sid = sid
         return {last.split("\n")[0][:40]: self.MARK in system for system, last in self.requests()}
 
     def test_live_plugin_loads_and_persona_survives_compaction(self):
@@ -620,6 +695,11 @@ class OpenCodeLiveTests(HomeTest):
         self.assertTrue(seen.get("first turn"), seen)
         self.assertTrue([v for k, v in seen.items() if "summar" in k.lower()][0], seen)
         self.assertTrue(seen.get("after compaction"), seen)
+        # the idle signal reads the session the plugin recorded, from the store the server wrote
+        os.environ["XDG_STATE_HOME"] = str(self.t / "state")
+        os.environ["XDG_DATA_HOME"] = str(self.t / "data")
+        self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "opencode"), self.sid)
+        self.assertIn(self.pkg.load_harness("opencode").idle_minutes(self.checkout, time.time()), (0, 1))
 
     def test_live_no_persona_without_markers(self):
         self.serve(markers=False)
@@ -654,6 +734,10 @@ class RecordTests(unittest.TestCase):
                        '"compaction"', "### 2026-11-19 live check (OpenCode 2.2.1)"):
             self.assertIn(needle, " ".join(oc.split()), needle)
         self.assertNotIn("experimental.", oc)  # the v1 hook names do not exist in v2
+        cl = " ".join(self.status("claude")[1].split())
+        for needle in ("10,000 characters", "lane-control/sessions/", "<role>.claude", "subagents"):
+            self.assertIn(needle, cl, needle)
+        self.assertIn("<role>.opencode", " ".join(oc.split()))
 
     def test_records_are_public_safe(self):
         for f in HARNESSES.glob("*/record.md"):

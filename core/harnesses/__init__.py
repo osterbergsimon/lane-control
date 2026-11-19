@@ -6,11 +6,13 @@ start_command(), install_persona_hook() and idle_minutes(); every harness, tried
 Import with core/ on sys.path: `import harnesses; harnesses.load_harness("claude")`.
 """
 import importlib.util
+import os
 import re
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PERSONA_HOOK = HERE / "persona-hook.sh"
+SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,200}")
 ROLES = frozenset({"coordinator", "design-lead", "reviewer", "debugger", "machine-coordinator"})
 _cache: dict = {}
 
@@ -51,3 +53,27 @@ def check_role_and_persona(role: str, persona: Path) -> Path:
 def env_prefix(role: str, persona: Path) -> list:
     persona = check_role_and_persona(role, persona)
     return ["env", f"LANE_ROLE={role}", f"LANE_PERSONA={persona}"]
+
+
+def encode_path(path: Path) -> str:
+    """A path as one folder name: every character but letters and digits becomes '-' (Claude's own rule)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def session_record(checkout: Path, role: str, harness: str) -> Path:
+    """Where a marked session records its id, so the idle signal reads that session and no other in the checkout:
+    $XDG_STATE_HOME/lane-control/sessions/<encoded checkout>/<role>.<harness> (default ~/.local/state). The Claude
+    hook (persona-hook.sh) and the OpenCode plugin (lane-persona.js) write it; keep the three in step."""
+    v = os.environ.get("XDG_STATE_HOME")
+    state = Path(v) if v and os.path.isabs(v) else Path.home() / ".local" / "state"
+    key = re.sub(rb"[^A-Za-z0-9]", b"-", os.fsencode(Path(checkout).resolve())).decode()  # per byte, like the writers
+    return state / "lane-control" / "sessions" / key / f"{role}.{harness}"
+
+
+def read_session(checkout: Path, role: str, harness: str) -> "str | None":
+    """The recorded session id, or None when there is none (or it is not an id). An unreadable record raises."""
+    try:
+        text = session_record(checkout, role, harness).read_text().strip()
+    except FileNotFoundError:
+        return None
+    return text if SESSION_ID.fullmatch(text) else None

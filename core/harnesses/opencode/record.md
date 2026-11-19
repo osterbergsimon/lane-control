@@ -18,9 +18,12 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   only when the server was started with `LANE_ROLE` and `LANE_PERSONA` set and the file is readable. OpenCode
   watches the plugin folder, so installing or updating the file reaches every running OpenCode server of the user at
   once; without the markers it registers nothing there.
-- Idle signal: the newest `time_updated` of the checkout's sessions in the v2 store,
-  `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/`), tables `session_v2` and
-  `session_message`, times in milliseconds. The older `session` table and `storage/` folder are not v2's.
+- Idle signal: the coordinator's own session only. The plugin, in a marked server, records the id of the session
+  taking a turn in `${XDG_STATE_HOME:-~/.local/state}/lane-control/sessions/<checkout>/<role>.opencode`; idle is the
+  newest `time_updated` of that session's family (up to its root, then every sub-agent session below it) in the v2
+  store, `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/`), tables `session_v2` and
+  `session_message`, times in milliseconds. Other sessions in the checkout do not count; no record means no marked
+  session (`None`). The older `session` table and `storage/` folder are not v2's.
 - Wake: Orca types reports into an OpenCode terminal as for Claude; not yet confirmed for an OpenCode coordinator.
 - Markers are environment variables: everything in a marked server gets the persona, child (sub-agent) sessions
   included, and so does an OpenCode the coordinator starts from its own shell.
@@ -47,6 +50,8 @@ server's API (prompt, compact, prompt).
 - Compaction: pass — the persona is in the system prompt of the compaction request (the `"compaction"` hook; a
   one-off run that tagged each hook's text showed each hook firing on its own request), and in the turn after it.
 - No markers: pass — a server started without them sends no persona.
+- Idle: pass — the plugin recorded the session it served, and `idle_minutes` read it from the store the server
+  wrote.
 - The top-level `model` in `OPENCODE_CONFIG_CONTENT` selects the model (the prompts carried none).
 - Not checked: the TUI (`opencode2 --standalone` in a terminal) itself; the server, the plugin loader and the hooks
   are the same ones it runs.

@@ -69,22 +69,30 @@ def db_path() -> Path:
     return _xdg("XDG_DATA_HOME", ".local/share") / "opencode" / "opencode.db"
 
 
-NEWEST = """SELECT max(t) FROM (
-  SELECT time_updated AS t FROM session_v2 WHERE directory = ?
+# The recorded session's family: up to its root, then every session below that root (sub-agent sessions).
+NEWEST = """WITH RECURSIVE
+  up(id, parent) AS (SELECT id, parent_id FROM session_v2 WHERE id = ?
+                     UNION SELECT s.id, s.parent_id FROM session_v2 s JOIN up ON s.id = up.parent),
+  family(id) AS (SELECT id FROM up WHERE parent IS NULL
+                 UNION SELECT s.id FROM session_v2 s JOIN family f ON s.parent_id = f.id)
+SELECT max(t) FROM (
+  SELECT time_updated AS t FROM session_v2 WHERE id IN (SELECT id FROM family)
   UNION ALL
-  SELECT m.time_updated FROM session_message m JOIN session_v2 s ON s.id = m.session_id WHERE s.directory = ?)"""
+  SELECT time_updated FROM session_message WHERE session_id IN (SELECT id FROM family))"""
 
 
-def idle_minutes(checkout: Path, now: float) -> "int | None":
-    """Minutes since the newest session write for the checkout; None if OpenCode has no session for it. A store
-    that cannot be read raises (OSError or sqlite3.Error), so a caller can tell it from "no session"."""
+def idle_minutes(checkout: Path, now: float, role: str = "coordinator") -> "int | None":
+    """Minutes since the newest write of the checkout's <role> session (recorded by lane-persona.js in a server
+    started with the markers) and of its sub-agent sessions; other sessions in the same checkout do not count. None
+    when no marked session is recorded or the store does not have it. A record or store that cannot be read raises
+    (OSError or sqlite3.Error), so a caller can tell it from "no session"."""
+    sid = harnesses.read_session(checkout, role, NAME)
     db = db_path()
-    if not db.exists():
+    if sid is None or not db.exists():
         return None
-    here = str(Path(checkout).resolve())
     con = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
     try:
-        (newest,) = con.execute(NEWEST, (here, here)).fetchone()
+        (newest,) = con.execute(NEWEST, (sid,)).fetchone()
     finally:
         con.close()
     if newest is None:

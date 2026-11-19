@@ -7,7 +7,6 @@ Idle: the newest transcript write in ~/.claude/projects/<encoded path>/.
 """
 import json
 import os
-import re
 import shlex
 import sys
 from pathlib import Path
@@ -82,17 +81,35 @@ def install_persona_hook(checkout: Path) -> list:
 
 def project_dir(checkout: Path) -> Path:
     """Claude's transcript folder for a working directory: every character but letters and digits becomes '-'."""
-    return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(checkout))
+    return Path.home() / ".claude" / "projects" / harnesses.encode_path(checkout)
 
 
-def idle_minutes(checkout: Path, now: float) -> "int | None":
-    """Minutes since the newest *.jsonl transcript write for the checkout; None if it has no transcript. An
-    unreadable folder raises OSError, so a caller can tell it from "no session"."""
+def _mtime(path: Path) -> "float | None":
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
+def idle_minutes(checkout: Path, now: float, role: str = "coordinator") -> "int | None":
+    """Minutes since the newest transcript write of the checkout's <role> session (recorded by persona-hook.sh when
+    the session started with the markers), its own sub-agents' transcripts included. Other sessions in the same
+    checkout do not count. None when no marked session is recorded or its transcript is gone. An unreadable folder
+    or record raises OSError, so a caller can tell it from "no session"."""
+    sid = harnesses.read_session(checkout, role, NAME)
+    if sid is None:
+        return None
     d = project_dir(Path(checkout).resolve())
-    if not d.is_dir():
+    times = [_mtime(d / f"{sid}.jsonl")]
+    sub = d / sid
+    if sub.is_dir():
+        for root, _dirs, files in os.walk(sub, onerror=_raise):
+            times += [_mtime(Path(root) / f) for f in files if f.endswith(".jsonl")]
+    times = [t for t in times if t is not None]
+    if not times:
         return None
-    with os.scandir(d) as it:  # unlike Path.glob, raises on an unreadable folder
-        newest = max((e.stat().st_mtime for e in it if e.name.endswith(".jsonl") and e.is_file()), default=None)
-    if newest is None:
-        return None
-    return max(0, int((now - newest) // 60))
+    return max(0, int((now - max(times)) // 60))
+
+
+def _raise(err: OSError):
+    raise err
