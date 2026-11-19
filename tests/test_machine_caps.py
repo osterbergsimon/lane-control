@@ -70,7 +70,8 @@ class Machine(unittest.TestCase):
         self.env = dict(os.environ, PATH=f"{self.stubs}:{os.environ['PATH']}", STUB_DIR=str(self.stubs),
                         LANE_PROC_DIR=str(self.proc), LANE_STATE_DIR=str(self.dir / "state"),
                         LANE_LIMITS_FILE=str(self.limits))
-        self.env.pop("LANE_HEAVY_HOLDS_SLOT", None)
+        for name in ("LANE_HEAVY_HOLDS_SLOT", "GITHUB_ACTIONS", "LANE_HEAVY_CI"):   # a CI run of this suite is no CI job
+            self.env.pop(name, None)
 
     def stub(self, name, body):
         path = self.stubs / name
@@ -352,6 +353,55 @@ class HeavyTests(Machine):
         self.assertEqual(self.heavy("true").returncode, 0)
         self.assertTrue((state / "heavy.0").is_file())
 
+    def test_a_ci_job_takes_a_ci_slot_in_the_ci_slice(self):
+        state = Path(self.env["LANE_STATE_DIR"])
+        for flag in ({"GITHUB_ACTIONS": "true"}, {"LANE_HEAVY_CI": "1"}):
+            env = {k: v for k, v in self.env.items() if k not in ("GITHUB_ACTIONS", "LANE_HEAVY_CI")}
+            self.env = {**env, **flag}
+            (self.stubs / "systemd-run.log").unlink(missing_ok=True)
+            r = self.heavy("sh", "-c", "exit 5")
+            self.assertEqual((r.returncode, r.stderr), (5, ""), flag)
+            self.assertIn("--slice=ci.slice", self.job_lines()[0])
+        self.assertTrue((state / "ci-heavy.0").is_file())
+        self.assertFalse((state / "heavy.0").exists())
+
+    def test_a_lane_job_stays_out_of_the_ci_slice(self):
+        self.env.pop("GITHUB_ACTIONS", None)
+        for off in ("", "0"):
+            self.env["LANE_HEAVY_CI"] = off
+            (self.stubs / "systemd-run.log").unlink(missing_ok=True)
+            self.assertEqual(self.heavy("true").returncode, 0)
+            self.assertNotIn("--slice", self.job_lines()[0])
+
+    def test_ci_never_waits_behind_lanes_and_has_its_own_limit(self):
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_CI_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_HEAVY_POLL_SECS=0.02)
+        holder, release = self.holder("lane")
+        self.env["GITHUB_ACTIONS"] = "true"
+        r = self.heavy("true")                       # the lane holds the only lane slot; CI goes straight in
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        ci, ci_release = self.holder("ci")           # the one CI slot is taken: the next CI job waits for it
+        marker = self.dir / "ci2.ran"
+        waiter = self.start("sh", "-c", f"touch {marker}")
+        time.sleep(0.3)
+        self.assertFalse(marker.exists())
+        ci_release.touch()
+        _, err = waiter.communicate(timeout=TIMEOUT)
+        self.assertTrue(marker.exists())
+        self.assertIn("all 1 CI heavy-work slot(s)", err)
+        release.touch()
+        self.assertEqual((holder.wait(timeout=TIMEOUT), ci.wait(timeout=TIMEOUT)), (0, 0))
+
+    def test_the_ci_slice_is_a_setting_and_a_bad_one_falls_back(self):
+        self.env["LANE_HEAVY_CI"] = "1"
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_SLICE="runners.slice")
+        self.assertEqual(self.heavy("true").returncode, 0)
+        self.assertIn("--slice=runners.slice", self.job_lines()[-1])
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_SLICE="'x y'")
+        r = self.heavy("true")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("LANE_CI_SLICE", r.stderr)
+        self.assertIn("--slice=ci.slice", self.job_lines()[-1])
+
     def test_missing_command_takes_no_slot_and_exits_127(self):
         self.assertEqual(self.heavy("no-such-command-here").returncode, 127)
         self.assertFalse((self.dir / "state").exists())
@@ -545,8 +595,8 @@ class LimitsTests(Machine):
 
 class ContentTests(unittest.TestCase):
     def test_every_setting_is_documented(self):
-        names = set(re.findall(r"^(LANE_(?:HEAVY|ROOM)_[A-Z_]+)=", LIMITS.read_text(), re.M))
-        self.assertEqual(len(names), 8)
+        names = set(re.findall(r"^(LANE_(?:HEAVY|ROOM|CI)_[A-Z_]+)=", LIMITS.read_text(), re.M))
+        self.assertEqual(len(names), 10)
         example = EXAMPLE.read_text()
         for name in names:
             self.assertIn(f"# {name}=", example)

@@ -10,6 +10,11 @@
 #                            # The job may not swap: past the limit it is killed and reported, not left to thrash.
 # LANE_HEAVY_POLL_SECS=2     # how often a waiting job looks for a free slot.
 
+# --- CI's own pool (lane-heavy under GITHUB_ACTIONS=true, or LANE_HEAVY_CI=1): CI never waits behind lanes ---
+# LANE_CI_SLOTS=2            # CI jobs running at once, beside the lane slots. Default 2.
+# LANE_CI_SLICE=ci.slice     # systemd user slice a CI job's scope joins; its MemoryMax and CPUQuota hold all CI
+#                            # together. Default ci.slice.
+
 # --- Opening another lane (lane-room). Looser than the gate: idle agents cost little. ---
 # LANE_ROOM_MIN_MEM_GB=8     # hold a new lane under this much available memory. Default: memory GB/8, at least 2.
 # LANE_ROOM_MAX_LOAD=18      # hold a new lane over this many runnable tasks (CPU contention: threads waiting for or

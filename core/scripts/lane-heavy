@@ -12,6 +12,9 @@
 #   counts as no working scope.
 # - The exit code is the command's. A nested lane-heavy (a project's wrapper calling it again) runs inside the slot
 #   it already holds. Output from the gate goes to stderr only; stdin and stdout are the command's.
+# - CI has its own pool: a CI job (GITHUB_ACTIONS=true, or LANE_HEAVY_CI set and not 0) takes one of LANE_CI_SLOTS
+#   slots instead of a lane slot, so it never waits behind lanes, and its scope joins the CI slice (LANE_CI_SLICE),
+#   whose memory and CPU limits hold all CI together. A self-hosted runner's scope would otherwise escape that slice.
 # - Out of memory: when the scope was OOM-killed it prints `OUT OF MEMORY` and keeps the exit code (often 137 or 143,
 #   which otherwise look like a hang or a crash; reliability.md section 17). When only the kernel's machine-wide OOM
 #   counter moved during a failed job, it prints `POSSIBLE OUT OF MEMORY`.
@@ -42,14 +45,21 @@ esac
 
 type -P -- "$1" >/dev/null || { say "$1: command not found or not executable"; exit 127; }
 
+# CI's own pool (owner 2026-11-19: "separate slots for ci"); lane slots are sized so lanes and the CI slice fit together.
+ci=
+[ "${GITHUB_ACTIONS:-}" = true ] && ci=1
+case ${LANE_HEAVY_CI:-} in '' | 0) ;; *) ci=1 ;; esac
+slot_prefix=heavy
+if [ -n "$ci" ]; then slot_prefix=ci-heavy; LANE_HEAVY_SLOTS=$LANE_CI_SLOTS; fi
+
 exec {slot_fd}</dev/null   # replaced by a real slot; a valid fd keeps the job's "close the slot" redirect harmless
 
 take_slot() {
   local i fd
   for ((i = 0; i < LANE_HEAVY_SLOTS; i++)); do
     # flock needs no write access, so a read-only slot file still works; the first gate here creates them
-    { [ -e "$LANE_STATE_DIR/heavy.$i" ] || : >>"$LANE_STATE_DIR/heavy.$i"; } 2>/dev/null
-    { exec {fd}<"$LANE_STATE_DIR/heavy.$i"; } 2>/dev/null || continue   # on exec itself, 2> would stick to the gate
+    { [ -e "$LANE_STATE_DIR/$slot_prefix.$i" ] || : >>"$LANE_STATE_DIR/$slot_prefix.$i"; } 2>/dev/null
+    { exec {fd}<"$LANE_STATE_DIR/$slot_prefix.$i"; } 2>/dev/null || continue   # on exec itself, 2> would stick to the gate
     if flock -n "$fd"; then slot_fd=$fd; return 0; fi
     exec {fd}>&-
   done
@@ -67,7 +77,7 @@ if ! command -v flock >/dev/null; then
 elif ! state_dir_usable; then
   say "cannot use $LANE_STATE_DIR: running without the machine-wide limit"
 elif ! take_slot; then
-  say "all $LANE_HEAVY_SLOTS heavy-work slot(s) on this machine are busy: waiting for a turn"
+  say "all $LANE_HEAVY_SLOTS ${ci:+CI }heavy-work slot(s) on this machine are busy: waiting for a turn"
   until take_slot; do sleep "$LANE_HEAVY_POLL_SECS"; done
 fi
 
@@ -78,6 +88,7 @@ if command -v nice >/dev/null; then job=(nice -n 19 "${job[@]}"); fi
 
 unit=lane-heavy-$$-$RANDOM$RANDOM
 scope_args=(--user --scope --quiet)
+[ -z "$ci" ] || scope_args+=(--slice="$LANE_CI_SLICE")   # in the probe too: it must test where the job will run
 # nice only ranks processes inside one cgroup, so the scope needs low weights of its own.
 scope_props=(-p "MemoryMax=${LANE_HEAVY_MEM_GB}G" -p MemorySwapMax=0 -p CPUWeight=20 -p IOWeight=20)
 

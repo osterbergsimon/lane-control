@@ -29,6 +29,8 @@ lane_default_room_agents=$(lane_at_least "$(lane_at_most "$LANE_CORES" $((LANE_M
 LANE_HEAVY_SLOTS=$lane_default_slots
 LANE_HEAVY_MEM_GB=$lane_default_job_gb
 LANE_HEAVY_POLL_SECS=2
+LANE_CI_SLOTS=2
+LANE_CI_SLICE=ci.slice
 LANE_ROOM_MIN_MEM_GB=$lane_default_room_mem
 LANE_ROOM_MAX_LOAD=$lane_default_room_load
 LANE_ROOM_MAX_AGENTS=$lane_default_room_agents
@@ -70,6 +72,17 @@ lane_setting LANE_ROOM_MIN_MEM_GB "$lane_default_room_mem"
 lane_setting LANE_ROOM_MAX_LOAD "$lane_default_room_load"
 lane_setting LANE_ROOM_MAX_AGENTS "$lane_default_room_agents"
 lane_setting LANE_ROOM_SAMPLES 5 1
+lane_setting LANE_CI_SLOTS 2 1
+# A slice unit name: systemd-run would refuse anything else, and the CI job would then run with no limit at all.
+case $LANE_CI_SLICE in
+  *[!A-Za-z0-9_.@:-]* | .slice) lane_bad_slice=1 ;;
+  ?*.slice) lane_bad_slice= ;;
+  *) lane_bad_slice=1 ;;
+esac
+if [ -n "$lane_bad_slice" ]; then
+  echo "lane-limits: ignoring LANE_CI_SLICE='$LANE_CI_SLICE' in $LANE_LIMITS_FILE, using ci.slice" >&2
+  LANE_CI_SLICE=ci.slice
+fi
 case $LANE_HEAVY_POLL_SECS in
   '' | *[!0-9.]* | *.*.* | .) LANE_HEAVY_POLL_SECS=2 ;;
 esac
