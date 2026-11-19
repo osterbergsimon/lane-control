@@ -281,6 +281,41 @@ class ClaudeAdapterTests(HomeTest):
         self.settings.parent.mkdir(exist_ok=True)
         self.settings.write_text(json.dumps({"hooks": {"SessionStart": starts}}))
 
+    def test_claude_hook_write_keeps_text_link_and_mode(self):
+        # Review m3: non-ASCII text stays as written; a symlinked settings file stays a link; the mode is kept.
+        import json
+        real = self.t / "elsewhere" / "settings.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps({"owner": "Österberg"}, ensure_ascii=False))
+        real.chmod(0o600)
+        self.settings.parent.mkdir()
+        self.settings.symlink_to(real)
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertTrue(self.settings.is_symlink())
+        self.assertIn("Österberg", real.read_text())
+        self.assertEqual(real.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(real.read_text())["hooks"]["SessionStart"], [self.ours()])
+        self.assertEqual(sorted(p.name for p in real.parent.iterdir()), ["settings.json"])  # no temp file left
+
+    def test_claude_hook_failed_write_leaves_file(self):
+        # Review m3: a crash mid-write must not truncate a file that holds the owner's permission rules.
+        from unittest import mock
+        self.settings.parent.mkdir()
+        self.settings.write_text('{"permissions": {"allow": ["Bash(ls)"]}}')
+        before = self.settings.read_bytes()
+        with mock.patch.object(self.a.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.a.install_persona_hook(self.checkout)
+        self.assertEqual(self.settings.read_bytes(), before)
+        self.assertEqual([p.name for p in self.settings.parent.iterdir()], ["settings.local.json"])
+
+    def test_claude_hook_whitespace_file_is_empty(self):
+        # Review n2: a file with only whitespace is treated like an empty one.
+        self.settings.parent.mkdir()
+        self.settings.write_text("  \n")
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertEqual(self.entries(), [self.ours()])
+
     def test_claude_hook_matcher_covers_clear(self):
         # Review m1: after /clear the context is empty; the persona must come back then too.
         self.a.install_persona_hook(self.checkout)

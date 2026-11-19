@@ -8,7 +8,9 @@ Idle: the newest transcript write in ~/.claude/projects/<encoded path>/.
 import json
 import os
 import shlex
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -51,7 +53,7 @@ def install_persona_hook(checkout: Path) -> list:
     data = {}
     if path.exists():
         try:
-            data = json.loads(path.read_text() or "{}")
+            data = json.loads(path.read_text().strip() or "{}")
         except json.JSONDecodeError as e:
             raise ValueError(f"{path}: not valid JSON ({e}); fix it by hand, it was left as it is") from None
     hooks = data.get("hooks", {}) if isinstance(data, dict) else None
@@ -73,10 +75,30 @@ def install_persona_hook(checkout: Path) -> list:
         if others:  # someone else's hooks share this entry: keep the entry and them, take only ours out
             kept.append({**e, "hooks": others})
     data["hooks"] = {**hooks, "SessionStart": kept + [want]}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     what = "updated" if any(holds_ours(e) for e in starts) else "added"
     return [f"{path}: {what} the SessionStart persona hook ({MATCHER})"]
+
+
+def _write_atomic(path: Path, text: str):
+    """Write through a temp file and a rename beside the real file (a symlink stays a link, its target is replaced),
+    keeping the file's mode, so a crash never leaves the owner's settings cut short."""
+    target = path.resolve() if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def project_dir(checkout: Path) -> Path:
