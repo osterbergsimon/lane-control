@@ -61,7 +61,9 @@ is silent).
 - `core/harnesses/__init__.py`: `load_harness(name: str) -> module` and `harnesses() -> dict[str, module]`.
 - Personas: `orchestrators/native-orca/personas/{coordinator,design-lead,reviewer,debugger,machine-coordinator}.md`,
   with the same render placeholders `project-setup` already uses for the Cotal personas.
-- `project-setup` native path writes rendered personas to `<checkout>/.lane-control/<role>.md`.
+- `project-setup` native path writes rendered personas to `<checkout>/.lane-control/<role>.md`: the persona with the
+  project's additions appended. The adaptation agent writes the additions to `.lane-control/additions/<role>.md`
+  (the kept source), and every setup and refresh re-renders the combined file from both (NO-2, 2026-11-19).
 - Peer discovery (NO-2, 2026-11-19): Orca terminal titles `<project> coordinator`, `<project> design lead`,
   `machine coordinator`. Claude overwrites a terminal's title with its session title, so phases 3, 4 and 6 set the
   title and, for Claude, also send `/rename <title>`; personas fall back to the terminal whose `worktreePath` is the
