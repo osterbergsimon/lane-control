@@ -54,23 +54,29 @@ def detect(project: Path) -> list:
     return [SECTION] if BEGIN in text or END in text else []
 
 
-def setup(project: Path, work: Path) -> list:
-    f = agents_md(work)
-    text = read(f)
+def section_text(text: str) -> str:
+    """text with the native-orca section: an older copy replaced in place, else added at the end after a blank line.
+    project-setup's native path uses this too, so the section has one implementation."""
     block = TEMPLATE.read_text().rstrip("\n")
     head, section, rest = split(text)
     if section is not None:
-        if section == block:
-            return []
-        write(f, head + block + rest)
-        return [f"{f.resolve().relative_to(work.resolve())}: refreshed the native-orca section"]
+        return head + block + rest
     if not text:
-        new = block + "\n"
-    else:
-        new = text + ("" if text.endswith("\n") else "\n") + "\n" + block + "\n"
+        return block + "\n"
+    return text + ("" if text.endswith("\n") else "\n") + "\n" + block + "\n"
+
+
+def setup(project: Path, work: Path) -> list:
+    f = agents_md(work)
+    text = read(f)
+    new = section_text(text)
+    if new == text:
+        return []
     existed = f.exists()
     write(f, new)
     name = f.resolve().relative_to(work.resolve())
+    if split(text)[1] is not None:
+        return [f"{name}: refreshed the native-orca section"]
     return [f"{name}: added the native-orca section" + ("" if existed else " (new file)")]
 
 

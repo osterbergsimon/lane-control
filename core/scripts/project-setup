@@ -873,7 +873,7 @@ def setup_script(repo: Path, write: bool):
         (repo / "orca.yaml").write_text(text)
         say("setup-script", "written", "orca.yaml (review it, then commit it: lanes only get it once committed)")
     else:
-        f = repo / ".cotal" / "orca.yaml.proposed"
+        f = (store_dir(repo) if ORCHESTRATOR == "native-orca" else repo / ".cotal") / "orca.yaml.proposed"
         if f.is_file() and f.read_text() == text:
             say("setup-script", "exists", f"{f} (not committed as orca.yaml yet)")
             return
@@ -1170,7 +1170,19 @@ def without_section(text: str) -> str:
 
 
 def with_section(text: str) -> str:
-    """text with lane-control's section: replaced in place when present, else added at the end. Nothing else changes."""
+    """text with lane-control's section: replaced in place when present, else added at the end; on native Orca also
+    the native-orca adapter's section (orchestrators/native-orca/adapter.py, the one implementation of it). Nothing
+    else changes."""
+    out = with_lane_control_section(text)
+    if ORCHESTRATOR != "native-orca":
+        return out
+    try:
+        return native_module("adapter").section_text(out)
+    except ValueError as e:
+        raise Fail(str(e))
+
+
+def with_lane_control_section(text: str) -> str:
     without_section(text)
     nl = "\r\n" if "\r\n" in text else "\n"
     block = SECTION.replace("\n", nl)
@@ -1212,7 +1224,7 @@ def check_agents_md(repo: Path):
 def check_gitignore(repo: Path):
     """.gitignore must be as committed, or exactly that plus the .cotal/ line, for the same reason."""
     head = head_text(repo, ".gitignore")
-    if read_raw(repo / ".gitignore") not in (head, with_cotal_ignored(head)):
+    if read_raw(repo / ".gitignore") not in ((head,) if ORCHESTRATOR == "native-orca" else (head, with_cotal_ignored(head))):
         hint = " (an earlier project-setup may have rewritten its line endings)" if "\r\n" in head else ""
         raise Fail(f".gitignore has uncommitted changes besides .cotal/{hint}; commit or undo them and run again. "
                    "Nothing was committed")
@@ -2011,7 +2023,8 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     check_agents_md(repo)
     check_gitignore(repo)
     # Before the agent starts, so nothing in .cotal/ can pass for its work; committed with its files.
-    say("gitignore", ignore_cotal(repo), ".cotal/")
+    if ORCHESTRATOR == "orca-cotal":
+        say("gitignore", ignore_cotal(repo), ".cotal/")
     before = snapshot(repo)
     visibility = repo_visibility(repo)
     say("visibility", visibility, "from the git host" if visibility != "unknown" else "gh could not say; the adapter treats it as public")
@@ -2167,7 +2180,7 @@ def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int}
+            "permission_mode": str, "port": int, "orchestrator": str, "runs": dict, "paused": bool}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
@@ -2317,6 +2330,117 @@ def show(repo: Path) -> int:
 # --- native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11) ------------------------
 
 BINARIES = {"claude": "claude", "opencode": "opencode2"}  # what each harness adapter starts
+NATIVE = HERE / "orchestrators" / "native-orca"
+NATIVE_ROLES = ("coordinator", "design-lead", "reviewer", "debugger")  # rendered into each project's .lane-control/
+ADDITIONS = f"{ADAPTED}/additions"  # the adapted text per role, kept and committed; rendered in on every setup and refresh
+EXCLUDE_BEGIN = "# lane-control: begin (files project-setup writes in this checkout; never committed)"
+EXCLUDE_END = "# lane-control: end"
+LOCAL_FILES = ("/.claude/settings.local.json", *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
+NATIVE_PLACEMENT = f"""
+- Native Orca: write the coordinator, design-lead and reviewer templates to {ADDITIONS}/<its name> (they are appended
+  to the rendered personas there, which are {ADAPTED}/<role>.md and not yours to write); the other templates go to
+  {ADAPTED}/<its name>."""
+
+
+def native_module(name: str):
+    """orchestrators/native-orca/<name>.py (render, adapter), loaded by path."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"native_orca_{name}", NATIVE / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def additions(repo: Path, role: str) -> str:
+    """The project's additions for a role, front matter dropped, as the rendered persona's last part ('' if none)."""
+    f = repo / ADDITIONS / f"{role}.md"
+    try:
+        text = f.read_text()
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"cannot read {f}: {e}")
+    if text.startswith("---\n") and "\n---\n" in text[4:]:
+        text = text[4:].split("\n---\n", 1)[1]
+    body = text.strip()
+    if not body:
+        return ""
+    return (f"\n\n# Additions for this project\n<!-- from {ADDITIONS}/{role}.md, rendered in by project-setup: edit "
+            f"that file, not this one -->\n\n{body}\n")
+
+
+def native_persona(repo: Path, role: str, harness: str, model: str, mode: str, project: str, design_lead: bool,
+                   attached: tuple = ()) -> str:
+    """One role's persona for this project: the native values first (render.prepare), then render_persona's, then
+    the project's additions at the end."""
+    text = native_module("render").prepare((NATIVE / "personas" / f"{role}.md").read_text(), design_lead=design_lead,
+                                           attached=attached)
+    text = render_persona(text, harness, model, mode, project, str(store_table(repo)),
+                          str(repo / ADAPTED / "reviewer.md"), design_lead=design_lead, attached=attached)
+    return text.rstrip("\n") + "\n" + additions(repo, role)
+
+
+def exclude_local(repo: Path) -> str:
+    """The files project-setup writes in the checkout (rendered personas, Claude's local settings), in the repo's own
+    git exclude (shared by every worktree): never committed, never in the project's .gitignore."""
+    common = Path(run(["git", "rev-parse", "--git-common-dir"], cwd=repo).stdout.strip())
+    f = (common if common.is_absolute() else repo / common) / "info" / "exclude"
+    text = read_raw(f)
+    block = "\n".join((EXCLUDE_BEGIN, *LOCAL_FILES, EXCLUDE_END))
+    if block in text:
+        return "exists"
+    if EXCLUDE_BEGIN in text and EXCLUDE_END in text.split(EXCLUDE_BEGIN, 1)[1]:
+        head, rest = text.split(EXCLUDE_BEGIN, 1)
+        new, state = head + block + rest.split(EXCLUDE_END, 1)[1], "updated"
+    else:
+        new, state = text + ("" if not text or text.endswith("\n") else "\n") + block + "\n", "created"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    write_raw(f, new)
+    return state
+
+
+def refuse_tracked(repo: Path, roles) -> None:
+    """A committed .lane-control/<role>.md is an Orca + Cotal adapted file: never rendered over."""
+    names = [f"{ADAPTED}/{r}.md" for r in roles]
+    tracked = [n for n in run(["git", "ls-files", "-z", "--", *names], cwd=repo).stdout.split("\0") if n]
+    if tracked:
+        moves = "; ".join(f"git mv {n} {ADDITIONS}/{Path(n).name}" for n in tracked)
+        raise Fail(f"{', '.join(tracked)} is committed: the Orca + Cotal setup's adapted text. On native Orca that "
+                   f"path is the rendered persona, and the adapted text lives in {ADDITIONS}/. Move it ({moves}), "
+                   "commit, and run again. Nothing was rendered")
+
+
+def native_personas(repo: Path, project: str, pins: dict, lead: bool, mode: str, tier_text: str,
+                    attached: tuple = ()) -> list:
+    """The four project roles rendered into .lane-control/ (reviewer and debugger lanes pinned like the reviewer);
+    returns the roles whose persona existed and changed."""
+    roles = {"coordinator": pins["coordinator"], **({"design-lead": pins["design-lead"]} if lead else {}),
+             "reviewer": pins["reviewer"], "debugger": pins["reviewer"]}
+    refuse_tracked(repo, NATIVE_ROLES)
+    say("git-exclude", exclude_local(repo), "rendered personas and .claude/settings.local.json (.git/info/exclude)")
+    changed = []
+    for role, (h, m) in roles.items():
+        f = repo / ADAPTED / f"{role}.md"
+        state = write_if_changed(f, native_persona(repo, role, h, m, mode, project, lead, attached))
+        say(f"persona {role}", state, f"{h}/{m}")
+        if state == "updated":
+            changed.append(role)
+    gone = repo / ADAPTED / "design-lead.md"
+    if not lead and gone.is_file():
+        gone.unlink()
+        say("persona design-lead", "removed", "the project has no design lead")
+    say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
+    return changed
+
+
+def persona_hooks(checkout: Path, harnesses_used) -> None:
+    for h in sorted(harnesses_used):
+        try:
+            lines = load_harness(h).install_persona_hook(checkout)
+        except (OSError, ValueError) as e:
+            raise Fail(f"persona hook for {h}: {e}")
+        say(f"persona-hook {h}", "updated" if lines else "exists", "; ".join(lines) or str(checkout))
+
 
 
 def opencode_mode_refusal(pins: dict, lead: bool, mode: str):
@@ -2381,10 +2505,50 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         if refusal:
             print(refusal, file=sys.stderr)
             return 2
+        root = attached_to(repo)
+        if root is not None:
+            raise Fail(f"{repo} is attached to the project at {root}, so it is not a project of its own: it gets its "
+                       "lanes from that project's coordinator. Nothing was changed")
+        stored_attached = attached_of(settings(repo))
+        attached = prepare_attached(repo, stored_attached, a.with_repos, Path(a.dest).expanduser(), a.skip_adapt)
+        if attached:
+            settings(repo, attached=list(dict.fromkeys([*stored_attached, *(str(d) for d in attached)])))
+        pins = cfg["pins"]
+        lead = pins["design-lead"] if cfg["lead"] else None
+        PRIVATE_GLOBS[:] = cfg["private"]
+        standing = {pins["coordinator"][0]} | ({lead[0]} if lead else set())
+        native_preflight(standing)
+        tier_text = choose_tiers(repo, a, tiers)
+        if "claude" in standing and not a.no_start:
+            ensure_claude_trust(repo, record=a.trust_folder)
+        project = cfg["name"] or repo.name
+        global ADAPT_RULES
+        if NATIVE_PLACEMENT not in ADAPT_RULES:
+            ADAPT_RULES += NATIVE_PLACEMENT
+        adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
+        if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+            return STOPPED
+        if not a.skip_adapt:
+            publish_onboarding(repo)
+        for d in attached:
+            if not a.skip_adapt:
+                if not onboard_attached(d, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+                    return STOPPED
+                publish_onboarding(d)
+        repo_id = orca_repo(repo)
+        for d in attached:
+            orca_repo(d)
+            setup_script(d, a.write_orca_yaml)
+        lane_tools(Path(os.environ.get("HOME", str(Path.home()))))
         if own_models:
             settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
+        changed = native_personas(repo, project, pins, lead is not None, cfg["mode"], tier_text,
+                                  tuple(str(d) for d in attached))
+        persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
+        setup_script(repo, a.write_orca_yaml)
         if a.no_start:
             say("start", "skipped", "--no-start")
+            return 0
         return 0
     except Fail as e:
         print(f"project-setup: {e}", file=sys.stderr)
