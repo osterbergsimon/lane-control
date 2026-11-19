@@ -295,18 +295,51 @@ class HeavyTests(Machine):
         for p, _ in held:
             self.assertEqual(p.wait(timeout=TIMEOUT), 0)
 
-    def test_ci_jobs_are_held_to_the_ci_budget_too(self):
+    def test_ci_admission_counts_slots_only_the_slice_holds_the_sum(self):
+        # Each CI job may use the whole CI budget; the CI slice's MemoryMax bounds them together, so two 10G CI jobs
+        # run at once in a 10G budget, and a third waits only for a slot.
         self.env["LANE_HEAVY_CI"] = "1"
         self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_MEM_GB=10, LANE_HEAVY_POLL_SECS=0.02)
-        holder, release = self.holder("ci")             # 5G of 10G
-        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_MEM_GB=8, LANE_HEAVY_POLL_SECS=0.02)
-        marker = self.dir / "ci2.ran"
-        waiter = self.start("sh", "-c", f"touch {marker}")
-        self.assert_waits(waiter, marker)               # 5 + 4 > 8
+        (a, rel_a), (b, rel_b) = self.holder("ci-a"), self.holder("ci-b")
+        self.assertTrue(all("MemoryMax=10G" in l for l in self.job_lines()))
+        marker = self.dir / "ci-c.ran"
+        c = self.start("sh", "-c", f"touch {marker}")
+        self.assert_waits(c, marker)
+        rel_a.touch()
+        _, err = c.communicate(timeout=TIMEOUT)
+        self.assertIn("all 2 CI heavy-work slot(s)", err)
+        self.assertNotIn("pool", err)
+        rel_b.touch()
+        self.assertEqual((a.wait(timeout=TIMEOUT), b.wait(timeout=TIMEOUT)), (0, 0))
+
+    def test_a_stale_size_on_a_free_slot_is_ignored(self):
+        # A job that ended left its size behind: its slot is free, so its size counts for nothing.
+        self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=12, LANE_HEAVY_POLL_SECS=0.02)
+        state = Path(self.env["LANE_STATE_DIR"])
+        state.mkdir(mode=0o700, parents=True)
+        for n in (0, 1):
+            (state / f"heavy.{n}").touch()
+            (state / f"heavy.{n}.gb").write_text("999\n")
+        r = self.heavy("true")
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        holder, release = self.holder("one")
+        r = self.heavy("true")                       # beside a running 12G job: 12 + 12 fits 24
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
         release.touch()
-        _, err = waiter.communicate(timeout=TIMEOUT)
-        self.assertIn("running CI jobs hold 5G of the 8G pool", err)
         self.assertEqual(holder.wait(timeout=TIMEOUT), 0)
+
+    def test_a_busy_slot_with_no_or_a_bad_size_counts_as_the_waiting_jobs_own(self):
+        # Counted as the waiting job's own 12G, a 12G job fits beside it: the pool never blocks for ever on a lost,
+        # junk or overlong size, and no wrapped number is printed.
+        self.write_limits(LANE_HEAVY_SLOTS=2, LANE_HEAVY_MEM_GB=12, LANE_HEAVY_POLL_SECS=0.02)
+        gb = Path(self.env["LANE_STATE_DIR"]) / "heavy.0.gb"
+        for size in (None, "lots", "9" * 23):
+            holder, release = self.holder(f"busy-{size and len(size)}")
+            gb.unlink() if size is None else gb.write_text(size)
+            r = self.heavy("true")
+            self.assertEqual((r.returncode, r.stderr), (0, ""), size)
+            release.touch()
+            self.assertEqual(holder.wait(timeout=TIMEOUT), 0)
 
     def test_an_older_lane_limits_beside_it_still_runs_ci(self):
         # A hand copy of a new lane-heavy next to an old lane-limits.sh with none of the CI settings.
@@ -486,11 +519,11 @@ class HeavyTests(Machine):
 
     def test_a_ci_job_has_the_ci_memory_limit_and_names_it_on_oom(self):
         self.env["LANE_HEAVY_CI"] = "1"
-        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_MEM_GB=10)   # 2 CI slots: 5G each
+        self.write_limits(LANE_HEAVY_SLOTS=1, LANE_HEAVY_MEM_GB=3, LANE_CI_MEM_GB=10)   # each CI job: the whole budget
         (self.stubs / "scope-result").write_text("ActiveState=failed\nResult=oom-kill\n")
         r = self.heavy("sh", "-c", "exit 137")
-        self.assertIn("MemoryMax=5G", self.job_lines()[0])
-        self.assertIn("hit its 5G limit", r.stderr)
+        self.assertIn("MemoryMax=10G", self.job_lines()[0])
+        self.assertIn("hit its 10G limit", r.stderr)
         self.assertIn("raise LANE_CI_MEM_GB", r.stderr)
 
     def test_a_ci_slice_with_no_memory_limit_is_named(self):

@@ -16,11 +16,15 @@
 # - CI has its own pool: a CI job (GITHUB_ACTIONS=true, or LANE_HEAVY_CI set and not 0) takes one of LANE_CI_SLOTS
 #   slots instead of a lane slot, so it never waits behind lanes, and its scope joins the CI slice (LANE_CI_SLICE),
 #   whose memory and CPU limits hold all CI together. A self-hosted runner's scope would otherwise escape that slice.
-#   A CI job's own memory limit is its share of the CI budget, LANE_CI_MEM_GB / LANE_CI_SLOTS; when the slice has no
-#   MemoryMax of its own, it says so. LANE_HEAVY_CI=0, false or no is not CI.
-# - Memory: a job also waits while the running jobs' memory limits and its own would be more than its pool
-#   (slots x limit). A running job keeps the limit it started with, so when night or a day begins, a mixed set of
-#   old and new sizes cannot go over the pool; the next job waits until enough of the old ones are done.
+#   A CI job's own memory limit is the whole CI budget, LANE_CI_MEM_GB, so one job alone may use it; the slice's
+#   MemoryMax holds all CI together, so CI never takes more than the slice and an overrun hits only CI, never the
+#   desktop. CI admission therefore counts slots only. When the slice has no MemoryMax, it says so.
+#   LANE_HEAVY_CI=0, false or no is not CI.
+# - Memory (lanes): a lane job also waits while the running lane jobs' memory limits and its own would be more than
+#   the lane pool (slots x limit). A running job keeps the limit it started with, so when night or a day begins, a
+#   mixed set of old and new sizes cannot go over the pool; the next job waits until enough of the old ones are done.
+#   Each lane job writes its limit beside its slot (heavy.N.gb); admissions take turns on heavy.admit. Both live in
+#   the slot directory and may be deleted when no job runs.
 # - Out of memory: when the scope was OOM-killed it prints `OUT OF MEMORY` and keeps the exit code (often 137 or 143,
 #   which otherwise look like a hang or a crash; reliability.md section 17). When only the kernel's machine-wide OOM
 #   counter moved during a failed job, it prints `POSSIBLE OUT OF MEMORY`.
@@ -57,13 +61,12 @@ ci=
 case ${LANE_HEAVY_CI:-} in '' | 0 | false | no) ;; *) ci=1 ;; esac
 slot_prefix=heavy mem_setting=LANE_HEAVY_MEM_GB
 [ -z "$ci" ] || slot_prefix=ci-heavy mem_setting=LANE_CI_MEM_GB
-# A CI job gets its share of the CI budget. The fallbacks keep an older lane-limits.sh (a hand copy of lane-heavy
-# alone) from ending every CI job under set -u.
+# A CI job gets the whole CI budget; the CI slice bounds the sum. The fallbacks keep an older lane-limits.sh (a hand
+# copy of lane-heavy alone) from ending every CI job under set -u.
 pool_limits() {
   [ -n "$ci" ] || return 0
   LANE_HEAVY_SLOTS=${LANE_CI_SLOTS:-2}
-  LANE_HEAVY_MEM_GB=$((${LANE_CI_MEM_GB:-$((LANE_HEAVY_MEM_GB * LANE_HEAVY_SLOTS))} / LANE_HEAVY_SLOTS))
-  [ "$LANE_HEAVY_MEM_GB" -gt 0 ] || [ "${LANE_CI_MEM_GB:-1}" -eq 0 ] || LANE_HEAVY_MEM_GB=1
+  LANE_HEAVY_MEM_GB=${LANE_CI_MEM_GB:-$LANE_HEAVY_MEM_GB}
   LANE_CI_SLICE=${LANE_CI_SLICE:-ci.slice}
 }
 pool_limits
@@ -82,8 +85,9 @@ take_slot() {
   return 1
 }
 
-# held_gb: the memory limits of the pool's other running jobs. A job writes its limit beside its slot (slot.N.gb)
-# while it holds the admission lock; a busy slot with no readable size counts as this job's size.
+# held_gb: the memory limits of the pool's other running jobs. A job writes its limit beside its slot (heavy.N.gb)
+# while it holds the admission lock. A busy slot with no readable size (a job with no limit, or one that could not
+# write the file) counts as the waiting job's own limit.
 held_gb() {
   local f n gb fd sum=0
   for f in "$LANE_STATE_DIR/$slot_prefix".*; do
@@ -94,15 +98,16 @@ held_gb() {
     if flock -n "$fd"; then exec {fd}>&-; continue; fi   # free
     exec {fd}>&-
     gb=$(cat "$f.gb" 2>/dev/null)
-    case $gb in '' | *[!0-9]*) gb=$LANE_HEAVY_MEM_GB ;; esac
+    case $gb in '' | *[!0-9]* | ???????*) gb=$LANE_HEAVY_MEM_GB ;; esac   # digits, and a sane length
     sum=$((sum + 10#$gb))
   done
   echo "$sum"
 }
 
-# admit: a free slot, and room in the pool's memory beside the running jobs' limits. A job that took its slot under
-# other limits (a day job of 12G when night brings 3 x 8G) keeps its limit, so at 23:00 or 07:00 the counts alone
-# could put more limits than the pool on the machine. One admission at a time per pool, under a lock of its own.
+# admit: a free slot and, for a lane job, room in the lane pool beside the running jobs' limits. A job that took its
+# slot under other limits (a day job of 12G when night brings 3 x 8G) keeps its limit, so at 23:00 or 07:00 the
+# counts alone could put more limits than the pool on the machine. CI counts slots only: its slice holds the sum.
+# One admission at a time per pool, under a lock of its own.
 admit() {
   local lock held pool=$((LANE_HEAVY_SLOTS * LANE_HEAVY_MEM_GB)) ok=1
   local f="$LANE_STATE_DIR/$slot_prefix.admit"
@@ -111,16 +116,18 @@ admit() {
   [ -z "$lock" ] || flock "$lock"
   if ! take_slot; then
     why="all $LANE_HEAVY_SLOTS ${ci:+CI }heavy-work slot(s) on this machine are busy"; ok=
-  elif [ "$LANE_HEAVY_MEM_GB" -gt 0 ]; then
+  elif [ -z "$ci" ] && [ "$LANE_HEAVY_MEM_GB" -gt 0 ]; then
     held=$(held_gb)
     if [ $((held + LANE_HEAVY_MEM_GB)) -gt "$pool" ]; then
-      why="running ${ci:+CI }jobs hold ${held}G of the ${pool}G pool, no room for ${LANE_HEAVY_MEM_GB}G more"; ok=
+      why="running lane jobs hold ${held}G of the ${pool}G pool, no room for ${LANE_HEAVY_MEM_GB}G more"; ok=
       exec {slot_fd}>&-; exec {slot_fd}</dev/null
     else
-      echo "$LANE_HEAVY_MEM_GB" >"$LANE_STATE_DIR/$slot_prefix.$slot_no.gb" 2>/dev/null
+      # In a slot directory this job cannot write, its slot keeps the previous holder's size, or none (counted as
+      # the waiting job's own); the pool is then a little off for this job's life only. The job still runs.
+      { echo "$LANE_HEAVY_MEM_GB" >"$LANE_STATE_DIR/$slot_prefix.$slot_no.gb"; } 2>/dev/null
     fi
-  else
-    rm -f -- "$LANE_STATE_DIR/$slot_prefix.$slot_no.gb" 2>/dev/null   # no limit: counts as this pool's size
+  elif [ -z "$ci" ]; then
+    { rm -f -- "$LANE_STATE_DIR/$slot_prefix.$slot_no.gb"; } 2>/dev/null   # no limit: counts as a waiting job's own
   fi
   [ -z "$lock" ] || exec {lock}>&-
   [ -n "$ok" ]
