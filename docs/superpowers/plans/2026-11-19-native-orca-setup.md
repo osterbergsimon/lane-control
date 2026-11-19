@@ -98,10 +98,10 @@ is silent).
 - [ ] Task 1.1: hook script. Tests: `test_hook_prints_persona_with_markers`, `test_hook_silent_without_markers`,
   `test_hook_silent_missing_file`, `test_hook_exit_zero_always`.
 - [ ] Task 1.2: Claude adapter. `install_persona_hook` adds one `SessionStart` entry (matcher
-  `startup|resume|clear|compact`, command = absolute path of `persona-hook.sh`) to `<checkout>/.claude/settings.local.json`,
-  keeping other keys; idempotent. `idle_minutes` reads the newest `*.jsonl` mtime in
-  `~/.claude/projects/<checkout path with / and . replaced by ->`. Tests: idempotence, other settings kept,
-  idle from a fake projects dir (HOME in a temp dir), `start_command` shape.
+  `startup|resume|clear|compact`, command = absolute path of `persona-hook.sh`) to
+  `<checkout>/.claude/settings.local.json`, keeping other keys; idempotent. `idle_minutes` reads the newest `*.jsonl`
+  mtime in `~/.claude/projects/<checkout path with every character but letters and digits replaced by ->`. Tests:
+  idempotence, other settings kept, idle from a fake projects dir (HOME in a temp dir), `start_command` shape.
 - [ ] Task 1.3: OpenCode adapter and plugin. `install_persona_hook` copies `lane-persona.js` into OpenCode's plugin
   folder (`$XDG_CONFIG_HOME/opencode/plugins/`, default `~/.config/opencode/plugins/`), idempotent by content.
   `idle_minutes` from OpenCode's session storage for that directory (find the v2 location under

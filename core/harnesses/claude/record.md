@@ -5,10 +5,10 @@ Status: in use
 Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effort`.
 - Start: `env LANE_ROLE=<role> LANE_PERSONA=<persona> claude --model <model> [--permission-mode <mode>]` in an Orca
   terminal. Orca recognises a Claude started this way (SPIKE-2, 2026-11-19).
-- Persona after compaction: a `SessionStart` hook (matchers `startup|resume|clear|compact`) in the checkout's uncommitted
-  `.claude/settings.local.json` runs `../persona-hook.sh`, which prints `$LANE_PERSONA`. Workers started in the same
-  checkout do not have the markers, so they get nothing (core/reliability.md 11). The hook is its own entry; other
-  entries and hooks, under the same matcher too, are left as they are.
+- Persona after compaction: a `SessionStart` hook (matchers `startup|resume|clear|compact`) in the checkout's
+  uncommitted `.claude/settings.local.json` runs `../persona-hook.sh`, which prints `$LANE_PERSONA`. Workers
+  started in the same checkout do not have the markers, so they get nothing (core/reliability.md 11). The hook is its
+  own entry; other entries and hooks, under the same matcher too, are left as they are.
 - Size: Claude keeps at most 10,000 characters of a hook's output (over that it shows a 2,000-character preview and
   does not ask the session to read the rest). A persona over about 9,800 bytes is printed as a first line telling
   the session to read the whole file now, by path, then as much of it as fits, cut at a line end.

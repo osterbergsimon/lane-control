@@ -1,6 +1,7 @@
 #!/bin/sh
 # persona-hook.sh: Claude Code SessionStart hook (matchers startup|resume|clear|compact) that gives a lane-control
-# session its persona back at start, on resume, after /clear and after every compaction. What it prints becomes the session's context.
+# session its persona back at start, on resume, after /clear and after every compaction. What it prints becomes the
+# session's context.
 #
 # It prints $LANE_PERSONA only when LANE_ROLE and LANE_PERSONA are both set and the file is readable. The env vars
 # are the marker: a worker started in the same checkout does not have them, so it never gets this persona
