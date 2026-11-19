@@ -146,7 +146,7 @@ class TierTableTests(unittest.TestCase):
         for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             flat = " ".join((ROOT / f).read_text().split())
             for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin",
-                           "orca-ide orchestration worker-start --agent opencode --model opencode-go/deepseek-v4.1-flash",
+                           "orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash",
                            "lane-control's own lane tools do not start OpenCode",
                            "Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare",
                            "needs the sandbox back first (restore it from b97c919)",
@@ -1010,6 +1010,28 @@ class NativePersonaTests(unittest.TestCase):
         for out in (with_lead, without):
             for needle in ("skill's section", "role `design`)", "cotal", "orca-cotal-lanes"):
                 self.assertNotIn(needle, out.lower() if needle == "cotal" else out, needle)
+
+
+class OwnerDecisions20261119Tests(unittest.TestCase):
+    def test_coordinators_follow_the_machine_coordinator_only_on_budget_and_machine_matters(self):
+        t = flat(ROOT / "core" / "roles.md")
+        self.assertIn("Owner decision 2026-11-19: coordinators follow the machine coordinator only on budget and "
+                      "machine matters, and check the facts first", t)
+
+    def test_roles_budget_steps_come_from_the_ceiling(self):
+        for f in ("core/roles.md", "core/templates/budget-ceiling.json"):
+            t = flat(ROOT / f)
+            self.assertNotIn("ceiling-10", t, f)
+            for step in ("ceiling-15", "ceiling-7", "ceiling-4", "ceiling-2"):
+                self.assertIn(step, t, (f, step))
+
+    def test_we_target_opencode_v2(self):
+        # owner 2026-11-19: "We target opencode v2"; Orca's agent id for it is opencode2
+        for f in ("README.md", "core/model-routing.md", "orchestrators/orca-cotal/docs/orca.md"):
+            t = flat(ROOT / f)
+            self.assertNotRegex(t, r"--agent opencode(?!2)", f)
+            self.assertIn("--agent opencode2", t, f)
+
 
 if __name__ == "__main__":
     unittest.main()
