@@ -12,6 +12,7 @@ Check each item on a new box before adopting the playbook.
 The limit on heavy work is per machine, across every project and lane, not per project: several lanes building at once overwhelm a machine (load 23 on 12 cores with four lanes). `lane-heavy` runs its jobs at nice 19, so its slots are what limit lane builds; `lane-room` leaves nice-19 tasks out and counts the rest.
 - **Heavy work:** every build or full test suite runs through `~/.agents/bin/lane-heavy <command>`, the per-machine install of `scripts/lane-heavy` (a lane in another project has no `scripts/` of ours). A fixed number run at once; the rest wait, at low priority, with a memory limit where the host supports one.
 - **Opening a lane:** `~/.agents/bin/lane-room` first. If it exits non-zero, hold the lane and tell the owner. Its limit is looser than the heavy-work gate: idle agents cost little. It holds a lane on available memory, on the number of lane agents, and on CPU contention: runnable tasks averaged over a few seconds, leaving out SCHED_IDLE and nice-19 tasks (idle-priority CI), not the 5-minute load average, which stays high for minutes after a burst and counts that CI.
+- **Presence:** the owner being away or asleep is when the machine has room. Limits branch on it: night (23-07 by default) or an away file (expires after 14 hours) against day. The CI slice and the `lane-heavy` slots both change; a machine's `limits.sh` can branch on presence. Numbers and the reboot fallback: `reliability.md` entry 31. Native Orca's machine setup (phase 4 of the native-Orca plan) adds `lane-away` (writes the away file), `ci-presence` and `machine-setup`.
 - **Settings:** one per-machine file outside any repo, `~/.config/lane-control/limits.sh` (`limits.example.sh`); without it the defaults follow cores and memory. `MEM_LOW_GB` and `SWAP_HIGH_GB` in the config are the window guard's memory check, a separate thing.
 
 ## Usage feeds (per metered budget)
@@ -28,6 +29,8 @@ The limit on heavy work is per machine, across every project and lane, not per p
 - [ ] Tools: `jq`, `awk`, `gh`, `bd`, the orchestrator's own tools (its notes), the engine CLIs for every configured tier. `bd` DB location and remote; off-machine backup of issues and memories.
 - [ ] Containers: run as the invoking user, or caches become root-owned and block worktree deletion.
 - [ ] CI runner: self-hosted if gates need local data; pin image versions.
+- [ ] Nix machines that run night CI: schedule Nix garbage collection in the daytime (`reliability.md` entry 33).
+- [ ] Self-hosted runners: runner labels apply only at registration; change them in the config and through the runner-labels API (entry 34). On NixOS, allow `capset` after the default deny list and set `Restart=always` (entry 27).
 - [ ] Persistent background jobs (watches, dev servers) die with the session; use approved user services if they must survive.
 - [ ] Host-acting software (anything that can reboot, shut down or reconfigure the machine) must be guarded or stubbed in worker environments.
 - [ ] Clock and timezone: night mode and routine times, where the orchestrator has them, assume the owner's local time.
