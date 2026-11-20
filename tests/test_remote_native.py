@@ -138,6 +138,9 @@ with open(os.environ["STUB_LOG"] + ".systemctl", "a") as f:
     f.write(" ".join(args) + "\n")
 if os.environ.get("STUB_NO_SYSTEMD"):
     sys.exit(1)
+if "--version" in args:
+    print("systemd " + os.environ.get("STUB_SYSTEMD", "260") + " (" + os.environ.get("STUB_SYSTEMD", "260") + ")")
+    sys.exit(0)
 conf = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.environ["HOME"], ".config")
 units = [a for a in args if a.startswith("lane-tunnel@")]
 def pidfile(u):
@@ -160,12 +163,28 @@ def start(u):
                          start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
     open(pidfile(u) + (".impostor" if impostor else ""), "w").write(str(p.pid))
+def enabled(u):
+    return os.path.join(os.environ["HOME"], "enabled-" + u)
 for u in units:
+    if "is-enabled" in args:
+        sys.exit(0 if os.path.exists(enabled(u)) else 1)
+    if "enable" in args:
+        open(enabled(u), "w").write("1")
+    if "disable" in args and os.environ.get("STUB_DISABLE_FAILS") and "--now" not in args:
+        sys.exit(1)
+    if "disable" in args and os.path.exists(enabled(u)):
+        os.unlink(enabled(u))
     if "disable" in args or "stop" in args or "restart" in args:
         stop(u)
-    if ("enable" in args and "--now" in args) or "restart" in args:
+    if ("enable" in args and "--now" in args) or "restart" in args or "start" in args:
         start(u)
     if "is-active" in args:
+        if os.environ.get("STUB_TUNNEL_FLAPS"):  # up for the first check, then ssh failed and the unit is restarting
+            n = os.path.join(os.environ["HOME"], "is-active-count")
+            k = int(open(n).read()) if os.path.exists(n) else 0
+            open(n, "w").write(str(k + 1))
+            if k >= 1:
+                sys.exit(3)
         sys.exit(0 if os.path.exists(pidfile(u)) else 3)
 '''
 
@@ -246,7 +265,7 @@ class RemoteEnv(NativeEnv):
             (cli / n).chmod(0o700)
         self.env.update(STUB_BOX=str(self.box), STUB_ORCA=str(self.bin / "orca"), LANE_ORCA_HOST_INSTALL=str(self.bin / "orca-host-install"),
                         LANE_MACHINE_SETUP=str(self.bin / "machine-setup"), LANE_PAIR_WAIT="0",
-                        LANE_TUNNEL_WAIT="3")
+                        LANE_TUNNEL_WAIT="3", LANE_TUNNEL_SETTLE="0")
         (self.home / "tmp").mkdir()
         self.env["TMPDIR"] = str(self.home / "tmp")  # a temp file a child writes is inside what the tests scan
         self.env.pop("ORCA_CLI", None)
@@ -335,6 +354,40 @@ class DirectionOneTests(Case):
         port = int(installs[0][installs[0].index("--port") + 1])
         self.assertNotEqual(port, 6768)  # the desktop's own listener; the tunnel uses one port at both ends
         self.assertIn("orca server: created", r.stdout)
+
+    def test_the_server_can_be_pinned_to_a_version_and_a_source(self):
+        for flag, opt in (("--orca-from", "--from"), ("--orca-bundle", "--bundle")):
+            self.e.state.write_text("{}")
+            shutil.rmtree(self.e.box / ".config" / "lane-control", True)
+            r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", flag, "/srv/orca/pinned",
+                             "--orca-version", "0.1.0+abc123")
+            self.assertEqual(r.returncode, 0, (flag, r.stderr + r.stdout))
+            args = self.e.jlines(".install")[-1]
+            self.assertEqual(args[args.index(opt) + 1], "/srv/orca/pinned", args)
+            self.assertEqual(args[args.index("--version") + 1], "0.1.0+abc123", args)
+            self.assertNotIn(args[0], ("--from",))
+        # only this machine installs the server: the host's own run never sees the options
+        self.assertNotIn("--orca-", " ".join(" ".join(c) for c in self.e.jlines(".ssh")))
+
+    def test_without_pin_options_orca_host_install_gets_none(self):
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        args = self.e.jlines(".install")[0]
+        for opt in ("--from", "--bundle", "--version"):
+            self.assertNotIn(opt, args)
+
+    def test_a_source_given_twice_is_refused_before_anything_runs(self):
+        r = self.e.setup(str(self.repo), "box", "--orca-from", "/a", "--orca-bundle", "/b")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(self.e.jlines(".install"), [])
+
+    def test_pin_options_for_a_server_that_is_already_there_are_said_to_be_unused(self):
+        self.e.saved("box")
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--orca-version", "0.1.0+abc123")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.e.jlines(".install"), [])
+        self.assertIn("--orca-version", r.stdout)
+        self.assertIn("not used", r.stdout)
 
     def test_a_reachable_host_server_is_not_installed_again(self):
         self.e.saved("box")
@@ -580,6 +633,77 @@ class DirectionTwoTests(Case):
         self.assertIn("key", out)  # the unit has no ssh agent: it needs a key that works without one
         self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
         self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service")
+
+    def agent_args(self):
+        w = self.e.home / "card-ssh"
+        w.write_text("#!/bin/sh\nexit 0\n")
+        w.chmod(0o755)
+        return ["--tunnel-auth-sock", "/tmp/lane-test/card-agent.sock", "--tunnel-ssh", str(w)], str(w)
+
+    def test_tunnel_options_reach_the_unit_and_not_the_box(self):
+        args, wrapper = self.agent_args()
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", *args, "--tunnel-no-enable", answer=self.link)
+        self.assertEqual(rc, 0, out)
+        env = (self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").read_text()
+        self.assertIn("SSH_AUTH_SOCK=/tmp/lane-test/card-agent.sock", env)
+        self.assertIn(f"LANE_TUNNEL_SSH={wrapper}", env)
+        sysctl = self.e.lines(".systemctl")
+        self.assertIn("--user start lane-tunnel@box.service", sysctl)
+        self.assertFalse([l for l in sysctl if " enable" in l], sysctl)
+        self.assertNotIn("--tunnel-", " ".join(" ".join(c) for c in self.e.jlines(".ssh")))  # local paths stay here
+
+    def test_without_tunnel_options_the_unit_is_enabled_and_has_no_agent(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link)
+        self.assertEqual(rc, 0, out)
+        env = (self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").read_text()
+        self.assertNotIn("SSH_AUTH_SOCK", env)
+        self.assertIn("--user enable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
+
+    def test_bad_tunnel_paths_are_refused_before_the_link_is_asked_for(self):
+        for args in (["--tunnel-auth-sock", "agent.sock"], ["--tunnel-ssh", "ssh"], ["--tunnel-ssh", "/nonexistent/ssh"]):
+            rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", *args, answer=self.link)
+            self.assertEqual(rc, 2, (args, out))
+            self.assertNotIn("share link", out)
+            self.assertEqual(self.e.lines(".systemctl"), [])
+
+    def test_a_tunnel_ssh_that_is_a_folder_is_refused_before_direction_one_runs(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-ssh", str(self.e.home), answer=self.link)
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(self.e.jlines(".install"), [])
+
+    def test_tunnel_paths_get_lane_tunnels_rules_before_direction_one_runs(self):
+        for flag, val in (("--tunnel-auth-sock", "/run/a.sock "), ("--tunnel-auth-sock", "/run/a\\b.sock"),
+                          ("--tunnel-auth-sock", "'/run/a.sock"), ("--tunnel-ssh", str(self.e.home / "x") + " ")):
+            rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", flag, val, answer=self.link)
+            self.assertEqual(rc, 2, (flag, val, out))
+            self.assertIn(flag, out)  # named as the owner typed it, not as lane-tunnel's own option
+            self.assertEqual(self.e.jlines(".install"), [], (flag, val))
+            self.assertEqual(self.e.lines(".systemctl"), [])
+
+    def test_a_failed_tunnel_start_is_stopped_and_forgotten(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
+                                   env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service")
+        self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
+
+    def test_tunnel_options_for_a_box_that_is_already_paired_are_said_to_be_unused(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-no-enable")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("desktop lanes: exists", out)
+        self.assertIn("--tunnel-no-enable", out)
+        self.assertIn("not used", out)
+        self.assertIn("lane-tunnel start", out)
+
+    def test_a_tunnel_that_fails_tells_the_owner_about_the_agent_option(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
+                                   env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("--tunnel-auth-sock", out)
+        self.assertIn("journalctl", out)
+        self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
 
     def test_a_terminal_that_cannot_hide_input_is_not_asked(self):
         import getpass
@@ -895,6 +1019,208 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("systemd", r.stderr)
 
+    def start_env(self, name="box"):
+        return (self.e.home / ".config" / "lane-control" / "tunnels" / f"{name}.env").read_text()
+
+    def wrapper(self, name="ssh-wrapper"):
+        p = self.e.home / name
+        p.write_text("#!/bin/sh\nexit 0\n")
+        p.chmod(0o755)
+        return str(p)
+
+    def test_no_agent_socket_line_unless_one_is_given(self):
+        self.tunnel("start", "box", "6768")
+        self.assertNotIn("SSH_AUTH_SOCK", self.start_env())
+        self.assertNotIn("LANE_TUNNEL_SSH", self.start_env())
+
+    def test_an_agent_socket_goes_in_the_env_file(self):
+        r = self.tunnel("start", "--auth-sock", "/tmp/lane-test/card-agent.sock", "box", "6768")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SSH_AUTH_SOCK=/tmp/lane-test/card-agent.sock\n", self.start_env() + "\n")
+
+    def test_the_agent_socket_can_come_from_the_environment(self):
+        r = self.tunnel("start", "box", "6768", env_extra={"LANE_TUNNEL_AUTH_SOCK": "/tmp/lane-test/a.sock"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SSH_AUTH_SOCK=/tmp/lane-test/a.sock", self.start_env())
+
+    def test_a_changed_agent_socket_restarts_a_running_tunnel(self):
+        self.tunnel("start", "box", "6768")
+        self.tunnel("start", "--auth-sock", "/tmp/lane-test/a.sock", "box", "6768")
+        self.assertIn("--user restart lane-tunnel@box.service", self.e.lines(".systemctl"))
+
+    def test_an_ssh_wrapper_goes_in_the_env_file(self):
+        w = self.wrapper()
+        r = self.tunnel("start", "--ssh", w, "box", "6768")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"LANE_TUNNEL_SSH={w}", self.start_env())
+
+    def test_the_unit_runs_the_wrapper_when_there_is_one_and_ssh_otherwise(self):
+        unit = UNIT.read_text()
+        line = next(l for l in unit.splitlines() if l.startswith("ExecStart="))
+        body = line[len("ExecStart=/bin/sh -c '"):-1].replace("$$", "$")  # systemd turns $$ into $
+        log = self.e.home / "ran"
+        fake = self.e.home / "fakebin"
+        fake.mkdir()
+        (fake / "ssh").write_text(f'#!/bin/sh\necho "plain $*" >> {log}\n')
+        (fake / "ssh").chmod(0o755)
+        w = self.e.home / "wrap"
+        w.write_text(f'#!/bin/sh\necho "wrapped $*" >> {log}\n')
+        w.chmod(0o755)
+        base = {"PATH": f"{fake}:/usr/bin:/bin", "SSH_HOST": "box", "PORT": "6768"}
+        for extra in ({}, {"LANE_TUNNEL_SSH": str(w)}):
+            subprocess.run(["sh", "-c", body], env={**base, **extra}, check=True)
+        ran = log.read_text().splitlines()
+        self.assertTrue(ran[0].startswith("plain -N"), ran)
+        self.assertTrue(ran[1].startswith("wrapped -N"), ran)
+        self.assertIn("-R 127.0.0.1:6768:127.0.0.1:6768 box", ran[1])
+
+    def test_values_that_could_add_a_line_or_name_nothing_usable_are_refused(self):
+        w = self.wrapper()
+        (self.e.home / "plain").write_text("x")
+        cases = [("--auth-sock", "/run/a.sock\nPATH=/evil"), ("--auth-sock", "run/a.sock"), ("--auth-sock", ""),
+                 ("--ssh", "/nonexistent/ssh"), ("--ssh", "ssh"), ("--ssh", str(self.e.home / "plain")),
+                 ("--ssh", w + "\nPATH=/evil")]
+        for flag, val in cases:
+            r = self.tunnel("start", flag, val, "box", "6768")
+            self.assertEqual(r.returncode, 2, (flag, val, r.stderr))
+        r = self.tunnel("start", "box", "6768", env_extra={"LANE_SSH_CONFIG": "/etc/x\nPATH=/evil"})
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels").exists())  # refused before writing
+        self.assertEqual(self.e.lines(".systemctl"), [])
+
+    def test_check_runs_the_same_rules_without_a_host_or_systemd(self):
+        w = self.wrapper()
+        good = self.tunnel("check", "--auth-sock", "/tmp/lane-test/a.sock", "--ssh", w)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        for flag, val in (("--auth-sock", "/run/a.sock "), ("--auth-sock", "/run/a\\b.sock"), ("--auth-sock", '"/x'),
+                          ("--auth-sock", "a.sock"), ("--ssh", w + " "), ("--ssh", "ssh"), ("--ssh", str(self.e.home))):
+            r = self.tunnel("check", flag, val)
+            self.assertEqual(r.returncode, 2, (flag, val, r.stderr))
+        self.assertEqual(self.tunnel("check", env_extra={"PATH": "/usr/bin:/bin\\"}).returncode, 2)
+        self.assertEqual(self.e.lines(".systemctl"), [])
+        self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels").exists())
+
+    def test_unknown_options_and_options_on_other_commands_are_refused(self):
+        self.assertEqual(self.tunnel("start", "--bogus", "box", "6768").returncode, 2)
+        self.assertEqual(self.tunnel("stop", "--no-enable", "box").returncode, 2)
+
+    def test_no_enable_starts_the_unit_without_enabling_it(self):
+        r = self.tunnel("start", "--no-enable", "box", "6768")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sysctl = self.e.lines(".systemctl")
+        self.assertIn("--user start lane-tunnel@box.service", sysctl)
+        self.assertFalse([l for l in sysctl if " enable" in l], sysctl)
+        self.assertIn("SSH_HOST=box", self.start_env())
+        self.assertIn("not enabled", r.stdout)  # says what it did, and that a login does not bring it back
+
+    def test_no_enable_after_an_enabled_start_disables_it_so_a_login_does_not_loop(self):
+        self.tunnel("start", "box", "6768")
+        r = self.tunnel("start", "--no-enable", "box", "6768")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sysctl = self.e.lines(".systemctl")
+        self.assertIn("--user disable lane-tunnel@box.service", sysctl)
+        self.assertLess(sysctl.index("--user disable lane-tunnel@box.service"),
+                        len(sysctl) - 1 - sysctl[::-1].index("--user start lane-tunnel@box.service"))
+
+    def test_stop_after_a_no_enable_start_leaves_it_stopped_and_disabled(self):
+        self.tunnel("start", "--no-enable", "box", "6768")
+        r = self.tunnel("stop", "box")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sysctl = self.e.lines(".systemctl")
+        self.assertEqual(sysctl[-1], "--user disable --now lane-tunnel@box.service")
+        self.assertFalse([l for l in sysctl if " enable" in l], sysctl)
+        self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
+
+    def test_a_start_that_does_not_come_up_points_at_the_journal(self):
+        for flags in ((), ("--no-enable",)):
+            r = self.tunnel("start", *flags, "box", "6768", env_extra={"STUB_TUNNEL_FAILS": "1"})
+            self.assertEqual(r.returncode, 1, flags)
+            self.assertIn("did not come up", r.stderr)
+            self.assertIn("journalctl --user -u lane-tunnel@box.service", r.stderr)
+            self.assertTrue((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())  # to retry
+        # only a unit that was never meant to stay is stopped again; an always-on one keeps retrying
+        r = self.tunnel("start", "--no-enable", "box", "6768", env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service")
+
+    def test_a_failure_names_the_agent_when_the_unit_had_none(self):
+        r = self.tunnel("start", "box", "6768", env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertIn("--auth-sock", r.stderr)
+        r = self.tunnel("start", "--auth-sock", "/tmp/lane-test/a.sock", "box", "6768",
+                        env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertIn("/tmp/lane-test/a.sock", r.stderr)  # which agent it used, so the owner can check it is unlocked
+
+    def test_a_unit_that_comes_up_and_then_fails_is_caught_during_the_settle_time(self):
+        r = self.tunnel("start", "box", "6768", env_extra={"STUB_TUNNEL_FLAPS": "1", "LANE_TUNNEL_SETTLE": "2"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("journalctl --user -u lane-tunnel@box.service", r.stderr)
+
+    def test_the_unit_never_gives_up_and_backs_off_to_five_minutes(self):
+        unit = UNIT.read_text()
+        self.assertRegex(unit.split("[Service]")[0], r"(?m)^StartLimitIntervalSec=0$")
+        self.assertNotIn("StartLimitBurst", unit)
+        for line in ("Restart=always", "RestartSec=10", "RestartSteps=6", "RestartMaxDelaySec=5min"):
+            self.assertRegex(unit, r"(?m)^" + line + "$")
+        self.assertIn("-o ConnectTimeout=15", unit)  # a dropped-packet network does not hang each try for minutes
+
+    def test_an_older_systemd_gets_a_fixed_restart_delay_it_understands(self):
+        unit = self.e.home / ".config" / "systemd" / "user" / "lane-tunnel@.service"
+        self.tunnel("start", "box", "6768", env_extra={"STUB_SYSTEMD": "253"})
+        old = unit.read_text()
+        service = old.split("[Service]")[1]  # (the header comment names the keys)
+        self.assertRegex(service, r"(?m)^RestartSec=30$")
+        self.assertNotIn("RestartSteps", service)
+        self.assertNotIn("RestartMaxDelaySec", service)
+        self.assertRegex(old, r"(?m)^StartLimitIntervalSec=0$")
+        self.tunnel("start", "box", "6768", env_extra={"STUB_SYSTEMD": "254"})
+        new = unit.read_text()
+        for line in ("RestartSec=10", "RestartSteps=6", "RestartMaxDelaySec=5min"):
+            self.assertRegex(new, r"(?m)^" + line + "$")
+
+    def test_a_failed_check_leaves_an_always_on_tunnel_enabled_and_says_it_keeps_retrying(self):
+        self.tunnel("start", "box", "6768")  # an always-on tunnel that worked
+        before = len(self.e.lines(".systemctl"))
+        r = self.tunnel("start", "box", "6768", env_extra={"STUB_TUNNEL_FLAPS": "1", "LANE_TUNNEL_SETTLE": "2"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("journalctl --user -u lane-tunnel@box.service", r.stderr)
+        self.assertIn("keeps retrying", r.stderr)
+        self.assertIn("lane-tunnel stop box", r.stderr)
+        later = self.e.lines(".systemctl")[before:]
+        self.assertFalse([l for l in later if "disable" in l or " stop" in l], later)
+        self.assertTrue((self.e.home / "enabled-lane-tunnel@box.service").exists())
+        self.assertTrue((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
+
+    def test_the_diagnosis_names_an_authentication_failure(self):
+        r = self.tunnel("start", "--auth-sock", "/tmp/lane-test/a.sock", "box", "6768",
+                        env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertIn("could not log in", r.stderr)
+
+    def test_values_systemd_would_read_differently_are_refused(self):
+        w = self.wrapper()
+        cases = [("--auth-sock", "/run/a.sock\\"), ("--auth-sock", "/run/a\\b.sock"), ("--auth-sock", '"/run/a.sock'),
+                 ("--auth-sock", "'/run/a.sock"), ("--auth-sock", "/run/a.sock "), ("--auth-sock", " /run/a.sock"),
+                 ("--ssh", w + " ")]
+        for flag, val in cases:
+            r = self.tunnel("start", flag, val, "box", "6768")
+            self.assertEqual(r.returncode, 2, (flag, val, r.stderr))
+        for extra in ({"PATH": "/usr/bin:/bin\\"}, {"LANE_SSH_CONFIG": "/etc/x\\"}):
+            r = self.tunnel("start", "box", "6768", env_extra=extra)
+            self.assertEqual(r.returncode, 2, (extra, r.stderr))
+        self.assertEqual(self.e.lines(".systemctl"), [])
+
+    def test_no_enable_that_cannot_disable_an_earlier_enable_says_so(self):
+        self.tunnel("start", "box", "6768")
+        r = self.tunnel("start", "--no-enable", "box", "6768", env_extra={"STUB_DISABLE_FAILS": "1"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("still enabled", r.stderr)
+        self.assertNotIn("not enabled", r.stdout)
+
+    def test_an_agent_socket_that_is_not_a_socket_is_noted_but_not_refused(self):
+        r = self.tunnel("start", "--auth-sock", "/tmp/lane-test/not-there.sock", "box", "6768")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("not a socket", r.stderr)
+        r = self.tunnel("start", "box", "6768")
+        self.assertNotIn("not a socket", r.stderr)
+
 
 class DocTests(unittest.TestCase):
     def test_remote_doc_covers_both_directions_removal_and_revoking(self):
@@ -902,6 +1228,26 @@ class DocTests(unittest.TestCase):
         for s in ("project-setup <repo> <host>", "orca-host-install", "Share this computer", "127.0.0.1",
                   "--remove-host", "revoke", "lane-tunnel@", "paired_environment", "never"):
             self.assertIn(s, text, s)
+
+    def test_remote_doc_covers_the_card_tunnel_and_its_failure(self):
+        text = REMOTE_DOC.read_text()
+        for s in ("--auth-sock", "SSH_AUTH_SOCK", "--ssh", "--no-enable", "--tunnel-auth-sock", "--tunnel-no-enable",
+                  "journalctl", "smartcard", "keeps retrying", "5 minutes", "systemctl --user restart lane-tunnel@"):
+            self.assertIn(s, text, s)
+        self.assertNotIn("5 times in 15 minutes", text)  # the unit never gives up now
+
+    def test_remote_doc_says_how_to_pin_the_box_server(self):
+        text = " ".join(REMOTE_DOC.read_text().split())
+        for s in ("--orca-version", "--orca-from", "--orca-bundle", "orca-host-install", "known-good", "server too old",
+                  "from <source>", "app version", "packaged app", "ORCA_ARTIFACTS", ".version"):
+            self.assertIn(s, text, s)
+
+    def test_remote_doc_reserves_the_orca_tunnel_ports(self):
+        text = " ".join(REMOTE_DOC.read_text().split())
+        self.assertRegex(text, r"[Pp]orts 6769 and up are reserved for Orca tunnels")
+        self.assertIn("6769-6868", text)  # the range project-setup searches, so an estate knows where the edge is
+        m = re.search(r"range\(6769, (\d+)\)", (ROOT / "core" / "scripts" / "project-setup").read_text())
+        self.assertEqual(m.group(1), "6869")  # the doc's 6769-6868 and the code agree
 
     def test_the_coordinator_persona_names_the_stored_key(self):
         text = (ROOT / "orchestrators" / "native-orca" / "personas" / "coordinator.md").read_text()
