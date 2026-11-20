@@ -1,0 +1,25 @@
+# lane-control machine config: ~/.config/lane-control/machine.conf, one per machine, outside any repo. machine-setup
+# writes it from this example; fill it in by hand. Shell-sourceable KEY=value. Read by night-precheck, machine-check,
+# lane-sweep and lane-limits.sh (night hours and the away file's life; only plain KEY=<number> lines there).
+
+# Coordinators on this machine, one per line: <name> <checkout path> <harness> <Orca terminal title>
+#   name      a short name, used in check-ins and stamps (letters, digits, . _ -)
+#   checkout  the project's main checkout, where its coordinator runs (no spaces)
+#   harness   claude or opencode: whose session store gives the idle time
+#   title     its Orca terminal title, also its session name for SendMessage ("<project> coordinator")
+# Example:
+#   myproject ~/code/myproject claude myproject coordinator
+COORDINATORS="
+"
+
+# owner/repo of each repo whose self-hosted runners the night manager and the machine check watch (space separated)
+RUNNER_REPOS=""
+
+# Night, in local hours: from NIGHT_START to NIGHT_END (23-07 wraps past midnight).
+NIGHT_START=23
+NIGHT_END=7
+# A coordinator is due a check-in after IDLE_MIN minutes idle, at most once every RECHECK_MIN minutes.
+IDLE_MIN=45
+RECHECK_MIN=120
+# `lane-away on` counts for this many hours.
+AWAY_HOURS=14

@@ -1089,6 +1089,13 @@ class LessonsDoctrineTests(unittest.TestCase):
                        "Terminal output can only keep a lane, never mark it idle", "a local `<user>/x` can push to `origin/x`",
                        "base branch's old merged PR"):
             self.assertIn(needle, t, needle)
+        # lc-7zk notes (owner, 2026-11-19): the open-PR removal rule and the live-agent rule
+        self.assertIn("It also removes an open-PR lane whose PR head is exactly HEAD", t)
+        self.assertIn("the PR and the remote branch are kept", t)
+        self.assertIn("Never remove a lane, merged or open-PR, while an agent process (claude, opencode, codex) has its "
+                      "cwd inside the worktree", t)
+        self.assertIn("When the sweep cannot tell", t)  # PR #38 review M1: fail closed
+        self.assertIn("it keeps the lane", t)
 
     def test_use_idle_machine_time(self):
         t = reliability_entry(31)

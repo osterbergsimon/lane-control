@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""night-precheck: the night manager automation's precheck (spec section 8). Exit 0 = start the agent; anything
+else = skip the run, which costs nothing.
+
+  night-precheck                 what is due now, one line each:
+                                   DUE <name> idle=<n>min        a coordinator to check in on
+                                   OFFLINE <runner,...> repo=<r> self-hosted runners not online
+                                   BUDGET push-and-handover (<why>) check-ins ask only to push and hand over
+                                   BUDGET unknown (<why>) ...    no budget reading: no check-ins (said once a night)
+  night-precheck --checked <name> record that <name> was just checked in on (the night manager runs it after
+                                   each check-in), so it is not due again for RECHECK_MIN minutes
+
+Due only while the owner counts as away (LANE_OWNER_AWAY from lane-limits.sh: night, NIGHT_START-NIGHT_END, or the
+away file; a stopped budget never counts, since a check-in spends budget), and then for a coordinator idle at least
+IDLE_MIN minutes and not checked in on for RECHECK_MIN minutes, or a runner of RUNNER_REPOS offline. Idle is the
+newest write of the coordinator's own session (the one started with LANE_ROLE/LANE_PERSONA), read by its harness
+adapter; Orca's terminal output is no idle signal (status-line redraws keep it fresh).
+
+Budget gate (budget-state, free), as the machine coordinator's night routine had it: at the no-new-work and
+push-and-handover steps, or with the short window at WINDOW_WARN_PCT (95) or WINDOW_STOP_PCT (98), check-ins still go
+out but only to have coordinators push and write their handover (a `BUDGET push-and-handover` line comes first); at
+the stop step none. When the budget is unknown (no config, no usage feed, a feed that gives no reading) nobody gets a
+check-in: if a coordinator would be due, one BUDGET line says so once a night (stamp
+~/.cache/lane-control/night/.budget-unknown, 16 h); otherwise only stderr does, and machine-check reports the unknown
+budget once. Runners are reported either way.
+
+A project marked paused in its settings store (project-pause) is skipped; a settings file that cannot be read means
+no check-in for it, said on stderr. Coordinators and runner repos come from ~/.config/lane-control/machine.conf
+(LANE_MACHINE_CONF). Check-in stamps are ~/.cache/lane-control/night/<name>.
+
+Exit: 0 something is due; 1 nothing is due (a coordinator whose idle time is unknown, or a runner list gh cannot
+read, is named on stderr); 2 it cannot tell (no or a bad machine.conf, an unreadable session folder or store): the
+run is skipped and stderr says why.
+"""
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import harnesses  # noqa: E402
+import machineconf  # noqa: E402
+
+
+def stamp_dir() -> Path:
+    v = os.environ.get("XDG_CACHE_HOME")
+    base = Path(v) if v and os.path.isabs(v) else Path.home() / ".cache"
+    return base / "lane-control" / "night"
+
+
+def err(msg: str):
+    print(f"night-precheck: {msg}", file=sys.stderr)
+
+
+def checked(name: str) -> int:
+    if not machineconf.NAME.fullmatch(name or ""):
+        err(f"--checked takes a coordinator name from machine.conf, got {name!r}")
+        return 2
+    d = stamp_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).touch()
+    return 0
+
+
+UNKNOWN_STAMP = ".budget-unknown"
+UNKNOWN_QUIET_H = 16
+
+
+def budget_gate() -> "tuple[str, str]":
+    """('ok', ''), ('push', why) at no-new-work or push-and-handover (or the window at 95 or 98), ('stopped', why) at
+    the stop step, or ('unknown', why)."""
+    here = Path(__file__).resolve().parent
+    try:
+        r = subprocess.run([str(here / "budget-state")], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return "unknown", f"budget-state failed ({e})"
+    if r.returncode != 0:
+        return "unknown", (r.stderr.strip().splitlines() or ["budget-state failed"])[-1].removeprefix("budget-state: ")
+    lines = r.stdout.splitlines()
+    if not lines:
+        return "unknown", "no metered budget in the config"
+    for line in lines:
+        f = line.split()
+        if len(f) > 1 and f[1] == "unknown":
+            return "unknown", line
+    push = ""
+    for line in lines:
+        kv = dict(x.split("=", 1) for x in line.split()[1:] if "=" in x)
+        step, wstep = kv.get("step", "0"), kv.get("window_step", "0")
+        step = int(step) if step.isdigit() else 0
+        if step >= 4:
+            return "stopped", line
+        if step >= 2 or (wstep.isdigit() and int(wstep) >= 1):
+            push = push or line
+    return ("push", push) if push else ("ok", "")
+
+
+def recently_checked(name: str, recheck_min: int, now: float) -> bool:
+    try:
+        return now - (stamp_dir() / name).stat().st_mtime < recheck_min * 60
+    except FileNotFoundError:
+        return False
+
+
+def main(argv: list) -> int:
+    if argv[:1] == ["--checked"] and len(argv) == 2:
+        return checked(argv[1])
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    if argv:
+        err("usage: night-precheck [--checked <name>]")
+        return 2
+    try:
+        conf = machineconf.load()
+        coords = machineconf.coordinators(conf)
+        for c in coords:
+            harnesses.load_harness(c.harness)
+        away = machineconf.presence()
+    except (machineconf.ConfError, ValueError) as e:
+        err(str(e))
+        return 2
+    for w in conf["warnings"]:
+        err(w)
+    if not away.get("LANE_OWNER_AWAY"):
+        err(f"the owner is not away ({away.get('LANE_PRESENCE_WHY') or 'day'}): nothing is due")
+        return 1
+    now, due, broken = time.time(), [], False
+    if not coords:
+        err(f"{machineconf.path()} lists no coordinators (is it still the unfilled example?): nobody to check in on")
+    for c in coords:
+        try:
+            if machineconf.paused(c.checkout):
+                err(f"{c.name}: paused (project-pause), no check-in")
+                continue
+        except machineconf.ConfError as e:
+            err(f"{c.name}: {e}; no check-in")
+            continue
+        try:
+            idle = harnesses.load_harness(c.harness).idle_minutes(c.checkout, now, "coordinator")
+        except (OSError, sqlite3.Error) as e:
+            err(f"{c.name}: cannot read its {c.harness} session for {c.checkout} ({e}); skipping this run")
+            broken = True
+            continue
+        if idle is None:
+            err(f"{c.name}: no coordinator session recorded for {c.checkout}: it was not started with LANE_ROLE and "
+                "LANE_PERSONA (project-setup starts it so), so its idle time is unknown and it gets no check-in")
+            continue
+        if idle >= conf["IDLE_MIN"] and not recently_checked(c.name, conf["RECHECK_MIN"], now):
+            due.append(f"DUE {c.name} idle={idle}min")
+    if due:  # coordinators due: the budget decides what, if anything, they get
+        gate, why = budget_gate()
+        if gate == "stopped":
+            err(f"budget at the stop step ({why}): no check-ins")
+            due = []
+        elif gate == "push":
+            due.insert(0, f"BUDGET push-and-handover ({why}): check-ins ask only to push and write the handover")
+        elif gate == "unknown":
+            stamp = stamp_dir() / UNKNOWN_STAMP
+            try:
+                said = now - stamp.stat().st_mtime < UNKNOWN_QUIET_H * 3600
+            except FileNotFoundError:
+                said = False
+            if said:
+                err(f"budget unknown ({why}): no check-ins; already said so tonight")
+                due = []
+            else:
+                stamp.parent.mkdir(parents=True, exist_ok=True)
+                stamp.touch()
+                due = [f"BUDGET unknown ({why}): no check-ins until the usage feed gives a reading"]
+    elif coords and not broken:
+        gate, why = budget_gate()
+        if gate == "unknown":
+            err(f"budget unknown ({why}): no check-ins would go out (nobody is due now)")
+    for repo in machineconf.runner_repos(conf):
+        try:
+            off = machineconf.offline_runners(repo)
+        except machineconf.RunnerError as e:
+            err(f"runners of {e}: not counted")
+            continue
+        if off:
+            due.append(f"OFFLINE {','.join(off)} repo={repo}")
+    if broken:
+        return 2
+    for line in due:
+        print(line)
+    return 0 if due else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
