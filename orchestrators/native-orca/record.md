@@ -86,3 +86,22 @@ and logs in as root, so the box was an unprivileged container (no extra capabili
 - Not yet run, needs the owner: the desktop's own share link (Settings > Servers > "Share this computer"), a lane
   started from a box coordinator showing in the desktop window, its `worker_done` reaching the box, and whether that
   wakes an agent coordinator there (a box with a signed-in agent).
+
+### 2026-11-20 UP-3: worker_done contract and a dispatch that can no longer report (Orca 1.4.250, one machine)
+A scratch Run, plain shell terminals as the workers (started with a command that waits on a file, so nothing was typed
+into any terminal), tasks made with `task-create` and dispatched with `dispatch`; no agent was started and no other
+Run was touched. The Run cannot be deleted (`reset` is global), so its tasks were set to `failed`/`cancelled`.
+- Missing ids: pass — `worker_done` without `--task-id` is refused in the worker's terminal with `missing_task_id`,
+  without `--dispatch-id` with `missing_dispatch_id`; each also arrived in the coordinator's Run inbox as a
+  `Rejected worker_done` message with the code (`check`).
+- Wrong owner: pass — a report from a terminal that is not the dispatch's own is refused with
+  `worker_identity_changed` ("<terminal> is not the exact process that owns Dispatch <id>"), and arrives in the
+  Run inbox the same way. This reproduces the code, not its cause in the field (a runtime restart).
+- Accepted report: pass — `lifecycle=completed`, the task completed, and the coordinator's session got Orca's
+  one-line message prompt for it (the same prompt also woke this session for the rejected ones).
+- Recovery on a plain dispatch: partial — after the worker's terminal was closed the dispatch was failed and its task
+  `ready` again; `worker-abandon` said it was already settled, `worker-release` said `retained` (no terminal of its own),
+  and a second dispatch of the task reported and completed. Not tested: a real runtime restart (it would have
+  restarted the owner's Orca), `worker-start --retry-of` (it starts an agent), and any second Orca server.
+- A `worker_done` from a lane on a paired server to a coordinator on the box, and whether it wakes an agent there:
+  still not run (needs a box with a signed-in agent and the owner's share link). `remote.md` says poll-only until it is.
