@@ -46,8 +46,9 @@ For what the box lacks (graphics, a browser, a GPU), its coordinator starts a la
    Before it starts, the port must be free on the box (`--box-pairing port`): anything else listening there, such as
    the box's own Orca server on 6768, would get the code. The link is sent only once the box's end is open, the
    unit is active, and the port is open on the box's loopback only (sshd's `GatewayPorts yes` would open it on the
-   box's network: setup refuses). The unit's ssh runs without your ssh agent, so it needs a key it can use alone,
-   with no passphrase (`IdentityFile` in the ssh config it uses).
+   box's network: setup refuses). By default the unit's ssh runs without your ssh agent, so it needs a key it can
+   use alone, with no passphrase (`IdentityFile` in the ssh config it uses). See "A host that takes only a smartcard"
+   below for one that does not.
 4. The link goes to the box on ssh's stdin. There `project-setup --box-pairing add <this machine>` runs Orca's CLI as
    the launcher Orca wrote (`~/.orca/cli/bin/orca`) does, plus `node --require core/scripts/pairing-code-stdin.cjs`,
    with `environment add --name <this machine> --pairing-code -`: the preload reads the code from stdin and puts it in
@@ -61,6 +62,31 @@ For what the box lacks (graphics, a browser, a GPU), its coordinator starts a la
 The link is never in an argument, a log, a file, the settings store or a test's output (`tests/test_remote_native.py`,
 `test_link_not_in_argv_or_files`). It lets the box run commands as the owner on this computer (no desktop control)
 until it is revoked.
+
+## A host that takes only a smartcard
+The unit's ssh runs with `BatchMode`, so it can never ask for a PIN or a passphrase, and (by default) it does not see
+your ssh agent. A jump host that accepts only a key on a smartcard therefore needs the unit to use an agent that has
+the card unlocked. The owner unlocks it, then starts the tunnel:
+- `lane-tunnel start --auth-sock <agent socket> <host> <port>` puts `SSH_AUTH_SOCK=<socket>` in the instance's env file
+  (`LANE_TUNNEL_AUTH_SOCK` does the same). `--ssh <path>` (or `LANE_TUNNEL_SSH`) runs an executable of yours in place
+  of `ssh`, with ssh's arguments, for a card that needs a wrapper. Both paths are absolute, with no line break, and
+  the wrapper must be executable; neither is a secret.
+- `--no-enable` only starts the unit (`systemctl --user start`): it is not enabled, so a login or reboot does not
+  bring up a tunnel whose card is locked, and a start that enabled it earlier is undone. An estate can start it from
+  its own "unlock the card, then bring things up" command. `lane-tunnel stop` always leaves the unit stopped and
+  disabled.
+- `project-setup <repo> <host>` passes these on: `--tunnel-auth-sock <socket>`, `--tunnel-ssh <path>` and
+  `--tunnel-no-enable`. They are read here only; the box's own run never sees them. They apply while the box is
+  being paired. Bringing the tunnel up again later (after a reboot, or when the card was locked) is `lane-tunnel start`
+  with the same options and the port in `~/.config/lane-control/hosts/<host>.json` (`tunnel_port`); a new share link
+  is not needed while the box still has this machine's environment.
+
+A key or card the unit cannot use is not left as a silent restart loop. `lane-tunnel start` looks again after a few
+seconds (`LANE_TUNNEL_SETTLE`, default 4), and if the unit is not running it stops and disables it and exits 1,
+naming the agent it used and `journalctl --user -u lane-tunnel@<host>.service`. The env file stays, so `start` again
+retries. A unit that fails 5 times in 15 minutes (it restarts every 30 seconds) stops restarting and shows as
+`failed` in `systemctl --user status`; `lane-tunnel status` exits non-zero. A network that is down for a couple of
+minutes is ridden out; a longer outage needs `lane-tunnel start` again.
 
 ## Removing a box
 `project-setup --remove-host <host>`: the box forgets this machine's environment (`environment rm`, and

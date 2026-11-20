@@ -4,12 +4,17 @@
 [Unit]
 Description=lane-control tunnel: %i reaches this machine's Orca
 After=network-online.target
+# ssh runs with BatchMode, so a key or card it cannot use ends it at once; without a limit Restart=always would loop on
+# that for ever. 5 failures inside 15 minutes (a restart every 30s) leave the unit failed, and lane-tunnel says so. A
+# network that is down for a couple of minutes is ridden out.
+StartLimitIntervalSec=900
+StartLimitBurst=5
 
 [Service]
 EnvironmentFile=@TUNNELS@/%i.env
-ExecStart=/bin/sh -c 'exec ssh $${SSH_CONFIG:+-F "$$SSH_CONFIG"} -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R "127.0.0.1:$${PORT}:127.0.0.1:$${PORT}" "$$SSH_HOST"'
+ExecStart=/bin/sh -c 'exec "$${LANE_TUNNEL_SSH:-ssh}" $${SSH_CONFIG:+-F "$$SSH_CONFIG"} -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R "127.0.0.1:$${PORT}:127.0.0.1:$${PORT}" "$$SSH_HOST"'
 Restart=always
-RestartSec=10
+RestartSec=30
 
 [Install]
 WantedBy=default.target
