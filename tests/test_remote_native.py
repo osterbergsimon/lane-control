@@ -1088,6 +1088,13 @@ class DocTests(unittest.TestCase):
                   "journalctl", "smartcard"):
             self.assertIn(s, text, s)
 
+    def test_remote_doc_reserves_the_orca_tunnel_ports(self):
+        text = " ".join(REMOTE_DOC.read_text().split())
+        self.assertRegex(text, r"[Pp]orts 6769 and up are reserved for Orca tunnels")
+        self.assertIn("6769-6868", text)  # the range project-setup searches, so an estate knows where the edge is
+        m = re.search(r"range\(6769, (\d+)\)", (ROOT / "core" / "scripts" / "project-setup").read_text())
+        self.assertEqual(m.group(1), "6869")  # the doc's 6769-6868 and the code agree
+
     def test_the_coordinator_persona_names_the_stored_key(self):
         text = (ROOT / "orchestrators" / "native-orca" / "personas" / "coordinator.md").read_text()
         self.assertIn("paired_environment", text)

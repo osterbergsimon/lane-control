@@ -17,7 +17,9 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    `-`) does not answer here, `orchestrators/orca-cotal/scripts/orca-host-install <host> --pair --port <p>` puts it
    there from this machine's Orca install and pairs it here through a `-L` tunnel (`orca-tunnel-<host>.service`).
    `<p>` is the first free port from 6769 (`--orca-port` to choose): the desktop listens on 6768, and the tunnel uses
-   one port at both ends.
+   one port at both ends. **Ports 6769 and up are reserved for Orca tunnels** (the range project-setup searches is
+   6769-6868): do not put your own services there, on this machine or on a box, or setup takes the next free one and a
+   later run may find yours in the way.
 3. The box's copy of `project-setup` runs there (`--via-host`, over `ssh -t` when there is a terminal). It does the
    native setup of phase 3 there: rendered personas, the persona hook, the AGENTS.md sections, the settings store
    and the coordinator (and design lead) in Orca terminals of the box's own server, which show in this machine's
