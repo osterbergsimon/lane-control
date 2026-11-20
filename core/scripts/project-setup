@@ -3250,7 +3250,13 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | Non
     host, me = place.host, this_machine()
     state = box_pairing_remote(place, "status", me)
     if state == "reachable":
-        say("desktop lanes", "exists", f"{host} has this machine's Orca as environment {me}")
+        given = [f for f, v in (("--tunnel-auth-sock", tunnel_opts and "--auth-sock" in tunnel_opts),
+                                ("--tunnel-ssh", tunnel_opts and "--ssh" in tunnel_opts),
+                                ("--tunnel-no-enable", tunnel_opts and "--no-enable" in tunnel_opts)) if v]
+        unused = (f"; {' '.join(given)} not used: the tunnel is already paired and running. To change it run "
+                  f"core/scripts/lane-tunnel start <options> {host} <port> (the port is tunnel_port in the host's "
+                  "record under ~/.config/lane-control/hosts/)") if given else ""
+        say("desktop lanes", "exists", f"{host} has this machine's Orca as environment {me}{unused}")
         return me
     if not has_terminal():
         say("desktop lanes", "skipped", f"(the desktop's share link is asked for only in a terminal: run "
@@ -3286,6 +3292,7 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | Non
                    f"orca-host-install {host} --pair --port <another>), then run again")
     t = subprocess.run([tunnel, "start", *(tunnel_opts or []), host, str(port)], capture_output=True, text=True)
     if t.returncode != 0:
+        subprocess.run([tunnel, "stop", host], capture_output=True)  # an always-on unit keeps retrying: not unpaired
         raise Fail((t.stderr.strip() or "lane-tunnel failed") + f"; nothing was sent to {host}. For a host that "
                    "takes only a smartcard or an agent's key: unlock it, then pass --tunnel-auth-sock <agent socket> "
                    "(and --tunnel-ssh <wrapper>)")
@@ -3726,7 +3733,7 @@ def main(argv=None) -> int:
         if val is not None and (not val.startswith("/") or "\n" in val or "\r" in val):
             print(f"project-setup: {flag} takes an absolute path on this machine, with no line break", file=sys.stderr)
             return 2
-    if a.tunnel_ssh and not os.access(a.tunnel_ssh, os.X_OK):
+    if a.tunnel_ssh and not (os.path.isfile(a.tunnel_ssh) and os.access(a.tunnel_ssh, os.X_OK)):
         print(f"project-setup: --tunnel-ssh {a.tunnel_ssh} is not an executable file", file=sys.stderr)
         return 2
     if a.desktop_environment is not None and not ENV_NAME.fullmatch(a.desktop_environment):

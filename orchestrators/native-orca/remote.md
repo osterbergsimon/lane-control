@@ -91,12 +91,20 @@ the card unlocked. The owner unlocks it, then starts the tunnel:
   with the same options and the port in `~/.config/lane-control/hosts/<host>.json` (`tunnel_port`); a new share link
   is not needed while the box still has this machine's environment.
 
-A key or card the unit cannot use is not left as a silent restart loop. `lane-tunnel start` looks again after a few
-seconds (`LANE_TUNNEL_SETTLE`, default 4), and if the unit is not running it stops and disables it and exits 1,
-naming the agent it used and `journalctl --user -u lane-tunnel@<host>.service`. The env file stays, so `start` again
-retries. A unit that fails 5 times in 15 minutes (it restarts every 30 seconds) stops restarting and shows as
-`failed` in `systemctl --user status`; `lane-tunnel status` exits non-zero. A network that is down for a couple of
-minutes is ridden out; a longer outage needs `lane-tunnel start` again.
+A key or card the unit cannot use is not a silent restart loop, and a short outage does not end the tunnel. The unit
+never gives up (`StartLimitIntervalSec=0`): it retries every 10 seconds at first and backs off to every 5 minutes
+(`RestartSteps`, `RestartMaxDelaySec`; systemd 254 or later, an older one retries every 30 seconds), and ssh gives up
+on a dead network after 15 seconds (`ConnectTimeout`). So a network that is down for an hour, or a box whose sshd still
+holds the old forward for a while (the next ssh fails on `ExitOnForwardFailure` until it lets go), ends with the tunnel
+back on its own, and a locked card costs about a dozen refused logins an hour, not a burst.
+
+`lane-tunnel start` looks again after a few seconds (`LANE_TUNNEL_SETTLE`, default 10), while you are there to read it.
+If the unit is not running it exits 1 and names the agent it used and `journalctl --user -u lane-tunnel@<host>.service`.
+Without `--no-enable` the unit stays enabled and keeps retrying (a re-run during a network blip must not turn an
+always-on tunnel off), and the message says so; `lane-tunnel stop <host>` ends it. With `--no-enable` it is stopped
+again. The env file stays either way, so `start` again retries. `project-setup` stops and forgets a tunnel whose
+start failed. While the unit is retrying, `lane-tunnel status` exits non-zero. The env file's values may not hold a
+line break, a backslash, a leading quote or leading or trailing spaces (systemd reads them differently from sh).
 
 ## Removing a box
 `project-setup --remove-host <host>`: the box forgets this machine's environment (`environment rm`, and

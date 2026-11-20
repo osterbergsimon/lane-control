@@ -138,6 +138,9 @@ with open(os.environ["STUB_LOG"] + ".systemctl", "a") as f:
     f.write(" ".join(args) + "\n")
 if os.environ.get("STUB_NO_SYSTEMD"):
     sys.exit(1)
+if "--version" in args:
+    print("systemd " + os.environ.get("STUB_SYSTEMD", "260") + " (" + os.environ.get("STUB_SYSTEMD", "260") + ")")
+    sys.exit(0)
 conf = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.environ["HOME"], ".config")
 units = [a for a in args if a.startswith("lane-tunnel@")]
 def pidfile(u):
@@ -160,7 +163,17 @@ def start(u):
                          start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
     open(pidfile(u) + (".impostor" if impostor else ""), "w").write(str(p.pid))
+def enabled(u):
+    return os.path.join(os.environ["HOME"], "enabled-" + u)
 for u in units:
+    if "is-enabled" in args:
+        sys.exit(0 if os.path.exists(enabled(u)) else 1)
+    if "enable" in args:
+        open(enabled(u), "w").write("1")
+    if "disable" in args and os.environ.get("STUB_DISABLE_FAILS") and "--now" not in args:
+        sys.exit(1)
+    if "disable" in args and os.path.exists(enabled(u)):
+        os.unlink(enabled(u))
     if "disable" in args or "stop" in args or "restart" in args:
         stop(u)
     if ("enable" in args and "--now" in args) or "restart" in args or "start" in args:
@@ -653,6 +666,28 @@ class DirectionTwoTests(Case):
             self.assertNotIn("share link", out)
             self.assertEqual(self.e.lines(".systemctl"), [])
 
+    def test_a_tunnel_ssh_that_is_a_folder_is_refused_before_direction_one_runs(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-ssh", str(self.e.home), answer=self.link)
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(self.e.jlines(".install"), [])
+
+    def test_a_failed_tunnel_start_is_stopped_and_forgotten(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
+                                   env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service")
+        self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
+
+    def test_tunnel_options_for_a_box_that_is_already_paired_are_said_to_be_unused(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-no-enable")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("desktop lanes: exists", out)
+        self.assertIn("--tunnel-no-enable", out)
+        self.assertIn("not used", out)
+        self.assertIn("lane-tunnel start", out)
+
     def test_a_tunnel_that_fails_tells_the_owner_about_the_agent_option(self):
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
                                    env_extra={"STUB_TUNNEL_FAILS": "1"})
@@ -1075,14 +1110,16 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertFalse([l for l in sysctl if " enable" in l], sysctl)
         self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
 
-    def test_a_start_that_does_not_come_up_points_at_the_journal_and_does_not_loop(self):
+    def test_a_start_that_does_not_come_up_points_at_the_journal(self):
         for flags in ((), ("--no-enable",)):
             r = self.tunnel("start", *flags, "box", "6768", env_extra={"STUB_TUNNEL_FAILS": "1"})
             self.assertEqual(r.returncode, 1, flags)
             self.assertIn("did not come up", r.stderr)
             self.assertIn("journalctl --user -u lane-tunnel@box.service", r.stderr)
-            self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service", flags)
             self.assertTrue((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())  # to retry
+        # only a unit that was never meant to stay is stopped again; an always-on one keeps retrying
+        r = self.tunnel("start", "--no-enable", "box", "6768", env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service")
 
     def test_a_failure_names_the_agent_when_the_unit_had_none(self):
         r = self.tunnel("start", "box", "6768", env_extra={"STUB_TUNNEL_FAILS": "1"})
@@ -1096,17 +1133,72 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("journalctl --user -u lane-tunnel@box.service", r.stderr)
 
-    def test_the_unit_gives_up_after_repeated_failures(self):
+    def test_the_unit_never_gives_up_and_backs_off_to_five_minutes(self):
         unit = UNIT.read_text()
-        head = unit.split("[Service]")[0]
-        burst = re.search(r"^StartLimitBurst=(\d+)$", head, re.M)
-        interval = re.search(r"^StartLimitIntervalSec=(\d+)$", head, re.M)
-        self.assertTrue(burst and interval, "a failure limit belongs in [Unit]")
-        self.assertLessEqual(int(burst.group(1)), 10)
-        # restarts every RestartSec: the limit must be reachable inside the interval, or it never trips
-        rs = int(re.search(r"^RestartSec=(\d+)$", unit, re.M).group(1))
-        self.assertLess(rs * int(burst.group(1)), int(interval.group(1)))
-        self.assertIn("Restart=always", unit)
+        self.assertRegex(unit.split("[Service]")[0], r"(?m)^StartLimitIntervalSec=0$")
+        self.assertNotIn("StartLimitBurst", unit)
+        for line in ("Restart=always", "RestartSec=10", "RestartSteps=6", "RestartMaxDelaySec=5min"):
+            self.assertRegex(unit, r"(?m)^" + line + "$")
+        self.assertIn("-o ConnectTimeout=15", unit)  # a dropped-packet network does not hang each try for minutes
+
+    def test_an_older_systemd_gets_a_fixed_restart_delay_it_understands(self):
+        unit = self.e.home / ".config" / "systemd" / "user" / "lane-tunnel@.service"
+        self.tunnel("start", "box", "6768", env_extra={"STUB_SYSTEMD": "253"})
+        old = unit.read_text()
+        service = old.split("[Service]")[1]  # (the header comment names the keys)
+        self.assertRegex(service, r"(?m)^RestartSec=30$")
+        self.assertNotIn("RestartSteps", service)
+        self.assertNotIn("RestartMaxDelaySec", service)
+        self.assertRegex(old, r"(?m)^StartLimitIntervalSec=0$")
+        self.tunnel("start", "box", "6768", env_extra={"STUB_SYSTEMD": "254"})
+        new = unit.read_text()
+        for line in ("RestartSec=10", "RestartSteps=6", "RestartMaxDelaySec=5min"):
+            self.assertRegex(new, r"(?m)^" + line + "$")
+
+    def test_a_failed_check_leaves_an_always_on_tunnel_enabled_and_says_it_keeps_retrying(self):
+        self.tunnel("start", "box", "6768")  # an always-on tunnel that worked
+        before = len(self.e.lines(".systemctl"))
+        r = self.tunnel("start", "box", "6768", env_extra={"STUB_TUNNEL_FLAPS": "1", "LANE_TUNNEL_SETTLE": "2"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("journalctl --user -u lane-tunnel@box.service", r.stderr)
+        self.assertIn("keeps retrying", r.stderr)
+        self.assertIn("lane-tunnel stop box", r.stderr)
+        later = self.e.lines(".systemctl")[before:]
+        self.assertFalse([l for l in later if "disable" in l or " stop" in l], later)
+        self.assertTrue((self.e.home / "enabled-lane-tunnel@box.service").exists())
+        self.assertTrue((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
+
+    def test_the_diagnosis_names_an_authentication_failure(self):
+        r = self.tunnel("start", "--auth-sock", "/run/user/1000/a.sock", "box", "6768",
+                        env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertIn("could not log in", r.stderr)
+
+    def test_values_systemd_would_read_differently_are_refused(self):
+        w = self.wrapper()
+        cases = [("--auth-sock", "/run/a.sock\\"), ("--auth-sock", "/run/a\\b.sock"), ("--auth-sock", '"/run/a.sock'),
+                 ("--auth-sock", "'/run/a.sock"), ("--auth-sock", "/run/a.sock "), ("--auth-sock", " /run/a.sock"),
+                 ("--ssh", w + " ")]
+        for flag, val in cases:
+            r = self.tunnel("start", flag, val, "box", "6768")
+            self.assertEqual(r.returncode, 2, (flag, val, r.stderr))
+        for extra in ({"PATH": "/usr/bin:/bin\\"}, {"LANE_SSH_CONFIG": "/etc/x\\"}):
+            r = self.tunnel("start", "box", "6768", env_extra=extra)
+            self.assertEqual(r.returncode, 2, (extra, r.stderr))
+        self.assertEqual(self.e.lines(".systemctl"), [])
+
+    def test_no_enable_that_cannot_disable_an_earlier_enable_says_so(self):
+        self.tunnel("start", "box", "6768")
+        r = self.tunnel("start", "--no-enable", "box", "6768", env_extra={"STUB_DISABLE_FAILS": "1"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("still enabled", r.stderr)
+        self.assertNotIn("not enabled", r.stdout)
+
+    def test_an_agent_socket_that_is_not_a_socket_is_noted_but_not_refused(self):
+        r = self.tunnel("start", "--auth-sock", "/run/user/1000/not-there.sock", "box", "6768")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("not a socket", r.stderr)
+        r = self.tunnel("start", "box", "6768")
+        self.assertNotIn("not a socket", r.stderr)
 
 
 class DocTests(unittest.TestCase):
@@ -1119,8 +1211,9 @@ class DocTests(unittest.TestCase):
     def test_remote_doc_covers_the_card_tunnel_and_its_failure(self):
         text = REMOTE_DOC.read_text()
         for s in ("--auth-sock", "SSH_AUTH_SOCK", "--ssh", "--no-enable", "--tunnel-auth-sock", "--tunnel-no-enable",
-                  "journalctl", "smartcard"):
+                  "journalctl", "smartcard", "keeps retrying", "5 minutes"):
             self.assertIn(s, text, s)
+        self.assertNotIn("5 times in 15 minutes", text)  # the unit never gives up now
 
     def test_remote_doc_says_how_to_pin_the_box_server(self):
         text = REMOTE_DOC.read_text()

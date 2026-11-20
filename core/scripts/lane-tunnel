@@ -13,13 +13,19 @@
 # --ssh PATH (or LANE_TUNNEL_SSH): an executable run in place of `ssh` with the same arguments (a wrapper that sets
 #   up a card, a proxy, a socket); LANE_TUNNEL_SSH in the env file.
 # --no-enable: start the unit for now only (systemctl --user start). It is not enabled, so a login or reboot does not
-#   bring it back, and a start that left it enabled before is disabled. stop always leaves it stopped and disabled.
-# Both paths must be absolute, with no newline; --ssh must be executable.
+#   bring it back, and a start that left it enabled before is disabled (an error when that does not work). stop always
+#   leaves it stopped and disabled.
+# Both paths must be absolute, with no line break, backslash, leading quote or leading or trailing space (systemd reads
+# its env files differently from sh); --ssh must be an executable file. --auth-sock need not exist yet (a note says so).
 #
-# start waits LANE_TUNNEL_SETTLE seconds (default 4) and checks the unit is still running. If it is not (a key or a
-# card the unit cannot use: ssh runs with BatchMode, so it never asks), the unit is stopped and disabled again, the
-# env file stays for a retry, and the message points at the journal. A unit that fails 5 times in 15 minutes
-# stops restarting (StartLimitBurst in the template) and shows as failed: lane-tunnel status exits non-zero.
+# The unit never gives up: ssh runs with BatchMode, ConnectTimeout and ExitOnForwardFailure, and Restart=always retries
+# every 10 s, backing off to every 5 minutes (systemd 254 or later; older ones retry every 30 s). So a network that is
+# down for an hour, or a host that still holds the old forward for a while, ends with the tunnel back on its own.
+#
+# start waits LANE_TUNNEL_SETTLE seconds (default 10) and checks the unit is running. If it is not (a key or a card the
+# unit cannot use: ssh never asks), it exits 1 and names the agent and the journal. With --no-enable the unit is then
+# stopped and disabled again. Without it the unit stays enabled and keeps retrying, as it did before this check
+# existed (a re-run during a blip must not turn an always-on tunnel off); lane-tunnel stop ends it.
 #
 # <name> is the host with every character but letters, digits, '.', '_' and '-' turned into '-' (as orca-host-install
 # names the host's environment). The instance's host, port, ssh config (LANE_SSH_CONFIG, passed as ssh -F), PATH,
@@ -87,9 +93,14 @@ case $op in
     nl=$(printf '\n_'); nl=${nl%_}
     for v in "$cfg" "$auth_sock" "$ssh_bin" "$PATH"; do
       case $v in *"$nl"*|*"$(printf '\r')"*) die "a value with a line break cannot go in the tunnel's env file" 2 ;; esac
+      # ... and systemd reads \ as an escape or a line continuation, a leading quote as quoting, trailing space as nothing.
+      case $v in
+        *\\*|\"*|\'*|[[:space:]]*|*[[:space:]]) die "a value with a backslash, a leading quote, or leading or trailing space would be read differently by systemd, so it cannot go in the tunnel's env file: $v" 2 ;;
+      esac
     done
     if [ -n "$auth_sock" ]; then
       case $auth_sock in /*) ;; *) die "--auth-sock must be an absolute path, got: $auth_sock" 2 ;; esac
+      [ -S "$auth_sock" ] || echo "lane-tunnel: note: $auth_sock is not a socket (yet): the agent has to be running there for the unit to use it" >&2
     fi
     if [ -n "$ssh_bin" ]; then
       case $ssh_bin in /*) ;; *) die "--ssh must be an absolute path, got: $ssh_bin" 2 ;; esac
@@ -104,7 +115,15 @@ case $op in
     [ -z "$ssh_bin" ] || new=$(printf '%s\nLANE_TUNNEL_SSH=%s' "$new" "$ssh_bin")
     (umask 077; printf '%s\n' "$new" > "$envfile.tmp")
     mv -f "$envfile.tmp" "$envfile"
-    sed "s|@TUNNELS@|$tunnels|" "$template" > "$units/lane-tunnel@.service.tmp"
+    # RestartSteps and RestartMaxDelaySec (backoff to 5 minutes) need systemd 254; an older one gets a fixed 30 s.
+    sysver=$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p')
+    case $sysver in ''|*[!0-9]*) sysver=0 ;; esac
+    if [ "$sysver" -ge 254 ]; then
+      sed "s|@TUNNELS@|$tunnels|" "$template" > "$units/lane-tunnel@.service.tmp"
+    else
+      sed -e "s|@TUNNELS@|$tunnels|" -e '/^RestartSteps=/d' -e '/^RestartMaxDelaySec=/d' -e 's/^RestartSec=10$/RestartSec=30/' \
+        "$template" > "$units/lane-tunnel@.service.tmp"
+    fi
     mv -f "$units/lane-tunnel@.service.tmp" "$units/lane-tunnel@.service"
     sd daemon-reload || die "systemctl --user daemon-reload failed"
     if [ "$enable" = 1 ]; then
@@ -112,21 +131,29 @@ case $op in
     else
       # Not enabled: a login must not bring back a tunnel whose card is locked, and an earlier enable is undone.
       sd disable "$unit" >/dev/null 2>&1 || true
+      if sd is-enabled --quiet "$unit" 2>/dev/null; then
+        die "$unit is still enabled (systemctl --user disable $unit did not work), so it would come back at login; it was not started"
+      fi
       sd start "$unit" >/dev/null 2>&1 || die "systemctl --user start $unit failed (journalctl --user -u $unit)"
     fi
     # A changed host, port, agent or wrapper must replace a tunnel that already runs.
     if [ -n "$old" ] && [ "$old" != "$new" ]; then sd restart "$unit" || die "systemctl --user restart $unit failed"; fi
-    # ssh runs with BatchMode, so a key or card it cannot use ends it at once and Restart= would loop: look again
-    # after a few seconds, and when the unit is not running, stop it rather than leave it looping.
+    # ssh runs with BatchMode, so a key or card it cannot use ends it at once: look again after a few seconds, while the
+    # owner is here to read it.
     i=0
     while :; do
       sd is-active --quiet "$unit" || {
-        sd disable --now "$unit" >/dev/null 2>&1 || true
-        if [ -n "$auth_sock" ]; then agent="it used the ssh agent at $auth_sock (is the card unlocked in it?)"
+        if [ -n "$auth_sock" ]; then agent="it used the ssh agent at $auth_sock: is the card unlocked in it?"
         else agent="it has no ssh agent: it needs a key it can use alone, with no passphrase (IdentityFile in the ssh config it uses), or pass --auth-sock <agent socket>"; fi
-        die "the tunnel $unit did not come up or did not stay up; $agent. It is stopped and disabled; see journalctl --user -u $unit"
+        if [ "$enable" = 1 ]; then
+          fate="The unit is enabled and keeps retrying (at most every 5 minutes, so a host that still holds the old forward, or a network that comes back, is picked up); lane-tunnel stop $host stops it."
+        else
+          sd disable --now "$unit" >/dev/null 2>&1 || true
+          fate="It is stopped again (--no-enable)."
+        fi
+        die "the tunnel $unit did not come up or did not stay up: ssh could not log in to $host or open the port ($agent). $fate See journalctl --user -u $unit"
       }
-      [ "$i" -lt "${LANE_TUNNEL_SETTLE:-4}" ] || break
+      [ "$i" -lt "${LANE_TUNNEL_SETTLE:-10}" ] || break
       i=$((i + 1)); sleep 1
     done
     if [ "$enable" = 1 ]; then how="enabled"; else how="not enabled: it does not come back at login or boot"; fi
