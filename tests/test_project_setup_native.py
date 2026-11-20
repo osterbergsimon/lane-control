@@ -801,5 +801,37 @@ class SeamTests(Case):
                       f.read_text())
 
 
+class AnswersTests(Case):
+    def test_answers_on_native_go_to_additions_never_to_the_rendered_persona(self):
+        # M3: rendered personas exist; the answers run edits the role file where the base prompt says.
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        rendered = (self.repo / ".lane-control" / "coordinator.md").read_text()
+        adapt = {"write": {ADDITION: "## First turn\nRead docs/plan.md.\n", ".lane-control/project.md": "facts\n",
+                           ".lane-control/SUGGESTIONS.md": "## AGENTS.md edits you would make\n- none\n\n"
+                                                           "## Questions for the owner\n- Which port does it use?\n"}}
+        answers = {"write": {".lane-control/coordinator.md": "## First turn\nRead docs/plan.md.\nUse port 8080.\n"}}
+        self.e.script_agents(sonnet=[adapt, answers], opus=[PASS])
+        replies = iter(["8080"])
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", side_effect=lambda *_: next(replies, "y")), \
+                contextlib.redirect_stdout(Tty()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            status = m.main([str(self.repo), "--no-start"])
+        self.assertEqual(status, 0, err.getvalue() + out.getvalue())
+        runs = [r for r in self.e.agent_runs() if "-p" in r["argv"]]
+        self.assertEqual(len(runs), 3)  # adapter, reviewer, answers
+        self.assertIn(".lane-control/additions/", runs[2]["prompt"])
+        self.assertNotIn("coordinator.md", runs[2]["lane_files"])  # the rendered persona is not where agents work
+        committed = git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
+        self.assertIn(ADDITION, committed)
+        self.assertNotIn(".lane-control/coordinator.md", committed)
+        added = (self.repo / ADDITION).read_text()
+        self.assertIn("Use port 8080.", added)
+        self.assertNotIn("## Rules", added)
+        now = (self.repo / ".lane-control" / "coordinator.md").read_text()
+        self.assertTrue(now.startswith(rendered.split("# Additions for this project")[0][:200]))
+        self.assertIn("Use port 8080.", now)
+
+
 if __name__ == "__main__":
     unittest.main()

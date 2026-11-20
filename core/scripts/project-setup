@@ -53,6 +53,7 @@ the store and a run without them reuses it; --show prints it. A project set up b
 once, automatically, and the run says what moved. Only the rendered personas stay in .cotal/agents/. No secret goes in.
 """
 import argparse
+import contextlib
 import difflib
 import hashlib
 import json
@@ -1525,8 +1526,6 @@ def adapt(repo: Path, who: tuple, prompt: str, before: dict):
     run that gets to its end is recorded as finished (adapter_finished)."""
     check_limit()  # before the finished record is dropped: a stop here leaves the files reviewable
     forget_adapter(repo)
-    roles = [repo / ADAPTED / f"{r}.md" for r in ("coordinator", "design-lead", "reviewer")]
-    was = {f: fingerprint(f) for f in roles}  # on native Orca these may be rendered personas: only new writes move
     try:
         run_agent(repo, who, prompt, write=True)
     finally:  # also when the run failed: the suggestions are never left where a later run could commit them
@@ -1534,18 +1533,48 @@ def adapt(repo: Path, who: tuple, prompt: str, before: dict):
         if new.is_file():
             kept_suggestions(repo).write_bytes(new.read_bytes())
             new.unlink()
-        if ORCHESTRATOR == "native-orca":  # the base prompt says .lane-control/<name>: on native that is additions/
-            for f in roles:
-                if f.is_file() and not f.is_symlink() and fingerprint(f) != was[f]:
-                    dest = repo / ADDITIONS / f.name
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(f, dest)
-                    say("adapt", "moved", f"{f.relative_to(repo)} -> {dest.relative_to(repo)} (native Orca)")
+        move_role_files(repo)
     check_scope(repo, before)
     d = store_dir(repo)
     d.mkdir(parents=True, exist_ok=True)
     d.chmod(0o700)
     write_atomic(adapter_record(repo), b"{}\n", 0o600)
+
+
+def move_role_files(repo: Path) -> None:
+    """Native Orca: a role file an onboarding agent wrote at .lane-control/<role>.md (where the shared prompts put
+    them) is that role's additions, so it moves to .lane-control/additions/. The rendered personas are set aside while
+    the agents run (rendered_aside), so whatever is there now is the agent's."""
+    if ORCHESTRATOR != "native-orca":
+        return
+    for role in NATIVE_ROLES:
+        f = repo / ADAPTED / f"{role}.md"
+        if f.is_file() and not f.is_symlink():
+            dest = repo / ADDITIONS / f.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(f, dest)
+            say("adapt", "moved", f"{f.relative_to(repo)} -> {dest.relative_to(repo)} (native Orca)")
+
+
+@contextlib.contextmanager
+def rendered_aside(repo: Path):
+    """Native Orca: the rendered personas wait in the settings store while the onboarding agents run, so no agent
+    reads or edits them and an answer never lands in a file that is re-rendered; they come back after, whatever
+    happens (a running session's LANE_PERSONA keeps its file)."""
+    aside = store_dir(repo) / "rendered-aside"
+    moved = []
+    for role in NATIVE_ROLES:
+        f = repo / ADAPTED / f"{role}.md"
+        if f.is_file() and not f.is_symlink() and not run(["git", "ls-files", "--", str(f)], cwd=repo).stdout.strip():
+            aside.mkdir(parents=True, exist_ok=True)
+            store_dir(repo).chmod(0o700)
+            os.replace(f, aside / f.name)
+            moved.append(f)
+    try:
+        yield
+    finally:
+        for f in moved:
+            os.replace(aside / f.name, f)
 
 
 def fill(name: str, project: str, design_lead: bool, findings: str = "", visibility: str = "unknown",
@@ -2028,8 +2057,11 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
     text = (fill("answers-prompt.md", project, False)
             .replace("{{QUESTIONS}}", clip("\n".join(f"{n}. {q}" for n, q, _ in given), FINDINGS_LIMIT))
             .replace("{{ANSWERS}}", clip("\n".join(f"{n}. {a}" for n, _, a in given), FINDINGS_LIMIT)))
+    if ORCHESTRATOR == "native-orca":
+        text += NATIVE_PLACEMENT
     try:
         run_agent(repo, adapter, text, write=True)
+        move_role_files(repo)
     except Fail as e:
         restore_lane_files(repo, was)
         check_scope(repo, before)
@@ -2875,9 +2907,11 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             REVIEW_RULES = NATIVE_REVIEW_NOTE + REVIEW_RULES
             CHECK_RULES = NATIVE_REVIEW_NOTE + CHECK_RULES
         adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
-        if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
-            return STOPPED
         if not a.skip_adapt:
+            refuse_tracked(repo, NATIVE_ROLES)
+            with rendered_aside(repo):
+                if not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+                    return STOPPED
             publish_onboarding(repo)
         for d in attached:
             if not a.skip_adapt:
