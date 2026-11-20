@@ -63,8 +63,14 @@ def handover(repo: Path, key: str) -> str:
 def run_by_name(place, title: str, old: set):
     """The one Run whose objective is the session's name and that no earlier start of it made (`old_runs`: those
     belong to closed terminals), or None when there is none or more than one."""
-    rows = place.jrun("orchestration", "run-list", "--limit", "500")["result"]
-    rows = (rows.get("runs") or rows.get("items") or []) if isinstance(rows, dict) else rows
+    rows, cursor = [], None
+    for _ in range(100):  # Orca serves at most 100 Runs a page; nextCursor leads to the next one
+        page = place.jrun("orchestration", "run-list", "--limit", "100", *(["--cursor", cursor] if cursor else []))
+        page = page.get("result") or {}
+        rows += (page.get("runs") or page.get("items") or []) if isinstance(page, dict) else page
+        cursor = page.get("nextCursor") if isinstance(page, dict) else None
+        if not cursor:
+            break
     ids = [r.get("runId") or r.get("id") for r in rows if isinstance(r, dict) and r.get("objective") == title]
     ids = [i for i in ids if i and i not in old]
     return ids[0] if len(ids) == 1 else None

@@ -93,11 +93,11 @@ def presence() -> dict:
 
 def settings_file(checkout: Path) -> Path:
     """The project's settings store file, where project-setup and project-pause keep its settings (`paused` among
-    them): <config>/lane-control/projects/<folder name as given>-<first 10 hex of sha256 of the real
-    path>/settings.json, project-setup's store_key."""
+    them): <config>/lane-control/projects/<folder name of the real path>-<first 10 hex of sha256 of the real
+    path>/settings.json, project-setup's store_key (a checkout named through a symlink keys the same store)."""
     real = Path(checkout).resolve()
     config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    key = f"{Path(checkout).name}-{hashlib.sha256(str(real).encode()).hexdigest()[:10]}"  # as project-setup
+    key = f"{real.name}-{hashlib.sha256(str(real).encode()).hexdigest()[:10]}"  # as project-setup
     return config / "lane-control" / "projects" / key / "settings.json"
 
 

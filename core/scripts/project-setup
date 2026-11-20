@@ -62,6 +62,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -181,7 +182,8 @@ def config_home() -> Path:
 def store_key(repo: Path) -> str:
     """<folder name>-<first 10 hex of sha256 of the checkout's real path>: readable, and two checkouts with the same folder
     name do not share a store."""
-    return f"{repo.name}-{hashlib.sha256(str(repo.resolve()).encode()).hexdigest()[:10]}"
+    real = repo.resolve()  # the night precheck (core/machineconf.py) keys it the same way
+    return f"{real.name}-{hashlib.sha256(str(real).encode()).hexdigest()[:10]}"
 
 
 def store_dir(repo: Path) -> Path:
@@ -437,7 +439,30 @@ class Place:
     def jrun(self, *args):
         return jrun(self.argv(*args, "--json"))
 
+    def agent_running(self, checkout: Path, role: str) -> bool:
+        """Whether an agent process of this lane role runs in the checkout: argv[0] an agent harness (or node or bun
+        running one), its cwd in the checkout, LANE_ROLE=<role> in its environment. For a terminal Orca did not mark
+        with agentIdentity. Read from /proc (Linux); elsewhere False."""
+        want, marker = Path(checkout).resolve(), f"LANE_ROLE={role}".encode()
+        try:
+            pids = [d for d in Path("/proc").iterdir() if d.name.isdigit()]
+        except OSError:
+            return False
+        for d in pids:
+            try:
+                argv = [os.path.basename(a.decode(errors="replace")) for a in (d / "cmdline").read_bytes().split(b"\0")[:2]]
+                if not (argv[0] in AGENT_PROGRAMS or (argv[0] in ("node", "bun") and len(argv) > 1
+                                                       and argv[1] in AGENT_PROGRAMS)):
+                    continue
+                cwd = Path(os.readlink(d / "cwd")).resolve()
+                if (cwd == want or want in cwd.parents) and marker in (d / "environ").read_bytes().split(b"\0"):
+                    return True
+            except (OSError, IndexError):
+                continue
+        return False
 
+
+AGENT_PROGRAMS = frozenset({"claude", "opencode", "opencode2", "codex"})  # as lane-sweep matches an agent
 LOCAL = Place()  # this machine
 
 
@@ -1551,32 +1576,45 @@ def move_role_files(repo: Path) -> None:
         return
     for role in NATIVE_ROLES:
         f = repo / ADAPTED / f"{role}.md"
-        if f.is_file() and not f.is_symlink():
-            dest = repo / ADDITIONS / f.name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(f, dest)
-            say("adapt", "moved", f"{f.relative_to(repo)} -> {dest.relative_to(repo)} (native Orca)")
+        if not f.is_file() or f.is_symlink() or tracked(repo, f):  # a committed file is the owner's: never moved
+            continue
+        data = f.read_bytes()
+        if RENDERED.get(f) == data:  # the rendered persona itself, untouched by the agent
+            continue
+        dest = repo / ADDITIONS / f.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(dest, data)
+        if f in RENDERED:  # the persona goes back at once, so a running session can read it
+            write_atomic(f, RENDERED[f], stat.S_IMODE(f.stat().st_mode))
+        else:
+            f.unlink()
+        say("adapt", "moved", f"{f.relative_to(repo)} -> {dest.relative_to(repo)} (native Orca)")
+
+
+def tracked(repo: Path, f: Path) -> bool:
+    return bool(run(["git", "ls-files", "--", str(f)], cwd=repo).stdout.strip())
+
+
+RENDERED: dict = {}  # path -> bytes of the rendered personas while onboarding agents run (rendered_aside)
 
 
 @contextlib.contextmanager
 def rendered_aside(repo: Path):
-    """Native Orca: the rendered personas wait in the settings store while the onboarding agents run, so no agent
-    reads or edits them and an answer never lands in a file that is re-rendered; they come back after, whatever
-    happens (a running session's LANE_PERSONA keeps its file)."""
-    aside = store_dir(repo) / "rendered-aside"
-    moved = []
+    """Native Orca: the rendered personas are remembered (in memory) while the onboarding agents run, and stay in
+    place, so a running session can read its LANE_PERSONA throughout. A role file an agent writes over one is its
+    additions (move_role_files) and the persona goes straight back; at the end every persona is as it was."""
+    RENDERED.clear()
     for role in NATIVE_ROLES:
         f = repo / ADAPTED / f"{role}.md"
-        if f.is_file() and not f.is_symlink() and not run(["git", "ls-files", "--", str(f)], cwd=repo).stdout.strip():
-            aside.mkdir(parents=True, exist_ok=True)
-            store_dir(repo).chmod(0o700)
-            os.replace(f, aside / f.name)
-            moved.append(f)
+        if f.is_file() and not f.is_symlink() and not tracked(repo, f):
+            RENDERED[f] = f.read_bytes()
     try:
         yield
     finally:
-        for f in moved:
-            os.replace(aside / f.name, f)
+        for f, data in RENDERED.items():
+            if not f.is_file() or f.read_bytes() != data:
+                write_atomic(f, data)
+        RENDERED.clear()
 
 
 def fill(name: str, project: str, design_lead: bool, findings: str = "", visibility: str = "unknown",
@@ -2399,7 +2437,7 @@ def resolve_settings(repo: Path, a) -> dict:
     return {"pins": pins, "lead": lead_on, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
 
 
-def which_orchestrator(flag, repo) -> str:
+def which_orchestrator(flag, repo, default: str = None) -> str:
     """The flag; else the one the project's store records; else orca-cotal for a project with a .cotal/ folder (set up
     on Orca + Cotal before the store said so); else the default. A re-run never switches a project by leaving out
     the flag."""
@@ -2414,7 +2452,7 @@ def which_orchestrator(flag, repo) -> str:
             return stored
         if (repo / ".cotal").is_dir():
             return "orca-cotal"
-    return DEFAULT_ORCHESTRATOR
+    return default or DEFAULT_ORCHESTRATOR
 
 
 def show(repo: Path) -> int:
@@ -2603,14 +2641,16 @@ def bare_title(title) -> str:
     return re.sub(r"^[^\w]+", "", title or "").strip()
 
 
-def session_terminal(place: Place, title: str, handle: "str | None" = None):
+def session_terminal(place: Place, title: str, handle: "str | None" = None, role: str = "coordinator"):
     """The Orca terminal of a running standing session (its agent runs), or None: the handle recorded at its start,
     else its title (a shell or OpenCode may retitle the tab; Claude keeps its --name)."""
-    # A tab whose agent exited stays as a shell: Orca marks a terminal whose agent runs with agentIdentity.
-    rows = [t for t in place.jrun("terminal", "list")["result"]["terminals"]
-            if t.get("agentIdentity") and not t.get("orphaned")]
-    return (next((t for t in rows if handle and t.get("handle") == handle), None)
-            or next((t for t in rows if bare_title(t.get("title")) == title), None))
+    # A tab whose agent exited stays as a shell. A running one has agentIdentity (Orca recognised the agent), or an
+    # agent process of this role in its folder (one Orca did not recognise).
+    rows = place.jrun("terminal", "list")["result"]["terminals"]
+    found = [t for t in rows if handle and t.get("handle") == handle] + \
+            [t for t in rows if bare_title(t.get("title")) == title]
+    return next((t for t in found if not t.get("orphaned") and (t.get("agentIdentity") or place.agent_running(
+        Path(t.get("worktreePath") or "/nonexistent"), role))), None)
 
 
 def stored_handle(repo: Path, role: str):
@@ -2696,7 +2736,7 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
     """One standing session in its own Orca terminal; True when started now, False when its terminal already runs.
     Nothing is ever typed into a terminal: the first message is the start command's own prompt."""
     title = session_title(role, project)
-    if session_terminal(place, title, stored_handle(repo, role)):
+    if session_terminal(place, title, stored_handle(repo, role), role):
         say(f"session {role}", "exists", title)
         return False
     f = launcher(repo, role, pin, mode, checkout, title, kickoff, resume, place)
@@ -2784,7 +2824,7 @@ def native_project(repo: Path, name: str = "") -> dict:
     lead = st.get("design_lead", True) is not False
     why = native_pin_refusal(pins, lead, mode, {x for x in st.get("own_models") or [] if isinstance(x, str)})
     if why:  # a hand-edited store never starts what setup would refuse
-        raise Fail(f"{store_dir(repo) / 'settings.json'}: {why}. Nothing was started or rendered")
+        raise Fail(f"{store_dir(repo) / 'settings.json'}: {why.rstrip('.')}. Nothing was started or rendered")
     return {"pins": pins, "lead": lead, "mode": mode,
             "project": name or st.get("name") or repo.name, "attached": tuple(attached_of(st)), "st": st}
 
@@ -2807,7 +2847,7 @@ def running_sessions(place: Place, repo: Path, project: str, lead: bool) -> dict
     """{role: terminal} of the standing sessions that run now."""
     out = {}
     for role in STANDING if lead else ("coordinator",):
-        t = session_terminal(place, session_title(role, project), stored_handle(repo, role))
+        t = session_terminal(place, session_title(role, project), stored_handle(repo, role), role)
         if t:
             out[role] = t
     return out
@@ -3069,7 +3109,9 @@ def main(argv=None) -> int:
             peek = peek_repo(a.target, Path(a.dest).expanduser(), slug(base))
         except Fail:
             peek = None  # no usable git here: the run below says so
-        ORCHESTRATOR = which_orchestrator(a.orchestrator, peek)
+        # A run copied over by --host keeps the local meaning of no flag (orca-cotal, until phase 6) for a project
+        # this host has no record of; one the host already set up on native stops below, never switched.
+        ORCHESTRATOR = which_orchestrator(a.orchestrator, peek, "orca-cotal" if a.via_host else None)
     if a.via_host and ORCHESTRATOR == "native-orca":
         print("project-setup: this project is on native Orca here (no Orca + Cotal store or .cotal/ on this host), and "
               "native-Orca setup over --host is phase 6 of the native-Orca plan, not built yet; nothing was changed. "

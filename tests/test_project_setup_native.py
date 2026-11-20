@@ -841,7 +841,8 @@ class AnswersTests(Case):
         runs = [r for r in self.e.agent_runs() if "-p" in r["argv"]]
         self.assertEqual(len(runs), 3)  # adapter, reviewer, answers
         self.assertIn(".lane-control/additions/", runs[2]["prompt"])
-        self.assertNotIn("coordinator.md", runs[2]["lane_files"])  # the rendered persona is not where agents work
+        for run in (runs[0], runs[2]):  # R2-5: a running session's persona file stays readable throughout
+            self.assertIn("coordinator.md", run["lane_files"])
         committed = git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
         self.assertIn(ADDITION, committed)
         self.assertNotIn(".lane-control/coordinator.md", committed)
@@ -891,12 +892,14 @@ class HostTests(Case):
         self.assertTrue([c for c in self.e.calls() if c.startswith("cotal space")])
 
     def test_on_the_host_a_native_project_stops_at_phase_6(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)  # set up on native there already
+        before = (self.e.store(self.repo) / "settings.json").read_bytes()
+        self.e.log.unlink()
         r = self.e.run(str(self.repo), "--via-host", "--no-start")
         self.assertEqual(r.returncode, 2)
         self.assertIn("phase 6", r.stderr)
-        self.assertIn("--orchestrator orca-cotal", r.stderr)
         self.assertEqual(self.e.calls(), [])
-        self.assertFalse(self.e.store(self.repo).exists())
+        self.assertEqual((self.e.store(self.repo) / "settings.json").read_bytes(), before)  # never switched
 
 
 class NoGitTests(Case):
@@ -1004,6 +1007,111 @@ class MinorTests(Case):
                          "run_0123456789ab")
         self.assertEqual(m.run_id({"result": {"run": {"id": "run_00000000000f"}}}), "run_00000000000f")
         self.assertIsNone(m.run_id({"result": {"id": "msg_1"}}))
+
+
+# --- coordinator's review round 2 ------------------------------------------------------------------------------------
+
+class Round2Tests(Case):
+    def titles(self):
+        return sorted(t.get("title") for t in json.loads(self.e.state.read_text())["terminals"])
+
+    def started(self, role="coordinator"):
+        return [x for x in self.e.sessions() if x["role"] == role]
+
+    def test_stop_pages_through_run_list_within_orcas_limit(self):
+        # R2-1: Orca refuses --limit above 100; the session's Run may be on a later page.
+        self.e.set_state(run_create_fails=True)
+        self.e.run(str(self.repo), "--no-design-lead", env_extra={"LANE_RUN_WAIT": "0"})
+        state = json.loads(self.e.state.read_text())
+        runs = [{"runId": f"run_{i:012x}", "objective": f"other {i}"} for i in range(1, 141)]
+        runs.insert(130, {"runId": "run_0000000abcde", "objective": "app coordinator"})
+        state.update(run_create_fails=False, runs=runs, handover_on_send={"handover-latest": "new"})
+        self.e.state.write_text(json.dumps(state))
+        r = self.e.pause("stop", str(self.repo), "--wait", "2")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual([x["to"] for x in json.loads(self.e.state.read_text())["sent"]], ["run:run_0000000abcde"])
+        limits = [c.split("--limit ", 1)[1].split()[0] for c in self.e.calls() if "run-list" in c]
+        self.assertTrue(limits and all(int(x) <= 100 for x in limits), limits)
+
+    def test_a_new_project_over_host_runs_the_cotal_path_there(self):
+        # R2-2: the first orca.md command; the host's copy has no store and no .cotal/ for it yet.
+        r = self.e.run(str(self.repo), "--via-host", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue([c for c in self.e.calls() if c.startswith("cotal space")])
+        self.assertEqual(self.e.settings(self.repo)["orchestrator"], "orca-cotal")
+
+    def live_agent(self, argv0, *args, role="coordinator", cwd=None):
+        """A process whose argv[0] is argv0 (python, which ignores argv[0]; a multi-call coreutils would not run)."""
+        p = subprocess.Popen(["bash", "-c", f"exec -a {argv0} \"$@\"", "x", *args], cwd=cwd or self.repo,
+                             env={**self.e.env, "LANE_ROLE": role})
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p
+
+    def test_a_live_agent_process_counts_without_agent_identity(self):
+        # R2-3: Orca may not mark a terminal it did not recognise; a live agent process in the checkout still counts.
+        self.e.set_state(agent_exits=True)  # the terminal never gets agentIdentity
+        self.e.run(str(self.repo), "--no-design-lead")
+        self.live_agent("claude", sys.executable, "-c", "import time; time.sleep(60)")
+        r = self.e.run(str(self.repo), "--no-design-lead")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.started()), 1)  # not started twice
+        self.assertIn("exists", r.stdout)
+
+    def test_a_node_run_agent_counts_too(self):
+        script = self.e.home / "tools" / "opencode2"
+        script.parent.mkdir()
+        script.write_text("import time\ntime.sleep(60)\n")
+        self.e.set_state(agent_exits=True)
+        self.e.run(str(self.repo), "--no-design-lead")
+        self.live_agent("node", sys.executable, str(script))
+        self.assertIn("sessions running: app coordinator", self.e.pause("status", str(self.repo)).stdout)
+
+    def test_an_agent_of_another_role_or_folder_does_not_count(self):
+        self.e.set_state(agent_exits=True)
+        self.e.run(str(self.repo), "--no-design-lead")
+        self.live_agent("claude", sys.executable, "-c", "import time; time.sleep(60)", role="design-lead")
+        self.live_agent("claude", sys.executable, "-c", "import time; time.sleep(60)", cwd=self.e.home)
+        self.e.run(str(self.repo), "--no-design-lead")
+        self.assertEqual(len(self.started()), 2)
+
+    def test_a_tracked_role_file_is_never_moved(self):
+        # R2-4: an attached repo onboarded on Orca + Cotal keeps its committed adapted file where it is.
+        m = load()
+        f = self.repo / ".lane-control" / "coordinator.md"
+        f.parent.mkdir()
+        f.write_text("adapted\n")
+        git("add", str(f), cwd=self.repo)
+        git("commit", "-q", "-m", "adapted", cwd=self.repo)
+        m.ORCHESTRATOR = "native-orca"
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.move_role_files(self.repo)
+        self.assertEqual(f.read_text(), "adapted\n")
+        self.assertFalse((self.repo / ".lane-control" / "additions").exists())
+
+    def test_the_store_key_reads_the_resolved_checkout_like_the_night_precheck(self):
+        # R2-7: a checkout named through a symlink of another name keys the same store.
+        core = str(ROOT / "core")
+        if core not in sys.path:
+            sys.path.insert(0, core)
+        import machineconf
+        link = self.e.home / "shop-link"
+        link.symlink_to(self.repo)
+        m = load()
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.e.env["XDG_CONFIG_HOME"], "HOME": str(self.e.home)}):
+            self.assertEqual(machineconf.settings_file(link), machineconf.settings_file(self.repo))
+            self.assertEqual(machineconf.settings_file(link).parent, m.store_dir(link))
+            self.assertEqual(m.store_dir(link), m.store_dir(self.repo))
+
+    def test_a_refusal_reads_as_one_sentence_end(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        f = self.e.store(self.repo) / "settings.json"
+        st = json.loads(f.read_text())
+        st["models"]["coordinator"] = "opencode/opencode-go/x"
+        f.write_text(json.dumps(st))
+        r = self.e.pause("start", str(self.repo))
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("..", r.stderr)
 
 
 if __name__ == "__main__":

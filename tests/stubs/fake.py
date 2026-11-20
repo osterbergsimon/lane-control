@@ -111,8 +111,15 @@ def orca():
         run = {"runId": f"run_{len(state.setdefault('runs', [])) + 1:012x}", "objective": opt("--objective")}
         state["runs"].append(run)
         out({"ok": True, "result": {**run, "next": []}})  # Orca 1.4.250's concise shape
-    if cmd == "orchestration run-list":
-        out({"ok": True, "result": {"runs": state.get("runs", [])}})
+    if cmd == "orchestration run-list":  # pages as Orca 1.4.250: --limit at most 100, then --cursor nextCursor
+        limit, start = int(opt("--limit", "10")), int(opt("--cursor", "0"))
+        if not 1 <= limit <= 100:
+            out({"ok": False, "error": {"message": "stub: --limit must be 1..100"}}, 1)
+        rows = state.get("runs", [])
+        page = {"runs": rows[start:start + limit]}
+        if start + limit < len(rows):
+            page["nextCursor"] = str(start + limit)
+        out({"ok": True, "result": page})
     if cmd == "orchestration send":
         state.setdefault("sent", []).append({"to": opt("--to"), "subject": opt("--subject"), "body": opt("--body")})
         for key, text in (state.get("handover_on_send") or {}).items():  # sessions write their handovers when asked
