@@ -50,6 +50,16 @@ def tree_hash(path: Path) -> str:
     return h.hexdigest()
 
 
+def load_adapters_here() -> dict:
+    """This checkout's adapters, loaded the way core/orch.py loads them."""
+    sys.path.insert(0, str(ROOT / "core"))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("orch_t", ROOT / "core" / "orch.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.load_adapters(ROOT)
+
+
 class Env:
     """A temp dir with a project (clone of a bare origin), a gh stub, and helpers to run orch."""
 
@@ -96,11 +106,12 @@ class Env:
         return self.gh_log.read_text().splitlines() if self.gh_log.exists() else []
 
     def fake_root(self, adapters: dict) -> Path:
-        """A lane-control root with the real core/orch.py and core/lcroot.py, and the given adapter sources."""
+        """A lane-control root with the real core/orch.py, core/lcroot.py and core/agentsdoc.py, and the given adapter
+        sources."""
         root = self.d / "lc"
         (root / "core").mkdir(parents=True)
         (root / ".lane-control-root").write_text("")
-        for f in ("orch.py", "lcroot.py"):
+        for f in ("orch.py", "lcroot.py", "agentsdoc.py"):
             shutil.copy2(ROOT / "core" / f, root / "core" / f)
         for name, src in adapters.items():
             (root / "orchestrators" / name).mkdir(parents=True)
@@ -257,8 +268,11 @@ class SwitchTests(OrchTest):
         branch = "origin/" + orch_heads(p)[0]
         git(p, "fetch", "-q", "origin")
         agents = git(p, "show", f"{branch}:AGENTS.md").stdout
-        self.assertNotIn("lane-control:begin", agents)
-        self.assertIn("<!-- orchestrator: native-orca -->", agents)
+        generated = git(p, "show", f"{branch}:AGENTS.lane-control.md").stdout
+        self.assertNotIn("lane-control:begin", agents + generated)
+        self.assertNotIn("<!-- orchestrator: native-orca -->", agents)
+        self.assertEqual(agents.count("<!-- lane-control:pointer -->"), 1)
+        self.assertIn("<!-- orchestrator: native-orca -->", generated)
         self.assertNotIn(".lane-control/", git(p, "ls-tree", "-r", "--name-only", branch).stdout)
         self.assertEqual(git(p, "log", "--format=%s", f"origin/main..{branch}").stdout.count("\n"), 1)
 
@@ -277,8 +291,8 @@ class SwitchTests(OrchTest):
         self.assert_untouched(p)
 
     def test_switch_with_nothing_to_do_prints_no_steps(self):
-        section = (ROOT / "orchestrators" / "native-orca" / "templates" / "agents-section.md").read_text()
-        p = self.e.project({"AGENTS.md": section})
+        native = load_adapters_here()["native-orca"]
+        p = self.e.project({"AGENTS.md": native.pointer_text(""), "AGENTS.lane-control.md": native.section_text("")})
         r = self.e.run("switch", str(p), "--from", "orca-cotal", "--to", "native-orca", "--yes")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("nothing to switch", r.stdout)
@@ -338,7 +352,7 @@ class SwitchTests(OrchTest):
         self.assertEqual(len(local), 1, git(p, "branch").stdout)
         self.assertIn(local[0], r.stderr)
         self.assertIn("not pushed", r.stderr)
-        self.assertIn("orchestrator: native-orca", git(p, "show", f"{local[0]}:AGENTS.md").stdout)
+        self.assertIn("orchestrator: native-orca", git(p, "show", f"{local[0]}:AGENTS.lane-control.md").stdout)
         self.assertEqual(git(p, "worktree", "list").stdout.count("\n"), 1)
         self.assertEqual(self.e.gh_calls(), [])
 

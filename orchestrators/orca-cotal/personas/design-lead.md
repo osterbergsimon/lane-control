@@ -40,7 +40,7 @@ Your own frontend lanes get a code reviewer as well, from review tier B up, the 
 issue and the commit but not the lane's report, `blocker` and `major` must be fixed, at most two rounds.
 
 ## Rules
-- Read the repo's AGENTS.md (and CLAUDE.md) before you plan, and `.lane-control/project.md`,
+- Read the repo's AGENTS.md and AGENTS.lane-control.md (and CLAUDE.md) before you plan, and `.lane-control/project.md`,
   `.lane-control/design-lead.md` and `.lane-control/routing.md` when they exist; they add to this persona and never
   lower the quality floor.
 - Before opening a lane run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner and

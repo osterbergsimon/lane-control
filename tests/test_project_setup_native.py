@@ -15,6 +15,7 @@ from unittest import mock
 from test_project_setup import Env, ROOT, Tty, git  # the shared stub environment
 
 CORE = ROOT / "core" / "scripts"
+GENERATED = "AGENTS.lane-control.md"
 SETUP = CORE / "project-setup"
 PAUSE = CORE / "project-pause"
 
@@ -325,10 +326,14 @@ class NativeOnboardingTests(Case):
             status = m.main([str(self.repo), "--no-start"])
         self.assertEqual(status, 0, err.getvalue() + out.getvalue())
         committed = git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
-        self.assertEqual(sorted(committed), sorted(["AGENTS.md", ADDITION, ".lane-control/project.md"]))
+        self.assertEqual(sorted(committed), sorted(["AGENTS.md", GENERATED, ADDITION, ".lane-control/project.md"]))
         agents = (self.repo / "AGENTS.md").read_text()
-        self.assertEqual(agents.count("<!-- lane-control:begin -->"), 1)
-        self.assertEqual(agents.count("<!-- orchestrator: native-orca -->"), 1)
+        generated = (self.repo / GENERATED).read_text()
+        self.assertEqual(agents.count("<!-- lane-control:pointer -->"), 1)
+        self.assertNotIn("<!-- lane-control:begin -->", agents)
+        self.assertNotIn("<!-- orchestrator: native-orca -->", agents)
+        self.assertEqual(generated.count("<!-- lane-control:begin -->"), 1)
+        self.assertEqual(generated.count("<!-- orchestrator: native-orca -->"), 1)
         adapter_prompt = self.e.agent_runs()[0]["prompt"]
         self.assertIn(".lane-control/additions/", adapter_prompt)
         self.assertIn("Read docs/plan.md.", (self.repo / ".lane-control" / "coordinator.md").read_text())
@@ -478,6 +483,37 @@ def session_record(e, checkout, role, harness):
     import harnesses
     with mock.patch.dict(os.environ, {"XDG_STATE_HOME": e.env["XDG_STATE_HOME"]}):
         return harnesses.session_record(checkout, role, harness)
+
+
+class NativeSkillTests(Case):
+    """UP-7: the native path installs its lane skill the way the Cotal path installs orca-cotal-lanes."""
+
+    def skill(self):
+        return self.e.home / ".agents" / "skills" / "native-orca-lanes"
+
+    def test_setup_installs_the_native_lane_skill_for_claude_and_opencode(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        src = ROOT / "orchestrators" / "native-orca"
+        self.assertEqual((self.skill() / "SKILL.md").read_text(),
+                         (src / "skills" / "native-orca-lanes" / "SKILL.md").read_text())
+        self.assertEqual((self.skill() / "brief.md").read_text(), (src / "templates" / "lane-brief.md").read_text())
+        for agent_dir in (self.e.home / ".claude" / "skills", Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills"):
+            link = agent_dir / "native-orca-lanes"
+            self.assertTrue(link.is_symlink(), link)
+            self.assertEqual(link.resolve(), self.skill().resolve())
+        self.assertIn("skills: created", r.stdout)
+        self.assertFalse((self.e.home / ".agents" / "skills" / "orca-cotal-lanes").exists())
+
+    def test_refresh_puts_back_a_changed_or_missing_skill_file(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        (self.skill() / "brief.md").unlink()
+        (self.skill() / "SKILL.md").write_text("old\n")
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue((self.skill() / "brief.md").exists())
+        self.assertNotEqual((self.skill() / "SKILL.md").read_text(), "old\n")
+        self.assertIn("skills: updated", r.stdout)
 
 
 class RefreshTests(Case):
@@ -660,8 +696,12 @@ class RerunTests(Case):
         started = [r for r in self.e.agent_runs() if "-p" not in r["argv"]]
         self.assertEqual(len(headless), 2)  # the first run's adapter and reviewer only
         agents = (self.repo / "AGENTS.md").read_text()
-        self.assertEqual(agents.count("<!-- lane-control:begin -->"), 1)
-        self.assertEqual(agents.count("<!-- orchestrator: native-orca -->"), 1)
+        generated = (self.repo / GENERATED).read_text()
+        self.assertEqual(agents.count("<!-- lane-control:pointer -->"), 1)
+        self.assertNotIn("<!-- lane-control:begin -->", agents)
+        self.assertNotIn("<!-- orchestrator: native-orca -->", agents)
+        self.assertEqual(generated.count("<!-- lane-control:begin -->"), 1)
+        self.assertEqual(generated.count("<!-- orchestrator: native-orca -->"), 1)
         lead_wt = Path(opt(next(c for c in self.e.creates() if opt(c, "--title") == "app design lead"),
                            "--worktree").split(":", 1)[1])
         for checkout in (self.repo, lead_wt):
@@ -674,6 +714,32 @@ class RerunTests(Case):
         self.assertEqual((self.repo / ".git" / "info" / "exclude").read_text().count("lane-control: begin"), 1)
         self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
 
+
+    def test_a_rerun_moves_sections_left_in_agents_md_to_their_own_file_once(self):
+        self.e.script_agents(sonnet=[WRITE_NATIVE], opus=[PASS])
+        self.setup_in_terminal()
+        hand = "# Rules\n\nWritten by hand.\n"
+        generated = (self.repo / GENERATED).read_text()
+        blocks = generated[generated.index("<!-- lane-control:begin -->"):]  # as an older project-setup left them
+        (self.repo / "AGENTS.md").write_text(hand + "\n" + blocks)
+        git("rm", "-q", GENERATED, cwd=self.repo)
+        git("commit", "-qam", "an older layout", cwd=self.repo)
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        self.setup_in_terminal()
+        self.assertEqual(git("rev-list", "--count", f"{head}..HEAD", cwd=self.repo), "1")
+        self.assertEqual(git("log", "-1", "--format=%s", cwd=self.repo),
+                         "Move lane-control's generated sections from AGENTS.md to AGENTS.lane-control.md")
+        self.assertEqual(sorted(git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()),
+                         ["AGENTS.lane-control.md", "AGENTS.md"])
+        agents = (self.repo / "AGENTS.md").read_text()
+        self.assertTrue(agents.startswith(hand))
+        self.assertEqual(agents.count("<!-- lane-control:pointer -->"), 1)
+        self.assertNotIn("<!-- lane-control:begin -->", agents)
+        self.assertNotIn("<!-- orchestrator: native-orca -->", agents)
+        self.assertEqual((self.repo / GENERATED).read_text(), generated)
+        moved = git("rev-parse", "HEAD", cwd=self.repo)
+        self.setup_in_terminal()
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), moved)
 
 # --- final review fixes ----------------------------------------------------------------------------------------------
 
@@ -744,7 +810,7 @@ class ReviewFixTests(Case):
             status = m.main([str(self.repo), "--no-start"])
         self.assertEqual(status, 0, err.getvalue() + out.getvalue())
         committed = git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
-        self.assertEqual(sorted(committed), sorted(["AGENTS.md", ADDITION, ".lane-control/project.md"]))
+        self.assertEqual(sorted(committed), sorted(["AGENTS.md", GENERATED, ADDITION, ".lane-control/project.md"]))
         self.assertIn("Read docs/plan.md.", (self.repo / ".lane-control" / "coordinator.md").read_text())
         review = [r for r in self.e.agent_runs() if "-p" in r["argv"]][1]["prompt"]
         self.assertIn(".lane-control/additions/", review)

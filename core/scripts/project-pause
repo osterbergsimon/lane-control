@@ -158,9 +158,9 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
     print(f"{p['project']} paused. `project-pause start` starts them again, resuming their sessions.")
     return 0
 
-RESUME = ("You are restarting as a fresh session. Read AGENTS.md and the orca-cotal-lanes skill, then resume from "
-          "`bd recall handover-latest`, `cotal who` and `orca worktree list`, and tell the owner in one line that you "
-          "are back.")
+RESUME = ("You are restarting as a fresh session. Read AGENTS.md and AGENTS.lane-control.md and the orca-cotal-lanes "
+          "skill, then resume from `bd recall handover-latest`, `cotal who` and `orca worktree list`, and tell the "
+          "owner in one line that you are back.")
 
 
 marker = ps.guard_marker

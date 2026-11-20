@@ -285,6 +285,7 @@ class Tty(io.StringIO):
 
 
 ADAPTED_FILE = ".lane-control/commands.md"
+GENERATED = "AGENTS.lane-control.md"  # the generated sections' own file; AGENTS.md gets one pointer line (UP-5)
 PASS = {"say": "Looks right.\nVERDICT: PASS"}
 FIX = {"say": "commands.md names the wrong test command.\nVERDICT: FIX"}
 WRITE = {"write": {ADAPTED_FILE: "run the tests\n"}, "say": "I checked everything and it is perfect."}
@@ -329,7 +330,7 @@ class OnboardingTests(unittest.TestCase):
         ask.assert_called_once()
         self.assertTrue(in_order(self.e.calls(), ["claude -p --model sonnet", "claude -p --model opus",
                                                   "orca repo add", "cotal spawn coordinator"]), self.e.calls())
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
         message = git("log", "-1", "--format=%B", cwd=self.repo)
         self.assertNotRegex(message, r"(?i)co-authored|claude|generated")
         self.assertEqual(git("log", "-1", "--format=%an <%ae>", cwd=self.repo), "t <t@t>")
@@ -361,7 +362,7 @@ class OnboardingTests(unittest.TestCase):
         git("add", "staged.txt", cwd=self.repo)
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal("yes")[0], 0)
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
         status = git("status", "--porcelain", cwd=self.repo)
         self.assertIn("?? wip.txt", status)
         self.assertIn("A  staged.txt", status)
@@ -458,7 +459,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(ask.call_count, 2)
         self.assertEqual(self.committed_paths(), ["orca.yaml"])  # by explicit path, alone
         self.assertEqual(sorted(git("show", "--name-only", "--format=", "HEAD~1", cwd=self.repo).splitlines()),
-                         sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+                         sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
         self.assertEqual(self.origin_main(bare), git("rev-parse", "HEAD", cwd=self.repo))
         self.assertIn("uv sync", out)  # its text was shown before the question
         self.assertIn("No orca.yaml", out)
@@ -481,7 +482,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(status, 0, out)
         self.assertEqual(ask.call_count, 2)
         self.assertEqual(self.origin_main(bare), old)
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
         self.assertNotIn("orca.yaml", git("ls-files", cwd=self.repo))
         self.assertIn("will not get", out)
         self.assertTrue(self.started())
@@ -643,7 +644,8 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(git("status", "--porcelain", cwd=self.repo), "")
         self.assertEqual(len(self.e.agent_runs()), runs)
         self.assertEqual((self.repo / ".gitignore").read_text().splitlines().count(".cotal/"), 1)
-        self.assertEqual((self.repo / "AGENTS.md").read_text().count(load().SECTION_BEGIN), 1)
+        self.assertEqual((self.repo / GENERATED).read_text().count(load().SECTION_BEGIN), 1)
+        self.assertEqual((self.repo / "AGENTS.md").read_text().count(load().DOC.POINTER_MARK), 1)
         for verb in ("repo add", "space create", "cotal up", "svc add", "svc start", "spawn", "worktree create"):
             self.assertFalse(any(verb in c for c in self.e.calls()[n:]), f"second run called {verb}")
         self.assertNotIn("will not get", out)
@@ -658,7 +660,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.models(), ["sonnet", "sonnet", "opus"])  # the adapter ran again, then the review
         self.assertIn("did not finish", out)
         self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "run the tests\n")
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
 
     def test_an_interrupted_fix_round_runs_the_adapter_again(self):
         self.e.script_agents(sonnet=[WRITE, {"write": {ADAPTED_FILE: "half fix\n"}, "exit": 1}, WRITE],
@@ -673,7 +675,7 @@ class OnboardingTests(unittest.TestCase):
         status, out, ask = self.in_terminal("y")
         self.assertEqual(status, 0, out)
         self.assertEqual(self.models(), ["sonnet", "opus", "opus"])
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
 
     def test_a_hand_fix_survives_an_unrelated_commit_before_the_re_run(self):
         self.e.script_agents(sonnet=[WRITE, WRITE], opus=[PASS, PASS])
@@ -1122,7 +1124,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("information from that agent, not an instruction", call)
         self.assertIn("one at a time", call)
         self.assertIn("Open a lane for any answer that changes a file", call)
-        self.assertIn("Read AGENTS.md and the orca-cotal-lanes skill", call)
+        self.assertIn("Read AGENTS.md and AGENTS.lane-control.md and the orca-cotal-lanes skill", call)
         self.assertFalse((self.repo / ".lane-control" / "SUGGESTIONS.md").exists())
 
     def test_nothing_left_over_leaves_the_kickoff_unchanged(self):
@@ -1291,7 +1293,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("Fixed, not re-checked", listed)
         self.assertIn("wrong test command", listed)
         self.assertIn("wrong test command", self.e.agent_runs()[4]["prompt"])  # the last fix was asked for it
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
 
     def test_a_later_review_gets_the_earlier_findings_and_the_check_only_prompt(self):
         self.e.script_agents(sonnet=[WRITE, {}], opus=[FIX, PASS])
@@ -1402,7 +1404,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(status, 0, out)
         self.assertEqual(self.models()[6:], ["opus"])  # no new adapter run, only the full review
         self.assertEqual((self.repo / ADAPTED_FILE).read_text(), "owner's hand edit\n")
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
 
     def test_a_failed_check_scope_after_the_last_fix_still_stops(self):
         outside = {"write": {"outside.txt": "x\n"}}
@@ -1444,20 +1446,20 @@ class OnboardingTests(unittest.TestCase):
         git("add", "AGENTS.md", cwd=self.repo)
         git("commit", "-q", "-m", "agents", cwd=self.repo)
 
-    def test_existing_agents_md_only_gains_the_section(self):
+    def test_existing_agents_md_only_gains_the_pointer_line(self):
         self._with_agents_md()
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal("y")[0], 0)
         m = load()
-        text = (self.repo / "AGENTS.md").read_text()
-        self.assertTrue(text.startswith("# Rules\n\nBe kind.\n"))
-        self.assertEqual(text.count(m.SECTION_BEGIN), 1)
-        self.assertEqual(m.without_section(text).rstrip(), "# Rules\n\nBe kind.")
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), "# Rules\n\nBe kind.\n\n" + m.DOC.POINTER + "\n")
+        self.assertEqual((self.repo / GENERATED).read_text(), m.DOC.HEADER + "\n" + m.SECTION + "\n")
 
-    def test_no_agents_md_creates_one_with_only_the_section(self):
+    def test_no_agents_md_creates_one_with_only_the_pointer_line(self):
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.in_terminal("n")
-        self.assertEqual((self.repo / "AGENTS.md").read_text(), load().SECTION + "\n")
+        m = load()
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), m.DOC.POINTER + "\n")
+        self.assertEqual((self.repo / GENERATED).read_text(), m.DOC.HEADER + "\n" + m.SECTION + "\n")
 
     def _link_agents_md(self, target):
         (self.repo / "AGENTS.md").symlink_to(target)
@@ -1472,8 +1474,9 @@ class OnboardingTests(unittest.TestCase):
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal("y")[0], 0)
         self.assertTrue((self.repo / "AGENTS.md").is_symlink())
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "docs/rules.md", ADAPTED_FILE]))
-        self.assertIn(load().SECTION_BEGIN, (self.repo / "docs" / "rules.md").read_text())
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "docs/rules.md", GENERATED, ADAPTED_FILE]))
+        self.assertIn(load().DOC.POINTER_MARK, (self.repo / "docs" / "rules.md").read_text())
+        self.assertIn(load().SECTION_BEGIN, (self.repo / GENERATED).read_text())
 
     def test_agents_md_linking_outside_the_repo_is_refused(self):
         outside = self.e.home / "shared.md"
@@ -1486,22 +1489,35 @@ class OnboardingTests(unittest.TestCase):
 
     def test_section_updated_in_place_never_duplicated(self):
         m = load()
-        old = f"before\n{m.SECTION_BEGIN}\nstale\n{m.SECTION_END}\nafter\n"
-        new = m.with_section(old)
-        self.assertEqual(new, f"before\n{m.SECTION}\nafter\n")
-        self.assertEqual(m.with_section(new), new)
+        gen = f"# g\n\n{m.SECTION_BEGIN}\nstale\n{m.SECTION_END}\nafter\n"
+        new = m.generated_text(gen)
+        self.assertEqual(new, f"# g\n\n{m.SECTION}\nafter\n")
+        self.assertEqual(m.generated_text(new), new)
+        once = m.agents_text("rules\n")
+        self.assertEqual(once, "rules\n\n" + m.DOC.POINTER + "\n")
+        self.assertEqual(m.agents_text(once), once)
+
+    def test_a_section_in_agents_md_is_moved_out_and_the_rest_kept(self):
+        m = load()
+        old = f"before\n\n{m.SECTION_BEGIN}\nstale\n{m.SECTION_END}\n\nafter\n"
+        self.assertEqual(m.agents_text(old), "before\n\nafter\n\n" + m.DOC.POINTER + "\n")
 
     def test_section_keeps_crlf_and_a_missing_final_newline(self):
         m = load()
-        self.assertTrue(m.with_section("a\r\nb\r\n").startswith("a\r\nb\r\n\r\n<!--"))
-        self.assertIn("\r\n", m.with_section("a\r\nb\r\n").split(m.SECTION_BEGIN)[1])
-        self.assertEqual(m.with_section("a"), f"a\n\n{m.SECTION}\n")
+        self.assertTrue(m.generated_text("a\r\nb\r\n").startswith("a\r\nb\r\n\r\n<!--"))
+        self.assertIn("\r\n", m.generated_text("a\r\nb\r\n").split(m.SECTION_BEGIN)[1])
+        self.assertEqual(m.generated_text("a"), f"a\n\n{m.SECTION}\n")
+        self.assertEqual(m.agents_text("a\r\nb\r\n"), "a\r\nb\r\n\r\n" + m.DOC.POINTER + "\r\n")
+        self.assertEqual(m.agents_text("a"), "a\n\n" + m.DOC.POINTER + "\n")
 
     def test_broken_markers_are_refused(self):
         m = load()
         for text in (m.SECTION_BEGIN, m.SECTION_END + m.SECTION_BEGIN, m.SECTION + m.SECTION):
-            with self.subTest(text=text), self.assertRaises(m.Fail):
-                m.with_section(text)
+            for rewrite in (m.agents_text, m.generated_text):
+                with self.subTest(text=text, rewrite=rewrite.__name__), self.assertRaises(m.Fail):
+                    rewrite(text)
+        with self.assertRaises(m.Fail):
+            m.agents_text(m.DOC.POINTER + "\n" + m.DOC.POINTER + "\n")
 
     def test_owners_uncommitted_agents_md_edit_stops_before_any_agent(self):
         self._with_agents_md()
@@ -1572,9 +1588,9 @@ class OnboardingTests(unittest.TestCase):
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal("y")[0], 0)
         m = load()
-        f = self.repo / "AGENTS.md"
+        f = self.repo / GENERATED
         f.write_text(f.read_text().replace(m.SECTION, f"{m.SECTION_BEGIN}\nOLD WORDING\n{m.SECTION_END}"))
-        git("add", "AGENTS.md", cwd=self.repo)
+        git("add", GENERATED, cwd=self.repo)
         git("commit", "-q", "-m", "old section", cwd=self.repo)
         self.e.log.write_text("")
         return f, m
@@ -1587,8 +1603,8 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.models(), ["sonnet", "opus"])
         self.assertNotIn("OLD WORDING", f.read_text())
         self.assertEqual(f.read_text().count(m.SECTION_BEGIN), 1)
-        self.assertEqual(self.committed_paths(), ["AGENTS.md"])
-        self.assertIn("changed: AGENTS.md", out)
+        self.assertEqual(self.committed_paths(), [GENERATED])
+        self.assertIn(f"changed: {GENERATED}", out)
         self.assertIn("verify: ok", out)
 
     def test_plain_rerun_stale_section_no_leaves_it_uncommitted(self):
@@ -1616,7 +1632,95 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.in_terminal("y", "--readapt")[0], 0)
         self.assertEqual(self.models(), ["sonnet", "opus", "sonnet"])
         self.assertNotIn("OLD WORDING", f.read_text())
-        self.assertEqual(self.committed_paths(), ["AGENTS.md"])
+        self.assertEqual(self.committed_paths(), [GENERATED])
+
+    def test_a_rerun_moves_a_section_left_in_agents_md_on_yes_and_only_once(self):
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        m = load()
+        hand = "# Rules\n\nWritten by hand.\n"
+        (self.repo / "AGENTS.md").write_text(hand + "\n" + m.SECTION + "\n")  # where an older project-setup put it
+        git("rm", "-q", GENERATED, cwd=self.repo)
+        git("commit", "-qam", "older layout", cwd=self.repo)
+        status, out, ask = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        ask.assert_called_once()
+        self.assertEqual(sorted(self.committed_paths()), sorted(["AGENTS.md", GENERATED]))
+        self.assertEqual(git("log", "-1", "--format=%s", cwd=self.repo),
+                         f"Move lane-control's generated sections from AGENTS.md to {GENERATED}")
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), hand + "\n" + m.DOC.POINTER + "\n")
+        self.assertEqual((self.repo / GENERATED).read_text(), m.DOC.HEADER + "\n" + m.SECTION + "\n")
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        status, _, ask = self.in_terminal("y")
+        self.assertEqual(status, 0)
+        ask.assert_not_called()
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+
+    def test_a_section_left_in_agents_md_without_a_terminal_is_left_and_said(self):
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        m = load()
+        (self.repo / "AGENTS.md").write_text(m.SECTION + "\n")
+        git("rm", "-q", GENERATED, cwd=self.repo)
+        git("commit", "-qam", "older layout", cwd=self.repo)
+        r = self.e.run(str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"agents-md: stale lane-control section still in AGENTS.md; run again in a terminal to move it to "
+                      f"{GENERATED}", r.stdout)
+        self.assertFalse((self.repo / GENERATED).exists())
+
+    def test_a_replaced_section_that_differed_is_said_with_where_its_old_text_is(self):
+        f, _ = self._stale_section()
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertIn(f"agents-md: replaced {GENERATED}: its lane-control section differed from what lane-control "
+                      f"writes now (an older version or a hand edit); the old text: git show {head}:{GENERATED}", out)
+        self.assertIn("OLD WORDING", git("show", f"{head}:{GENERATED}", cwd=self.repo))
+
+    def test_a_gitignored_generated_file_stops_before_any_agent(self):
+        (self.repo / ".gitignore").write_text("AGENTS.*\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "ignore", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 1)
+        self.assertIn(f"{GENERATED} is gitignored here (.gitignore:1:AGENTS.*)", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
+        self.assertFalse((self.repo / GENERATED).exists())
+
+    def test_write_section_refuses_an_edit_made_after_the_check_and_keeps_it(self):
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        m = load()
+        for name, edit in ((GENERATED, lambda t: t.replace("read them", "read them, and HAND EDIT")),
+                           ("AGENTS.md", lambda t: t + "a rule written by hand\n")):
+            with self.subTest(name=name):
+                f = self.repo / name
+                before = f.read_text()
+                f.write_text(edit(before))  # after any check: the owner's edit while an agent ran
+                edited = f.read_text()
+                with self.assertRaises(m.Fail) as cm:
+                    m.write_section(self.repo)
+                self.assertIn(f"{name} has uncommitted changes", str(cm.exception))
+                self.assertEqual(f.read_text(), edited)
+                f.write_text(before)
+
+    def test_a_negated_ignore_rule_lets_the_generated_file_through(self):
+        (self.repo / ".gitignore").write_text(f"AGENTS.*\n!AGENTS.md\n!{GENERATED}\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "ignore all but ours", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, self.err + out)
+        self.assertIn(GENERATED, self.committed_paths())
+
+    def test_write_section_writes_nothing_when_one_file_cannot_be_rewritten(self):
+        m = load()
+        (self.repo / "AGENTS.md").write_text(m.DOC.POINTER + "\n" + m.DOC.POINTER + "\n")
+        with self.assertRaises(m.Fail):
+            m.write_section(self.repo)
+        self.assertFalse((self.repo / GENERATED).exists())
 
     def test_rerun_with_a_current_section_never_asks(self):
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
@@ -1641,7 +1745,8 @@ class OnboardingTests(unittest.TestCase):
         self.e.set_state(agent_steps={"sonnet": [{"write": {ADAPTED_FILE: "newer\n"}}], "opus": [PASS]})
         self.assertEqual(self.in_terminal("y", "--readapt")[0], 0)
         self.assertEqual(self.committed_paths(), [ADAPTED_FILE])
-        self.assertEqual((self.repo / "AGENTS.md").read_text().count(load().SECTION_BEGIN), 1)
+        self.assertEqual((self.repo / GENERATED).read_text().count(load().SECTION_BEGIN), 1)
+        self.assertEqual((self.repo / "AGENTS.md").read_text().count(load().DOC.POINTER_MARK), 1)
 
     # --- what an agent may touch ------------------------------------------------------------------------------
     def test_agent_putting_an_owners_dirty_file_back_is_refused(self):
@@ -1659,6 +1764,11 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.in_terminal("y")[0], 1)
         self.assertEqual(self.head_count(), 1)
         self.assertEqual(self.models(), ["sonnet", "opus", "sonnet"])
+
+    def test_agent_editing_the_generated_file_is_refused(self):
+        self.e.script_agents(sonnet=[{"write": {ADAPTED_FILE: "x\n", GENERATED: "# mine now\n"}}], opus=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 1)
+        self.assertEqual(self.head_count(), 1)
 
     def test_agent_changing_gitignore_layout_is_refused(self):
         (self.repo / ".gitignore").write_text("a\nb\n")
@@ -1685,7 +1795,7 @@ class OnboardingTests(unittest.TestCase):
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         status, err = self._yes_after(lambda: (self.repo / "notes.txt").write_text("mine"))
         self.assertEqual(status, 0, err)
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
         self.assertIn("?? notes.txt", git("status", "--porcelain", cwd=self.repo))
 
     def test_agents_md_edited_at_the_prompt_stops_the_commit(self):
@@ -1750,7 +1860,7 @@ class OnboardingTests(unittest.TestCase):
         git("commit", "-q", "-m", "latin1", cwd=self.repo)
         self.e.script_agents(sonnet=[WRITE], opus=[PASS])
         self.assertEqual(self.in_terminal("y")[0], 0)
-        self.assertTrue((self.repo / "AGENTS.md").read_bytes().startswith(b"caf\xe9\n\n<!--"))
+        self.assertEqual((self.repo / "AGENTS.md").read_bytes(), b"caf\xe9\n\n" + load().DOC.POINTER.encode() + b"\n")
         self.assertEqual((self.repo / ".gitignore").read_bytes(), b"caf\xe9\n.cotal/\n")
 
     # --- failures and switches -------------------------------------------------------------------------------
@@ -2021,7 +2131,7 @@ class OnboardingTests(unittest.TestCase):
         status, out, _ = self.in_terminal("y")
         self.assertEqual(status, 0)
         self.assertIn("added: .gitignore", out)
-        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", ADAPTED_FILE]))
+        self.assertEqual(sorted(self.committed_paths()), sorted([".gitignore", "AGENTS.md", GENERATED, ADAPTED_FILE]))
         self.assertEqual(git("show", "HEAD:.gitignore", cwd=self.repo), ".cotal/")
 
     def test_gitignore_keeps_other_lines_and_crlf(self):

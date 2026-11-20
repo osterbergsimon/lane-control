@@ -110,6 +110,50 @@ class AdapterTests(unittest.TestCase):
             self.a.strip(self.p, self.p)
 
 
+class GeneratedFileTests(unittest.TestCase):
+    """UP-5: the section in AGENTS.lane-control.md, one pointer line in AGENTS.md; the fixture keeps the old layout."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.p = Path(self.tmp.name) / "proj"
+        shutil.copytree(FIXTURE, self.p)
+        self.a = load()
+        spec = importlib.util.spec_from_file_location("agentsdoc_t", ROOT / "core" / "agentsdoc.py")
+        self.d = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.d)
+        old = (self.p / "AGENTS.md").read_text()
+        section = old[old.index(self.a.BEGIN):old.index(self.a.END) + len(self.a.END)]
+        (self.p / "AGENTS.md").write_text(self.d.with_pointer(PROJECT_TEXT))
+        self.gen = self.p / self.d.GENERATED
+        self.gen.write_text(self.d.put_block(self.d.HEADER, section, self.a.BEGIN, self.a.END))
+
+    def test_detect_names_the_generated_file(self):
+        found = self.a.detect(self.p)
+        self.assertIn("AGENTS.lane-control.md lane-control section", found)
+        self.assertNotIn("AGENTS.md lane-control section", found)
+
+    def test_strip_removes_the_file_and_the_pointer(self):
+        changes = self.a.strip(self.p, self.p)
+        self.assertEqual((self.p / "AGENTS.md").read_text(), PROJECT_TEXT)
+        self.assertFalse(self.gen.exists())
+        self.assertTrue(any("pointer" in c for c in changes), changes)
+        self.assertEqual(self.a.strip(self.p, self.p), [])
+
+    def test_strip_keeps_the_file_while_another_section_is_in_it(self):
+        native = "<!-- orchestrator: native-orca -->\nn\n<!-- /orchestrator: native-orca -->"
+        self.gen.write_text(self.gen.read_text() + "\n" + native + "\n")
+        self.a.strip(self.p, self.p)
+        self.assertNotIn(self.a.BEGIN, self.gen.read_text())
+        self.assertIn(native, self.gen.read_text())
+        self.assertIn(self.d.POINTER_MARK, (self.p / "AGENTS.md").read_text())
+
+    def test_strip_refuses_unpaired_markers_in_the_generated_file(self):
+        self.gen.write_text(self.d.HEADER + self.a.BEGIN + "\n")
+        with self.assertRaises(ValueError):
+            self.a.strip(self.p, self.p)
+
+
 class CommandTests(OrchTest):
     def test_strip_on_clean_project_says_nothing_to_strip(self):
         p = self.e.project()

@@ -451,7 +451,7 @@ class LaneSkillCliTests(unittest.TestCase):
     def test_closes_shell_and_setup_tab_only_after_the_agent_started(self):
         t = self.flat
         i_wait, i_spawn, i_close, i_owner = (t.index(x) for x in (
-            "1. If the worktree's", "start the agent with the `cotal_spawn`", "3. Only then close the plain shell", "4. Give the owner a shell"))
+            "1. Never wait for the repo's setup script yourself", "start the agent with the `cotal_spawn`", "3. Only then close the plain shell", "4. Give the owner a shell"))
         self.assertTrue(i_wait < i_spawn < i_close < i_owner)
         for needle in ("an empty worktree may refuse the spawn and strand the agent's name", "Close the Setup tab only if the marker",
                        "If the marker never appeared, keep the Setup tab open", "With no marker in `orca.yaml`"):
@@ -1169,6 +1169,274 @@ class LessonsDoctrineTests(unittest.TestCase):
             self.assertIn(needle, flat(ROOT / "orchestrators" / "native-orca" / "record.md"), needle)
         hist = text.split("\n## History\n", 1)[1].split("\n## ", 1)[0]
         self.assertRegex(hist, r"(?m)^- 2026-11-19 ")
+
+
+# --- coordinator hands (UP-4, lc-ay2) -------------------------------------------------------------------------------
+HANDS = ("Before any edit or state-changing command, write one line naming whom it is for: `LANE: <KEY>-<n>` for the "
+         "lane you act for, or `DOCTRINE: <why>` for one of the three exceptions below.")
+WAITS = "Waits are lane work: never wait, poll, sleep or watch yourself."
+EXCEPTIONS = ("1. Merging on the owner's word", "2. Closing lanes", "3. Your own records")
+# Coordinator-facing files that are not personas: the sections project-setup or a person pastes into a project.
+HANDS_TEMPLATES = (ROOT / "orchestrators" / "native-orca" / "templates" / "agents-section.md",
+                   ROOT / "orchestrators" / "rove" / "templates" / "AGENTS-coordination.md")
+
+
+def coordinator_personas():
+    """Every project coordinator persona, on every orchestrator: a new one is pinned by being added."""
+    return sorted((ROOT / "orchestrators").glob("*/personas/coordinator.md"))
+
+
+class CoordinatorHandsTests(unittest.TestCase):
+    """The doctrine dropped once in a restructure; these keep it in every coordinator-facing file."""
+
+    def test_every_orchestrator_with_personas_has_a_coordinator_persona(self):
+        with_personas = sorted(d.name for d in (ROOT / "orchestrators").iterdir() if (d / "personas").is_dir())
+        self.assertEqual(sorted(p.parent.parent.name for p in coordinator_personas()), with_personas)
+        self.assertGreaterEqual(len(with_personas), 2)
+
+    def test_roles_coordinator_personas_and_templates_carry_the_doctrine(self):
+        for path in (ROOT / "core" / "roles.md", *coordinator_personas(), *HANDS_TEMPLATES):
+            t = flat(path)
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn(HANDS, t)
+                self.assertIn(WAITS, t)
+                for needle in EXCEPTIONS:
+                    self.assertIn(needle, t)
+                self.assertIn("no others", t)
+
+    def test_roles_puts_the_doctrine_under_the_project_coordinator(self):
+        roles = (ROOT / "core" / "roles.md").read_text()
+        coordinator = roles.split("\n## Project coordinator\n", 1)[1]
+        self.assertIn("### Coordinator hands", coordinator)
+        self.assertIn(HANDS, flat_text(coordinator))
+
+    def test_machine_coordinators_never_wait_either(self):
+        for path in sorted((ROOT / "orchestrators").glob("*/personas/machine-coordinator.md")):
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn(WAITS, flat(path))
+
+    def test_the_native_section_never_tells_the_coordinator_to_block(self):
+        self.assertNotIn("check --wait", (ROOT / "orchestrators" / "native-orca" / "templates" /
+                                          "agents-section.md").read_text())
+
+
+def flat_text(text):
+    return " ".join(text.split())
+
+
+# --- native-orca lane skill (UP-7, lc-dcn) --------------------------------------------------------------------------
+NATIVE_SKILL = ROOT / "orchestrators" / "native-orca" / "skills" / "native-orca-lanes" / "SKILL.md"
+
+
+class NativeLaneSkillTests(unittest.TestCase):
+    def setUp(self):
+        self.text = NATIVE_SKILL.read_text()
+        self.flat = " ".join(self.text.split())
+
+    def test_frontmatter_names_the_skill_and_when_to_use_it(self):
+        keys, _ = frontmatter(NATIVE_SKILL)
+        self.assertEqual(keys["name"], "native-orca-lanes")
+        self.assertIn("coordinator", keys["description"])
+        self.assertIn("native Orca", keys["description"])
+
+    def test_gate_comes_before_the_lane_opens(self):
+        t = self.flat
+        for needle in ("project-pause wake .", "`~/.agents/bin/lane-room`", "hold the lane and tell the owner",
+                       "~/.agents/bin/lane-tier", "git rev-list --count HEAD..origin/<default>", "lane:<KEY>-<n>",
+                       "--claim"):
+            self.assertIn(needle, t, needle)
+        self.assertLess(t.index("lane-room"), t.index("orca-ide orchestration worker-start"))
+        self.assertLess(t.index("lane-tier"), t.index("orca-ide orchestration worker-start"))
+
+    def test_lane_mechanics(self):
+        t = self.flat
+        for needle in ("orca-ide orchestration worker-start --spec-file", "--worktree new-child", "opencode2",
+                       "`brief.md` next to this skill", "orca-ide orchestration run-current",
+                       "orca-ide orchestration check", "reply", "SendMessage", "--to dispatch:<id>",
+                       "worker-release", "orca-ide worktree rm", "worker-stop", "`LANE: <KEY>-<n>`",
+                       "Waits are lane work", "orca-ide skills get orchestration"):
+            self.assertIn(needle, t, needle)
+
+    def test_report_conventions(self):
+        t = self.flat
+        for needle in ("succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP", "worker_done", "word for word",
+                       "never the lane's report"):
+            self.assertIn(needle, t, needle)
+
+    def test_never_types_into_a_terminal(self):
+        self.assertIn("terminal send", self.text)
+        for line in self.text.splitlines():
+            for bad in FORBIDDEN + ["check --wait"]:
+                if bad in line:
+                    self.assertRegex(line.lower(), r"never|do not|don't", f"'{bad}' outside a prohibition: {line}")
+
+    def test_native_lane_starters_read_the_skill(self):
+        for role in ("coordinator", "design-lead"):
+            t = flat(ROOT / "orchestrators" / "native-orca" / "personas" / f"{role}.md")
+            self.assertIn("the `native-orca-lanes` skill", t, role)
+
+    def test_lines_fit(self):
+        for n, line in enumerate(self.text.splitlines(), 1):
+            if not line.startswith(("description:", "for c in")):
+                self.assertLessEqual(len(line), 120, f"SKILL.md:{n}")
+
+
+# --- review round 1 of UP-B ----------------------------------------------------------------------------------------
+WAIT_LOOP = re.compile(r"until \[|until test\b|\buntil\b.*;\s*do\b(?!\s+not\b|\s*n't)|`until\b|"
+                       r"\bwhile\b.*\bsleep\b|\bsleep (?:\d|\$)|"
+                       r"--wait\b|--watch\b|\bgh run watch\b|\bwatch -n\b|\btail -[fF]\b|\bterminal wait\b|"
+                       r"\borchestration wait\b")
+PROHIBITION = re.compile(r"\bnever\b|\bdo not\b|\bdon't\b", re.I)
+BOUNDARY = re.compile(r"[.:;] |, (?:but|then)\b")
+
+
+def _plain(context: str) -> str:
+    """The context with code spans (closed, or opened and still open at the wait) and e.g./i.e. blanked, so that their
+    punctuation is never taken for a clause boundary."""
+    out = re.sub(r"`[^`]*`", lambda m: " " * len(m.group()), context)
+    if out.count("`") % 2:
+        i = out.rindex("`")
+        out = out[:i] + " " * (len(out) - i)
+    return re.sub(r"\b(?:e\.g|i\.e)\.", lambda m: " " * len(m.group()), out, flags=re.I)
+
+
+def wait_outside_prohibition(lines: list, n: int):
+    """The wait on line n (0-based) that no prohibition covers, or None. A prohibition covers a wait when it comes
+    before it in the same clause: on that line, or at the end of the line before (prose wrapped between the two), with
+    no ". ", ": ", "; ", ", but" or ", then" between them (a colon right after the prohibition word is its own)."""
+    for m in WAIT_LOOP.finditer(lines[n]):
+        context = _plain(((lines[n - 1][-60:] + " ") if n else "") + lines[n][:m.start()])
+        last = None
+        for p in PROHIBITION.finditer(context):
+            last = p
+        after = context[last.end():] if last else ""
+        if last is None or BOUNDARY.search(after[1:] if after.startswith(":") else after):
+            return m.group(0)
+    return None
+
+
+def coordinator_facing():
+    """Everything a coordinator, design lead or machine coordinator reads as its own instructions."""
+    o = ROOT / "orchestrators"
+    return sorted({*o.glob("*/skills/*/SKILL.md"), *o.glob("*/personas/coordinator.md"),
+                   *o.glob("*/personas/design-lead.md"), *o.glob("*/personas/machine-coordinator.md"),
+                   *HANDS_TEMPLATES})
+
+
+class NoCoordinatorWaitLoopTests(unittest.TestCase):
+    def test_no_coordinator_facing_file_has_a_wait_loop(self):
+        files = coordinator_facing()
+        self.assertGreaterEqual(len(files), 10)
+        for f in files:
+            lines = f.read_text().splitlines()
+            for n in range(len(lines)):
+                self.assertIsNone(wait_outside_prohibition(lines, n),
+                                  f"{f.relative_to(ROOT)}:{n + 1}: a wait outside a prohibition: {lines[n].strip()}")
+
+    def test_the_wait_check_catches_loops_and_spares_prohibitions(self):
+        caught = ['until [ -e "$f" ]; do sleep 5; done', "do sleep 5; done", 'while ! test -e x; do sleep "$n"; done',
+                  "sleep 1m", "orca-ide orchestration check --wait", "gh run watch 123", "gh pr checks --watch",
+                  "tail -f build.log", "timeout 600 sh -c 'until test -e x; do :; done'",
+                  "never skip this: until [ -e x ]; do sleep 5; done"]
+        for line in caught:
+            self.assertIsNotNone(wait_outside_prohibition([line], 0), line)
+        spared = [["never `check --wait`, never `sleep 5`"], ["Do not use `gh run watch`."],
+                  ["Never type into it, and do not use Orca's", "`orchestration` skill (check --wait)."],
+                  ["waits are lane work: never", "  check --wait; it blocks"]]
+        for lines in spared:
+            self.assertIsNone(wait_outside_prohibition(lines, len(lines) - 1), lines)
+        self.assertIsNotNone(wait_outside_prohibition(["never mind.", "Then run tail -f x"], 1))
+
+    def test_round_4_probes(self):
+        for line in ("until the lane reports; do not poll it", "wait until it is done; do n't poll"):
+            self.assertIsNone(wait_outside_prohibition([line], 0), line)
+        for line in ("tail -F build.log", "orca-ide orchestration wait --dispatch d", "until x; do sleep 1; done"):
+            self.assertIsNotNone(wait_outside_prohibition([line], 0), line)
+
+    def test_round_3_probes(self):
+        caught = ["sleep $n", "until curl -sf x; do :; done", "run `until bd ready | grep x` first", "watch -n 5 git status",
+                  "orca-ide terminal wait --terminal t", "never wait for CI, but run tail -f build.log",
+                  "do not poll it, then run gh run watch"]
+        for line in caught:
+            self.assertIsNotNone(wait_outside_prohibition([line], 0), line)
+        spared = ["Never: sleep 5, check --wait", "Do not: poll with tail -f", "never wait (e.g. check --wait)",
+                  "Never wait on CI, e.g. with gh run watch.", "Do not poll, and never run `until [ -e x ]; do sleep 5; done`",
+                  "warn once per step, not again until the step changes", "it stays until project-setup next runs"]
+        for line in spared:
+            self.assertIsNone(wait_outside_prohibition([line], 0), line)
+
+    def test_the_lane_waits_for_its_setup_script_not_the_coordinator(self):
+        for brief in (BRIEF, NATIVE_BRIEF):
+            t = flat(brief)
+            self.assertIn("orca-setup-done", t, brief)
+            self.assertIn("before any check", t, brief)
+        skill = flat(SKILL)
+        self.assertIn("the lane waits for it", skill)
+        self.assertIn("Never wait for the repo's setup script yourself", skill)
+
+
+GENERATED_NAME = "AGENTS.lane-control.md"
+# "Read AGENTS.md" or "then AGENTS.md" not followed by the generated file: an entry point that misses half the rules.
+AGENTS_ONLY = re.compile(r"(?:Read|then|reread)(?: the repo's)? AGENTS\.md(?! and AGENTS\.lane-control\.md)", re.I)
+
+
+class NativeHandsAfterMainTests(unittest.TestCase):
+    """Final round: #41's worker-abandon sits under exception 2, still on the owner's word; a lost cross-host wake is
+    noticed by the night manager or the owner, never by a loop of the coordinator's."""
+
+    def test_exception_2_names_worker_abandon_on_the_owners_word(self):
+        for path in (ROOT / "core" / "roles.md", NATIVE / "coordinator.md",
+                     ROOT / "orchestrators" / "native-orca" / "templates" / "agents-section.md"):
+            t = flat(path)
+            two = t[t.index("2. Closing lanes"):t.index("3. Your own records")]
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn("worker-abandon", two)
+                self.assertIn("owner's word", two)
+
+    def test_who_notices_a_lost_cross_host_wake(self):
+        t = flat(NATIVE / "coordinator.md")
+        self.assertIn("If a cross-host wake is lost, the night manager's idle check or the owner notices it; you never "
+                      "loop on `check`.", t)
+        self.assertLess(t.index("is poll-only"), t.index("If a cross-host wake is lost"))
+
+
+class AdaptTemplatesKnowTheGeneratedFileTests(unittest.TestCase):
+    """R3-1: the adapting agent and its reviewer are told where the generated section is now."""
+
+    def test_adapt_prompts_name_the_generated_file_and_the_pointer(self):
+        for name in ("prompt.md", "review-prompt.md"):
+            t = flat(ADAPT / name)
+            with self.subTest(name=name):
+                self.assertIn("AGENTS.lane-control.md", t)
+                self.assertIn("pointer line", t)
+                self.assertNotIn("The AGENTS.md section is added", t)
+                self.assertNotIn("the AGENTS.md block", t)
+                self.assertNotIn("The AGENTS.md block", t)
+
+    def test_a_lane_in_an_attached_repo_is_briefed_with_both_files(self):
+        self.assertIn("brief it with that repo's AGENTS.md and AGENTS.lane-control.md", flat(SKILL))
+
+
+class EntryPointsNameTheGeneratedFileTests(unittest.TestCase):
+    """UP-5: AGENTS.md now holds one pointer line; every kickoff, brief and reviewer names the generated file too."""
+
+    FILES = (ROOT / "core" / "scripts" / "project-setup", ROOT / "core" / "scripts" / "project-pause", BRIEF,
+             NATIVE_BRIEF, *sorted((ROOT / "orchestrators").glob("*/personas/*.md")))
+
+    def test_the_pattern_catches_each_wording(self):
+        for text in ("Read AGENTS.md fully", "then AGENTS.md;", "Read the repo's AGENTS.md (and CLAUDE.md)",
+                     "reread AGENTS.md"):
+            self.assertTrue(AGENTS_ONLY.search(text), text)
+        self.assertFalse(AGENTS_ONLY.search("Read the repo's AGENTS.md and AGENTS.lane-control.md (and CLAUDE.md)"))
+
+    def test_every_entry_point_reads_both_files(self):
+        for f in self.FILES:
+            text = f.read_text()
+            with self.subTest(f=f.relative_to(ROOT)):
+                found = AGENTS_ONLY.findall(" ".join(text.split()))
+                self.assertEqual(found, [])
+                if "AGENTS.md" in text and found == [] and f.parent.name != "personas":
+                    self.assertIn(GENERATED_NAME, text)
 
 
 class CrossHostReportContractTests(unittest.TestCase):

@@ -1,11 +1,13 @@
 You are lane <KEY> of <PROJECT>, started by <PARENT>. Your task: <KEY> (bd <ISSUE_ID>) "<title>". You run on the
 <TIER> tier; if the work needs a higher tier, stop and report `NEEDS_STANDARD` or `NEEDS_DEEP` instead of guessing.
 You work in this Orca worktree only (branch <BRANCH>, from <BASE>).
-1. Read AGENTS.md fully. `bd show <ISSUE_ID>`, claim it, do exactly what it asks; list anything else you notice
-   under "Also noticed" in your report instead of doing it. Never close an issue: the coordinator does at merge.
-   If you stop without merging, set your issue back to open (`bd update <ISSUE_ID> --status open`) with a Resume
-   note (`--notes`). Search (`bd search`) before filing a follow-up, and put nits in the PR body, not in new
-   issues. Never install bd git hooks.
+1. If this worktree's `orca.yaml` ends by writing `orca-setup-done`, first wait for that file in your git dir
+   (`$(git rev-parse --git-dir)/orca-setup-done`, at most 10 minutes) before any check; if it never comes, report
+   `blocked`. Read AGENTS.md and AGENTS.lane-control.md fully. `bd show <ISSUE_ID>`, claim it, do exactly what it
+   asks; list anything else you notice under "Also noticed" in your report instead of doing it. Never close an issue:
+   the coordinator does at merge. If you stop without merging, set your issue back to open (`bd update <ISSUE_ID>
+   --status open`) with a Resume note (`--notes`). Search (`bd search`) before filing a follow-up, and put nits in
+   the PR body, not in new issues. Never install bd git hooks.
 2. Relevant: <files, docs, ids>. <Heavy builds and full test suites: `~/.agents/bin/lane-heavy COMMAND` (it may wait
    for a machine-wide slot, so run it in the background; the project's wrapper goes inside it; if that file is
    missing, run the command plainly and say so in your report); never read whole logs.>

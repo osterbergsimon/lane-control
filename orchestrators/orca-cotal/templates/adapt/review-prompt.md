@@ -22,8 +22,10 @@ VERDICT: PASS | FIX
 FIX if there is any blocker or major. Never inflate a level to be heard or drop one to be agreeable.
 
 **Mechanical checks.** Any failure is a blocker. Checks 1 and 2 are done by the script that started you: skip them.
-1. (Script) Only `.lane-control/*`, the AGENTS.md block and a `.cotal/` line in .gitignore changed; no SUGGESTIONS.md.
-2. (Script) The AGENTS.md block is the script's own text, between its markers, with nothing else changed.
+1. (Script) Only `.lane-control/*`, AGENTS.lane-control.md, AGENTS.md's one pointer line (and a lane-control section
+   moved out of it) and a `.cotal/` line in .gitignore changed; no SUGGESTIONS.md.
+2. (Script) AGENTS.lane-control.md holds the script's own text between its markers, and AGENTS.md changed only by its
+   pointer line (and that move), with nothing else changed.
 3. No `<!-- slot`, `<!-- fixed`, or unfilled double-brace placeholders left in `.lane-control/`.
 4. Each fixed block of the template appears in its file, byte for byte.
 5. Each file has all its headings and front matter; `design-lead.md` exists only when a design lead was asked for.
