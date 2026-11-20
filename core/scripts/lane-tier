@@ -3,6 +3,8 @@
 #
 #   lane-tier <table> <tier>     prints harness=<h> model=<m> permission=<p>
 #   lane-tier --check <table>    prints "<tier> <harness> <model>" per row (- for no model); nothing else is decided
+#   lane-tier --model <model>    exit 0 when the model may run, 4 when it is refused (an opencode/ or opencode-go/
+#                                model, whatever the harness); project-setup asks this for its standing roles
 #
 # Exit: 0 the tier may be started; 2 usage, a bad table or an unknown tier; 3 the tier's harness is none (skip it, one
 # tier up); 4 refused: an OpenCode tier (harness opencode, or an opencode/ or opencode-go/ model whatever the harness
@@ -13,6 +15,21 @@
 set -u
 
 die() { echo "lane-tier: $*" >&2; exit 2; }
+
+if [ "${1:-}" = "--model" ]; then
+  [ $# -eq 2 ] && [ -n "$2" ] || die "usage: lane-tier --model <model>"
+  case $2 in
+    opencode/*|opencode-go/*)
+      cat >&2 <<MSG
+lane-tier: refused: $2 is a hosted OpenCode model (opencode/ or opencode-go/). It runs unsandboxed only in calvin,
+started there by calvin's Orca coordinator, never through lane-tier or project-setup (model-routing.md, "Sandbox per
+tier").
+MSG
+      exit 4 ;;
+  esac
+  echo "model=$2 ok"
+  exit 0
+fi
 
 check=""
 if [ "${1:-}" = "--check" ]; then

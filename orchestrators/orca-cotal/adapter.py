@@ -11,7 +11,7 @@ Markers (the union of what the strip PRs of 2026-11-15 removed from three projec
 `orca.yaml` is Orca's, used without Cotal too: not a marker. Prose a project wrote about Cotal in its own words is not
 ours either; it is for whoever reviews the strip PR.
 
-setup runs `scripts/project-setup --no-start` on the project as it is: that script edits the main checkout, runs
+setup runs `scripts/project-setup --no-start --orchestrator orca-cotal` on the project as it is: that script edits the main checkout, runs
 its adapting and reviewing agents, asks its own questions and commits on its own, so no PR is made and it says so
 first. It starts no coordinator or design lead; it prints how to start them.
 """
@@ -142,9 +142,9 @@ def setup(project: Path, work, dry: bool = False) -> int:
     script = ROOT / "orchestrators" / "orca-cotal" / "scripts" / "project-setup"
     print(WARNING, flush=True)
     if dry:
-        print(f"dry run: would run {script} {project} --no-start")
+        print(f"dry run: would run {script} {project} --no-start --orchestrator orca-cotal")
         return 0
-    code = subprocess.run([str(script), str(project), "--no-start"]).returncode
+    code = subprocess.run([str(script), str(project), "--no-start", "--orchestrator", "orca-cotal"]).returncode
     print(f"To start its coordinator and design lead, run `{ROOT / 'scripts' / 'project-setup'} {project}` "
           "(a rerun only does what is missing).", flush=True)
     return code

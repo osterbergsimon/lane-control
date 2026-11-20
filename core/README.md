@@ -38,7 +38,8 @@ uses it has been updated.
 | `scripts/lib.sh` | `core/scripts/lib.sh` | sourced by every watch script, wherever it is started from |
 | `scripts/stale-claims.sh`, `park-check.sh` | `core/scripts/` | Rove routines (`bash <repo>/scripts/...`) |
 | `scripts/window-guard-install` | `core/scripts/window-guard-install` | the install steps in the docs |
-| `scripts/project-setup`, `project-pause`, `machine-coordinator-setup`, `orca-host-install`, `orca-cotal-task`, `cotal-agent` | `orchestrators/orca-cotal/scripts/` | rendered personas (`<repo>/scripts/project-pause wake`), `project-setup --host` (runs `scripts/project-setup` in the host copy) and the docs |
+| `scripts/project-setup`, `project-pause` | `core/scripts/` (`orchestrators/orca-cotal/scripts/<name>` stays a link too) | rendered personas, `project-setup --host` and the docs |
+| `scripts/machine-coordinator-setup`, `orca-host-install`, `orca-cotal-task`, `cotal-agent` | `orchestrators/orca-cotal/scripts/` | the Orca + Cotal docs and the machine coordinator setup |
 | `scripts/machine-night-watch.sh`, `docs-review-launch.sh` | `orchestrators/rove/scripts/` | Rove routines |
 | `scripts/wsp-owner-code.mjs` | `orchestrators/wsp/scripts/` | the wsp notes |
 | `roles.md`, `model-routing.md` | `core/` | a machine coordinator whose persona was rendered before the move reads them there |

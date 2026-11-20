@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Stand-in for the `orca` and `cotal` CLIs in project-setup tests.
 
-Invoked through symlinks named orca/cotal. Appends `<tool> <args>` to $STUB_LOG and answers from the JSON state in
+Invoked through symlinks named orca/cotal. Appends `<tool> <args>` to $STUB_LOG (and the argv as JSON to
+$STUB_LOG.argv) and answers from the JSON state in
 $STUB_STATE (created with defaults on first use). Only the calls project-setup makes are modelled.
 """
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +24,8 @@ state.setdefault("agents", [])
 state.setdefault("terminals", [])
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write(tool + " " + " ".join(args) + "\n")
+with open(os.environ["STUB_LOG"] + ".argv", "a") as log:  # the same call with its words kept apart
+    log.write(json.dumps([tool, *args]) + "\n")
 
 
 def out(obj, code=0):
@@ -86,7 +90,41 @@ def orca():
         t = {"handle": f"term_{sum(t['handle'].startswith('term_') for t in state['terminals']) + 1}", "title": opt("--title", "shell"),
              "worktreePath": opt("--worktree").split(":", 1)[1]}
         state["terminals"].append(t)
+        command = opt("--command")
+        if command and not state.get("no_exec"):
+            # Like Orca: the command runs in the new terminal's shell (here at once, to its end). It may call this
+            # stub itself, so the state is written first and read back after.
+            state_path.write_text(json.dumps(state))
+            subprocess.run(["sh", "-c", command], cwd=t["worktreePath"])
+            state.clear()
+            state.update(json.loads(state_path.read_text()))
+            for x in state["terminals"]:
+                if x["handle"] == t["handle"]:
+                    if state.get("retitle"):  # the shell or the program renames the tab, as fish and OpenCode do
+                        x["title"] = state["retitle"]
+                    if not state.get("agent_exits"):  # Orca marks a terminal whose agent runs
+                        x["agentIdentity"] = "claude"
         out({"ok": True, "result": {"terminal": t}})
+    if cmd == "orchestration run-create":
+        if state.get("run_create_fails"):
+            out({"ok": False, "error": {"message": "stub: run-create failed"}}, 1)
+        run = {"runId": f"run_{len(state.setdefault('runs', [])) + 1:012x}", "objective": opt("--objective")}
+        state["runs"].append(run)
+        out({"ok": True, "result": {**run, "next": []}})  # Orca 1.4.250's concise shape
+    if cmd == "orchestration run-list":  # pages as Orca 1.4.250: --limit at most 100, then --cursor nextCursor
+        limit, start = int(opt("--limit", "10")), int(opt("--cursor", "0"))
+        if not 1 <= limit <= 100:
+            out({"ok": False, "error": {"message": "stub: --limit must be 1..100"}}, 1)
+        rows = state.get("runs", [])
+        page = {"runs": rows[start:start + limit]}
+        if start + limit < len(rows):
+            page["nextCursor"] = str(start + limit)
+        out({"ok": True, "result": page})
+    if cmd == "orchestration send":
+        state.setdefault("sent", []).append({"to": opt("--to"), "subject": opt("--subject"), "body": opt("--body")})
+        for key, text in (state.get("handover_on_send") or {}).items():  # sessions write their handovers when asked
+            Path(os.environ["HOME"], key).write_text(text)  # (the tests' bd stub reads $HOME/<key>)
+        out({"ok": True, "result": {"message": {"id": f"msg_{len(state['sent'])}"}}})
     out({"ok": False, "error": {"message": f"stub: unhandled orca {args}"}}, 9)
 
 

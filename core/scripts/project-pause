@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Let a project rest, or pause its standing agents (coordinator and design lead); see orchestrators/orca-cotal/docs/orca.md.
+
+  project-pause rest|wake|stop|start|status <project-dir | project-name>
+
+rest    the normal way to leave a project alone for a while: writes the guard marker only and stops no agent, so the
+        window guard stops waking it. Refuses, naming them, while a lane or reviewer runs. wake undoes it.
+wake    removes the marker; the guard then sends the project the current weekly budget standing on its next poll (missed window
+        orders are not replayed); with no coordinator running it keeps the marker for start. rest and wake
+        run no cotal stop or spawn, so they work from inside an agent's shell.
+stop    rest, and also stops the coordinator and design lead with `cotal stop` to free memory. Refuses, naming them, while
+        any other agent (a lane or reviewer) runs in the project's space. The broker and manager stay up; nothing is torn down.
+start   starts the standing agents that are missing: project-setup --skip-adapt (no adapting, no commit, no questions),
+        with a kickoff that resumes from handover-latest. It picks up the current personas.
+status  running, resting or paused, and what else runs in the space.
+
+On native Orca (a project project-setup set up there) the verbs keep their meaning without Cotal: rest and wake mark
+and unmark the project paused in its settings store (the night manager skips it); stop also asks each standing
+session for its handover through its own Orca Run, waits (--wait SECONDS, default 600) until each one's handover memory changes
+(handover-latest, handover-design-lead), then closes their terminals (--no-handover closes them without asking); start starts the missing ones again, each
+resuming its recorded session (Claude --resume, OpenCode --session; a fresh session when the harness no longer has it).
+stop runs in an Orca terminal (Orca sends messages only from its own terminals), finds each session's Run (the one
+recorded at its start, else the one of its name that no earlier start made), and changes nothing when a Run, a
+handover or that terminal is missing. rest and stop refuse while a lane's agent runs. Each start makes the session a
+new Run; the older ones stay in Orca and are never used again. Nothing is typed into a session's terminal.
+
+  project-pause stop <project> [--wait SECONDS] [--no-handover]
+
+A paused project keeps its space in the window guard's COORD_SPACE; the guard config is not touched. stop leaves a
+marker, <guard state dir>/paused/<space>, that makes the guard send nothing to that space; start removes it. Reruns are
+harmless. cotal refuses stop and spawn from inside a managed agent shell: run stop and start from a plain shell.
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+_path = Path(__file__).resolve().parent / "project-setup"
+_loader = importlib.machinery.SourceFileLoader("project_setup", str(_path))
+_spec = importlib.util.spec_from_loader("project_setup", _loader)
+ps = importlib.util.module_from_spec(_spec)
+_loader.exec_module(ps)
+
+STANDING = ("coordinator", "design-lead")
+
+HANDOVER_WAIT = 600  # seconds stop waits for a new handover-latest
+HANDOVER_SUBJECT = "Write your handover now: project-pause is stopping this session"
+HANDOVER_KEYS = ps.HANDOVERS  # one beads memory per standing session
+HANDOVER_BODY = ("The owner is pausing this project. Refresh your beads memory `{key}` now (bd remember), then stop "
+                 "working. Your terminal is closed once the new handover is there.")
+
+
+def handover(repo: Path, key: str) -> str:
+    try:
+        return ps.run(["bd", "recall", key], cwd=repo, check=False, timeout=30).stdout
+    except ps.Fail:
+        return ""
+
+
+def run_by_name(place, title: str, old: set):
+    """The one Run whose objective is the session's name and that no earlier start of it made (`old_runs`: those
+    belong to closed terminals), or None when there is none or more than one."""
+    rows, cursor = [], None
+    for _ in range(100):  # Orca serves at most 100 Runs a page; nextCursor leads to the next one
+        page = place.jrun("orchestration", "run-list", "--limit", "100", *(["--cursor", cursor] if cursor else []))
+        page = page.get("result") or {}
+        rows += (page.get("runs") or page.get("items") or []) if isinstance(page, dict) else page
+        cursor = page.get("nextCursor") if isinstance(page, dict) else None
+        if not cursor:
+            break
+    ids = [r.get("runId") or r.get("id") for r in rows if isinstance(r, dict) and r.get("objective") == title]
+    ids = [i for i in ids if i and i not in old]
+    return ids[0] if len(ids) == 1 else None
+
+
+def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
+    """rest, wake, stop, start and status on native Orca: the paused mark is in the settings store (the night manager
+    skips a paused project); stop asks each standing session for its handover through its own Run, never by typing."""
+    if cmd == "start":
+        return ps.resume_standing(repo)
+    ps.ORCHESTRATOR = "native-orca"
+    ps.add_orca_cli_to_path()
+    ps.ORCA = ps.orca_cli()
+    p = ps.native_project(repo)
+    place = ps.Place()
+    live = ps.running_sessions(place, repo, p["project"], p["lead"])
+    if cmd in ("rest", "stop"):  # as on the Orca + Cotal path: never while a lane runs
+        lanes = ps.running_lanes(place, repo)
+        if lanes:
+            raise ps.Fail(f"not pausing {p['project']}: lanes still running: {', '.join(lanes)}; finish or stop them "
+                          "first. Nothing was changed")
+    if cmd == "rest":
+        ps.settings(repo, paused=True)
+        print(f"{p['project']} is resting: marked paused in its settings store, so the night manager leaves it alone; "
+              "no session was stopped. `project-pause wake` ends it.")
+        return 0
+    if cmd == "wake":
+        if "coordinator" not in live:
+            print(f"{p['project']}: its coordinator is not running, so it stays paused until `project-pause start`.")
+            return 0
+        ps.settings(repo, paused=False)
+        print(f"{p['project']} woke: no longer paused.")
+        return 0
+    if cmd == "status":
+        state = "paused" if p["st"].get("paused") else "running"
+        if live and p["st"].get("paused"):
+            state = "resting"
+        names = ", ".join(ps.session_title(r, p["project"]) for r in live) or "none"
+        print(f"{p['project']}: {state if live or p['st'].get('paused') else 'stopped'} (sessions running: {names})")
+        return 0
+    # stop
+    if not live:
+        ps.settings(repo, paused=True)
+        print(f"{p['project']} paused: no standing session was running.")
+        return 0
+    if ask:
+        if not os.environ.get("ORCA_TERMINAL_HANDLE"):
+            raise ps.Fail("stop asks for the handovers by Orca message, and Orca sends one only from its own terminals "
+                          "(ORCA_TERMINAL_HANDLE is not set here). Run project-pause stop in an Orca terminal, or ask "
+                          "the sessions for their handovers yourself and run project-pause stop --no-handover. Nothing "
+                          "was changed")
+        # Each session's Run: the one recorded at its start, else the one Run of its name it made itself. All are
+        # found before any session is told to stop working.
+        runs = {role: (p["st"].get("runs") or {}).get(role) or run_by_name(place, ps.session_title(role, p["project"]), set(p["st"].get("old_runs") or []))
+                for role in live}
+        missing = [r for r, rid in runs.items() if not rid]
+        if missing:
+            raise ps.Fail(" ".join(
+                f"Ask {ps.session_title(r, p['project'])} yourself, in its terminal, to write its handover (`bd "
+                f"remember {HANDOVER_KEYS[r]}`)." for r in missing) + " It has no Run project-pause can reach (none "
+                "recorded at its start, and not exactly one of its name in `orca-ide orchestration run-list`), and "
+                "nothing is typed into a session's terminal. Then run project-pause stop --no-handover. Nothing was "
+                "changed")
+        before = {role: handover(repo, HANDOVER_KEYS[role]) for role in live}
+        for role, rid in runs.items():
+            place.jrun("orchestration", "send", "--to", f"run:{rid}", "--subject", HANDOVER_SUBJECT,
+                       "--body", HANDOVER_BODY.format(key=HANDOVER_KEYS[role]))
+            ps.say(f"handover {role}", "asked", f"run:{rid} ({HANDOVER_KEYS[role]})")
+        end = time.time() + wait
+        while True:
+            waiting = [r for r in live if handover(repo, HANDOVER_KEYS[r]) == before[r]]
+            if not waiting:
+                break
+            if time.time() >= end:
+                raise ps.Fail("no new handover after " + f"{int(wait)}s from " + ", ".join(
+                    f"{ps.session_title(r, p['project'])} ({HANDOVER_KEYS[r]})" for r in waiting)
+                    + ", so every session keeps running and the project is not marked paused. Run project-pause stop "
+                    "again later, or --no-handover to close them anyway")
+            time.sleep(min(5, max(0.2, end - time.time())))
+        ps.say("handover", "written", ", ".join(HANDOVER_KEYS[r] for r in live))
+    ps.settings(repo, paused=True)
+    for role, t in live.items():
+        place.jrun("terminal", "close", "--terminal", t["handle"])
+        ps.say(f"session {role}", "stopped", ps.session_title(role, p["project"]))
+    print(f"{p['project']} paused. `project-pause start` starts them again, resuming their sessions.")
+    return 0
+
+RESUME = ("You are restarting as a fresh session. Read AGENTS.md and the orca-cotal-lanes skill, then resume from "
+          "`bd recall handover-latest`, `cotal who` and `orca worktree list`, and tell the owner in one line that you "
+          "are back.")
+
+
+marker = ps.guard_marker
+
+
+def find_repo(arg: str) -> Path:
+    d = Path(arg).expanduser()
+    if d.is_dir():
+        top = ps.run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False)
+        if top.returncode != 0:
+            raise ps.Fail(f"{d} is not a git repository")
+        return Path(top.stdout.strip())
+    found = []
+    for f in sorted((ps.config_home() / "lane-control" / "projects").glob("*/settings.json")):
+        try:
+            st = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(st, dict) and ps.slug(arg) in (ps.slug(Path(st.get("root", "")).name), ps.slug(st.get("name") or "")):
+            found.append(st["root"])
+    if len(found) != 1:
+        raise ps.Fail(f"{arg} is not a directory, and " + (f"matches {len(found)} projects: " + ", ".join(found)
+                      if found else "is no project set up here"))
+    return Path(found[0])
+
+
+def space_of(repo: Path) -> str:
+    root = ps.attached_to(repo)
+    if root is not None:  # an attached repo has no space of its own: its project's one space is the root repo's
+        raise ps.Fail(f"{repo} is attached to the project at {root} and has no space of its own: "
+                      f"run project-pause on {root}")
+    if not (ps.store_dir(repo) / "settings.json").is_file():
+        raise ps.Fail(f"{repo} has not been set up: run project-setup first")
+    return ps.slug(ps.settings(repo).get("name") or repo.name)
+
+
+def rest(repo: Path, space: str, stopping: bool = False) -> int:
+    live = ps.live_agents(repo, space)
+    others = sorted(n for n in live if n not in STANDING)
+    if others:
+        raise ps.Fail(f"not pausing {space}: {', '.join(others)} still running; finish or stop them first")
+    m = marker(space)  # first, so the guard stops sending before the coordinator's seat is gone
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.touch()
+    if not stopping:
+        print(f"{space} is resting: the window guard no longer wakes it. `project-pause wake` ends it.")
+        return 0
+    for name in STANDING:
+        if name in live:
+            ps.run(["cotal", "stop", name, "-s", space], cwd=repo)
+            ps.say(f"agent {name}", "stopped")
+        else:
+            ps.say(f"agent {name}", "exists", "not running")
+    print(f"{space} paused. `project-pause start` restarts them as a fresh session that resumes from handover-latest.")
+    return 0
+
+
+def wake(repo: Path, space: str) -> int:
+    if "coordinator" not in ps.live_agents(repo, space):
+        print(f"{space}: its coordinator is not running, so the marker stays until `project-pause start` "
+              "(run it from a plain shell).")
+        return 0
+    marker(space).unlink(missing_ok=True)
+    print(f"{space} woke: the window guard sends it the current weekly budget standing on its next poll.")
+    return 0
+
+
+def start(repo: Path, space: str) -> int:
+    ps.COORDINATOR_KICKOFF = RESUME  # the one thing different from a first setup
+    return ps.main([str(repo), "--skip-adapt"])  # clears the marker when it starts a coordinator
+
+
+def status(repo: Path, space: str) -> int:
+    live = ps.live_agents(repo, space)
+    names = [n for n in STANDING if n in live]
+    if not names:
+        state = "paused" + ("" if marker(space).exists() else " (no guard marker: the guard still warns)")
+    else:
+        state = ("resting" if marker(space).exists() else "running") + f" ({', '.join(names)})"
+    print(f"{space}: {state}")
+    others = sorted(n for n in live if n not in STANDING)
+    print("  also running: " + (", ".join(others) if others else "none"))
+    if names and others and marker(space).exists():
+        print("  WARNING: resting with a lane running, so the guard sends it no orders: run `project-pause wake`.")
+    return 0
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    opts, wait, ask = argv[2:], HANDOVER_WAIT, True
+    try:
+        while opts:
+            if opts[0] == "--no-handover":
+                ask, opts = False, opts[1:]
+            elif opts[0] == "--wait" and len(opts) > 1:
+                wait, opts = float(opts[1]), opts[2:]
+            else:
+                raise ValueError(opts[0])
+    except ValueError:
+        argv = []
+    if len(argv) < 2 or argv[0] not in ("rest", "wake", "stop", "start", "status") or (
+            argv[2:] and argv[0] != "stop"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    cmd, target = argv[:2]
+    if os.geteuid() == 0:
+        print("project-pause: refusing to run as root; agents run as a normal user", file=sys.stderr)
+        return 2
+    try:
+        repo = find_repo(target)
+        if ps.which_orchestrator(None, repo) == "native-orca" and ps.attached_to(repo) is None:
+            return native(cmd, repo, wait, ask)
+    except ps.Fail as e:
+        print(f"project-pause: {e}", file=sys.stderr)
+        return 1
+    if cmd in ("stop", "start") and os.environ.get("COTAL_NAME"):
+        print(f"project-pause: {cmd} cannot run from inside an agent's shell: cotal refuses it there. "
+              "Run it from a plain shell instead.", file=sys.stderr)
+        return 1
+    try:
+        space = space_of(repo)
+        if cmd == "start":
+            return start(repo, space)
+        ps.add_orca_cli_to_path()
+        return {"rest": rest, "wake": wake, "stop": lambda r, s: rest(r, s, True), "status": status}[cmd](repo, space)
+    except ps.Fail as e:
+        print(f"project-pause: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
