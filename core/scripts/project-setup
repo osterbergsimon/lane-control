@@ -3233,23 +3233,47 @@ def desktop_lanes(place: Place) -> "str | None":
         return None
     print(SHARE_HELP.format(host=host), flush=True)
     import getpass
-    try:
-        link = getpass.getpass(f"Desktop share link for {host} (hidden; Enter to skip): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        link = ""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)  # getpass would read with echo: refuse instead
+        try:
+            link = getpass.getpass(f"Desktop share link for {host} (hidden; Enter to skip): ").strip()
+        except getpass.GetPassWarning:
+            raise Fail("this terminal cannot hide what is typed, so the share link is not asked for here; nothing "
+                       "was sent. Run project-setup in another terminal, or pass --no-desktop-lanes") from None
+        except (EOFError, KeyboardInterrupt):
+            link = ""
     if not link:
         say("desktop lanes", "skipped", f"(no link; run again to add it, or --no-desktop-lanes)")
         return None
     port = link_port(link)
     if state == "saved":  # saved there earlier but not reachable: this machine's identity or port changed
         box_pairing_remote(place, "rm", me)
-    t = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "start", host, str(port)],
-                       capture_output=True, text=True)
+    tunnel = tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel")
+    unit = f"lane-tunnel@{env_name(host)}.service"
+    subprocess.run([tunnel, "stop", host], capture_output=True)  # an earlier tunnel of ours would hold the port
+    # The box's end must be ours: whatever else listens there (the box's own Orca server, another user's program)
+    # would get the code instead of this machine.
+    if not wait_box_port(place, port, "free"):
+        raise Fail(f"port {port} on {host} is in use (its own Orca server, or another program), so the tunnel back "
+                   f"here cannot open there; nothing was sent. Move what listens there (Orca's server: "
+                   f"orca-host-install {host} --pair --port <another>), then run again")
+    t = subprocess.run([tunnel, "start", host, str(port)], capture_output=True, text=True)
     if t.returncode != 0:
         raise Fail((t.stderr.strip() or "lane-tunnel failed") + "; nothing was sent to " + host)
-    say("tunnel", "created", t.stdout.strip())
+    sent = False
     try:
+        if not wait_box_port(place, port, "busy"):
+            raise Fail(f"the tunnel {unit} did not come up on {host} (journalctl --user -u {unit}); nothing was sent")
+        say("tunnel", "created", t.stdout.strip())
+        sent = True
         box_pairing_remote(place, "add", me, link)
+    except BaseException:
+        subprocess.run([tunnel, "stop", host], capture_output=True)
+        if sent:
+            print(f"The tunnel to {host} is stopped again. The link may have reached {host}: "
+                  + REVOKE_HELP.format(host=host), file=sys.stderr)
+        raise
     finally:
         link = None  # noqa: F841 (dropped as soon as the box has it)
     end = time.time() + PAIR_WAIT
@@ -3269,6 +3293,20 @@ def desktop_lanes(place: Place) -> "str | None":
             f"lane-tunnel@{env_name(host)}.service")
     print(REVOKE_HELP.format(host=host))
     return me
+
+
+TUNNEL_WAIT = float(os.environ.get("LANE_TUNNEL_WAIT") or 20)  # seconds for the box's end of the tunnel to open
+
+
+def wait_box_port(place: Place, port: int, want: str) -> bool:
+    """Whether 127.0.0.1:<port> on the box becomes `want` (free or busy) within TUNNEL_WAIT."""
+    end = time.time() + TUNNEL_WAIT
+    while True:
+        if box_pairing_remote(place, "port", str(port)) == want:
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.5)
 
 
 def host_server(place: Place, port: "int | None") -> None:
@@ -3325,8 +3363,7 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
     try:
         if not LOCAL.found():
             raise Fail("Orca CLI not found here (orca-ide; or set ORCA_CLI)")
-        host_server(place, a.orca_port)
-        copy_to_host(place)
+        copy_to_host(place)  # the copy and the question need no Orca server on the host yet
         rest = host_argv(argv, value_flags, host)
         r = place.ssh(remote_cmd("scripts/project-setup", [*rest, "--via-host", "--which-orchestrator"]), timeout=120)
         which = (r.stdout.strip().splitlines() or [""])[-1]
@@ -3336,6 +3373,7 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
         if which == "orca-cotal":
             say("orchestrator", "orca-cotal", f"(the project is on Orca + Cotal on {host}; its own path runs there)")
             return reexec(place, rest)
+        host_server(place, a.orca_port)
         paired = None
         if a.no_desktop_lanes:
             say("desktop lanes", "skipped", "(--no-desktop-lanes)")
@@ -3414,10 +3452,20 @@ def shim_parts(cli: str) -> tuple:
 def box_pairing(args: list) -> int:
     """On the box (from this machine's --host run): status|add|rm of the environment that is the desktop. add reads
     the pairing code on stdin and hands it to Orca's CLI the same way, so it is never on a command line."""
-    if len(args) != 2 or args[0] not in ("status", "add", "rm") or not ENV_NAME.fullmatch(args[1]):
-        print("project-setup: --box-pairing status|add|rm <environment name>", file=sys.stderr)
+    if len(args) != 2 or args[0] not in ("status", "add", "rm", "port") or not ENV_NAME.fullmatch(args[1]) or (
+            args[0] == "port" and not (args[1].isdigit() and 1 <= int(args[1]) <= 65535)):
+        print("project-setup: --box-pairing status|add|rm <environment name> | port <port>", file=sys.stderr)
         return 2
     op, name = args
+    if op == "port":  # free, or busy (something listens on 127.0.0.1:<port> here)
+        import socket
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", int(name)))
+                print("free")
+            except OSError:
+                print("busy")
+        return 0
     global ORCA
     add_orca_cli_to_path()
     ORCA = orca_cli()

@@ -81,6 +81,8 @@ and logs in as root, so the box was an unprivileged container (no extra capabili
   the process. The box then reached the stand-in through the reverse tunnel (the unit's own ExecStart line, run by
   hand: the run used a logging systemctl so no user unit was installed here). Afterwards the token was in no file on
   the box but Orca's own pairing store, and in none here. `--remove-host` removed it and printed where to revoke.
+- A share link lets the box run commands as the owner on this computer (no desktop control) until it is revoked in
+  Orca here (Settings > Servers); setup says so when it asks for one and again when it removes a box.
 - Not yet run, needs the owner: the desktop's own share link (Settings > Servers > "Share this computer"), a lane
   started from a box coordinator showing in the desktop window, its `worker_done` reaching the box, and whether that
   wakes an agent coordinator there (a box with a signed-in agent).

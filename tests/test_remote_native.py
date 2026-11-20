@@ -47,7 +47,8 @@ while rest:
     else:
         host = a
         break
-if os.environ.get("STUB_SSH_DOWN"):
+down_on = os.environ.get("STUB_SSH_DOWN_ON")
+if os.environ.get("STUB_SSH_DOWN") or (down_on and down_on in " ".join(rest)):
     sys.stderr.write("ssh: connect to host %s: No route to host\n" % host)
     sys.exit(255)
 box = os.environ["STUB_BOX"]
@@ -75,6 +76,12 @@ if "--pairing-code" in args and args[args.index("--pairing-code") + 1] == "-":
     rec["stdin_sha256"] = hashlib.sha256(code.encode()).hexdigest()
     rec["user_data"] = os.environ.get("ORCA_USER_DATA_PATH")
     env["STUB_PAIRED_BY_STDIN"] = "1"
+    if os.environ.get("STUB_ADD_ECHOES"):  # a CLI error that repeats what it was given, on stdout and stderr
+        with open(os.environ["STUB_LOG"] + ".node", "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        print(json.dumps({"ok": False, "error": {"code": "invalid_argument", "message": "bad pairing code " + code}}))
+        sys.stderr.write("cli: rejected " + code + "\n")
+        sys.exit(1)
 with open(os.environ["STUB_LOG"] + ".node", "a") as f:
     f.write(json.dumps(rec) + "\n")
 os.execve(os.environ["STUB_ORCA"], ["orca", *args], env)
@@ -93,10 +100,55 @@ json.dump(state, open(p, "w"))
 print("installed orcad-0.1.0\nstarted orcad 6769\npaired " + name)
 '''
 
+FAKE_SYSTEMCTL = r'''#!/usr/bin/env python3
+import os, signal, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["STUB_LOG"] + ".systemctl", "a") as f:
+    f.write(" ".join(args) + "\n")
+if os.environ.get("STUB_NO_SYSTEMD"):
+    sys.exit(1)
+conf = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.environ["HOME"], ".config")
+units = [a for a in args if a.startswith("lane-tunnel@")]
+def pidfile(u):
+    return os.path.join(os.environ["HOME"], "tunnel-" + u + ".pid")
+def stop(u):
+    try:
+        os.kill(int(open(pidfile(u)).read()), signal.SIGTERM)
+        os.unlink(pidfile(u))
+    except (OSError, ValueError):
+        pass
+def start(u):
+    if os.environ.get("STUB_TUNNEL_FAILS"):
+        return
+    name = u[len("lane-tunnel@"):-len(".service")]
+    env = dict(l.split("=", 1) for l in open(os.path.join(conf, "lane-control", "tunnels", name + ".env")).read().splitlines() if "=" in l)
+    p = subprocess.Popen([sys.executable, "-c", "import socket,sys,time\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
+                          "s.bind(('127.0.0.1',int(sys.argv[1])))\ns.listen()\ntime.sleep(120)", env["PORT"]],
+                         start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    open(pidfile(u), "w").write(str(p.pid))
+for u in units:
+    if "disable" in args or "stop" in args or "restart" in args:
+        stop(u)
+    if ("enable" in args and "--now" in args) or "restart" in args:
+        start(u)
+    if "is-active" in args:
+        sys.exit(0 if os.path.exists(pidfile(u)) else 3)
+'''
+
+
+def free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 FAKE_LOGGER = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG.{name}"\n{tail}'
 
 
-def make_link(port=6768, address="127.0.0.1"):
+def make_link(port=None, address="127.0.0.1"):
+    port = port or free_port()
     token = "dvtok-" + secrets.token_hex(16)
     payload = {"v": 2, "endpoint": f"ws://{address}:{port}", "deviceToken": token,
                "publicKeyB64": base64.b64encode(secrets.token_bytes(32)).decode(), "pairedDeviceId": "dev_1",
@@ -141,12 +193,12 @@ class RemoteEnv(NativeEnv):
         super().__init__()
         self.box = self.home / "box"
         (self.box / ".config").mkdir(parents=True)
-        for name, body in (("ssh", FAKE_SSH), ("node-fake", FAKE_NODE), ("orca-host-install", FAKE_HOST_INSTALL)):
+        for name, body in (("ssh", FAKE_SSH), ("node-fake", FAKE_NODE), ("orca-host-install", FAKE_HOST_INSTALL),
+                           ("systemctl", FAKE_SYSTEMCTL)):
             p = self.bin / name
             p.write_text(body)
             p.chmod(0o755)
-        for name, tail in (("systemctl", '[ -z "$STUB_NO_SYSTEMD" ] || exit 1\nexit 0\n'),
-                           ("machine-setup", "exit 0\n")):
+        for name, tail in (("machine-setup", "exit 0\n"),):
             p = self.bin / name
             p.write_text(FAKE_LOGGER.format(name=name, tail=tail))
             p.chmod(0o755)
@@ -160,9 +212,19 @@ class RemoteEnv(NativeEnv):
             (cli / n).write_text(shim)
             (cli / n).chmod(0o700)
         self.env.update(STUB_BOX=str(self.box), STUB_ORCA=str(self.bin / "orca"), LANE_ORCA_HOST_INSTALL=str(self.bin / "orca-host-install"),
-                        LANE_MACHINE_SETUP=str(self.bin / "machine-setup"), LANE_PAIR_WAIT="0")
+                        LANE_MACHINE_SETUP=str(self.bin / "machine-setup"), LANE_PAIR_WAIT="0",
+                        LANE_TUNNEL_WAIT="3")
         self.env.pop("ORCA_CLI", None)
         self.env.pop("LANE_SSH_CONFIG", None)
+
+    def close(self):
+        import signal
+        for f in self.home.glob("**/tunnel-*.pid"):
+            try:
+                os.kill(int(f.read_text()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+        super().close()
 
     def box_repo(self, name="app"):
         d = self.box / "code" / name
@@ -300,12 +362,12 @@ class DirectionOneTests(Case):
         self.assertIn("machine setup: skipped", r.stdout)
 
     def test_a_cotal_project_on_the_host_keeps_the_cotal_path(self):
-        self.e.saved("box")
         (self.repo / ".cotal" / "agents").mkdir(parents=True)
         r = self.e.setup(str(self.repo), "box", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertTrue([l for l in self.e.lines("", self.e.box) if l.startswith("cotal space")])
         self.assertEqual(self.e.lines(".machine-setup"), [])
+        self.assertEqual(self.e.jlines(".install"), [])  # setup asks the host first; Cotal's path needs no new server
         self.assertEqual(self.e.jlines(".node", self.e.box) and
                          [x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
 
@@ -341,7 +403,8 @@ class DirectionTwoTests(Case):
     def setUp(self):
         super().setUp()
         self.e.saved("box")
-        self.link, self.token, self.code = make_link()
+        self.port = free_port()
+        self.link, self.token, self.code = make_link(self.port)
 
     def secrets_seen(self, text):
         return [s for s in (self.link, self.token, self.code) if s in text]
@@ -369,7 +432,7 @@ class DirectionTwoTests(Case):
         self.assertEqual(json.loads((box_store / "settings.json").read_text())["paired_environment"], "deskbox")
         rec = json.loads((self.e.home / ".config" / "lane-control" / "hosts" / "box.json").read_text())
         self.assertEqual(rec, {"host": "box", "environment": "box", "desktop_environment": "deskbox",
-                               "tunnel_port": 6768})
+                               "tunnel_port": self.port})
 
     def test_the_prompt_is_hidden(self):
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link)
@@ -379,13 +442,14 @@ class DirectionTwoTests(Case):
         self.assertIn("revoke", out.lower())  # what the link allows, and that it can be revoked
 
     def test_the_tunnel_is_a_user_service_on_the_links_port(self):
-        link, _, _ = make_link(port=6790)
+        port = free_port()
+        link, _, _ = make_link(port)
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=link)
         self.assertEqual(rc, 0, out)
         unit = self.e.home / ".config" / "systemd" / "user" / "lane-tunnel@.service"
         self.assertIn("-R", unit.read_text())
         env = (self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").read_text()
-        self.assertIn("PORT=6790", env)
+        self.assertIn(f"PORT={port}", env)
         self.assertIn("SSH_HOST=box", env)
         self.assertEqual(oct((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").stat().st_mode & 0o777),
                          "0o600")
@@ -432,6 +496,68 @@ class DirectionTwoTests(Case):
         self.assertNotIn("share link", out)
         self.assertIn("desktop lanes: exists", out)
         self.assertEqual(len([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x]), 1)
+
+    def assert_nowhere(self, out, link, token, code):
+        self.assertEqual([s for s in (link, token, code) if s in out], [], "the link reached the output")
+        for f in self.e.all_files():
+            data = f.read_bytes()
+            for s in (link, token, code):
+                self.assertNotIn(s.encode(), data, f"{s[:12]}... found in {f}")
+
+    def test_a_box_cli_error_that_repeats_the_code_never_shows_it(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
+                                   env_extra={"STUB_ADD_ECHOES": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("invalid_argument", out)
+        self.assert_nowhere(out, self.link, self.token, self.code)
+
+    def test_a_failed_pairing_stops_the_tunnel_and_says_to_revoke(self):
+        for extra in ({"STUB_ADD_ECHOES": "1"}, {"STUB_SSH_DOWN_ON": "--box-pairing add"}):
+            rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link, env_extra=extra)
+            self.assertNotEqual(rc, 0, (extra, out))
+            self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service", extra)
+            self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists(), extra)
+            self.assertFalse((self.e.home / ".config" / "lane-control" / "hosts" / "box.json").exists(), extra)
+            self.assertIn("revoke", out.lower())
+            self.assert_nowhere(out, self.link, self.token, self.code)
+
+    def test_a_port_already_taken_on_the_box_is_refused_before_the_link_is_sent(self):
+        import socket
+        s = socket.socket()  # the box's own Orca server, say, on the desktop's port (the "box" is this machine)
+        s.bind(("127.0.0.1", self.port))
+        s.listen()
+        self.addCleanup(s.close)
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn(f"port {self.port}", out)
+        self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
+        self.assertNotIn("--user enable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
+        self.assert_nowhere(out, self.link, self.token, self.code)
+
+    def test_a_tunnel_that_does_not_come_up_sends_nothing(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
+                                   env_extra={"STUB_TUNNEL_FAILS": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("did not come up", out)
+        self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
+        self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service")
+
+    def test_a_terminal_that_cannot_hide_input_is_not_asked(self):
+        import getpass
+        import warnings
+        m = load()
+
+        def echoing(prompt=""):
+            warnings.warn("Can not control echo on the terminal.", getpass.GetPassWarning)
+            return self.link
+        place = m.Place("box")
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch.object(m, "has_terminal", return_value=True), \
+                mock.patch.object(m, "box_pairing_remote", return_value="missing"), \
+                mock.patch("getpass.getpass", echoing), mock.patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()) as out:
+            with self.assertRaises(m.Fail) as e:
+                m.desktop_lanes(place)
+        self.assertIn("hide", str(e.exception))
+        self.assertNotIn(self.link, out.getvalue() + str(e.exception))
 
     def test_without_systemd_here_nothing_is_paired(self):
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
