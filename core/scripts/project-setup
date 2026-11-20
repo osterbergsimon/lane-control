@@ -2606,7 +2606,8 @@ NATIVE_ROLES = ("coordinator", "design-lead", "reviewer", "debugger")  # rendere
 ADDITIONS = f"{ADAPTED}/additions"  # the adapted text per role, kept and committed; rendered in on every setup and refresh
 EXCLUDE_BEGIN = "# lane-control: begin (files project-setup writes in this checkout; never committed)"
 EXCLUDE_END = "# lane-control: end"
-LOCAL_FILES = ("/.claude/settings.local.json", *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
+LOCAL_FILES = ("/.claude/settings.local.json", "/.opencode/plugins/lane-persona.js",  # the second: LANE_OPENCODE_PLUGIN=project
+               *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
 NATIVE_REVIEW_NOTE = f"""
 Native Orca: the coordinator, design-lead and reviewer files are in {ADDITIONS}/ (appended to the rendered personas);
 {ADAPTED}/<role>.md are rendered personas, not adapted files: never ask for them there."""

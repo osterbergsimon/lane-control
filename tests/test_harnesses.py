@@ -505,6 +505,38 @@ class OpenCodeAdapterTests(HomeTest):
         self.assertTrue((self.t / "xdg" / "opencode" / "plugins" / "lane-persona.js").is_file())
         self.assertFalse(self.plugin_dir().exists())
 
+    def project_plugin(self):
+        return self.checkout / ".opencode" / "plugins" / "lane-persona.js"
+
+    def test_opencode_plugin_project_level_install(self):
+        # UP-6: LANE_OPENCODE_PLUGIN=project puts the plugin in the project's .opencode/plugins/ instead of the user's.
+        os.environ["LANE_OPENCODE_PLUGIN"] = "project"
+        self.addCleanup(os.environ.pop, "LANE_OPENCODE_PLUGIN", None)
+        changes = self.a.install_persona_hook(self.checkout)
+        dest = self.project_plugin()
+        self.assertEqual(len(changes), 1)
+        self.assertIn(str(dest), changes[0])
+        self.assertIn("this project", changes[0])
+        self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
+        self.assertFalse(self.plugin_dir().exists())  # nothing in the user's folder
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+        dest.write_text("// an old copy\n")
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
+        self.assertEqual(self.a.plugin_path(self.checkout), dest)
+
+    def test_opencode_plugin_scope_defaults_to_user_and_refuses_the_unknown(self):
+        os.environ.pop("LANE_OPENCODE_PLUGIN", None)
+        self.assertEqual(self.a.plugin_path(self.checkout), self.plugin_dir() / "lane-persona.js")
+        for scope in ("user", ""):
+            os.environ["LANE_OPENCODE_PLUGIN"] = scope
+            self.assertEqual(self.a.plugin_path(self.checkout), self.plugin_dir() / "lane-persona.js", scope)
+        os.environ["LANE_OPENCODE_PLUGIN"] = "both"
+        self.addCleanup(os.environ.pop, "LANE_OPENCODE_PLUGIN", None)
+        with self.assertRaisesRegex(ValueError, "LANE_OPENCODE_PLUGIN.*user.*project"):
+            self.a.install_persona_hook(self.checkout)
+        self.assertFalse(self.plugin_dir().exists() or self.project_plugin().exists())
+
     def db(self, rows, messages=()):
         import sqlite3
         path = self.home / ".local" / "share" / "opencode" / "opencode.db"
@@ -639,6 +671,42 @@ console.log(JSON.stringify(out));
         self.assertEqual(record.read_text(), "ses_1\n")
         self.run_plugin(clean_env(XDG_STATE_HOME=str(self.t / "state2")))
         self.assertFalse((self.t / "state2").exists())
+
+    TWO_COPIES = """
+import { pathToFileURL } from "node:url";
+// the same plugin loaded from two places (user folder and project folder), as one OpenCode server loads both
+const copies = [];
+for (const file of process.argv.slice(2)) copies.push((await import(pathToFileURL(file).href)).default);
+const hooks = { context: [], compaction: [] };
+const ctx = { session: { hook: async (name, fn) => { hooks[name].push(fn); return { dispose: async () => {} }; } } };
+for (const c of copies) await c.setup(ctx);
+const turn = { sessionID: "ses_1", system: [{ type: "text", text: "base" }], messages: [] };
+for (const fn of hooks.context) await fn(turn);
+const compaction = { sessionID: "ses_1", system: [], messages: [] };
+for (const fn of hooks.compaction) await fn(compaction);
+const next = { sessionID: "ses_1", system: [{ type: "text", text: "base" }], messages: [] };
+for (const fn of hooks.context) await fn(next);  // the next turn is built from a fresh system prompt
+console.log(JSON.stringify({ registered: hooks.context.length, turn: turn.system, compaction: compaction.system,
+                             next: next.system }));
+"""
+
+    def test_plugin_two_installs_inject_the_persona_once(self):
+        # UP-6: a user-level and a project-level copy are both loaded; the persona is still added once per request.
+        import json
+        second = self.t / "second-copy.mjs"
+        second.write_bytes(PLUGIN.read_bytes())
+        driver = self.t / "two.mjs"
+        driver.write_text(self.TWO_COPIES)
+        env = clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona), XDG_STATE_HOME=str(self.t / "state"))
+        r = subprocess.run([NODE, str(driver), str(self.copy), str(second)], capture_output=True, text=True,
+                           cwd=self.t, env=env, timeout=30)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        out = json.loads(r.stdout)
+        part = {"type": "text", "text": PERSONA_TEXT}
+        self.assertEqual(out["registered"], 2)
+        self.assertEqual(out["turn"], [{"type": "text", "text": "base"}, part])
+        self.assertEqual(out["compaction"], [part])
+        self.assertEqual(out["next"], [{"type": "text", "text": "base"}, part])
 
     def test_plugin_silent_missing_file(self):
         (self.t / "a-dir.md").mkdir()

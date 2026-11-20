@@ -7,7 +7,8 @@ v2's interactive command has no --model flag; the model goes in through OPENCODE
 its own opencode2 agent. --standalone runs the session in a private server started from this command, so the
 markers reach the plugin; the shared background service would not see them.
 Persona: lane-persona.js in OpenCode's plugin folder ($XDG_CONFIG_HOME/opencode/plugins/, default
-~/.config/opencode/plugins/). Idle: the newest write of a session for the checkout in OpenCode's v2 store
+~/.config/opencode/plugins/), or with LANE_OPENCODE_PLUGIN=project in the project's .opencode/plugins/.
+Idle: the newest write of a session for the checkout in OpenCode's v2 store
 ($XDG_DATA_HOME/opencode/opencode.db, tables session_v2 and session_message, times in ms).
 """
 import json
@@ -50,14 +51,33 @@ def _xdg(var: str, default: str) -> Path:
     return Path(v) if v and os.path.isabs(v) else Path.home() / default
 
 
-def plugin_path() -> Path:
+SCOPES = ("user", "project")
+
+
+def plugin_scope() -> str:
+    """Where the plugin is installed: LANE_OPENCODE_PLUGIN=user (the default) or project. A project install is
+    <checkout>/.opencode/plugins/, loaded for OpenCode servers started in that project only."""
+    scope = os.environ.get("LANE_OPENCODE_PLUGIN") or "user"
+    if scope not in SCOPES:
+        raise ValueError(f"LANE_OPENCODE_PLUGIN={scope!r}: it takes {' or '.join(SCOPES)} (user: one copy in "
+                         "OpenCode's own plugin folder; project: one in the project's .opencode/plugins/)")
+    return scope
+
+
+def plugin_path(checkout: "Path | None" = None) -> Path:
+    if plugin_scope() == "project":
+        if checkout is None:
+            raise ValueError("a project-level plugin install needs the checkout")
+        return Path(checkout) / ".opencode" / "plugins" / PLUGIN.name
     return _xdg("XDG_CONFIG_HOME", ".config") / "opencode" / "plugins" / PLUGIN.name
 
 
 def install_persona_hook(checkout: Path) -> list:
-    """Copy lane-persona.js into OpenCode's plugin folder (one per user, not per checkout) unless the same bytes are
-    there already. Returns change lines; empty when it was in place."""
-    dest = plugin_path()
+    """Copy lane-persona.js into OpenCode's plugin folder: one per user (the default) or, with
+    LANE_OPENCODE_PLUGIN=project, one per project in <checkout>/.opencode/plugins/. Unless the same bytes are there
+    already. Both may exist: the plugin adds the persona once per request either way. Returns change lines; empty
+    when it was in place."""
+    dest = plugin_path(checkout)
     want = PLUGIN.read_bytes()
     if dest.is_file() and dest.read_bytes() == want:
         return []
@@ -66,8 +86,10 @@ def install_persona_hook(checkout: Path) -> list:
     tmp = dest.with_name(dest.name + ".tmp")
     tmp.write_bytes(want)
     tmp.replace(dest)
-    return [f"{dest}: {what} the lane-persona plugin; OpenCode loads it into every running OpenCode server of this "
-            "user at once, and it acts only in one started with LANE_ROLE and LANE_PERSONA set"]
+    reach = ("OpenCode servers started in this project load it at once" if plugin_scope() == "project" else
+             "OpenCode loads it into every running OpenCode server of this user at once")
+    return [f"{dest}: {what} the lane-persona plugin; {reach}, and it acts only in one started with LANE_ROLE and "
+            "LANE_PERSONA set"]
 
 
 def db_path() -> Path:

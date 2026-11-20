@@ -277,6 +277,7 @@ class RenderTests(Case):
             self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         exclude = (self.repo / ".git" / "info" / "exclude").read_text()
         self.assertEqual(exclude.count("lane-control: begin"), 1)
+        self.assertIn("/.opencode/plugins/lane-persona.js", exclude)  # a project-level OpenCode plugin (UP-6)
         status = git("status", "--porcelain", "--untracked-files=all", cwd=self.repo)
         self.assertEqual(status, "")
         self.assertTrue((self.repo / ".claude" / "settings.local.json").is_file())
