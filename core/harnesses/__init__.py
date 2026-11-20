@@ -3,6 +3,7 @@ compaction (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, secti
 
 Each harness with code has core/harnesses/<name>/adapter.py exposing NAME, STATUS, ORCA_AGENT_ID, MODEL_FLAGS,
 start_command(), install_persona_hook() and idle_minutes(); every harness, tried or not, has a dated record.md.
+The session record the adapters' idle signal reads is a published interface: session-record.md.
 Import with core/ on sys.path: `import harnesses; harnesses.load_harness("claude")`.
 """
 import importlib.util

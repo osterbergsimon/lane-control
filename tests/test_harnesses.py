@@ -715,6 +715,78 @@ console.log(JSON.stringify({ registered: hooks.context.length, turn: turn.system
             self.assertEqual((out["turn"], out["compaction"]), ([{"type": "text", "text": "base"}], []))
 
 
+@unittest.skipUnless(NODE, "node is not installed")
+class SessionRecordInterfaceTests(HomeTest):
+    """UP-6: the session record is a published, stable interface (core/harnesses/session-record.md). These tests pin
+    what a reader outside lane-control may rely on, with the two real writers (the Claude hook and the OpenCode
+    plugin) producing it."""
+
+    ID = "ses_4f1c2e9a-0b7d"
+    DOC = HARNESSES / "session-record.md"
+
+    def write_with_hook(self, sid, role="coordinator"):
+        env = clean_env(LANE_ROLE=role, LANE_PERSONA=str(self.t / "p.md"), CLAUDE_PROJECT_DIR=str(self.checkout))
+        (self.t / "p.md").write_text(PERSONA_TEXT)
+        r = subprocess.run([str(HOOK)], input='{"session_id": "%s"}' % sid, capture_output=True, text=True,
+                           cwd=self.t, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0)
+
+    def write_with_plugin(self, sid, role="coordinator"):
+        (self.t / "p.md").write_text(PERSONA_TEXT)
+        mod = self.t / "plugin.mjs"
+        mod.write_bytes(PLUGIN.read_bytes())
+        driver = self.t / "driver.mjs"
+        driver.write_text('import { pathToFileURL } from "node:url";\n'
+                          'const def = (await import(pathToFileURL(process.argv[2]).href)).default;\n'
+                          'let turn;\nawait def.setup({ session: { hook: async (n, fn) => { if (n === "context") turn = fn; } } });\n'
+                          'await turn({ sessionID: process.argv[3], system: [] });\n')
+        r = subprocess.run([NODE, str(driver), str(mod), sid], capture_output=True, text=True, cwd=self.checkout,
+                           env=clean_env(LANE_ROLE=role, LANE_PERSONA=str(self.t / "p.md")), timeout=30)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+
+    def test_both_writers_make_the_same_record(self):
+        # path: $XDG_STATE_HOME or ~/.local/state, lane-control/sessions/<checkout as one folder name>/<role>.<harness>
+        # content: the session id and one newline, written whole (a rename), no other file left in the folder
+        os.environ["XDG_STATE_HOME"] = str(self.t / "state")
+        self.write_with_hook(self.ID)
+        self.write_with_plugin(self.ID, role="design-lead")
+        folder = self.t / "state" / "lane-control" / "sessions" / self.pkg.encode_path(self.checkout.resolve())
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["coordinator.claude", "design-lead.opencode"])
+        for name in ("coordinator.claude", "design-lead.opencode"):
+            self.assertEqual((folder / name).read_bytes(), self.ID.encode() + b"\n", name)
+        self.assertEqual(self.pkg.session_record(self.checkout, "coordinator", "claude"), folder / "coordinator.claude")
+        self.assertEqual(self.pkg.session_record(self.checkout, "design-lead", "opencode"),
+                         folder / "design-lead.opencode")
+
+    def test_a_new_session_replaces_the_record_whole(self):
+        os.environ["XDG_STATE_HOME"] = str(self.t / "state")
+        self.write_with_hook("first-session")
+        self.write_with_hook("second")
+        self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "claude"), "second")
+        self.write_with_plugin("first-session")
+        self.write_with_plugin("second")
+        self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "opencode"), "second")
+
+    def test_reader_accepts_only_a_plain_id(self):
+        self.assertEqual(self.pkg.SESSION_ID.pattern, "[A-Za-z0-9_-]{1,200}")
+        for text, want in (("abc_DEF-123\n", "abc_DEF-123"), ("  abc\r\n", "abc"), ("a" * 200 + "\n", "a" * 200),
+                           ("a" * 201 + "\n", None), ("", None), ("\n", None), ("a b\n", None), ("a\nb\n", None),
+                           ("../x\n", None), ("a/b\n", None)):
+            path = self.record("claude", "x")
+            path.write_text(text)
+            self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "claude"), want, repr(text))
+
+    def test_the_interface_is_documented(self):
+        text = " ".join(self.DOC.read_text().split())
+        for needle in ("lane-control/sessions/<checkout>/<role>.<harness>", "$XDG_STATE_HOME", "~/.local/state",
+                       "[A-Za-z0-9_-]{1,200}", "one line", "a trailing newline", "renamed into place",
+                       "every byte that is not a letter or a digit becomes `-`", "no record means no marked session",
+                       "SessionStart", "session_v2", "lane-idle", "not a notification", "exit 3",
+                       "A change to the path, the file format or the id pattern is a breaking change",
+                       "harnesses.read_session"):
+            self.assertIn(needle, text, needle)
+
+
 OPENCODE2 = shutil.which("opencode2")
 LIVE = os.environ.get("LANE_LIVE_OPENCODE") == "1"
 

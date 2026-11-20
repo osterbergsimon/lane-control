@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""lane-idle: how long a lane-control session has been idle, and waiting for it (core/harnesses/session-record.md).
+
+  lane-idle [--checkout DIR] [--role ROLE] [--harness claude|opencode]
+      Prints the whole minutes since the newest write of that role's session in DIR (default: the current folder,
+      role coordinator). The session is the one recorded by a server or session started with LANE_ROLE and
+      LANE_PERSONA (project-setup starts the standing roles so); the harness is found from the record, and named
+      with --harness when a role has both.
+  lane-idle ... --wait MINUTES [--every SEC] [--timeout SEC]
+      Looks again every SEC seconds (default 30) until the session has been idle for MINUTES, then prints the
+      minutes as above. One process does the looking, so a coordinator waits with one command, not a loop of its
+      own. With --timeout (default: no limit) it gives up after SEC seconds.
+
+Exit: 0 idle minutes printed (with --wait: at least MINUTES); 1 no marked session recorded (stderr says how a
+session gets one); 2 it cannot tell (a record or store that cannot be read, a wrong option, or two harnesses
+recorded and none named); 3 --timeout ran out while the session was still busy (stderr says how idle it was).
+Only the minutes go to stdout. Nothing is written.
+"""
+import argparse
+import re
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import harnesses  # noqa: E402
+
+HARNESSES = ("claude", "opencode")
+
+
+def die(code: int, msg: str):
+    print(f"lane-idle: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def pick(checkout: Path, role: str, harness: "str | None") -> str:
+    if harness:
+        return harness
+    found = []
+    for h in HARNESSES:
+        try:
+            if harnesses.read_session(checkout, role, h):
+                found.append(h)
+        except OSError as e:
+            die(2, f"cannot read the {h} session record of {role} in {checkout} ({e})")
+    if len(found) > 1:
+        die(2, f"{role} in {checkout} has a session record for {' and '.join(found)}: name one with --harness")
+    if not found:
+        die(1, f"no {role} session is recorded for {checkout}: it was not started with LANE_ROLE and LANE_PERSONA "
+               "(project-setup starts the standing roles so), so its idle time is unknown")
+    return found[0]
+
+
+def idle(checkout: Path, role: str, harness: str) -> "int | None":
+    try:
+        return harnesses.load_harness(harness).idle_minutes(checkout, time.time(), role)
+    except (OSError, sqlite3.Error) as e:
+        die(2, f"cannot read the {harness} session of {role} in {checkout} ({e})")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="lane-idle", description="Minutes a lane-control session has been idle.")
+    ap.add_argument("--checkout", default=".", help="the folder the session was started in (default: here)")
+    ap.add_argument("--role", default="coordinator", help="the session's LANE_ROLE (default coordinator)")
+    ap.add_argument("--harness", choices=HARNESSES)
+    ap.add_argument("--wait", type=int, metavar="MINUTES", help="wait until idle at least this long")
+    ap.add_argument("--every", type=float, default=30, metavar="SEC", help="seconds between looks (default 30)")
+    ap.add_argument("--timeout", type=float, metavar="SEC", help="give up after this long (default: never)")
+    a = ap.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9-]+", a.role):
+        ap.error(f"--role {a.role!r}: letters, digits and - only")
+    if a.wait is not None and a.wait < 0:
+        ap.error("--wait takes minutes, 0 or more")
+    if a.every <= 0:
+        ap.error("--every takes seconds above 0")
+    checkout = Path(a.checkout).resolve()
+    harness = pick(checkout, a.role, a.harness)
+    deadline = None if a.timeout is None else time.monotonic() + a.timeout
+    last = None
+    while True:
+        minutes = idle(checkout, a.role, harness)
+        if minutes is None:
+            die(1, f"the {harness} session recorded for {a.role} in {checkout} is not in its store (it was never "
+                   "written to, or the store was cleared)")
+        last = minutes
+        if a.wait is None or minutes >= a.wait:
+            print(minutes)
+            return 0
+        if deadline is not None and time.monotonic() + a.every > deadline:
+            die(3, f"still busy after {a.timeout:g} s: idle {last} min, wanted {a.wait}")
+        time.sleep(a.every)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

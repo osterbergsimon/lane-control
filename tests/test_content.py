@@ -1171,5 +1171,61 @@ class LessonsDoctrineTests(unittest.TestCase):
         self.assertRegex(hist, r"(?m)^- 2026-11-19 ")
 
 
+class CrossHostReportContractTests(unittest.TestCase):
+    """UP-3: what is known about a worker's report (worker_done) reaching a coordinator, across hosts and not, and the
+    recovery for a dispatch that can no longer report. Tested live on one machine (record.md, 2026-11-20 UP-3);
+    delivery across hosts is not verified, and every text says so instead of claiming a wake."""
+
+    REMOTE = ROOT / "orchestrators" / "native-orca" / "remote.md"
+
+    def test_remote_doc_states_what_is_known_and_what_is_not(self):
+        t = flat(self.REMOTE)
+        self.assertNotIn("## Not yet established", t)
+        for needle in ("## Reports across hosts", "poll-only", "Not verified",
+                       "Orca's one-line message prompt", "orca-ide orchestration check",
+                       "`--task-id`", "`--dispatch-id`", "`missing_task_id`", "`missing_dispatch_id`",
+                       "`worker_identity_changed`", "Rejected worker_done",
+                       "is not the exact process that owns Dispatch",
+                       "## A dispatch that can no longer report", "read the lane's branch",
+                       "orca-ide orchestration worker-show --dispatch <dispatch>",
+                       "orca-ide orchestration worker-abandon --dispatch <dispatch>",
+                       "orca-ide orchestration worker-release --dispatch <dispatch>",
+                       "orca-ide orchestration worker-start --task <task> --retry-of <dispatch>",
+                       "ask the owner", "Not tested"):
+            self.assertIn(needle, t, needle)
+
+    def test_remote_doc_claims_no_delivery_across_hosts(self):
+        t = flat(self.REMOTE)
+        for claim in ("wakes the coordinator on the box", "is delivered to the box", "reaches the box's coordinator"):
+            self.assertNotIn(claim, t, claim)
+        self.assertRegex(t, r"(?i)across hosts[^.]*(not verified|poll-only)")
+
+    def test_lane_starters_treat_a_cross_host_report_as_poll_only_and_know_the_recovery(self):
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
+            for needle in ("poll-only", "`Rejected worker_done`", "`worker_identity_changed`",
+                           "read the lane's branch", "orca-ide orchestration worker-show --dispatch <dispatch>",
+                           "orca-ide orchestration worker-abandon --dispatch <dispatch>",
+                           "orca-ide orchestration worker-release --dispatch <dispatch>",
+                           "orca-ide orchestration worker-start --task <task> --retry-of <dispatch>",
+                           "ask the owner before you abandon", "Reports across hosts"):
+                self.assertIn(needle, t, (role, needle))
+
+    def test_workers_and_the_brief_say_what_to_do_when_the_report_is_refused(self):
+        for path in [NATIVE / f"{role}.md" for role in WORKERS] + [NATIVE_BRIEF]:
+            t = flat(path)
+            for needle in ("`missing_task_id`", "`missing_dispatch_id`", "`worker_identity_changed`",
+                           "exactly as in your first message", "from this terminal only",
+                           "Push your branch", "your coordinator reads the branch"):
+                self.assertIn(needle, t, (path.name, needle))
+
+    def test_no_script_calls_worker_done(self):
+        # lane-control's scripts never send a worker_done (briefs and personas tell agents to); if one starts to,
+        # its refusal must name the ids and the command, and this test says where to add that.
+        for path in list((ROOT / "core" / "scripts").iterdir()) + list((ROOT / "orchestrators").rglob("*.py")):
+            if path.is_file() and path.suffix not in (".md", ".pyc"):
+                self.assertNotIn("worker_done", path.read_text(errors="ignore"), path.name)
+
+
 if __name__ == "__main__":
     unittest.main()

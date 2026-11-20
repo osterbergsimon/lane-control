@@ -30,8 +30,16 @@ permission-mode flag for workers, so tell the owner if a lane needs another mode
 - Talk to a lane with `orca-ide orchestration send --to dispatch:<id>`; read its reports and questions with
   `orca-ide orchestration check`, and answer a question with `reply`. If a reply seems lost, send again and ask the
   lane to run `check`.
-- After you start a lane on another host, run `orca-ide orchestration check` yourself right after, and on each wake:
-  do not rely on the wake reaching you.
+- A report from a lane on another host is poll-only: that it reaches you or wakes you is not verified
+  (`{{LANE_CONTROL}}/orchestrators/native-orca/remote.md`, Reports across hosts). Run `orca-ide orchestration check`
+  yourself right after you start such a lane, and on each wake; do not rely on the wake reaching you.
+- A `Rejected worker_done` in `check` names a code and a dispatch. `missing_task_id` or `missing_dispatch_id`: tell the
+  lane to send again with both ids. `worker_identity_changed`: that dispatch can no longer report, and the lane's work
+  is on its branch: read the lane's branch, ask the owner before you abandon it, then run
+  `orca-ide orchestration worker-abandon --dispatch <dispatch>` and `orca-ide orchestration worker-release --dispatch
+  <dispatch>`, and start the work again with `orca-ide orchestration worker-start --task <task> --retry-of <dispatch>`
+  (placement, `--agent` and `--model` as for any lane). `orca-ide orchestration worker-show --dispatch <dispatch>`
+  says what Orca knows of a worker; silence alone never proves it gone.
 - When this machine is a box paired with another machine (its environment name is `paired_environment` in the
   project's settings store under `~/.config/lane-control/projects/`; a lane there takes `--on <that name>`), start a
   lane there only for what this machine lacks (graphics, a browser, a GPU). It works in its own clone there and pushes to GitHub as usual; its report comes back by Orca.

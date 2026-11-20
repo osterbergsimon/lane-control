@@ -21,7 +21,15 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   only when the server was started with `LANE_ROLE` and `LANE_PERSONA` set and the file is readable. OpenCode
   watches the plugin folder, so installing or updating the file reaches every running OpenCode server of the user at
   once; without the markers it registers nothing there.
-- Idle signal: the coordinator's own session only. The plugin, in a marked server, records the id of the session
+- Project-level install: `LANE_OPENCODE_PLUGIN=project` (default `user`) makes the adapter put the same file in
+  `<checkout>/.opencode/plugins/` instead; `project-setup` keeps it out of git (`.git/info/exclude`). With both
+  copies present (an old user-level install, then a project one) a server may load both: the plugin adds the persona
+  to a request only when that request does not already carry the same text, so the persona is there once. Not
+  verified against a real OpenCode: that OpenCode 2.2.1 loads `.opencode/plugins/` of a project (it does for the
+  user folder, see the trial); the double-load is tested with a node driver that registers two copies on one context.
+  `project-setup` has no flag for it yet: set the variable in its environment.
+- Idle signal (the record is a published interface: `../session-record.md`; `core/scripts/lane-idle` reads and waits
+  on it): the coordinator's own session only. The plugin, in a marked server, records the id of the session
   taking a turn in `${XDG_STATE_HOME:-~/.local/state}/lane-control/sessions/<checkout>/<role>.opencode`; idle is the
   newest `time_updated` of that session's family (up to its root, then every sub-agent session below it) in the v2
   store, `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/`), tables `session_v2` and
@@ -42,6 +50,9 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
 - 2026-11-19 review 1: the first plugin used the v1 API (v1 hook names, a named export); 2.2.1 refuses it
   ("Plugin must export a default definition with an id and an effect or setup function") and logs "failed to load
   plugin". Rewritten for the v2 API and checked live.
+
+- 2026-11-20 UP-6: project-level install (`LANE_OPENCODE_PLUGIN=project`), the persona added once when two copies are
+  loaded, and the session record published as a stable interface (`../session-record.md`, `lane-idle`).
 
 ## Retest when
 - OpenCode changes its plugin API, its `--standalone` flag or its session store: run the live check.
