@@ -38,6 +38,11 @@ Every build and full test suite runs through `~/.agents/bin/lane-heavy <command>
 project and lane (`core/machine.md`); open a lane only when `~/.agents/bin/lane-room` exits 0. A project can route
 its own heavy targets (a CI script, a make target) through `lane-heavy` so every caller gets the gate.
 
+## An SSH host
+`core/scripts/project-setup <repo> <host>` sets a project up on an SSH box, driven from this machine's Orca, and lets
+the box's coordinator run lanes here with the desktop's share link (`remote.md`); `project-setup --remove-host
+<host>` undoes the second part.
+
 ## A machine
 `core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
 every step says `exists` on a re-run):

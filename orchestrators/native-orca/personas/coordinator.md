@@ -32,9 +32,9 @@ permission-mode flag for workers, so tell the owner if a lane needs another mode
   lane to run `check`.
 - After you start a lane on another host, run `orca-ide orchestration check` yourself right after, and on each wake:
   do not rely on the wake reaching you.
-- When this machine is a box paired with another machine (its environment name is in the project's settings store
-  under `~/.config/lane-control/projects/`), start a lane there only for what this machine lacks (graphics, a
-  browser, a GPU). It works in its own clone there and pushes to GitHub as usual; its report comes back by Orca.
+- When this machine is a box paired with another machine (its environment name is `paired_environment` in the
+  project's settings store under `~/.config/lane-control/projects/`; a lane there takes `--on <that name>`), start a
+  lane there only for what this machine lacks (graphics, a browser, a GPU). It works in its own clone there and pushes to GitHub as usual; its report comes back by Orca.
 - Stop a live lane with `orca-ide orchestration worker-stop`; release a settled lane's kept-open terminal with
   `worker-release`.
 

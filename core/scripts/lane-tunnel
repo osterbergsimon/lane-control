@@ -1,0 +1,78 @@
+#!/bin/sh
+# lane-tunnel: the user service that keeps an SSH host's way back to this machine's Orca open (native-Orca setup,
+# direction 2; docs: orchestrators/native-orca/remote.md).
+#
+#   lane-tunnel start <ssh-host> <port>   write and start lane-tunnel@<name>.service: ssh -N -R 127.0.0.1:<port>:127.0.0.1:<port>
+#   lane-tunnel stop <ssh-host>           stop and disable it, and forget its host and port
+#   lane-tunnel status <ssh-host>         exit 0 when it runs
+#
+# <name> is the host with every character but letters, digits, '.', '_' and '-' turned into '-' (as orca-host-install
+# names the host's environment). The instance's host, port, ssh config (LANE_SSH_CONFIG, passed as ssh -F) and PATH
+# are in ${XDG_CONFIG_HOME:-~/.config}/lane-control/tunnels/<name>.env (mode 0600; no secret is in it). Needs a
+# systemd user manager; to keep it without a login session: loginctl enable-linger $USER.
+set -eu
+
+die() { echo "lane-tunnel: $1" >&2; exit "${2:-1}"; }
+conf=${XDG_CONFIG_HOME:-$HOME/.config}
+case $conf in /*) ;; *) conf=$HOME/.config ;; esac
+tunnels=$conf/lane-control/tunnels
+units=$conf/systemd/user
+here=$(cd "$(dirname "$0")" && pwd)
+template=$here/../templates/lane-tunnel@.service
+
+[ $# -ge 2 ] || die "usage: lane-tunnel start <ssh-host> <port> | stop <ssh-host> | status <ssh-host>" 2
+op=$1 host=$2
+case $host in
+  ''|-*|*[!A-Za-z0-9._@:%\[\]-]*) die "not an ssh host name: letters, digits and . _ @ : [ ] % - only, not starting with -" 2 ;;
+esac
+name=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
+unit=lane-tunnel@$name.service
+envfile=$tunnels/$name.env
+sd() { systemctl --user "$@"; }
+have_systemd() { command -v systemctl >/dev/null 2>&1 && sd show-environment >/dev/null 2>&1; }
+need_systemd() {
+  have_systemd || die "no systemd user manager here (systemctl --user), so the tunnel to $host cannot run as a user service"
+}
+
+case $op in
+  start)
+    [ $# -eq 3 ] || die "usage: lane-tunnel start <ssh-host> <port>" 2
+    port=$3
+    case $port in ''|*[!0-9]*) die "bad port: $port" 2 ;; esac
+    { [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "bad port: $port" 2
+    need_systemd
+    cfg=""
+    if [ -n "${LANE_SSH_CONFIG:-}" ]; then
+      case $LANE_SSH_CONFIG in
+        "~/"*) cfg=$HOME/${LANE_SSH_CONFIG#"~/"} ;;
+        /*) cfg=$LANE_SSH_CONFIG ;;
+        *) cfg=$(pwd)/$LANE_SSH_CONFIG ;;
+      esac
+    fi
+    mkdir -p "$tunnels" "$units"
+    chmod 700 "$tunnels"
+    old=$(cat "$envfile" 2>/dev/null || true)
+    new=$(printf 'SSH_HOST=%s\nPORT=%s\nSSH_CONFIG=%s\nPATH=%s' "$host" "$port" "$cfg" "$PATH")
+    (umask 077; printf '%s\n' "$new" > "$envfile.tmp")
+    mv -f "$envfile.tmp" "$envfile"
+    sed "s|@TUNNELS@|$tunnels|" "$template" > "$units/lane-tunnel@.service.tmp"
+    mv -f "$units/lane-tunnel@.service.tmp" "$units/lane-tunnel@.service"
+    sd daemon-reload || die "systemctl --user daemon-reload failed"
+    sd enable --now "$unit" >/dev/null 2>&1 || die "systemctl --user enable --now $unit failed (journalctl --user -u $unit)"
+    # A changed host or port must replace a tunnel that already runs.
+    if [ -n "$old" ] && [ "$old" != "$new" ]; then sd restart "$unit" || die "systemctl --user restart $unit failed"; fi
+    echo "started $unit (127.0.0.1:$port on $host reaches 127.0.0.1:$port here)"
+    ;;
+  stop)
+    # Without a user manager the unit cannot be stopped: keep its env file, so a running one is not left broken.
+    have_systemd || die "no systemd user manager here (systemctl --user), so $unit was not stopped; run lane-tunnel stop $host where one is"
+    sd disable --now "$unit" >/dev/null 2>&1 || true
+    if [ -e "$envfile" ]; then unlink "$envfile"; fi
+    echo "stopped $unit"
+    ;;
+  status)
+    need_systemd
+    sd is-active --quiet "$unit"
+    ;;
+  *) die "unknown command $op (start, stop, status)" 2 ;;
+esac

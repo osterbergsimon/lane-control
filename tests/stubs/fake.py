@@ -15,6 +15,22 @@ tool = "orca" if Path(sys.argv[0]).name.startswith("orca") else Path(sys.argv[0]
 args = sys.argv[1:]
 state_path = Path(os.environ["STUB_STATE"])
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
+# `--environment <name>`: a call routed to a paired Orca server. A saved environment with a state file of its own
+# ("environments": [{"name", "state"}]) answers from that file, as the box's own runtime would.
+if tool == "orca" and "--environment" in args:
+    i = args.index("--environment")
+    env_name, args = args[i + 1], args[:i] + args[i + 2:]
+    env = next((e for e in state.get("environments", []) if e.get("name") == env_name), None)
+    if args[:2] not in (["environment", "rm"], ["environment", "show"]):
+        if env is None or not env.get("reachable", True):
+            print(json.dumps({"ok": False, "error": {"code": "environment_unavailable",
+                                                     "message": f"stub: environment {env_name} not reachable"}}))
+            sys.exit(1)
+        if env.get("state"):
+            state_path = Path(env["state"])
+            state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    else:
+        args = args + ["--environment", env_name]
 state.setdefault("orca_up", True)
 state.setdefault("repos", [])
 state.setdefault("worktrees", [])
@@ -44,6 +60,24 @@ def orca():
         if not state["orca_up"]:
             out({"ok": False, "error": {"message": "runtime not reachable"}}, 1)
         out({"ok": True, "result": {"runtime": {"state": "ready", "reachable": True}}})
+    if cmd == "host list":
+        out({"ok": True, "result": {"hosts": [{"kind": "local", "name": "this machine", "id": "local",
+                                               "machineName": state.get("machine_name", "deskbox")}]}})
+    if cmd == "environment list":
+        if os.environ.get("STUB_LIST_READS_STDIN"):  # a CLI that reads whatever its stdin holds
+            sys.stdin.read()
+        out({"ok": True, "result": {"environments": [{"name": e["name"]} for e in state.get("environments", [])]}})
+    if cmd == "environment add":
+        if opt("--pairing-code") != "-" or not os.environ.get("STUB_PAIRED_BY_STDIN"):
+            out({"ok": False, "error": {"message": "stub: the pairing code must come by stdin (--pairing-code -)"}}, 1)
+        state.setdefault("environments", []).append({"name": opt("--name"), "reachable": True})
+        out({"ok": True, "result": {"environment": {"name": opt("--name")}}})
+    if cmd == "environment rm":
+        name = opt("--environment")
+        if not any(e["name"] == name for e in state.get("environments", [])):
+            out({"ok": False, "error": {"message": f"stub: no environment {name}"}}, 1)
+        state["environments"] = [e for e in state["environments"] if e["name"] != name]
+        out({"ok": True, "result": {"removed": name}})
     if cmd == "repo list":
         out({"ok": True, "result": {"repos": state["repos"]}})
     if cmd == "repo add":

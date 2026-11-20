@@ -2,11 +2,13 @@
 """Set up an Orca project with a coordinator and a frontend design lead: on native Orca (the default), or run by Cotal
 agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
 
-  project-setup <git-url|dir> [--orchestrator native-orca|orca-cotal] [--host H] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
+  project-setup <git-url|dir> [<host>] [--orchestrator native-orca|orca-cotal] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE] [--own-model M]... [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
+                [--no-desktop-lanes] [--no-machine-setup] [--orca-port N]
+  project-setup --remove-host <host>
 
 Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
 adapting agent and a reviewer, committed only on the owner's yes; the role files go to .lane-control/additions/ and
@@ -16,7 +18,17 @@ by .git/info/exclude), the persona hook of each standing role's harness (core/ha
 design lead each started in its own Orca terminal titled "<project> coordinator" / "<project> design lead", which
 makes the session's own Orca Run before the agent starts (its id goes in the settings store). Claude and OpenCode
 (v2, opencode2) both take every role; nothing is ever typed into a terminal. A project keeps the orchestrator it was
-set up with (the store, or a .cotal/ folder) unless --orchestrator names another. --host is not built for it yet.
+set up with (the store, or a .cotal/ folder) unless --orchestrator names another.
+
+With a host (`<host>` after the repo, or --host; the repo is then a URL or a path on the host), native Orca runs it
+there and drives it from here (orchestrators/native-orca/remote.md): Orca's server on the host, paired here
+(orca-host-install, when it does not answer yet); lane-control copied to the host and the steps above run there by
+its own copy; then, unless --no-desktop-lanes, the desktop's share link asked for on a hidden prompt (in a terminal
+only), passed to the host on ssh's stdin and saved there as an Orca environment, with a reverse tunnel kept open
+here (core/scripts/lane-tunnel, a systemd user service), so the host's coordinator can run lanes here; then
+machine-setup there, unless --no-machine-setup. The link is never in arguments, logs, files or the store: only
+the environment's name is kept. --remove-host undoes the desktop lanes and says where to revoke the link. A project
+the host runs on Orca + Cotal keeps that path, as does --orchestrator orca-cotal.
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
 with the @cotal-ai/orca extension, and the harnesses it will launch. Every step is skipped when already done; a
@@ -95,7 +107,8 @@ HOST_FILES = (".lane-control-root", "core/lcroot.py", "scripts/project-setup", *
               "core/scripts/project-setup", "core/harnesses", "orchestrators/native-orca",
               "orchestrators/orca-cotal/scripts/project-setup", "orchestrators/orca-cotal/personas",
               "orchestrators/orca-cotal/skills", "orchestrators/orca-cotal/templates",
-              *(f"core/scripts/{t}" for t in LANE_TOOLS), "core/model-routing.md")  # what --host copies (scripts/<name> are links to their real files, copied too)
+              *(f"core/scripts/{t}" for t in LANE_TOOLS), "core/model-routing.md",
+              "core/scripts/pairing-code-stdin.cjs")  # what --host copies (scripts/<name> are links to their real files, copied too)
 
 
 class Fail(Exception):
@@ -171,7 +184,8 @@ def free_port(start: int) -> int:
 
 
 SETTING_KEYS = ("root", "name", "models", "design_lead", "permission_mode", "private", "own_models", "port",
-                "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused")  # all that is ever written: names and choices, never a secret
+                "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
+                "paired_environment")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "design-lead": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -377,36 +391,90 @@ def ssh_base() -> list:
     return ["ssh", "-F", os.path.expanduser(cfg)] if cfg else ["ssh"]
 
 
-def on_host(host: str, argv: list, target: str) -> int:
-    """Copy what project-setup needs to the host and run it there with the same arguments minus --host."""
-    if not re.match(r"^(https?|ssh|git|file)://|^[\w.-]+@[\w.-]+:|^/|^~", target):
-        print("project-setup: with --host, give a URL or an absolute (or ~/) path on the host", file=sys.stderr)
-        return 2
-    remote = "~/.local/share/lane-control"
-    pack = subprocess.Popen(["tar", "-C", str(HERE), "-cf", "-", *HOST_FILES], stdout=subprocess.PIPE)
-    copy = subprocess.run([*ssh_base(), host, f"mkdir -p {remote} && tar -C {remote} -xf -"], stdin=pack.stdout)
-    pack.stdout.close()
-    if pack.wait() != 0 or copy.returncode != 0:
-        print(f"project-setup: copying lane-control to {host} failed", file=sys.stderr)
-        return 1
-    args, skip = [], False
-    for i, x in enumerate(argv):
-        if skip:
-            skip = False
-            continue
-        if x == "--host":
-            skip = True
-            continue
-        if x.startswith("--host="):
-            continue
-        args.append(x)  # --tiers, like the target, is a path on the host
-    args.append("--via-host")  # the host's copy picks the orchestrator from its own store, and stops at native
+REMOTE = "~/.local/share/lane-control"  # where --host puts lane-control on the host
+# setup's own ssh calls never wait for a password or a dead link; only the host's own run keeps a terminal
+SSH_BATCH = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15")
+HOST_RE = re.compile(r"[A-Za-z0-9._@:\[\]%-]+")
 
-    def q(x):  # keep a leading ~/ for the remote shell to expand, quote the rest
+
+def host_refusal(host: str) -> "str | None":
+    """Why a host string cannot be given to ssh (an option, a space, a newline...), or None."""
+    if not HOST_RE.fullmatch(host or "") or host.startswith("-"):
+        return (f"{host!r} is not an ssh host name (letters, digits and . _ @ : [ ] % -, not starting with -); "
+                "nothing was run")
+    return None
+
+
+def remote_target_ok(target: str) -> bool:
+    return bool(re.match(r"^(https?|ssh|git|file)://|^[\w.-]+@[\w.-]+:|^/|^~", target))
+
+
+def remote_cmd(script: str, args: list) -> str:
+    """A command line for the host's shell: lane-control's copy there, a leading ~/ kept for it to expand."""
+    def q(x):
         return "~/" + shlex.quote(x[2:]) if x.startswith("~/") else shlex.quote(x)
-    cmd = f"{remote}/scripts/project-setup " + " ".join(q(x) for x in args)
-    tty = sys.stdin.isatty()
-    return subprocess.run([*reexec_ssh_args(), host, cmd], stdin=None if tty else subprocess.DEVNULL).returncode
+    return f"{REMOTE}/{script} " + " ".join(q(x) for x in args)
+
+
+def copy_to_host(place: "Place") -> None:
+    """Put what project-setup needs in ~/.local/share/lane-control on the host (every run: a newer lane-control
+    replaces an older copy)."""
+    pack = subprocess.Popen(["tar", "-C", str(HERE), "--exclude=__pycache__", "-cf", "-", *HOST_FILES],
+                            stdout=subprocess.PIPE)
+    try:
+        copy = subprocess.run(place.ssh_argv(f"mkdir -p {REMOTE} && tar -C {REMOTE} -xf -"), stdin=pack.stdout,
+                              stderr=subprocess.PIPE, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        pack.kill()
+        raise Fail(f"copying lane-control to {place.host} took more than 15 minutes; stopped") from None
+    finally:
+        pack.stdout.close()
+    if pack.wait() != 0 or copy.returncode != 0:
+        said = [l for l in (copy.stderr or "").splitlines() if l.strip()]
+        raise Fail(f"copying lane-control to {place.host} failed" + (f": {said[-1].strip()}" if said else ""))
+    say("lane-control", "copied", f"to {REMOTE} on {place.host}")
+
+
+LOCAL_ONLY_FLAGS = {"--no-desktop-lanes": False, "--no-machine-setup": False, "--orca-port": True, "--host": True}
+
+
+def host_argv(argv: list, value_flags: set, drop_positional: "str | None") -> list:
+    """The arguments for the host's own run: argv without the host (the second positional, or --host) and without
+    what only this machine's side reads."""
+    out, i, positional = [], 0, 0
+    while i < len(argv):
+        x = argv[i]
+        name = x.split("=", 1)[0]
+        if name in LOCAL_ONLY_FLAGS:
+            i += 2 if LOCAL_ONLY_FLAGS[name] and "=" not in x else 1
+            continue
+        if x.startswith("-"):
+            out.append(x)
+            if x in value_flags and i + 1 < len(argv):
+                out.append(argv[i + 1])
+                i += 1
+        else:
+            positional += 1
+            if not (positional == 2 and drop_positional is not None and x == drop_positional):
+                out.append(x)  # --tiers, like the target, is a path on the host
+        i += 1
+    return out
+
+
+def on_host(host: str, argv: list, target: str, value_flags: set = frozenset()) -> int:
+    """The Orca + Cotal host path: copy what project-setup needs to the host and run it there with the same
+    arguments minus the host."""
+    if not remote_target_ok(target):
+        print("project-setup: with a host, give a URL or an absolute (or ~/) path on the host", file=sys.stderr)
+        return 2
+    place = Place(host)
+    place.legacy = True  # the Orca + Cotal path keeps its ssh command lines as they were (main checked the host)
+    try:
+        copy_to_host(place)
+    except Fail as e:
+        print(f"project-setup: {e}", file=sys.stderr)
+        return 1
+    return reexec(place, host_argv(argv, value_flags, host))
 
 
 def reexec_ssh_args():
@@ -414,21 +482,37 @@ def reexec_ssh_args():
     return ssh_base() + (["-t"] if sys.stdin.isatty() else [])
 
 
+def reexec(place: "Place", args: list) -> int:
+    """Run project-setup on the host with these arguments (reexec_ssh_args). --via-host tells the host's copy it was
+    started from here."""
+    tty = sys.stdin.isatty()
+    cmd = remote_cmd("scripts/project-setup", [*args, "--via-host"])
+    return subprocess.run([*reexec_ssh_args(), *([] if place.legacy else ["--"]), place.host, cmd],
+                          stdin=None if tty else subprocess.DEVNULL).returncode
+
+
+def env_name(host: str) -> str:
+    """The name orca-host-install saves a host's Orca server under here (and lane-tunnel names its unit by)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", host)
+
+
 # --- steps -------------------------------------------------------------------------------------------------------
 
 class Place:
-    """Where setup's Orca calls go: this machine, or a saved Orca SSH host (phase 6 of the native-Orca plan, not built
-    yet). Every Orca command line of both paths is built here, the launcher's too, so the host path changes this
-    class and nothing else. (Files: the store, launcher, personas and hooks are written where project-setup runs.)"""
+    """Where setup's Orca and host calls go: this machine, or an SSH host. Every Orca command line of both paths is
+    built here, the launcher's too. For a host (phase 6), Orca calls go to the host's Orca server, paired here as the
+    environment orca-host-install names it (`--environment <env>`), and host commands go over ssh. Files (the store,
+    launcher, personas and hooks) are written where project-setup runs: on a host by the host's own copy, which
+    uses Place() there."""
+
+    legacy = False  # the Orca + Cotal host path: ssh lines as before phase 6
 
     def __init__(self, host: "str | None" = None):
-        if host is not None:
-            raise NotImplementedError(f"native-Orca setup on the SSH host {host!r} is phase 6 of the native-Orca plan "
-                                      "and is not built yet")
         self.host = host
+        self.env = env_name(host) if host else None
 
     def argv(self, *args) -> list:
-        return [ORCA, *args]
+        return [ORCA, *args, *(["--environment", self.env] if self.env else [])]
 
     def found(self) -> bool:
         return bool(shutil.which(self.argv()[0]))
@@ -439,10 +523,36 @@ class Place:
     def jrun(self, *args):
         return jrun(self.argv(*args, "--json"))
 
+    def reachable(self) -> bool:
+        """Whether this place's Orca runtime answers and is ready."""
+        try:
+            p = self.run("status", "--json", check=False, timeout=30)
+            rt = json.loads(p.stdout)["result"]["runtime"]
+            return bool(rt.get("reachable") and rt.get("state") == "ready")
+        except (Fail, json.JSONDecodeError, KeyError, TypeError):
+            return False
+
+    def ssh_argv(self, cmd: str, tty: bool = False) -> list:
+        if not self.host:
+            raise ValueError("this machine has no ssh command line")
+        if self.legacy:
+            return [*ssh_base(), *(["-t"] if tty else []), self.host, cmd]
+        return [*ssh_base(), *(["-t"] if tty else SSH_BATCH), "--", self.host, cmd]
+
+    def ssh(self, cmd: str, input: "str | None" = None, timeout: float = 300) -> subprocess.CompletedProcess:
+        """A command on the host, its output captured; `input` goes to its stdin (never on a command line)."""
+        try:
+            return subprocess.run(self.ssh_argv(cmd), input=input if input is not None else "", capture_output=True,
+                                  text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise Fail(f"ssh {self.host}: {type(e).__name__}") from None
+
     def agent_running(self, checkout: Path, role: str) -> bool:
         """Whether an agent process of this lane role runs in the checkout: argv[0] an agent harness (or node or bun
         running one), its cwd in the checkout, LANE_ROLE=<role> in its environment. For a terminal Orca did not mark
-        with agentIdentity. Read from /proc (Linux); elsewhere False."""
+        with agentIdentity. Read from /proc (Linux), on this machine only; elsewhere False."""
+        if self.host:
+            return False
         want, marker = Path(checkout).resolve(), f"LANE_ROLE={role}".encode()
         try:
             pids = [d for d in Path("/proc").iterdir() if d.name.isdigit()]
@@ -2965,6 +3075,9 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             raise Fail(f"{why}. Nothing was changed")
         beads_note(repo)
         validate_settings(repo, settings(repo))
+        if a.desktop_environment:  # this box is paired with that machine (direction 2); the coordinator reads it
+            settings(repo, paired_environment=a.desktop_environment)
+            say("paired environment", "recorded", f"{a.desktop_environment} (lanes there: --on {a.desktop_environment})")
         try:
             cfg = resolve_settings(repo, a)
         except Refused as e:
@@ -2982,7 +3095,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         lead = pins["design-lead"] if cfg["lead"] else None
         PRIVATE_GLOBS[:] = cfg["private"]
         standing = {pins["coordinator"][0]} | ({lead[0]} if lead else set())
-        native_preflight(standing, place)
+        native_preflight(set() if a.no_start else standing, place)  # a box may get its agents signed in later
         tier_text = choose_tiers(repo, a, tiers)
         if "claude" in standing and not a.no_start:
             ensure_claude_trust(repo, record=a.trust_folder)
@@ -3042,14 +3155,461 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             print(f"agent time used: {minutes(agent_spent)} of {minutes(AGENT_LIMIT)}")
 
 
+# --- remote hosts (phase 6: orchestrators/native-orca/remote.md) -------------------------------------------------
+
+SHARE_HELP = """\
+Desktop lanes: {host}'s coordinator can run lanes here (for what {host} lacks: graphics, a browser, a GPU), in this
+desktop's Orca, paired with its share link. Make the link in Orca here: Settings > Servers > "Share this computer",
+and choose this computer's own address (127.0.0.1; a network address would widen what the desktop listens on).
+The link lets {host} run commands as you on this computer (no desktop control) until you revoke it there. It is
+read hidden, passed to {host} over ssh's stdin, and kept only in Orca's own pairing store on {host}: not in
+arguments, logs, other files or the settings store. lane-control keeps only the environment's name."""
+REVOKE_HELP = ("Revoke the link in Orca here: Settings > Servers, the link shared with {host} > revoke. Until then "
+               "anyone holding it can run commands as you on this computer.")
+PAIR_WAIT = float(os.environ.get("LANE_PAIR_WAIT") or 20)  # seconds to wait for the box to reach this machine
+PRELOAD = HERE / "core" / "scripts" / "pairing-code-stdin.cjs"
+ENV_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def tool_path(env: str, rel: str) -> str:
+    """A lane-control tool, or the stand-in a test or trial names in env."""
+    return os.environ.get(env) or str(HERE / rel)
+
+
+def hosts_dir() -> Path:
+    return config_home() / "lane-control" / "hosts"
+
+
+def host_record(host: str) -> Path:
+    return hosts_dir() / f"{env_name(host)}.json"
+
+
+def this_machine() -> str:
+    """This machine's name for a box to save it under: Orca's machine name, else the host name."""
+    name = ""
+    try:
+        rows = LOCAL.jrun("host", "list")["result"]["hosts"]
+        name = next((h.get("machineName") or "" for h in rows if h.get("kind") == "local"), "")
+    except (Fail, KeyError, TypeError):
+        pass
+    if not name:
+        import socket
+        name = socket.gethostname().split(".")[0]
+    return env_name(name)[:64] or "desktop"
+
+
+def link_port(link: str) -> int:
+    """The port of an Orca pairing link's endpoint, which must be this computer's own address. Every message is
+    free of the link and of what it holds."""
+    import base64
+    import urllib.parse
+    bad = Fail("that is not an Orca pairing link (orca://pair?code=...), so nothing was sent or started. Make it in "
+               'Orca here: Settings > Servers > "Share this computer"')
+    try:
+        text = link.strip()
+        if text.lower().startswith("orca://"):
+            u = urllib.parse.urlsplit(text)
+            if u.netloc.lower() != "pair":
+                raise ValueError
+            code = (urllib.parse.parse_qs(u.query).get("code") or [""])[0] or u.fragment
+        else:
+            code = text
+        code = code.replace("+", "-").replace("/", "_")
+        payload = json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
+        ep = urllib.parse.urlsplit(payload["endpoint"])
+        address, port = ep.hostname, ep.port
+    except Exception:  # noqa: BLE001 (any parse error: one message, without the link)
+        raise bad from None
+    if address != "127.0.0.1":  # the tunnel binds 127.0.0.1 at both ends: localhost or ::1 would never connect
+        raise Fail("the link names another address than this computer's own 127.0.0.1, so nothing was sent or "
+                   'started. Make it again choosing 127.0.0.1 (Settings > Servers > "Share this computer"), and '
+                   "revoke the one you made: a network address widens what the desktop listens on")
+    if not port:
+        raise bad
+    return port
+
+
+def box_pairing_remote(place: Place, op: str, name: str, link: "str | None" = None) -> str:
+    """The box-side pairing step (project-setup --box-pairing on the host's copy): its one-word answer."""
+    r = place.ssh(remote_cmd("scripts/project-setup", ["--box-pairing", op, name]), input=link)
+    said = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+    if r.returncode != 0 or not said:
+        err = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        why = err[-1] if err else f"exit {r.returncode}"
+        raise Fail(f"on {place.host}, pairing step {op} failed: {why}")
+    return said[-1]
+
+
+def desktop_lanes(place: Place) -> "str | None":
+    """Direction 2: the box pairs with this desktop's Orca, through a reverse tunnel. The environment's name on the
+    box, or None when skipped."""
+    host, me = place.host, this_machine()
+    state = box_pairing_remote(place, "status", me)
+    if state == "reachable":
+        say("desktop lanes", "exists", f"{host} has this machine's Orca as environment {me}")
+        return me
+    if not has_terminal():
+        say("desktop lanes", "skipped", f"(the desktop's share link is asked for only in a terminal: run "
+            f"project-setup <repo> {host} in one to let {host}'s coordinator run lanes here; --no-desktop-lanes "
+            "stops the question)")
+        return None
+    print(SHARE_HELP.format(host=host), flush=True)
+    import getpass
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)  # getpass would read with echo: refuse instead
+        try:
+            link = getpass.getpass(f"Desktop share link for {host} (hidden; Enter to skip): ").strip()
+        except getpass.GetPassWarning:
+            raise Fail("this terminal cannot hide what is typed, so the share link is not asked for here; nothing "
+                       "was sent. Run project-setup in another terminal, or pass --no-desktop-lanes") from None
+        except (EOFError, KeyboardInterrupt):
+            link = ""
+    if not link:
+        say("desktop lanes", "skipped", f"(no link; run again to add it, or --no-desktop-lanes)")
+        return None
+    port = link_port(link)
+    if state == "saved":  # saved there earlier but not reachable: this machine's identity or port changed
+        box_pairing_remote(place, "rm", me)
+    tunnel = tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel")
+    unit = f"lane-tunnel@{env_name(host)}.service"
+    subprocess.run([tunnel, "stop", host], capture_output=True)  # an earlier tunnel of ours would hold the port
+    # The box's end must be ours: whatever else listens there (the box's own Orca server, another user's program)
+    # would get the code instead of this machine.
+    if not wait_box_port(place, port, "free"):
+        raise Fail(f"port {port} on {host} is in use (its own Orca server, or another program), so the tunnel back "
+                   f"here cannot open there; nothing was sent. Move what listens there (Orca's server: "
+                   f"orca-host-install {host} --pair --port <another>), then run again")
+    t = subprocess.run([tunnel, "start", host, str(port)], capture_output=True, text=True)
+    if t.returncode != 0:
+        raise Fail((t.stderr.strip() or "lane-tunnel failed") + "; nothing was sent to " + host)
+    sent = False
+    try:
+        up = wait_box_port(place, port, "busy")
+        for _ in range(2):  # and it is our unit that holds it, not another program after the unit died
+            up = up and subprocess.run([tunnel, "status", host], capture_output=True).returncode == 0
+            time.sleep(1)
+        if not up:
+            raise Fail(f"the tunnel {unit} did not come up on {host}, so nothing was sent (journalctl --user -u {unit}). "
+                       "The unit's ssh runs without your ssh agent: it needs a key it can use alone, with no passphrase "
+                       "(IdentityFile in the ssh config it uses)")
+        if box_pairing_remote(place, "exposed", str(port)) != "no":
+            raise Fail(f"on {host} the tunnel's port {port} is open on more than 127.0.0.1 (sshd's GatewayPorts is on "
+                       "there), which would put this desktop's Orca on that network; nothing was sent. Set "
+                       "GatewayPorts no (or clientspecified) in the box's sshd_config, then run again")
+        say("tunnel", "created", t.stdout.strip())
+        sent = True
+        box_pairing_remote(place, "add", me, link)
+    except BaseException:
+        subprocess.run([tunnel, "stop", host], capture_output=True)
+        if sent:
+            print(f"The tunnel to {host} is stopped again. The link may have reached {host}: "
+                  + REVOKE_HELP.format(host=host), file=sys.stderr)
+        raise
+    finally:
+        link = None  # noqa: F841 (dropped as soon as the box has it)
+    end = time.time() + PAIR_WAIT
+    while True:
+        state = box_pairing_remote(place, "status", me)
+        if state == "reachable" or time.time() >= end:
+            break
+        time.sleep(2)
+    hosts_dir().mkdir(parents=True, exist_ok=True)
+    write_atomic(host_record(host), json.dumps({"host": host, "environment": place.env, "desktop_environment": me,
+                                                "tunnel_port": port}, indent=2).encode(), 0o600)
+    if state == "reachable":
+        say("desktop lanes", "created", f"{host} reaches this machine's Orca as environment {me} "
+            f"(tunnel lane-tunnel@{env_name(host)}.service)")
+    else:
+        say("desktop lanes", "pending", f"saved on {host} as {me}, but not reachable yet: see systemctl --user status "
+            f"lane-tunnel@{env_name(host)}.service")
+    print(REVOKE_HELP.format(host=host))
+    return me
+
+
+TUNNEL_WAIT = float(os.environ.get("LANE_TUNNEL_WAIT") or 20)  # seconds for the box's end of the tunnel to open
+
+
+def wait_box_port(place: Place, port: int, want: str) -> bool:
+    """Whether 127.0.0.1:<port> on the box becomes `want` (free or busy) within TUNNEL_WAIT."""
+    end = time.time() + TUNNEL_WAIT
+    while True:
+        if box_pairing_remote(place, "port", str(port)) == want:
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.5)
+
+
+def host_server(place: Place, port: "int | None") -> None:
+    """Direction 1: Orca's server on the host, paired here (orca-host-install), unless it already answers."""
+    if place.reachable():
+        say("orca server", "exists", f"{place.host} (environment {place.env} answers here)")
+        return
+    if port is None:  # the desktop's own listener is 6768, and the tunnel uses one port at both ends
+        import socket
+        for port in range(6769, 6869):
+            with socket.socket() as s:
+                try:
+                    s.bind(("127.0.0.1", port))
+                    break
+                except OSError:
+                    continue
+        else:
+            raise Fail("no free port in 6769-6868 here for the tunnel to the host's Orca server; pass --orca-port")
+    tool = tool_path("LANE_ORCA_HOST_INSTALL", "orchestrators/orca-cotal/scripts/orca-host-install")
+    try:
+        r = subprocess.run([tool, place.host, "--pair", "--port", str(port)], stdin=subprocess.DEVNULL, timeout=900)
+    except subprocess.TimeoutExpired:
+        raise Fail(f"orca-host-install {place.host} --pair took more than 15 minutes; stopped") from None
+    if r.returncode != 0:
+        raise Fail(f"orca-host-install {place.host} --pair failed (exit {r.returncode}); nothing else was done")
+    if not place.reachable():
+        raise Fail(f"Orca's server on {place.host} was installed but environment {place.env} does not answer here "
+                   f"(orca-ide status --environment {place.env})")
+    say("orca server", "created", f"{place.host} on port {port} (environment {place.env})")
+
+
+def seen_here(place: Place, project: str) -> None:
+    """Whether this machine's Orca shows the host's coordinator (through the paired environment)."""
+    try:
+        rows = place.jrun("terminal", "list")["result"]["terminals"]
+    except (Fail, KeyError, TypeError) as e:
+        return say("seen here", "unknown", f"(terminal list --environment {place.env}: {e})")
+    want = session_title("coordinator", project)
+    titles = sorted({bare_title(t.get("title")) for t in rows if not t.get("orphaned")})
+    if want in titles:
+        say("seen here", "ok", f"{want!r} on {place.host}, in this machine's Orca (environment {place.env})")
+    else:
+        say("seen here", "missing", f"no terminal {want!r} through environment {place.env}; it has: "
+            + (", ".join(t for t in titles if t) or "none"))
+
+
+def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
+    """project-setup <repo> <host> on native Orca: Orca's server there (direction 1), the host's own copy of
+    project-setup for the phase 3 steps, the desktop lanes (direction 2), machine-setup there."""
+    if not remote_target_ok(a.target):
+        print("project-setup: with a host, give a URL or an absolute (or ~/) path on the host", file=sys.stderr)
+        return 2
+    global ORCA
+    add_orca_cli_to_path()
+    ORCA = orca_cli()
+    place = Place(host)
+    try:
+        if not LOCAL.found():
+            raise Fail("Orca CLI not found here (orca-ide; or set ORCA_CLI)")
+        copy_to_host(place)  # the copy and the question need no Orca server on the host yet
+        rest = host_argv(argv, value_flags, host)
+        r = place.ssh(remote_cmd("scripts/project-setup", [*rest, "--via-host", "--which-orchestrator"]), timeout=120)
+        which = (r.stdout.strip().splitlines() or [""])[-1]
+        if r.returncode != 0 or which not in ORCHESTRATORS:
+            raise Fail(f"{host}'s copy of project-setup did not say which orchestrator the project is on"
+                       + (f": {r.stderr.strip().splitlines()[-1]}" if r.stderr.strip() else ""))
+        if which == "orca-cotal":
+            say("orchestrator", "orca-cotal", f"(the project is on Orca + Cotal on {host}; its own path runs there)")
+            return reexec(place, rest)
+        if a.show or a.refresh:  # the host's own --show or --refresh, and nothing else: no server, link or machine
+            return reexec(place, rest)
+        host_server(place, a.orca_port)
+        paired = None
+        if a.no_desktop_lanes:
+            say("desktop lanes", "skipped", "(--no-desktop-lanes)")
+        else:
+            paired = desktop_lanes(place)
+        rc = reexec(place, [*rest, *(["--desktop-environment", paired] if paired else [])])
+        if rc != 0:
+            return rc
+        if a.no_machine_setup:
+            say("machine setup", "skipped", "(--no-machine-setup)")
+        else:
+            tty = sys.stdin.isatty()  # with a terminal it may ask the owner, who takes their time
+            try:
+                ms = subprocess.run([tool_path("LANE_MACHINE_SETUP", "core/scripts/machine-setup"), "--host", host,
+                                     *(["--no-start"] if a.no_start else []),
+                                     *(["--trust-folder"] if a.trust_folder else [])],
+                                    stdin=None if tty else subprocess.DEVNULL, timeout=None if tty else 1800)
+            except subprocess.TimeoutExpired:
+                raise Fail(f"machine-setup --host {host} took more than 30 minutes; stopped") from None
+            if ms.returncode != 0:
+                raise Fail(f"machine-setup --host {host} failed (exit {ms.returncode}); the project is set up there")
+        if not a.no_start:
+            base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
+            seen_here(place, base)
+        return 0
+    except Fail as e:
+        print(f"project-setup: {e}", file=sys.stderr)
+        return 1
+
+
+def remove_host(host: str) -> int:
+    """--remove-host: the box forgets this machine's Orca, the tunnel stops, and the owner is told to revoke the link.
+    Direction 1 (this machine driving the host) stays."""
+    global ORCA
+    add_orca_cli_to_path()
+    ORCA = orca_cli()
+    place, ok = Place(host), True
+    try:
+        rec = json.loads(host_record(host).read_text())
+    except (OSError, ValueError):
+        rec = {}
+    me = rec.get("desktop_environment") if isinstance(rec, dict) else None
+    if not (isinstance(me, str) and ENV_NAME.fullmatch(me)):
+        me = this_machine()
+    try:
+        said = box_pairing_remote(place, "rm", me)
+        say("box environment", said, f"{me} on {host}")
+    except Fail as e:
+        ok = False
+        print(f"project-setup: {e}", file=sys.stderr)
+        say("box environment", "left", f"on {host} run: orca-ide environment rm --environment {me}")
+    t = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "stop", host], capture_output=True,
+                       text=True)
+    if t.returncode != 0:
+        ok = False
+        print(f"project-setup: {t.stderr.strip() or 'lane-tunnel stop failed'}", file=sys.stderr)
+    else:
+        say("tunnel", "removed", t.stdout.strip())
+    if ok:  # kept when a step failed, so a retry finds the same environment name
+        host_record(host).unlink(missing_ok=True)
+    print(REVOKE_HELP.format(host=host))
+    print(f"Kept: this machine driving {host} (direction 1). To drop that too: orca-ide environment rm --environment "
+          f"{place.env}; systemctl --user disable --now orca-tunnel-{place.env}.service")
+    return 0 if ok else 1
+
+
+def listens_beyond_loopback(port: int) -> bool:
+    """Whether a TCP listener on this port has an address other than 127.0.0.0/8 or ::1 (from /proc/net/tcp*)."""
+    for f, loop in (("/proc/net/tcp", lambda a: a[6:8] == "7F"),  # little-endian IPv4: 127.x.x.x ends in 7F
+                    ("/proc/net/tcp6", lambda a: a == "0" * 24 + "01000000" or a.startswith("0" * 16 + "FFFF0000")
+                     and a[30:32] == "7F")):
+        try:
+            rows = Path(f).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            cols = row.split()
+            if len(cols) < 4 or cols[3] != "0A":  # 0A = LISTEN
+                continue
+            addr, _, p = cols[1].partition(":")
+            if int(p, 16) == port and not loop(addr.upper()):
+                return True
+    return False
+
+
+def shim_parts(cli: str) -> tuple:
+    """(node, cli.js, ORCA_USER_DATA_PATH or None) from the CLI launcher Orca writes on a host
+    (~/.orca/cli/bin/orca: `exec '<node>' '<cli.js>' "$@"`)."""
+    try:
+        text = Path(cli).read_text()[:65536]
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    m = re.search(r"""^exec '([^']+)' '([^']+)' "\$@"\s*$""", text, re.M)
+    if not m:
+        raise Fail(f"{cli} is not the Orca CLI launcher Orca writes on a host, so the pairing code cannot reach it by "
+                   "stdin; nothing was saved")
+    u = re.search(r"^export ORCA_USER_DATA_PATH='([^']*)'\s*$", text, re.M)
+    return m.group(1), m.group(2), u.group(1) if u else None
+
+
+def box_pairing(args: list) -> int:
+    """On the box (from this machine's --host run): status|add|rm of the environment that is the desktop. add reads
+    the pairing code on stdin and hands it to Orca's CLI the same way, so it is never on a command line."""
+    if len(args) != 2 or args[0] not in ("status", "add", "rm", "port", "exposed") or not ENV_NAME.fullmatch(args[1]) or (
+            args[0] in ("port", "exposed") and not (args[1].isdigit() and 1 <= int(args[1]) <= 65535)):
+        print("project-setup: --box-pairing status|add|rm <environment name> | port|exposed <port>", file=sys.stderr)
+        return 2
+    op, name = args
+    if op == "port":  # free, or busy (something listens on 127.0.0.1:<port> here)
+        import socket
+        with socket.socket() as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # a closed listener's TIME_WAIT is free
+            try:
+                s.bind(("127.0.0.1", int(name)))
+                print("free")
+            except OSError:
+                print("busy")
+        return 0
+    if op == "exposed":  # yes when something listens on <port> on an address other than loopback (Linux /proc)
+        print("yes" if listens_beyond_loopback(int(name)) else "no")
+        return 0
+    code = None
+    if op == "add":  # read the code once, give it to node alone; every other child gets an empty stdin
+        code = sys.stdin.read()
+        fd = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(fd, 0)
+        os.close(fd)
+    global ORCA
+    add_orca_cli_to_path()
+    ORCA = orca_cli()
+    try:
+        envs = [e.get("name") for e in LOCAL.jrun("environment", "list")["result"]["environments"]]
+        desktop = Place()
+        desktop.env = name  # the desktop, as this box reaches it
+        if op == "status":
+            print("missing" if name not in envs else "reachable" if desktop.reachable() else "saved")
+            return 0
+        if op == "rm":
+            if name in envs:
+                LOCAL.jrun("environment", "rm", "--environment", name)
+            for f in (config_home() / "lane-control" / "projects").glob("*/settings.json"):
+                try:
+                    st = json.loads(f.read_text())
+                except (OSError, ValueError):
+                    continue
+                if isinstance(st, dict) and st.get("paired_environment") == name:
+                    st.pop("paired_environment")
+                    write_atomic(f, json.dumps(st, indent=2).encode() + b"\n", 0o600)
+            print("removed" if name in envs else "missing")
+            return 0
+        if name in envs:
+            LOCAL.jrun("environment", "rm", "--environment", name)
+        node, js, data = shim_parts(LOCAL.argv()[0])
+        env = {k: v for k, v in os.environ.items() if k not in ("NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE",
+                                                                  "ELECTRON_RUN_AS_NODE")}
+        if data:
+            env["ORCA_USER_DATA_PATH"] = data
+        try:
+            r = subprocess.run([node, "--require", str(PRELOAD), js, "environment", "add", "--name", name,
+                                "--pairing-code", "-", "--json"], input=code, capture_output=True, text=True, env=env,
+                               timeout=120)
+        finally:
+            code = None  # noqa: F841
+        try:
+            res = json.loads(r.stdout)
+        except ValueError:
+            res = {}
+        if r.returncode != 0 or not res.get("ok"):
+            err = res.get("error") or {}
+            why = re.sub(r"[A-Za-z0-9+/_=-]{24,}", "<...>", str(err.get("message") or "")) or f"exit {r.returncode}"
+            raise Fail(f"environment add {name}: {err.get('code') or 'failed'}: {why}")
+        print("paired")
+        return 0
+    except Fail as e:
+        print(f"project-setup: {e}", file=sys.stderr)
+        return 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(allow_abbrev=False, prog="project-setup", description=__doc__.split("\n\n")[0])
-    ap.add_argument("target")
+    ap.add_argument("target", nargs="?")
+    ap.add_argument("host_pos", nargs="?", metavar="host",
+                    help="an SSH host (as ssh names it): set the project up there, driven from this machine's Orca")
     ap.add_argument("--orchestrator", choices=ORCHESTRATORS,
                     help="native-orca (the default for a new project) or orca-cotal; a project keeps the one it was "
                          "set up with unless this names another")
-    ap.add_argument("--host")
+    ap.add_argument("--host", help="the same as the host after the repo")
     ap.add_argument("--via-host", action="store_true", help=argparse.SUPPRESS)  # added by --host for the host's copy
+    ap.add_argument("--which-orchestrator", action="store_true", help=argparse.SUPPRESS)  # the host's copy answers
+    ap.add_argument("--desktop-environment", help=argparse.SUPPRESS)  # the host's copy records it (direction 2)
+    ap.add_argument("--remove-host", metavar="HOST",
+                    help="the host forgets this machine's Orca (direction 2), its tunnel stops, and you are told where "
+                         "to revoke the share link; nothing else is changed")
+    ap.add_argument("--no-desktop-lanes", action="store_true",
+                    help="with a host: do not ask for this desktop's share link (no lanes from the host here)")
+    ap.add_argument("--no-machine-setup", action="store_true", help="with a host: do not run machine-setup there")
+    ap.add_argument("--orca-port", type=int, metavar="N",
+                    help="with a host: the port of Orca's server there and its tunnel here (default: the first free "
+                         "one from 6769)")
     ap.add_argument("--name")
     ap.add_argument("--dest", default=str(Path.home() / "code"))
     ap.add_argument("--coordinator", help="harness/model (default claude/opus); kept in the project's settings store")
@@ -3095,29 +3655,54 @@ def main(argv=None) -> int:
                             "writes nothing")
     again.add_argument("--skip-adapt", action="store_true", help="only the Orca setup: no adapting agent, no commit")
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--box-pairing"]:  # on a box, from this machine's host run (direction 2)
+        return box_pairing(argv[1:])
     a = ap.parse_args(argv)
+    value_flags = {s for act in ap._actions if act.option_strings and act.nargs is None for s in act.option_strings}
 
     if os.geteuid() == 0:
         print("project-setup: refusing to run as root; agents run as a normal user", file=sys.stderr)
         return 2
+    for h in (a.host, a.host_pos, a.remove_host):
+        why = host_refusal(h) if h is not None else None
+        if why:
+            print(f"project-setup: {why}", file=sys.stderr)
+            return 2
+    if a.via_host:  # a non-interactive ssh shell's PATH lacks the folders agents are often installed in; they go
+        home = Path(os.environ.get("HOME", str(Path.home())))  # last, so nothing there shadows git or python3
+        for d in (home / "bin", home / ".local" / "bin"):
+            if d.is_dir() and str(d) not in os.environ.get("PATH", "").split(":"):
+                os.environ["PATH"] = f"{os.environ.get('PATH', '')}:{d}"
+    if a.remove_host:
+        if a.target or a.host or a.host_pos:
+            print("project-setup: --remove-host takes the host alone: project-setup --remove-host <host>", file=sys.stderr)
+            return 2
+        return remove_host(a.remove_host)
+    if not a.target:
+        ap.print_usage(sys.stderr)
+        print("project-setup: a repo (git URL or folder) is required", file=sys.stderr)
+        return 2
+    if a.host and a.host_pos and a.host != a.host_pos:
+        print(f"project-setup: two hosts given ({a.host_pos} and --host {a.host}); give one", file=sys.stderr)
+        return 2
+    host = a.host or a.host_pos
+    if a.desktop_environment is not None and not ENV_NAME.fullmatch(a.desktop_environment):
+        print("project-setup: --desktop-environment takes an environment name", file=sys.stderr)
+        return 2
     global ORCHESTRATOR
     base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
-    if a.host:  # the target is on the host: its own copy decides there, from its store and .cotal/ (as on main)
-        ORCHESTRATOR = a.orchestrator or "orca-cotal"
+    if host:  # the target is on the host: without a flag its own copy decides there, from its store and .cotal/
+        ORCHESTRATOR = a.orchestrator or DEFAULT_ORCHESTRATOR
     else:
         try:
             peek = peek_repo(a.target, Path(a.dest).expanduser(), slug(base))
         except Fail:
             peek = None  # no usable git here: the run below says so
-        # A run copied over by --host keeps the local meaning of no flag (orca-cotal, until phase 6) for a project
-        # this host has no record of; one the host already set up on native stops below, never switched.
-        ORCHESTRATOR = which_orchestrator(a.orchestrator, peek, "orca-cotal" if a.via_host else None)
-    if a.via_host and ORCHESTRATOR == "native-orca":
-        print("project-setup: this project is on native Orca here (no Orca + Cotal store or .cotal/ on this host), and "
-              "native-Orca setup over --host is phase 6 of the native-Orca plan, not built yet; nothing was changed. "
-              "Run project-setup on this host itself, or pass --orchestrator orca-cotal for the Orca + Cotal host "
-              "path", file=sys.stderr)
-        return 2
+        # A project the store or a .cotal/ folder puts on a path keeps it, here or copied over by --host.
+        ORCHESTRATOR = which_orchestrator(a.orchestrator, peek)
+    if a.which_orchestrator:
+        print(ORCHESTRATOR)
+        return 0
     modes = NATIVE_MODES if ORCHESTRATOR == "native-orca" else MODES
     if a.permission_mode is not None and a.permission_mode not in modes:
         print(f"project-setup: --permission-mode must be one of {', '.join(modes)}", file=sys.stderr)
@@ -3171,13 +3756,10 @@ def main(argv=None) -> int:
             print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
                   "has (only --reviewer is used, for a reviewer persona that is missing)", file=sys.stderr)
             return 2
-    if a.host:
-        if ORCHESTRATOR == "native-orca":
-            print("project-setup: --host on the native-orca path is not built yet (phase 6 of the native-Orca plan); "
-                  "nothing was copied. Run project-setup on the host itself, or --orchestrator orca-cotal for the "
-                  "Orca + Cotal host path", file=sys.stderr)
-            return 2
-        return on_host(a.host, argv, a.target)
+    if host:
+        if a.orchestrator == "orca-cotal":
+            return on_host(host, argv, a.target, value_flags)
+        return native_on_host(a, argv, host, value_flags)
     if not tiers.is_file():
         print(f"project-setup: tier table {tiers} not found", file=sys.stderr)
         return 2
