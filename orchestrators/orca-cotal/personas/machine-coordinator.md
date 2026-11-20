@@ -35,5 +35,8 @@ need in the order. Say `No reply` when you want none.
   from a plain shell.
 - `REQ` and `FYI` lines from coordinators, as `roles.md` describes.
 
+Waits are lane work: never wait, poll, sleep or watch yourself. A build, a test run or a check you would sit on
+goes to the coordinator that owns it, or to a subagent on a cheaper model; end your turn.
+
 Never take a decision the owner keeps: record it in your notes when they make it. When something is unclear, ask the
 owner in your tab, ending with one full question.

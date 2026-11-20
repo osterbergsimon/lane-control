@@ -1171,5 +1171,115 @@ class LessonsDoctrineTests(unittest.TestCase):
         self.assertRegex(hist, r"(?m)^- 2026-11-19 ")
 
 
+# --- coordinator hands (UP-4, lc-ay2) -------------------------------------------------------------------------------
+HANDS = ("Before any edit or state-changing command, write one line naming whom it is for: `LANE: <KEY>-<n>` for the "
+         "lane you act for, or `DOCTRINE: <why>` for one of the three exceptions below.")
+WAITS = "Waits are lane work: never wait, poll, sleep or watch yourself."
+EXCEPTIONS = ("1. Merging on the owner's word", "2. Closing lanes", "3. Your own records")
+# Coordinator-facing files that are not personas: the sections project-setup or a person pastes into a project.
+HANDS_TEMPLATES = (ROOT / "orchestrators" / "native-orca" / "templates" / "agents-section.md",
+                   ROOT / "orchestrators" / "rove" / "templates" / "AGENTS-coordination.md")
+
+
+def coordinator_personas():
+    """Every project coordinator persona, on every orchestrator: a new one is pinned by being added."""
+    return sorted((ROOT / "orchestrators").glob("*/personas/coordinator.md"))
+
+
+class CoordinatorHandsTests(unittest.TestCase):
+    """The doctrine dropped once in a restructure; these keep it in every coordinator-facing file."""
+
+    def test_every_orchestrator_with_personas_has_a_coordinator_persona(self):
+        with_personas = sorted(d.name for d in (ROOT / "orchestrators").iterdir() if (d / "personas").is_dir())
+        self.assertEqual(sorted(p.parent.parent.name for p in coordinator_personas()), with_personas)
+        self.assertGreaterEqual(len(with_personas), 2)
+
+    def test_roles_coordinator_personas_and_templates_carry_the_doctrine(self):
+        for path in (ROOT / "core" / "roles.md", *coordinator_personas(), *HANDS_TEMPLATES):
+            t = flat(path)
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn(HANDS, t)
+                self.assertIn(WAITS, t)
+                for needle in EXCEPTIONS:
+                    self.assertIn(needle, t)
+                self.assertIn("no others", t)
+
+    def test_roles_puts_the_doctrine_under_the_project_coordinator(self):
+        roles = (ROOT / "core" / "roles.md").read_text()
+        coordinator = roles.split("\n## Project coordinator\n", 1)[1]
+        self.assertIn("### Coordinator hands", coordinator)
+        self.assertIn(HANDS, flat_text(coordinator))
+
+    def test_machine_coordinators_never_wait_either(self):
+        for path in sorted((ROOT / "orchestrators").glob("*/personas/machine-coordinator.md")):
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn(WAITS, flat(path))
+
+    def test_the_native_section_never_tells_the_coordinator_to_block(self):
+        self.assertNotIn("check --wait", (ROOT / "orchestrators" / "native-orca" / "templates" /
+                                          "agents-section.md").read_text())
+
+
+def flat_text(text):
+    return " ".join(text.split())
+
+
+# --- native-orca lane skill (UP-7, lc-dcn) --------------------------------------------------------------------------
+NATIVE_SKILL = ROOT / "orchestrators" / "native-orca" / "skills" / "native-orca-lanes" / "SKILL.md"
+
+
+class NativeLaneSkillTests(unittest.TestCase):
+    def setUp(self):
+        self.text = NATIVE_SKILL.read_text()
+        self.flat = " ".join(self.text.split())
+
+    def test_frontmatter_names_the_skill_and_when_to_use_it(self):
+        keys, _ = frontmatter(NATIVE_SKILL)
+        self.assertEqual(keys["name"], "native-orca-lanes")
+        self.assertIn("coordinator", keys["description"])
+        self.assertIn("native Orca", keys["description"])
+
+    def test_gate_comes_before_the_lane_opens(self):
+        t = self.flat
+        for needle in ("project-pause wake .", "`~/.agents/bin/lane-room`", "hold the lane and tell the owner",
+                       "~/.agents/bin/lane-tier", "git rev-list --count HEAD..origin/<default>", "lane:<KEY>-<n>",
+                       "--claim"):
+            self.assertIn(needle, t, needle)
+        self.assertLess(t.index("lane-room"), t.index("orca-ide orchestration worker-start"))
+        self.assertLess(t.index("lane-tier"), t.index("orca-ide orchestration worker-start"))
+
+    def test_lane_mechanics(self):
+        t = self.flat
+        for needle in ("orca-ide orchestration worker-start --spec-file", "--worktree new-child", "opencode2",
+                       "`brief.md` next to this skill", "orca-ide orchestration run-current",
+                       "orca-ide orchestration check", "reply", "SendMessage", "--to dispatch:<id>",
+                       "worker-release", "orca-ide worktree rm", "worker-stop", "`LANE: <KEY>-<n>`",
+                       "Waits are lane work", "orca-ide skills get orchestration"):
+            self.assertIn(needle, t, needle)
+
+    def test_report_conventions(self):
+        t = self.flat
+        for needle in ("succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP", "worker_done", "word for word",
+                       "never the lane's report"):
+            self.assertIn(needle, t, needle)
+
+    def test_never_types_into_a_terminal(self):
+        self.assertIn("terminal send", self.text)
+        for line in self.text.splitlines():
+            for bad in FORBIDDEN + ["check --wait"]:
+                if bad in line:
+                    self.assertRegex(line.lower(), r"never|do not|don't", f"'{bad}' outside a prohibition: {line}")
+
+    def test_native_lane_starters_read_the_skill(self):
+        for role in ("coordinator", "design-lead"):
+            t = flat(ROOT / "orchestrators" / "native-orca" / "personas" / f"{role}.md")
+            self.assertIn("the `native-orca-lanes` skill", t, role)
+
+    def test_lines_fit(self):
+        for n, line in enumerate(self.text.splitlines(), 1):
+            if not line.startswith(("description:", "for c in")):
+                self.assertLessEqual(len(line), 120, f"SKILL.md:{n}")
+
+
 if __name__ == "__main__":
     unittest.main()

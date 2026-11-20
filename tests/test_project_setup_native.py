@@ -459,6 +459,37 @@ def session_record(e, checkout, role, harness):
         return harnesses.session_record(checkout, role, harness)
 
 
+class NativeSkillTests(Case):
+    """UP-7: the native path installs its lane skill the way the Cotal path installs orca-cotal-lanes."""
+
+    def skill(self):
+        return self.e.home / ".agents" / "skills" / "native-orca-lanes"
+
+    def test_setup_installs_the_native_lane_skill_for_claude_and_opencode(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        src = ROOT / "orchestrators" / "native-orca"
+        self.assertEqual((self.skill() / "SKILL.md").read_text(),
+                         (src / "skills" / "native-orca-lanes" / "SKILL.md").read_text())
+        self.assertEqual((self.skill() / "brief.md").read_text(), (src / "templates" / "lane-brief.md").read_text())
+        for agent_dir in (self.e.home / ".claude" / "skills", Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills"):
+            link = agent_dir / "native-orca-lanes"
+            self.assertTrue(link.is_symlink(), link)
+            self.assertEqual(link.resolve(), self.skill().resolve())
+        self.assertIn("skills: created", r.stdout)
+        self.assertFalse((self.e.home / ".agents" / "skills" / "orca-cotal-lanes").exists())
+
+    def test_refresh_puts_back_a_changed_or_missing_skill_file(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        (self.skill() / "brief.md").unlink()
+        (self.skill() / "SKILL.md").write_text("old\n")
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue((self.skill() / "brief.md").exists())
+        self.assertNotEqual((self.skill() / "SKILL.md").read_text(), "old\n")
+        self.assertIn("skills: updated", r.stdout)
+
+
 class RefreshTests(Case):
     def test_refresh_rerenders_with_the_stored_pins_and_hooks(self):
         r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")

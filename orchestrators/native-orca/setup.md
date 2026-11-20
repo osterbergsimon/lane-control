@@ -8,8 +8,12 @@ Pin the Orca version you tested: Orca ships often and its orchestration commands
   Agents run as a normal user, never root.
 - Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, and the agent harnesses you use (Claude Code),
   signed in once as the user the agents run as.
-- The machine caps: `~/.agents/bin/lane-heavy` and `lane-room` (copies of `core/scripts/`; `project-setup` of
-  Orca + Cotal installs them, or copy them by hand with `lane-limits.sh` and `lane-tier`).
+- The machine caps: `~/.agents/bin/lane-heavy` and `lane-room` (copies of `core/scripts/`; `project-setup`
+  installs them, or copy them by hand with `lane-limits.sh` and `lane-tier`).
+- The lane skill, `skills/native-orca-lanes` (gate, lane, messages, report shape, review, close): `project-setup`
+  installs it with the caps in `~/.agents/skills/native-orca-lanes` (with the lane brief as its `brief.md`), linked
+  into `~/.claude/skills` and `~/.config/opencode/skills`; `--refresh` puts back a changed or missing file. Orca's
+  own `orchestration` guide (`orca-ide skills get orchestration`) stays the command reference.
 - Check: `orca-ide orchestration --help` lists the commands below.
 
 ## A project
@@ -23,7 +27,7 @@ where the handovers live. The project's own facts stay in its AGENTS.md.
 - **Workers:** `orca-ide orchestration worker-start` starts a worker in its own worktree and branch, with its brief as
   the first message. Reusing a kept-open terminal is much faster than a fresh one; release kept-open terminals when
   done.
-- **Messages:** `send`, `ask`, `reply` and `check` (`check --wait` to block for one). A message reaches the agent as a
+- **Messages:** `send`, `ask`, `reply` and `check` (a coordinator never uses `check --wait`: waits are lane work). A message reaches the agent as a
   one-line prompt in its composer telling it to run `check`; the content shows only after it does. If a worker that
   also coordinates its own run seems not to get a reply, nudge it to run `check` (`record.md`, point 3).
 - **Nesting:** a worker may not start its own worker until the owner raises Settings > Orchestration > Nested worker

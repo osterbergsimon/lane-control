@@ -686,30 +686,53 @@ def skills():
     home = Path(os.environ.get("HOME", str(Path.home())))
     lane_tools(home)
     root = home / ".agents" / "skills"
-    dst = root / "orca-cotal-lanes"
-    want = {"SKILL.md": (OC / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text(),
-            "brief.md": (OC / "templates" / "lane-brief.md").read_text()}
-    fresh = not dst.exists()
+    fresh = not (root / "orca-cotal-lanes").exists()
     changed = False
     if not (root / "orca-cli").exists():
         LOCAL.run("skills", "install", "--skill", "orca-cli", "--agent", "universal", "--json")
         changed = True
-    for name, text in want.items():
-        f = dst / name
+    changed |= install_skill(home, "orca-cotal-lanes",
+                             {"SKILL.md": (OC / "skills" / "orca-cotal-lanes" / "SKILL.md").read_text(),
+                              "brief.md": (OC / "templates" / "lane-brief.md").read_text()}, also=("orca-cli",))
+    state = "created" if fresh else ("updated" if changed else "exists")
+    say("skills", state, f"orca-cli, orca-cotal-lanes in {root}")
+    return state
+
+
+def native_skills():
+    """The native path's lane skill (orchestrators/native-orca/skills), installed like the Cotal path's, with the
+    machine's lane tools. Orca's own orchestration guide stays Orca's (`orca-ide skills get orchestration`)."""
+    home = Path(os.environ.get("HOME", str(Path.home())))
+    lane_tools(home)
+    root = home / ".agents" / "skills"
+    fresh = not (root / "native-orca-lanes").exists()
+    changed = install_skill(home, "native-orca-lanes",
+                            {"SKILL.md": (NATIVE / "skills" / "native-orca-lanes" / "SKILL.md").read_text(),
+                             "brief.md": (NATIVE / "templates" / "lane-brief.md").read_text()})
+    state = "created" if fresh else ("updated" if changed else "exists")
+    say("skills", state, f"native-orca-lanes in {root}")
+    return state
+
+
+def install_skill(home: Path, name: str, want: dict, also: tuple = ()) -> bool:
+    """~/.agents/skills/<name> holding exactly `want`'s files, linked into Claude's and OpenCode's skill folders (and
+    the skills named in `also`, when they are there). True when anything was written."""
+    root = home / ".agents" / "skills"
+    changed = False
+    for fname, text in want.items():
+        f = root / name / fname
         if not f.exists() or f.read_text() != text:
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(text)
             changed = True
     for agent_dir in (home / ".claude" / "skills", home / ".config" / "opencode" / "skills"):
-        for name in ("orca-cotal-lanes", "orca-cli"):
-            link = agent_dir / name
-            if not link.is_symlink() and not link.exists() and (root / name).exists():
+        for n in (name, *also):
+            link = agent_dir / n
+            if not link.is_symlink() and not link.exists() and (root / n).exists():
                 agent_dir.mkdir(parents=True, exist_ok=True)
-                link.symlink_to(root / name)
+                link.symlink_to(root / n)
                 changed = True
-    state = "created" if fresh else ("updated" if changed else "exists")
-    say("skills", state, f"orca-cli, orca-cotal-lanes in {root}")
-    return state
+    return changed
 
 
 def write_if_changed(path: Path, text: str) -> str:
@@ -2980,7 +3003,7 @@ def native_refresh(repo: Path, a, tiers: Path) -> int:
     changed = native_personas(repo, p["project"], pins, p["lead"], p["mode"], tier_text, p["attached"])
     standing = {pins["coordinator"][0]} | ({pins["design-lead"][0]} if p["lead"] else set())
     persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
-    lane_tools(Path(os.environ.get("HOME", str(Path.home()))))
+    native_skills()
     place = Place()
     try:
         if p["lead"] and pins["design-lead"][0] == "claude":
@@ -3121,7 +3144,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         for d in attached:
             orca_repo(d, place)
             setup_script(d, a.write_orca_yaml)
-        lane_tools(Path(os.environ.get("HOME", str(Path.home()))))
+        native_skills()
         if own_models:
             settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
         changed = native_personas(repo, project, pins, lead is not None, cfg["mode"], tier_text,

@@ -59,6 +59,11 @@ Tiers are roles (swift, standard, deep, top); the machine's config maps them to 
   launch, close at merge, follow-ups only with evidence at P2+, weekly grooming).
   Queue order is dependencies (`bd ready`). Tasks never sync beads or close the issues a merge names;
   the coordinator does, after the merge. Owner decisions and coordinator rules are bd memories.
+- **Coordinator hands** (`core/roles.md`): Before any edit or state-changing command, write one line naming whom
+  it is for: `LANE: <KEY>-<n>` for the lane you act for, or `DOCTRINE: <why>` for one of the three exceptions
+  below. Waits are lane work: never wait, poll, sleep or watch yourself. Builds, CI and checks the coordinator would
+  sit on go to a task. The three exceptions, and no others: 1. Merging on the owner's word (with the issue close and
+  beads sync); 2. Closing lanes (deleting a merged task); 3. Your own records (beads memories, issue notes, messages).
 - Work only on your task branch; commit and push it; never push to main. The coordinator gates and
   merges a finished branch on the owner's yes (or with a clean or fully evidenced gate when
   authorized), then deletes the task (`rove api delete`).
