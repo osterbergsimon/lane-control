@@ -17,6 +17,7 @@ recorded and none named); 3 --timeout ran out while the session was still busy (
 Only the minutes go to stdout. Nothing is written.
 """
 import argparse
+import math
 import re
 import sqlite3
 import sys
@@ -59,21 +60,33 @@ def idle(checkout: Path, role: str, harness: str) -> "int | None":
         die(2, f"cannot read the {harness} session of {role} in {checkout} ({e})")
 
 
+def number(low: float, high: float, name: str):
+    """An argparse type: a finite number from low to high (nan, inf, 1e-300 and the like are refused)."""
+    def parse(text: str) -> float:
+        try:
+            v = float(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{name} takes a number, not {text!r}") from None
+        if not math.isfinite(v) or not low <= v <= high:
+            raise argparse.ArgumentTypeError(f"{name} takes a number from {low:g} to {high:g}, not {text!r}")
+        return v
+    return parse
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="lane-idle", description="Minutes a lane-control session has been idle.")
     ap.add_argument("--checkout", default=".", help="the folder the session was started in (default: here)")
     ap.add_argument("--role", default="coordinator", help="the session's LANE_ROLE (default coordinator)")
     ap.add_argument("--harness", choices=HARNESSES)
-    ap.add_argument("--wait", type=int, metavar="MINUTES", help="wait until idle at least this long")
-    ap.add_argument("--every", type=float, default=30, metavar="SEC", help="seconds between looks (default 30)")
-    ap.add_argument("--timeout", type=float, metavar="SEC", help="give up after this long (default: never)")
+    ap.add_argument("--wait", type=lambda t: int(number(0, 525600, "--wait")(t)), metavar="MINUTES",
+                    help="wait until idle at least this long (0 to 525600)")
+    ap.add_argument("--every", type=number(1, 3600, "--every"), default=30, metavar="SEC",
+                    help="seconds between looks (1 to 3600, default 30)")
+    ap.add_argument("--timeout", type=number(1, 2592000, "--timeout"), metavar="SEC",
+                    help="give up after this long (1 to 2592000; default: never)")
     a = ap.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9-]+", a.role):
         ap.error(f"--role {a.role!r}: letters, digits and - only")
-    if a.wait is not None and a.wait < 0:
-        ap.error("--wait takes minutes, 0 or more")
-    if a.every <= 0:
-        ap.error("--every takes seconds above 0")
     checkout = Path(a.checkout).resolve()
     harness = pick(checkout, a.role, a.harness)
     deadline = None if a.timeout is None else time.monotonic() + a.timeout
@@ -92,5 +105,16 @@ def main() -> int:
         time.sleep(a.every)
 
 
+def cli() -> int:
+    """main(), but a bug is exit 2 ("cannot tell"), never the exit 1 that means "no marked session"."""
+    try:
+        return main()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as e:  # noqa: BLE001
+        print(f"lane-idle: unexpected error ({type(e).__name__}: {e}); cannot tell", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

@@ -22,11 +22,16 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   watches the plugin folder, so installing or updating the file reaches every running OpenCode server of the user at
   once; without the markers it registers nothing there.
 - Project-level install: `LANE_OPENCODE_PLUGIN=project` (default `user`) makes the adapter put the same file in
-  `<checkout>/.opencode/plugins/` instead; `project-setup` keeps it out of git (`.git/info/exclude`). With both
-  copies present (an old user-level install, then a project one) a server may load both: the plugin adds the persona
-  to a request only when that request does not already carry the same text, so the persona is there once. Not
-  verified against a real OpenCode: that OpenCode 2.2.1 loads `.opencode/plugins/` of a project (it does for the
-  user folder, see the trial); the double-load is tested with a node driver that registers two copies on one context.
+  `<checkout>/.opencode/plugins/` instead; `project-setup` keeps it out of git (`.git/info/exclude`) and, because it
+  is not committed, installs it in the design lead's own worktree too. A server may load both a user-level and a
+  project-level copy: a copy of this version adds the persona to a request only when the request does not already
+  carry the same text, so two copies of this version add it once. An older user-level copy has no such check, so a
+  project install also brings an existing user-level copy of ours (a file with `id: "lane-persona"`) to the same
+  bytes, and leaves any other plugin of that name alone. Not verified against a real OpenCode, and the first live
+  check to run: that OpenCode 2.2.1 loads `<project>/.opencode/plugins/` at all, that it accepts two plugin files with
+  the same id (it might keep one, which is fine, or refuse both, which is not), and whether it writes more files into
+  `.opencode/` (1.x wrote `package.json` and `node_modules` beside plugins; they would show as untracked). The
+  double-load is tested with a node driver that registers two copies on one context.
   `project-setup` has no flag for it yet: set the variable in its environment.
 - Idle signal (the record is a published interface: `../session-record.md`; `core/scripts/lane-idle` reads and waits
   on it): the coordinator's own session only. The plugin, in a marked server, records the id of the session
@@ -42,6 +47,10 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   plugins from and writes its store to places the adapter does not look: the plugin is then not installed for it,
   and idle reads as `None`.
 - Wake: Orca types reports into an OpenCode terminal as for Claude; not yet confirmed for an OpenCode coordinator.
+- Waiting on another session (`core/scripts/lane-idle --wait`): no background-command wake is known for OpenCode v2
+  (not verified), so an OpenCode coordinator must not run `--wait` unbounded in the foreground. Wait with a bounded
+  `--timeout` and look again on the next turn, or use `orca-ide orchestration check --wait` (it blocks until mail
+  arrives, with `--timeout-ms`; not verified for an OpenCode coordinator either).
 - Markers are environment variables: everything in a marked server gets the persona, child (sub-agent) sessions
   included, and so does an OpenCode the coordinator starts from its own shell.
 

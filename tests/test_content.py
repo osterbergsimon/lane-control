@@ -1200,6 +1200,38 @@ class CrossHostReportContractTests(unittest.TestCase):
             self.assertNotIn(claim, t, claim)
         self.assertRegex(t, r"(?i)across hosts[^.]*(not verified|poll-only)")
 
+    def test_no_text_says_a_cross_host_report_simply_comes_back(self):
+        # UP-6 review M1: the box paragraph said "its report comes back by Orca" next to the poll-only rule.
+        texts = [(self.REMOTE.name, flat(self.REMOTE))] + [(r, flat(NATIVE / f"{r}.md")) for r in LANE_STARTERS]
+        for name, t in texts:
+            self.assertNotIn("comes back by Orca", t, name)
+            self.assertNotIn("report comes back", t, name)
+        for name, t in texts[1:]:
+            self.assertIn("it reports by Orca; across hosts that is poll-only", t, name)
+        self.assertIn("it reports by Orca; across hosts that is poll-only", texts[0][1])
+
+    def test_one_rule_for_abandoning_a_dispatch_everywhere(self):
+        # review n1: no text lets the coordinator abandon without the owner; remote.md has no exception
+        for name, t in [("remote.md", flat(self.REMOTE))] + [(r, flat(NATIVE / f"{r}.md")) for r in LANE_STARTERS]:
+            self.assertRegex(t, r"(?i)ask the owner (first )?before you abandon|abandoning[^.]*ask the owner", name)
+            self.assertNotIn("unless `worker-show` proves", t, name)
+
+    def test_the_retry_step_matches_orcas_help_and_says_it_is_untested(self):
+        # review m4: --retry-of reopens a failed task itself; no task-update --status ready first
+        t = flat(self.REMOTE)
+        step = t[t.index("4. Start the work again"):]
+        self.assertNotIn("--status ready", step.split("Tested on one machine")[0])
+        self.assertIn("reopens it", step)
+        self.assertIn("untested", step.split("Tested on one machine")[0])
+
+    def test_the_opencode_record_says_how_an_opencode_coordinator_waits(self):
+        # review m3
+        t = flat(ROOT / "core" / "harnesses" / "opencode" / "record.md")
+        for needle in ("no background-command wake is known for OpenCode", "--timeout",
+                       "orca-ide orchestration check --wait", "not verified",
+                       "first live check", "two plugin files"):
+            self.assertIn(needle, t, needle)
+
     def test_lane_starters_treat_a_cross_host_report_as_poll_only_and_know_the_recovery(self):
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")

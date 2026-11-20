@@ -21,16 +21,16 @@ $XDG_STATE_HOME/lane-control/sessions/<checkout>/<role>.<harness>
 ## Format
 The file is one line: the session id, then a trailing newline (`<id>\n`). The id matches `[A-Za-z0-9_-]{1,200}`.
 A reader strips surrounding whitespace and takes anything else (empty, a longer id, a space, a slash, a second line)
-as no record. The file is written whole: the writer makes a dot-file beside it (`.<role>.<harness>.<pid>`) and
-renamed into place, so a reader never sees half an id; readers skip dot-files. Nothing else is in the folder that a
-reader may rely on. Lane-control never deletes a record.
+as no record (a file that is not text counts too). The file is written whole: the writer makes a dot-file beside it
+(`.<role>.<harness>.<pid>`) and renames it into place, so a reader never sees half an id; readers skip dot-files.
+Nothing else is in the folder that a reader may rely on. Lane-control never deletes a record.
 
 ## When it is written
 Only by a marked session, and only when the id and the role fit the rules above; a folder that cannot be written is
 skipped without an error, since the record is a convenience and never stops a session.
 - Claude: the `SessionStart` hook (`persona-hook.sh`) on every start of the session: `startup`, `resume`, `clear`
   and `compact`. The id is the `session_id` of the hook's JSON; the checkout is `$CLAUDE_PROJECT_DIR`, else the
-  hook's folder.
+  hook's working directory.
 - OpenCode (v2): `lane-persona.js`, on the first model request of a turn whose session id differs from the one it
   wrote last (once per server process). The id can be a sub-agent session's: the latest session that took a turn
   is recorded, and a reader treats the record's whole family (up to its root, then every sub-agent session below)

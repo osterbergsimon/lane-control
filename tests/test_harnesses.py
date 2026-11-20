@@ -525,6 +525,32 @@ class OpenCodeAdapterTests(HomeTest):
         self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
         self.assertEqual(self.a.plugin_path(self.checkout), dest)
 
+    OLD_PLUGIN = Path("/tmp/claude-1000/-home-tux-orca-workspaces-lane-control-up-c-contracts/21adb074-2158-4dbb-b73c-c73073054b27/scratchpad/old-plugin.js")
+
+    def test_opencode_project_install_brings_an_old_user_copy_up_to_date(self):
+        # UP-6 review M3: an older user-level copy has no dedupe; with a project copy beside it the persona could
+        # be added twice, so the project install refreshes the user copy of ours (only ours) to the same bytes.
+        os.environ["LANE_OPENCODE_PLUGIN"] = "project"
+        self.addCleanup(os.environ.pop, "LANE_OPENCODE_PLUGIN", None)
+        user = self.plugin_dir() / "lane-persona.js"
+        user.parent.mkdir(parents=True)
+        user.write_bytes(self.OLD_PLUGIN.read_bytes())
+        changes = self.a.install_persona_hook(self.checkout)
+        self.assertEqual(user.read_bytes(), PLUGIN.read_bytes())
+        self.assertEqual(self.project_plugin().read_bytes(), PLUGIN.read_bytes())
+        self.assertEqual(len(changes), 2)
+        self.assertTrue(any(str(user) in c and "updated" in c for c in changes), changes)
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+        # not ours: left alone, and said so
+        user.write_text("export default { id: 'someone-elses', setup() {} };\n")
+        changes = self.a.install_persona_hook(self.checkout)
+        self.assertEqual(user.read_text(), "export default { id: 'someone-elses', setup() {} };\n")
+        self.assertEqual(changes, [])
+        # no user copy: none is made
+        user.unlink()
+        self.a.install_persona_hook(self.checkout)
+        self.assertFalse(user.exists())
+
     def test_opencode_plugin_scope_defaults_to_user_and_refuses_the_unknown(self):
         os.environ.pop("LANE_OPENCODE_PLUGIN", None)
         self.assertEqual(self.a.plugin_path(self.checkout), self.plugin_dir() / "lane-persona.js")
@@ -767,6 +793,22 @@ class SessionRecordInterfaceTests(HomeTest):
         self.write_with_plugin("second")
         self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "opencode"), "second")
 
+    def test_the_writers_skip_an_id_the_reader_would_refuse(self):
+        # UP-6 review m2: a 201-character id must not replace a good record (the plugin already checks; the hook too).
+        os.environ["XDG_STATE_HOME"] = str(self.t / "state")
+        long_id = "a" * 201
+        for write, harness in ((self.write_with_hook, "claude"), (self.write_with_plugin, "opencode")):
+            write("good-id")
+            write(long_id)
+            self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", harness), "good-id", harness)
+            write("a" * 200)
+            self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", harness), "a" * 200, harness)
+
+    def test_an_undecodable_record_is_no_record(self):
+        path = self.record("claude", "x")
+        path.write_bytes(b"\xff\xfe\x00abc\n")
+        self.assertIsNone(self.pkg.read_session(self.checkout, "coordinator", "claude"))
+
     def test_reader_accepts_only_a_plain_id(self):
         self.assertEqual(self.pkg.SESSION_ID.pattern, "[A-Za-z0-9_-]{1,200}")
         for text, want in (("abc_DEF-123\n", "abc_DEF-123"), ("  abc\r\n", "abc"), ("a" * 200 + "\n", "a" * 200),
@@ -779,9 +821,9 @@ class SessionRecordInterfaceTests(HomeTest):
     def test_the_interface_is_documented(self):
         text = " ".join(self.DOC.read_text().split())
         for needle in ("lane-control/sessions/<checkout>/<role>.<harness>", "$XDG_STATE_HOME", "~/.local/state",
-                       "[A-Za-z0-9_-]{1,200}", "one line", "a trailing newline", "renamed into place",
+                       "[A-Za-z0-9_-]{1,200}", "one line", "a trailing newline", "renames it into place",
                        "every byte that is not a letter or a digit becomes `-`", "no record means no marked session",
-                       "SessionStart", "session_v2", "lane-idle", "not a notification", "exit 3",
+                       "SessionStart", "session_v2", "lane-idle", "not a notification", "exit 3", "the hook's working directory",
                        "A change to the path, the file format or the id pattern is a breaking change",
                        "harnesses.read_session"):
             self.assertIn(needle, text, needle)

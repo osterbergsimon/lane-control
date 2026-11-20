@@ -39,7 +39,9 @@ permission mode is `{{MODE}}`.
   says what Orca knows of a worker; silence alone never proves it gone.
 - When this machine is a box paired with another machine (its environment name is `paired_environment` in the
   project's settings store under `~/.config/lane-control/projects/`; a lane there takes `--on <that name>`), start a
-  lane there only for what this machine lacks (graphics, a browser, a GPU). It works in its own clone there and pushes to GitHub as usual; its report comes back by Orca.
+  lane there only for what this machine lacks (graphics, a browser, a GPU). It works in its own clone there and
+  pushes to GitHub as usual; it reports by Orca; across hosts that is poll-only (`{{LANE_CONTROL}}/orchestrators/native-orca/remote.md`, Reports
+  across hosts).
 
 ## Messages
 - Your own Run is your Orca address and your lanes' Run: if `orca-ide orchestration run-current` shows none, create

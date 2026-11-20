@@ -77,14 +77,13 @@ class LaneIdleTests(unittest.TestCase):
         start = time.time()
         r = self.run_idle("--wait", "10", "--every", "1", "--timeout", "2")
         self.assertEqual((r.returncode, r.stdout.strip()), (3, ""))
-        self.assertIn("0", r.stderr)  # says how idle it was last
+        self.assertIn("idle 0 min", r.stderr)  # says how idle it was last
         self.assertLess(time.time() - start, 20)
 
     def test_wait_sees_the_session_go_idle(self):
         # the record and the transcript are read again on every look: a session that was busy and is now quiet
         self.session("s1", 30)
         f = next((self.home / ".claude").rglob("s1.jsonl"))
-        script = self.run_idle  # noqa: F841
         p = subprocess.Popen([sys.executable, str(SCRIPT), "--checkout", str(self.checkout), "--wait", "1",
                               "--every", "1", "--timeout", "20"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, env=self.env)
@@ -111,6 +110,50 @@ class LaneIdleTests(unittest.TestCase):
         r = self.run_idle()
         self.assertEqual((r.returncode, r.stdout), (2, ""))
         self.assertIn("cannot read", r.stderr)
+
+    def test_every_and_timeout_must_be_finite_and_sane(self):
+        self.session("s1", 30)
+        for args in (("--wait", "1", "--every", "nan"), ("--wait", "1", "--every", "inf"),
+                     ("--wait", "1", "--every", "0.5"), ("--wait", "1", "--every", "1e-300"),
+                     ("--wait", "1", "--every", "100000"), ("--wait", "1", "--timeout", "nan"),
+                     ("--wait", "1", "--timeout", "inf"), ("--wait", "1", "--timeout", "0"),
+                     ("--wait", "1", "--timeout", "-3"), ("--wait", str(10 ** 9))):
+            r = self.run_idle(*args, timeout=10)
+            self.assertEqual((r.returncode, r.stdout), (2, ""), args)
+            self.assertNotIn("Traceback", r.stderr, args)
+
+    def test_an_undecodable_record_is_no_session_not_a_crash(self):
+        rec = harnesses.session_record(self.checkout, "coordinator", "claude")
+        rec.parent.mkdir(parents=True)
+        rec.write_bytes(b"\xff\xfe\x00\n")
+        r = self.run_idle()
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_an_unexpected_error_is_exit_2_never_exit_1(self):
+        # exit 1 means "no marked session"; a crash must not read as that
+        import contextlib
+        import importlib.machinery
+        import importlib.util
+        import io
+        loader = importlib.machinery.SourceFileLoader("lane_idle", str(SCRIPT))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("lane_idle", loader))
+        loader.exec_module(mod)
+
+        def boom(*a, **k):
+            raise RuntimeError("a bug")
+        mod.pick = boom
+        err = io.StringIO()
+        old = sys.argv
+        sys.argv = ["lane-idle", "--checkout", str(self.checkout)]
+        try:
+            with contextlib.redirect_stderr(err):
+                code = mod.cli()
+        finally:
+            sys.argv = old
+        self.assertEqual(code, 2)
+        self.assertIn("unexpected", err.getvalue())
+        self.assertIn("a bug", err.getvalue())
 
     def test_refuses_nonsense(self):
         for args in (("--wait", "-1"), ("--wait", "x"), ("--role", "../x"), ("--harness", "pi")):

@@ -72,24 +72,46 @@ def plugin_path(checkout: "Path | None" = None) -> Path:
     return _xdg("XDG_CONFIG_HOME", ".config") / "opencode" / "plugins" / PLUGIN.name
 
 
-def install_persona_hook(checkout: Path) -> list:
-    """Copy lane-persona.js into OpenCode's plugin folder: one per user (the default) or, with
-    LANE_OPENCODE_PLUGIN=project, one per project in <checkout>/.opencode/plugins/. Unless the same bytes are there
-    already. Both may exist: the plugin adds the persona once per request either way. Returns change lines; empty
-    when it was in place."""
-    dest = plugin_path(checkout)
-    want = PLUGIN.read_bytes()
+def _write(dest: Path, want: bytes) -> "str | None":
+    """Make dest hold want; 'installed', 'updated', or None when it already did."""
     if dest.is_file() and dest.read_bytes() == want:
-        return []
+        return None
     what = "updated" if dest.exists() else "installed"
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
     tmp.write_bytes(want)
     tmp.replace(dest)
-    reach = ("OpenCode servers started in this project load it at once" if plugin_scope() == "project" else
-             "OpenCode loads it into every running OpenCode server of this user at once")
-    return [f"{dest}: {what} the lane-persona plugin; {reach}, and it acts only in one started with LANE_ROLE and "
-            "LANE_PERSONA set"]
+    return what
+
+
+def _is_ours(path: Path) -> bool:
+    try:
+        return 'id: "lane-persona"' in path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def install_persona_hook(checkout: Path) -> list:
+    """Copy lane-persona.js into OpenCode's plugin folder: one per user (the default) or, with
+    LANE_OPENCODE_PLUGIN=project, one per project in <checkout>/.opencode/plugins/. Unless the same bytes are there
+    already. Both may exist: the plugin adds the persona once per request, but only a copy of this version does, so a
+    project install also brings an existing user-level copy of ours (never another plugin's file) to the same bytes.
+    Returns change lines; empty when everything was in place."""
+    want = PLUGIN.read_bytes()
+    dest = plugin_path(checkout)
+    lines = []
+    what = _write(dest, want)
+    if what:
+        reach = ("OpenCode servers started in this project load it at once" if plugin_scope() == "project" else
+                 "OpenCode loads it into every running OpenCode server of this user at once")
+        lines.append(f"{dest}: {what} the lane-persona plugin; {reach}, and it acts only in one started with "
+                     "LANE_ROLE and LANE_PERSONA set")
+    if plugin_scope() == "project":
+        user = _xdg("XDG_CONFIG_HOME", ".config") / "opencode" / "plugins" / PLUGIN.name
+        if user.is_file() and _is_ours(user) and _write(user, want):
+            lines.append(f"{user}: updated the user-level lane-persona plugin to this version, so it and the project "
+                         "copy never add the persona twice")
+    return lines
 
 
 def db_path() -> Path:

@@ -32,7 +32,8 @@ there as here.
 
 ## Direction 2: the box's coordinator runs lanes here
 For what the box lacks (graphics, a browser, a GPU), its coordinator starts a lane in this desktop's Orca with
-`--on <this machine>`; the lane works in its own clone here, pushes to GitHub, and its report comes back by Orca.
+`--on <this machine>`; the lane works in its own clone here, pushes to GitHub, and it reports by Orca; across hosts that
+is poll-only (Reports across hosts, below).
 1. The owner makes a share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this
    computer's own address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a
    link). Orca 1.4.250 has no CLI for it.
@@ -102,16 +103,19 @@ Coordinator:
    liveness alone never proves the agent is gone.
 2. First read the lane's branch (`git fetch origin <branch>`, `git log`, `git diff`) and decide what is left: finished,
    half done, or not started.
-3. Abandoning stops a lane's dispatch, so ask the owner first, unless `worker-show` proves the worker has exited.
-   Then `orca-ide orchestration worker-abandon --dispatch <dispatch>` (fences the dispatch, no process is touched;
+3. Abandoning stops a lane's dispatch, so ask the owner first, even when the worker looks gone (Orca's own rule:
+   silence or `unverifiable` liveness never proves it). Then
+   `orca-ide orchestration worker-abandon --dispatch <dispatch>` (fences the dispatch, no process is touched;
    on one that already failed it says so and changes nothing) and `orca-ide orchestration worker-release --dispatch
    <dispatch>` (closes the worker's own terminal when it has one, else says `retained`).
-4. Start the work again on the same task: `orca-ide orchestration worker-start --task <task> --retry-of <dispatch>
-   --worktree path:<the lane's worktree> --agent <id> --model <model>` (add `--on <environment>` for a lane on the other
-   server). A lane whose branch is finished gets a short spec: check the branch, run the gates, report. Its new
-   dispatch has new ids, and its `worker_done` uses those. If the task is not `ready`, `orca-ide orchestration
-   task-update --id <task> --status ready --run <run>` first; after three failed starts of one chain Orca's breaker
-   stops it, and only the owner reopens it.
+4. Start the work again on the same task (untested): `orca-ide orchestration worker-start --task <task> --retry-of
+   <dispatch> --worktree path:<the lane's worktree> --agent <id> --model <model>` (add `--on <environment>` for a
+   lane on the other server: placement is not inherited). Per Orca's help, `--retry-of` names the failed task's
+   dispatch and reopens it itself, so do not set the task `ready` first; only if Orca refuses the retry because the
+   task is not failed, set the dispatch's task failed (`task-update --id <task> --status failed --result
+   "<why>" --run <run>`) and retry. A lane whose branch is finished gets a short spec: check the branch, run the
+   gates, report. Its new dispatch has new ids, and its `worker_done` uses those. After three failed starts of one
+   chain Orca's breaker stops it, and only the owner reopens it.
 Tested on one machine with a plain dispatch (`dispatch`, not `worker-start`): after the worker's terminal closed the
 dispatch was failed and its task `ready` again, `worker-abandon` said it was already settled, `worker-release` said
 `retained` (no terminal of its own), and a second dispatch of the task reported and completed. Not tested: a real

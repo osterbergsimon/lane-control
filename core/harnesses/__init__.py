@@ -78,6 +78,6 @@ def read_session(checkout: Path, role: str, harness: str) -> "str | None":
     """The recorded session id, or None when there is none (or it is not an id). An unreadable record raises."""
     try:
         text = session_record(checkout, role, harness).read_text().strip()
-    except FileNotFoundError:
+    except (FileNotFoundError, UnicodeDecodeError):
         return None
     return text if SESSION_ID.fullmatch(text) else None

@@ -19,7 +19,7 @@
 record_session() {
     [ -t 0 ] && return 0
     sid=$(cat 2>/dev/null | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p' | head -n 1)
-    [ -n "$sid" ] || return 0
+    [ -n "$sid" ] && [ "${#sid}" -le 200 ] || return 0  # the id the reader accepts: 1 to 200 characters
     case "$LANE_ROLE" in *[!A-Za-z0-9-]* | "") return 0 ;; esac
     dir=$(cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null && pwd -P) || return 0
     case "${XDG_STATE_HOME:-}" in /*) state=$XDG_STATE_HOME ;; *) state=$HOME/.local/state ;; esac
