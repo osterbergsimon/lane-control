@@ -72,7 +72,7 @@
 
 - [ ] **Step 1: Write `tests/test_content.py`:** personas parse (frontmatter YAML-ish split on `---`, keys present: `name, role, agent, model, capabilities`); coordinator `role: coordinator`, `capabilities` contains `spawn`; design-lead `role: design`; no file under personas/ or skills/ contains `rove api`, `terminal send`, `orchestration dispatch`, `task-create`; SKILL.md has frontmatter `name: orca-cotal-lanes` and mentions `--parent-worktree active`, `cotal_spawn`, `lanes.tsv`, `cotal_dm`; lanes.tsv has rows swift/standard/deep/top with the Global Constraints values.
 - [ ] **Step 2: Run** `python3 -m unittest tests/test_content.py` → FAIL.
-- [ ] **Step 3: Write the content.** Sources and required elements per spec §3–§5; shepherdr templates in `/tmp/claude-1000/-home-tux/263dffe9-ff24-4030-9749-9a63f3cf00d9/scratchpad/persona-research/shepherdr/`; lane brief from `templates/worker-brief.md` with `rove api` replaced by "report once by `cotal_dm` to <parent>" and the 5-line format from `templates/AGENTS-coordination.md`. Use the cotal_spawn call shape found in Task 2 Step 7.
+- [ ] **Step 3: Write the content.** Sources and required elements per spec §3–§5; shepherdr templates in `<scratchpad>/persona-research/shepherdr/`; lane brief from `templates/worker-brief.md` with `rove api` replaced by "report once by `cotal_dm` to <parent>" and the 5-line format from `templates/AGENTS-coordination.md`. Use the cotal_spawn call shape found in Task 2 Step 7.
 - [ ] **Step 4: Run tests → PASS.**
 - [ ] **Step 5: Commit** `git add personas skills templates/lanes.tsv templates/lane-brief.md tests/test_content.py && git commit -m "personas, orca-cotal-lanes skill, tier table"`
 

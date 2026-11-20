@@ -2606,7 +2606,8 @@ NATIVE_ROLES = ("coordinator", "design-lead", "reviewer", "debugger")  # rendere
 ADDITIONS = f"{ADAPTED}/additions"  # the adapted text per role, kept and committed; rendered in on every setup and refresh
 EXCLUDE_BEGIN = "# lane-control: begin (files project-setup writes in this checkout; never committed)"
 EXCLUDE_END = "# lane-control: end"
-LOCAL_FILES = ("/.claude/settings.local.json", *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
+LOCAL_FILES = ("/.claude/settings.local.json", "/.opencode/plugins/lane-persona.js",  # the second: LANE_OPENCODE_PLUGIN=project
+               *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
 NATIVE_REVIEW_NOTE = f"""
 Native Orca: the coordinator, design-lead and reviewer files are in {ADDITIONS}/ (appended to the rendered personas);
 {ADAPTED}/<role>.md are rendered personas, not adapted files: never ask for them there."""
@@ -2691,7 +2692,8 @@ def native_personas(repo: Path, project: str, pins: dict, lead: bool, mode: str,
     roles = {"coordinator": pins["coordinator"], **({"design-lead": pins["design-lead"]} if lead else {}),
              "reviewer": pins["reviewer"], "debugger": pins["reviewer"]}
     refuse_tracked(repo, NATIVE_ROLES)
-    say("git-exclude", exclude_local(repo), "rendered personas and .claude/settings.local.json (.git/info/exclude)")
+    say("git-exclude", exclude_local(repo), "rendered personas, .claude/settings.local.json and a project-level "
+                                            "OpenCode plugin (.git/info/exclude)")
     changed = []
     for role, (h, m) in roles.items():
         f = repo / ADAPTED / f"{role}.md"
@@ -2705,6 +2707,13 @@ def native_personas(repo: Path, project: str, pins: dict, lead: bool, mode: str,
         say("persona design-lead", "removed", "the project has no design lead")
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
     return changed
+
+
+def wt_hook(harness: str) -> bool:
+    """Does the design lead's own worktree need the harness's persona hook? Claude's hook is a file in the
+    checkout (uncommitted, so a new worktree lacks it); OpenCode's plugin is in the user's folder unless
+    LANE_OPENCODE_PLUGIN=project puts it in the project, uncommitted too."""
+    return harness == "claude" or (harness == "opencode" and os.environ.get("LANE_OPENCODE_PLUGIN") == "project")
 
 
 def persona_hooks(checkout: Path, harnesses_used) -> None:
@@ -2904,8 +2913,8 @@ def start_standing(place: Place, repo: Path, project: str, pins: dict, lead: boo
         if created:
             setup_done = wait_for_setup(wt, "design-lead")
             before = {t["handle"] for t in worktree_terminals(wt, place)}
-        if pins["design-lead"][0] == "claude":
-            persona_hooks(wt, {"claude"})
+        if wt_hook(pins["design-lead"][0]):
+            persona_hooks(wt, {pins["design-lead"][0]})
         start_session(place, repo, "design-lead", pins["design-lead"], mode, wt, project, kickoffs["design-lead"],
                       sid(wt, "design-lead"))
         if created:
@@ -2983,10 +2992,10 @@ def native_refresh(repo: Path, a, tiers: Path) -> int:
     lane_tools(Path(os.environ.get("HOME", str(Path.home()))))
     place = Place()
     try:
-        if p["lead"] and pins["design-lead"][0] == "claude":
+        if p["lead"] and wt_hook(pins["design-lead"][0]):
             for w in place.jrun("worktree", "list")["result"]["worktrees"]:
                 if w.get("displayName") == "design-lead" and (w.get("parentWorktreeId") or "").endswith("::" + str(repo)):
-                    persona_hooks(Path(w["path"]), {"claude"})
+                    persona_hooks(Path(w["path"]), {pins["design-lead"][0]})
         live = running_sessions(place, repo, p["project"], p["lead"])
     except Fail as e:
         say("restart", "unknown", f"no Orca terminal list ({e}); restart these if running: {', '.join(changed) or 'none'}")

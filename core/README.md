@@ -15,6 +15,7 @@ orchestrator to another; everything that does depend on one is in `orchestrators
 | `lane-ledger.tsv` | one row per finished task, used to calibrate routing |
 | `scripts/lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh` | the machine caps: the gate for builds and full test suites, the check before opening a lane, the tier lookup, their shared limits |
 | `scripts/lane-away`, `ci-presence`, `budget-state` | presence (the away file), the CI slice's limits by presence, each budget's step and the `budget-stopped` marker |
+| `scripts/lane-idle`; `harnesses/session-record.md` | how long a marked session has been idle, and waiting for it; the session record both read, a stable interface |
 | `scripts/night-precheck`, `lane-sweep`, `machine-check`, `machine-setup`; `machineconf.py` | native Orca's machine setup: the night manager's, lane sweep's and machine check's prechecks, the setup itself, and the `machine.conf` reader they share |
 | `scripts/window-guard.sh`, `window-guard-install` | budget orders and the low-memory notice; it reads budgets (core) but sends its orders through an orchestrator (today `cotal send`, so it needs Orca + Cotal) |
 | `scripts/stale-claims.sh`, `park-check.sh`, `lib.sh` | daily beads checks and the shared config and budget helpers; the two checks run as Rove routines and send through `rove api` today (`stale-claims.sh` also reads live tasks from `rove api list`), so they need Rove (`orchestrators/rove/notes.md#issues`) |

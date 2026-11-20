@@ -32,7 +32,8 @@ there as here.
 
 ## Direction 2: the box's coordinator runs lanes here
 For what the box lacks (graphics, a browser, a GPU), its coordinator starts a lane in this desktop's Orca with
-`--on <this machine>`; the lane works in its own clone here, pushes to GitHub, and its report comes back by Orca.
+`--on <this machine>`; the lane works in its own clone here, pushes to GitHub, and it reports by Orca; across hosts that
+is poll-only (Reports across hosts, below).
 1. The owner makes a share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this
    computer's own address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a
    link). Orca 1.4.250 has no CLI for it.
@@ -69,6 +70,53 @@ revoke the link in Orca here: Settings > Servers, the link shared with that box.
 tunnel stopped, and the command to run there later is printed. Direction 1 stays; the output names the two commands
 that drop it too.
 
-## Not yet established
-See `record.md` (phase 6): whether a cross-host `worker_done` wakes an agent coordinator on the box. The coordinator
-persona runs `orchestration check` itself after a cross-host lane and on each wake, so it does not depend on it.
+## Reports across hosts
+What a worker's report (`worker_done`) does, as far as it is known. Orca 1.4.250; "tested" means run on one machine
+in a scratch Run with a plain shell as the worker and no agent (`record.md`, 2026-11-20 UP-3).
+
+Known:
+- On one machine, mail to a coordinator's Run reaches its session as Orca's one-line message prompt (it waits while
+  the session is busy); the coordinator then runs `orca-ide orchestration check`. Seen again while testing UP-3.
+- `worker_done` needs `--outcome succeeded|failed`, `--task-id` and `--dispatch-id`, and is accepted only from the
+  terminal the dispatch was made for. Tested refusals, each printed in the worker's terminal and also left in the
+  coordinator's Run inbox as a `Rejected worker_done` message with the code, which `check` shows:
+  - no `--task-id`: `missing_task_id` ("worker_done requires taskId")
+  - no `--dispatch-id`: `missing_dispatch_id` ("worker_done requires dispatchId")
+  - sent from a terminal that does not own the dispatch: `worker_identity_changed` ("<terminal> is not the exact
+    process that owns Dispatch <dispatch>"). The same code is what the issue behind this page saw after a runtime
+    restart; the restart itself was not tested.
+  - an accepted report prints `lifecycle=completed` and settles the task.
+
+Not verified: that a `worker_done` from a lane on the other Orca server (a lane started with `--on <environment>`)
+reaches, or wakes, an agent coordinator on the box. Across hosts, treat a report as poll-only: the coordinator runs
+`orca-ide orchestration check` right after it starts the lane, on each wake, and before it calls a quiet lane lost
+(`orca-ide orchestration worker-show --dispatch <dispatch>` says what Orca knows of the worker). The personas say so
+too. A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
+it is run, nothing here may be read as "delivered".
+
+## A dispatch that can no longer report
+A worker can finish its work and still be unable to report: a runtime restart left its dispatch with another owner
+(`worker_identity_changed`), so every `worker_done` is refused. The work is on the lane's branch, so nothing is lost.
+Coordinator:
+1. `check` shows the `Rejected worker_done` with the code and the dispatch id; `orca-ide orchestration worker-show
+   --dispatch <dispatch>` shows what Orca knows of the worker. Orca's own rule holds: silence or an `unverifiable`
+   liveness alone never proves the agent is gone.
+2. First read the lane's branch (`git fetch origin <branch>`, `git log`, `git diff`) and decide what is left: finished,
+   half done, or not started.
+3. Abandoning stops a lane's dispatch, so ask the owner first, even when the worker looks gone (Orca's own rule:
+   silence or `unverifiable` liveness never proves it). Then
+   `orca-ide orchestration worker-abandon --dispatch <dispatch>` (fences the dispatch, no process is touched;
+   on one that already failed it says so and changes nothing) and `orca-ide orchestration worker-release --dispatch
+   <dispatch>` (closes the worker's own terminal when it has one, else says `retained`).
+4. Start the work again on the same task (untested): `orca-ide orchestration worker-start --task <task> --retry-of
+   <dispatch> --worktree path:<the lane's worktree> --agent <id> --model <model>` (add `--on <environment>` for a
+   lane on the other server: placement is not inherited). Per Orca's help, `--retry-of` names the failed task's
+   dispatch and reopens it itself, so do not set the task `ready` first; only if Orca refuses the retry because the
+   task is not failed, set the dispatch's task failed (`task-update --id <task> --status failed --result
+   "<why>" --run <run>`) and retry. A lane whose branch is finished gets a short spec: check the branch, run the
+   gates, report. Its new dispatch has new ids, and its `worker_done` uses those. After three failed starts of one
+   chain Orca's breaker stops it, and only the owner reopens it.
+Tested on one machine with a plain dispatch (`dispatch`, not `worker-start`): after the worker's terminal closed the
+dispatch was failed and its task `ready` again, `worker-abandon` said it was already settled, `worker-release` said
+`retained` (no terminal of its own), and a second dispatch of the task reported and completed. Not tested: a real
+runtime restart, `worker-start --retry-of`, and anything on a second Orca server.
