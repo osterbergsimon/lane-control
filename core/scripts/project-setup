@@ -8,6 +8,8 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
                 [--no-desktop-lanes] [--no-machine-setup] [--orca-port N]
+                [--orca-from DIR | --orca-bundle TAR] [--orca-version V]
+                [--tunnel-auth-sock PATH] [--tunnel-ssh PATH] [--tunnel-no-enable]
   project-setup --remove-host <host>
 
 Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
@@ -450,7 +452,9 @@ def copy_to_host(place: "Place") -> None:
     say("lane-control", "copied", f"to {REMOTE} on {place.host}")
 
 
-LOCAL_ONLY_FLAGS = {"--no-desktop-lanes": False, "--no-machine-setup": False, "--orca-port": True, "--host": True}
+LOCAL_ONLY_FLAGS = {"--no-desktop-lanes": False, "--no-machine-setup": False, "--orca-port": True, "--host": True,
+                    "--tunnel-auth-sock": True, "--tunnel-ssh": True, "--tunnel-no-enable": False,
+                    "--orca-from": True, "--orca-bundle": True, "--orca-version": True}
 
 
 def host_argv(argv: list, value_flags: set, drop_positional: "str | None") -> list:
@@ -2685,7 +2689,8 @@ NATIVE_ROLES = ("coordinator", "design-lead", "reviewer", "debugger")  # rendere
 ADDITIONS = f"{ADAPTED}/additions"  # the adapted text per role, kept and committed; rendered in on every setup and refresh
 EXCLUDE_BEGIN = "# lane-control: begin (files project-setup writes in this checkout; never committed)"
 EXCLUDE_END = "# lane-control: end"
-LOCAL_FILES = ("/.claude/settings.local.json", *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
+LOCAL_FILES = ("/.claude/settings.local.json", "/.opencode/plugins/lane-persona.js",  # the second: LANE_OPENCODE_PLUGIN=project
+               *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
 NATIVE_REVIEW_NOTE = f"""
 Native Orca: the coordinator, design-lead and reviewer files are in {ADDITIONS}/ (appended to the rendered personas);
 {ADAPTED}/<role>.md are rendered personas, not adapted files: never ask for them there."""
@@ -2770,7 +2775,8 @@ def native_personas(repo: Path, project: str, pins: dict, lead: bool, mode: str,
     roles = {"coordinator": pins["coordinator"], **({"design-lead": pins["design-lead"]} if lead else {}),
              "reviewer": pins["reviewer"], "debugger": pins["reviewer"]}
     refuse_tracked(repo, NATIVE_ROLES)
-    say("git-exclude", exclude_local(repo), "rendered personas and .claude/settings.local.json (.git/info/exclude)")
+    say("git-exclude", exclude_local(repo), "rendered personas, .claude/settings.local.json and a project-level "
+                                            "OpenCode plugin (.git/info/exclude)")
     changed = []
     for role, (h, m) in roles.items():
         f = repo / ADAPTED / f"{role}.md"
@@ -2784,6 +2790,13 @@ def native_personas(repo: Path, project: str, pins: dict, lead: bool, mode: str,
         say("persona design-lead", "removed", "the project has no design lead")
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
     return changed
+
+
+def wt_hook(harness: str) -> bool:
+    """Does the design lead's own worktree need the harness's persona hook? Claude's hook is a file in the
+    checkout (uncommitted, so a new worktree lacks it); OpenCode's plugin is in the user's folder unless
+    LANE_OPENCODE_PLUGIN=project puts it in the project, uncommitted too."""
+    return harness == "claude" or (harness == "opencode" and os.environ.get("LANE_OPENCODE_PLUGIN") == "project")
 
 
 def persona_hooks(checkout: Path, harnesses_used) -> None:
@@ -2983,8 +2996,8 @@ def start_standing(place: Place, repo: Path, project: str, pins: dict, lead: boo
         if created:
             setup_done = wait_for_setup(wt, "design-lead")
             before = {t["handle"] for t in worktree_terminals(wt, place)}
-        if pins["design-lead"][0] == "claude":
-            persona_hooks(wt, {"claude"})
+        if wt_hook(pins["design-lead"][0]):
+            persona_hooks(wt, {pins["design-lead"][0]})
         start_session(place, repo, "design-lead", pins["design-lead"], mode, wt, project, kickoffs["design-lead"],
                       sid(wt, "design-lead"))
         if created:
@@ -3062,10 +3075,10 @@ def native_refresh(repo: Path, a, tiers: Path) -> int:
     native_skills()
     place = Place()
     try:
-        if p["lead"] and pins["design-lead"][0] == "claude":
+        if p["lead"] and wt_hook(pins["design-lead"][0]):
             for w in place.jrun("worktree", "list")["result"]["worktrees"]:
                 if w.get("displayName") == "design-lead" and (w.get("parentWorktreeId") or "").endswith("::" + str(repo)):
-                    persona_hooks(Path(w["path"]), {"claude"})
+                    persona_hooks(Path(w["path"]), {pins["design-lead"][0]})
         live = running_sessions(place, repo, p["project"], p["lead"])
     except Fail as e:
         say("restart", "unknown", f"no Orca terminal list ({e}); restart these if running: {', '.join(changed) or 'none'}")
@@ -3319,13 +3332,19 @@ def box_pairing_remote(place: Place, op: str, name: str, link: "str | None" = No
     return said[-1]
 
 
-def desktop_lanes(place: Place) -> "str | None":
+def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | None":
     """Direction 2: the box pairs with this desktop's Orca, through a reverse tunnel. The environment's name on the
-    box, or None when skipped."""
+    box, or None when skipped. tunnel_opts are lane-tunnel start's own options (--auth-sock, --ssh, --no-enable)."""
     host, me = place.host, this_machine()
     state = box_pairing_remote(place, "status", me)
     if state == "reachable":
-        say("desktop lanes", "exists", f"{host} has this machine's Orca as environment {me}")
+        given = [f for f, v in (("--tunnel-auth-sock", tunnel_opts and "--auth-sock" in tunnel_opts),
+                                ("--tunnel-ssh", tunnel_opts and "--ssh" in tunnel_opts),
+                                ("--tunnel-no-enable", tunnel_opts and "--no-enable" in tunnel_opts)) if v]
+        unused = (f"; {' '.join(given)} not used: the tunnel is already paired and running. To change it run "
+                  f"core/scripts/lane-tunnel start <options> {host} <port> (the port is tunnel_port in the host's "
+                  "record under ~/.config/lane-control/hosts/)") if given else ""
+        say("desktop lanes", "exists", f"{host} has this machine's Orca as environment {me}{unused}")
         return me
     if not has_terminal():
         say("desktop lanes", "skipped", f"(the desktop's share link is asked for only in a terminal: run "
@@ -3359,9 +3378,14 @@ def desktop_lanes(place: Place) -> "str | None":
         raise Fail(f"port {port} on {host} is in use (its own Orca server, or another program), so the tunnel back "
                    f"here cannot open there; nothing was sent. Move what listens there (Orca's server: "
                    f"orca-host-install {host} --pair --port <another>), then run again")
-    t = subprocess.run([tunnel, "start", host, str(port)], capture_output=True, text=True)
+    t = subprocess.run([tunnel, "start", *(tunnel_opts or []), host, str(port)], capture_output=True, text=True)
     if t.returncode != 0:
-        raise Fail((t.stderr.strip() or "lane-tunnel failed") + "; nothing was sent to " + host)
+        # lane-tunnel leaves an always-on unit enabled and retrying after a failed start. Pairing failed here, so stop
+        # it and forget its env file; a retry of this command starts it afresh.
+        subprocess.run([tunnel, "stop", host], capture_output=True)
+        raise Fail((t.stderr.strip() or "lane-tunnel failed") + f"; nothing was sent to {host}. For a host that "
+                   "takes only a smartcard or an agent's key: unlock it, then pass --tunnel-auth-sock <agent socket> "
+                   "(and --tunnel-ssh <wrapper>)")
     sent = False
     try:
         up = wait_box_port(place, port, "busy")
@@ -3370,8 +3394,8 @@ def desktop_lanes(place: Place) -> "str | None":
             time.sleep(1)
         if not up:
             raise Fail(f"the tunnel {unit} did not come up on {host}, so nothing was sent (journalctl --user -u {unit}). "
-                       "The unit's ssh runs without your ssh agent: it needs a key it can use alone, with no passphrase "
-                       "(IdentityFile in the ssh config it uses)")
+                       "The unit's ssh runs without your ssh agent unless --tunnel-auth-sock names one: it needs a key "
+                       "it can use alone, with no passphrase (IdentityFile in the ssh config it uses), or that agent")
         if box_pairing_remote(place, "exposed", str(port)) != "no":
             raise Fail(f"on {host} the tunnel's port {port} is open on more than 127.0.0.1 (sshd's GatewayPorts is on "
                        "there), which would put this desktop's Orca on that network; nothing was sent. Set "
@@ -3420,10 +3444,12 @@ def wait_box_port(place: Place, port: int, want: str) -> bool:
         time.sleep(0.5)
 
 
-def host_server(place: Place, port: "int | None") -> None:
-    """Direction 1: Orca's server on the host, paired here (orca-host-install), unless it already answers."""
+def host_server(place: Place, port: "int | None", pin: "list | None" = None) -> None:
+    """Direction 1: Orca's server on the host, paired here (orca-host-install), unless it already answers. `pin` is
+    orca-host-install's --from/--bundle/--version for the server's source and version."""
     if place.reachable():
-        say("orca server", "exists", f"{place.host} (environment {place.env} answers here)")
+        unused = f"; {' '.join('--orca-' + x[2:] for x in pin[::2])} not used: the server is already there" if pin else ""
+        say("orca server", "exists", f"{place.host} (environment {place.env} answers here{unused})")
         return
     if port is None:  # the desktop's own listener is 6768, and the tunnel uses one port at both ends
         import socket
@@ -3438,7 +3464,8 @@ def host_server(place: Place, port: "int | None") -> None:
             raise Fail("no free port in 6769-6868 here for the tunnel to the host's Orca server; pass --orca-port")
     tool = tool_path("LANE_ORCA_HOST_INSTALL", "orchestrators/orca-cotal/scripts/orca-host-install")
     try:
-        r = subprocess.run([tool, place.host, "--pair", "--port", str(port)], stdin=subprocess.DEVNULL, timeout=900)
+        r = subprocess.run([tool, place.host, "--pair", "--port", str(port), *(pin or [])], stdin=subprocess.DEVNULL,
+                           timeout=900)
     except subprocess.TimeoutExpired:
         raise Fail(f"orca-host-install {place.host} --pair took more than 15 minutes; stopped") from None
     if r.returncode != 0:
@@ -3462,6 +3489,13 @@ def seen_here(place: Place, project: str) -> None:
     else:
         say("seen here", "missing", f"no terminal {want!r} through environment {place.env}; it has: "
             + (", ".join(t for t in titles if t) or "none"))
+
+
+def tunnel_options(a) -> list:
+    """lane-tunnel start's options for what project-setup was given (the unit's agent socket, ssh wrapper, no enable)."""
+    return [*(["--auth-sock", a.tunnel_auth_sock] if a.tunnel_auth_sock else []),
+            *(["--ssh", a.tunnel_ssh] if a.tunnel_ssh else []),
+            *(["--no-enable"] if a.tunnel_no_enable else [])]
 
 
 def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
@@ -3489,12 +3523,14 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
             return reexec(place, rest)
         if a.show or a.refresh:  # the host's own --show or --refresh, and nothing else: no server, link or machine
             return reexec(place, rest)
-        host_server(place, a.orca_port)
+        host_server(place, a.orca_port, [*(["--from", a.orca_from] if a.orca_from else []),
+                                         *(["--bundle", a.orca_bundle] if a.orca_bundle else []),
+                                         *(["--version", a.orca_version] if a.orca_version else [])])
         paired = None
         if a.no_desktop_lanes:
             say("desktop lanes", "skipped", "(--no-desktop-lanes)")
         else:
-            paired = desktop_lanes(place)
+            paired = desktop_lanes(place, tunnel_options(a))
         rc = reexec(place, [*rest, *(["--desktop-environment", paired] if paired else [])])
         if rc != 0:
             return rc
@@ -3686,6 +3722,22 @@ def main(argv=None) -> int:
     ap.add_argument("--no-desktop-lanes", action="store_true",
                     help="with a host: do not ask for this desktop's share link (no lanes from the host here)")
     ap.add_argument("--no-machine-setup", action="store_true", help="with a host: do not run machine-setup there")
+    ap.add_argument("--orca-from", metavar="DIR",
+                    help="with a host: install Orca's server there from this slot folder or folder of slots instead of "
+                         "this desktop's own (orca-host-install --from); pins a box to a known-good server")
+    ap.add_argument("--orca-bundle", metavar="TAR",
+                    help="with a host: the same from a tar (orca-host-install --bundle)")
+    ap.add_argument("--orca-version", metavar="V",
+                    help="with a host: install exactly this server version (a slot's name or the Orca app version it records, "
+                         "such as 1.4.251), or fail (orca-host-install --version)")
+    ap.add_argument("--tunnel-auth-sock", metavar="PATH",
+                    help="with a host: the ssh agent socket the tunnel to it uses (lane-tunnel start --auth-sock), for "
+                         "a host that takes only a smartcard: unlock the card in that agent first")
+    ap.add_argument("--tunnel-ssh", metavar="PATH",
+                    help="with a host: an executable the tunnel runs in place of ssh (lane-tunnel start --ssh)")
+    ap.add_argument("--tunnel-no-enable", action="store_true",
+                    help="with a host: start the tunnel without enabling it, so it does not come back at login "
+                         "(lane-tunnel start --no-enable)")
     ap.add_argument("--orca-port", type=int, metavar="N",
                     help="with a host: the port of Orca's server there and its tunnel here (default: the first free "
                          "one from 6769)")
@@ -3765,6 +3817,17 @@ def main(argv=None) -> int:
         print(f"project-setup: two hosts given ({a.host_pos} and --host {a.host}); give one", file=sys.stderr)
         return 2
     host = a.host or a.host_pos
+    if a.orca_from and a.orca_bundle:
+        print("project-setup: --orca-from and --orca-bundle exclude each other: give one source", file=sys.stderr)
+        return 2
+    if a.tunnel_auth_sock or a.tunnel_ssh:  # lane-tunnel's own rules, before anything runs on the host
+        c = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "check", *tunnel_options(a)],
+                           capture_output=True, text=True)
+        if c.returncode != 0:
+            why = (c.stderr.strip().splitlines() or ["lane-tunnel check failed"])[-1].replace("lane-tunnel: ", "")
+            print("project-setup: " + why.replace("--auth-sock", "--tunnel-auth-sock").replace("--ssh", "--tunnel-ssh"),
+                  file=sys.stderr)
+            return 2
     if a.desktop_environment is not None and not ENV_NAME.fullmatch(a.desktop_environment):
         print("project-setup: --desktop-environment takes an environment name", file=sys.stderr)
         return 2

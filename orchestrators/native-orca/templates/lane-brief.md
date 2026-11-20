@@ -31,5 +31,10 @@ You work in this Orca worktree only (branch <BRANCH>, from <BASE>).
    agents-md: none | <one line the next agent would need that AGENTS.md lacks; never commit it yourself>
    ```
    Then end your turn. A follow-up comes as a new Task: answer it the same way.
+   If Orca refuses the report, do not send it again unchanged. `missing_task_id` or `missing_dispatch_id`: the call
+   lacked `--task-id` or `--dispatch-id`; send it again with both exactly as in your first message.
+   `worker_identity_changed`: this dispatch can no longer take your report (for example Orca's runtime restarted);
+   a report is accepted from this terminal only, so never send it from another one. Push your branch, write the
+   report in your terminal, and end your turn: your coordinator reads the branch.
 7. Review findings <PARENT> sends you: fix every one, commit, push, and report again in the same shape. A finding
    you judge wrong: say why in one line instead of complying; never agree just to end the round.

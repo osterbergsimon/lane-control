@@ -1411,5 +1411,146 @@ class EntryPointsNameTheGeneratedFileTests(unittest.TestCase):
                     self.assertIn(GENERATED_NAME, text)
 
 
+class CrossHostReportContractTests(unittest.TestCase):
+    """UP-3: what is known about a worker's report (worker_done) reaching a coordinator, across hosts and not, and the
+    recovery for a dispatch that can no longer report. Tested live on one machine (record.md, 2026-11-20 UP-3);
+    delivery across hosts is not verified, and every text says so instead of claiming a wake."""
+
+    REMOTE = ROOT / "orchestrators" / "native-orca" / "remote.md"
+
+    def test_remote_doc_states_what_is_known_and_what_is_not(self):
+        t = flat(self.REMOTE)
+        self.assertNotIn("## Not yet established", t)
+        for needle in ("## Reports across hosts", "poll-only", "Not verified",
+                       "Orca's one-line message prompt", "orca-ide orchestration check",
+                       "`--task-id`", "`--dispatch-id`", "`missing_task_id`", "`missing_dispatch_id`",
+                       "`worker_identity_changed`", "Rejected worker_done",
+                       "is not the exact process that owns Dispatch",
+                       "## A dispatch that can no longer report", "read the lane's branch",
+                       "orca-ide orchestration worker-show --dispatch <dispatch>",
+                       "orca-ide orchestration worker-abandon --dispatch <dispatch>",
+                       "orca-ide orchestration worker-release --dispatch <dispatch>",
+                       "orca-ide orchestration worker-start --task <task> --retry-of <dispatch>",
+                       "ask the owner", "Not tested"):
+            self.assertIn(needle, t, needle)
+
+    def test_remote_doc_claims_no_delivery_across_hosts(self):
+        t = flat(self.REMOTE)
+        for claim in ("wakes the coordinator on the box", "is delivered to the box", "reaches the box's coordinator"):
+            self.assertNotIn(claim, t, claim)
+        self.assertRegex(t, r"(?i)across hosts[^.]*(not verified|poll-only)")
+
+    def test_no_text_says_a_cross_host_report_simply_comes_back(self):
+        # UP-6 review M1: the box paragraph said "its report comes back by Orca" next to the poll-only rule.
+        texts = [(self.REMOTE.name, flat(self.REMOTE))] + [(r, flat(NATIVE / f"{r}.md")) for r in LANE_STARTERS]
+        for name, t in texts:
+            self.assertNotIn("comes back by Orca", t, name)
+            self.assertNotIn("report comes back", t, name)
+        for name, t in texts[1:]:
+            self.assertIn("it reports by Orca; across hosts that is poll-only", t, name)
+        self.assertIn("it reports by Orca; across hosts that is poll-only", texts[0][1])
+
+    def test_one_rule_for_abandoning_a_dispatch_everywhere(self):
+        # review n1: no text lets the coordinator abandon without the owner; remote.md has no exception
+        for name, t in [("remote.md", flat(self.REMOTE))] + [(r, flat(NATIVE / f"{r}.md")) for r in LANE_STARTERS]:
+            self.assertRegex(t, r"(?i)ask the owner (first )?before you abandon|abandoning[^.]*ask the owner", name)
+            self.assertNotIn("unless `worker-show` proves", t, name)
+
+    def test_the_retry_step_matches_orcas_help_and_says_it_is_untested(self):
+        # review m4: --retry-of reopens a failed task itself; no task-update --status ready first
+        t = flat(self.REMOTE)
+        step = t[t.index("4. Start the work again"):]
+        self.assertNotIn("--status ready", step.split("Tested on one machine")[0])
+        self.assertIn("reopens it", step)
+        self.assertIn("untested", step.split("Tested on one machine")[0])
+
+    def test_the_opencode_record_says_how_an_opencode_coordinator_waits(self):
+        # review m3
+        t = flat(ROOT / "core" / "harnesses" / "opencode" / "record.md")
+        for needle in ("no background-command wake is known for OpenCode", "--timeout",
+                       "orca-ide orchestration check --wait", "not verified",
+                       "first live check", "two plugin files"):
+            self.assertIn(needle, t, needle)
+
+    def test_lane_starters_treat_a_cross_host_report_as_poll_only_and_know_the_recovery(self):
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
+            for needle in ("poll-only", "`Rejected worker_done`", "`worker_identity_changed`",
+                           "read the lane's branch", "orca-ide orchestration worker-show --dispatch <dispatch>",
+                           "orca-ide orchestration worker-abandon --dispatch <dispatch>",
+                           "orca-ide orchestration worker-release --dispatch <dispatch>",
+                           "orca-ide orchestration worker-start --task <task> --retry-of <dispatch>",
+                           "ask the owner before you abandon", "Reports across hosts"):
+                self.assertIn(needle, t, (role, needle))
+
+    def test_workers_and_the_brief_say_what_to_do_when_the_report_is_refused(self):
+        for path in [NATIVE / f"{role}.md" for role in WORKERS] + [NATIVE_BRIEF]:
+            t = flat(path)
+            for needle in ("`missing_task_id`", "`missing_dispatch_id`", "`worker_identity_changed`",
+                           "exactly as in your first message", "from this terminal only",
+                           "Push your branch", "your coordinator reads the branch"):
+                self.assertIn(needle, t, (path.name, needle))
+
+    def test_no_script_calls_worker_done(self):
+        # lane-control's scripts never send a worker_done (briefs and personas tell agents to); if one starts to,
+        # its refusal must name the ids and the command, and this test says where to add that.
+        for path in list((ROOT / "core" / "scripts").iterdir()) + list((ROOT / "orchestrators").rglob("*.py")):
+            if path.is_file() and path.suffix not in (".md", ".pyc"):
+                self.assertNotIn("worker_done", path.read_text(errors="ignore"), path.name)
+
+
+class PublicRepoPathTests(unittest.TestCase):
+    """UP-6 review B1 and r3-2: no tracked file names a session scratch folder or a real home folder, in any of the
+    shapes one leaks in. The placeholder user is `u` (/home/u/..., -home-u-..., /Users/u/...); any other name,
+    `alice` and `user` included, is flagged on purpose."""
+
+    # Written in pieces so this file does not match its own patterns.
+    PATTERNS = {
+        "a session scratch folder": re.compile("/tmp/" + "claude-"),
+        "a home folder": re.compile("/ho" + "me/" + r"(?!u/)[A-Za-z0-9_.-]+"),
+        "an encoded home folder": re.compile("-ho" + "me-" + r"(?!u-)[A-Za-z0-9]+-"),
+        "a macOS home folder": re.compile("/Us" + "ers/" + r"(?!u/)[A-Za-z0-9_.-]+"),
+        "a user runtime folder": re.compile("/ru" + "n/user/[0-9]"),
+        "root's home folder": re.compile("/ro" + "ot/"),
+    }
+
+    # Documents that describe a root-owned trial setup; root's home is not a person's private path. No other file may
+    # name root's home folder.
+    ROOT_PATH_DOCS = ("docs/superpowers/plans/2026-11-06-project-setup.md", "orchestrators/wsp/docs/wsp.md")
+
+    @staticmethod
+    def tracked():
+        r = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout:
+            return [ROOT / n for n in r.stdout.split("\0") if n]
+        return [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.parts]  # no git: the working tree
+
+    def test_no_tracked_file_names_a_private_path(self):
+        hits = []
+        for path in self.tracked():
+            if not path.is_file() or path.is_symlink() or "__pycache__" in path.parts or path.suffix in (
+                    ".pyc", ".png", ".jpg", ".gz", ".ico", ".woff2"):
+                continue
+            text = path.read_text(errors="ignore")
+            for what, pat in self.PATTERNS.items():
+                m = pat.search(text)
+                if m and what == "root's home folder" and str(path.relative_to(ROOT)) in self.ROOT_PATH_DOCS:
+                    continue
+                if m:
+                    hits.append(f"{path.relative_to(ROOT)}: {what} ({m.group(0)})")
+        self.assertEqual(hits, [])
+
+    def test_the_patterns_catch_what_they_are_for(self):
+        for what, sample in (("a session scratch folder", "/tmp/" + "claude-1000/x"),
+                             ("a home folder", "/ho" + "me/alice/code"), ("a home folder", "/ho" + "me/user/code"),
+                             ("an encoded home folder", "~/.claude/projects/-ho" + "me-alice-code-x"),
+                             ("a macOS home folder", "/Us" + "ers/alice/code"),
+                             ("a user runtime folder", "/ru" + "n/user/1000/x.sock"),
+                             ("root's home folder", "/ro" + "ot/.ssh")):
+            self.assertTrue(self.PATTERNS[what].search(sample), sample)
+        for ok in ("/ho" + "me/u/code/shop.app", "-ho" + "me-u-code-shop-app", "/Us" + "ers/u/code", "/home/ and /Users/"):
+            self.assertFalse(any(p.search(ok) for p in self.PATTERNS.values()), ok)
+
+
 if __name__ == "__main__":
     unittest.main()
