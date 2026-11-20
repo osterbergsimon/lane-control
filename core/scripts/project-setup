@@ -170,7 +170,7 @@ def free_port(start: int) -> int:
 
 
 SETTING_KEYS = ("root", "name", "models", "design_lead", "permission_mode", "private", "own_models", "port",
-                "claude_setup", "attached", "orchestrator", "runs", "terminals", "paused")  # all that is ever written: names and choices, never a secret
+                "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "design-lead": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -2295,7 +2295,7 @@ def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int, "orchestrator": str, "runs": dict, "terminals": dict, "paused": bool}
+            "permission_mode": str, "port": int, "orchestrator": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
@@ -2604,9 +2604,11 @@ def bare_title(title) -> str:
 
 
 def session_terminal(place: Place, title: str, handle: "str | None" = None):
-    """The Orca terminal of a running standing session, or None: the handle recorded at its start, else its title (a
-    shell or OpenCode may retitle the tab; Claude keeps its --name)."""
-    rows = place.jrun("terminal", "list")["result"]["terminals"]
+    """The Orca terminal of a running standing session (its agent runs), or None: the handle recorded at its start,
+    else its title (a shell or OpenCode may retitle the tab; Claude keeps its --name)."""
+    # A tab whose agent exited stays as a shell: Orca marks a terminal whose agent runs with agentIdentity.
+    rows = [t for t in place.jrun("terminal", "list")["result"]["terminals"]
+            if t.get("agentIdentity") and not t.get("orphaned")]
     return (next((t for t in rows if handle and t.get("handle") == handle), None)
             or next((t for t in rows if bare_title(t.get("title")) == title), None))
 
@@ -2649,7 +2651,7 @@ def launcher(repo: Path, role: str, pin: tuple, mode: str, checkout: Path, title
     rec, q = run_record(repo, role), shlex.quote
     script = (f"#!/bin/sh\n# {title}: written by project-setup at each start. The session's own Run, then the agent.\n"
               f"cd {q(str(checkout))} || exit 1\n"
-              f"{shlex.join(place.argv('orchestration', 'run-create', '--objective', title, '--json'))} >{q(str(rec))}.tmp 2>/dev/null &&\n"
+              f"{shlex.join(place.argv('orchestration', 'run-create', '--objective', title, '--json'))} >{q(str(rec))}.tmp 2>{q(str(rec))}.err &&\n"
               f"    mv -f {q(str(rec))}.tmp {q(str(rec))}\n"
               f"exec {shlex.join(cmd)}\n")
     f = store_dir(repo) / "launch" / f"{role}.sh"
@@ -2657,6 +2659,23 @@ def launcher(repo: Path, role: str, pin: tuple, mode: str, checkout: Path, title
     store_dir(repo).chmod(0o700)
     write_atomic(f, script.encode(), 0o700)
     return f
+
+
+def run_create_error(repo: Path, role: str) -> str:
+    """What a failed run-create in the session's terminal said: its JSON error (on stdout with --json), else the
+    last line of its stderr; '' when nothing was kept."""
+    rec = run_record(repo, role)
+    try:
+        err = json.loads(Path(f"{rec}.tmp").read_text()).get("error") or {}
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])[:300]
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        said = [l for l in Path(f"{rec}.err").read_text(errors="replace").splitlines() if l.strip()]
+    except OSError:
+        said = []
+    return said[-1].strip()[:300] if said else ""
 
 
 def wait_run(repo: Path, role: str, timeout: float = None):
@@ -2681,10 +2700,14 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
         say(f"session {role}", "exists", title)
         return False
     f = launcher(repo, role, pin, mode, checkout, title, kickoff, resume, place)
-    run_record(repo, role).unlink(missing_ok=True)
-    st = settings(repo)  # an earlier start's Run and terminal are gone with it: never kept for this one
+    for old_rec in (run_record(repo, role), Path(f"{run_record(repo, role)}.err"),
+                    Path(f"{run_record(repo, role)}.tmp")):
+        old_rec.unlink(missing_ok=True)
+    st = settings(repo)  # an earlier start's Run and terminal are gone with it: never kept for this one, and its Run
+    old = (st.get("runs") or {}).get(role)  # is remembered so a lookup by name never takes it for this session's
     settings(repo, runs={k: v for k, v in (st.get("runs") or {}).items() if k != role},
-             terminals={k: v for k, v in (st.get("terminals") or {}).items() if k != role})
+             terminals={k: v for k, v in (st.get("terminals") or {}).items() if k != role},
+             **({"old_runs": [*(st.get("old_runs") or []), old][-100:]} if old else {}))
     made = place.jrun("terminal", "create", "--worktree", f"path:{checkout}", "--title", title,
                       "--command", f"sh {shlex.quote(str(f))}")
     handle = ((made.get("result") or {}).get("terminal") or {}).get("handle") if isinstance(made, dict) else None
@@ -2693,21 +2716,28 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
     say(f"session {role}", "created", f"{'/'.join(pin)} in {checkout} ({title}" + (", resumed)" if resume else ")"))
     found = wait_run(repo, role)
     if found:
+        f.unlink(missing_ok=True)  # it holds the first message; the terminal's sh has it open and runs on
         settings(repo, runs={**(settings(repo).get("runs") or {}), role: found})
         say(f"run {role}", "created", f"{found} (objective {title!r}; recorded in the settings store)")
     else:
-        say(f"run {role}", "pending", f"no Run from its terminal after {RUN_WAIT}s; peers find it in `orca-ide "
-            f"orchestration run-list` by the objective {title!r}, and the session makes one itself if it has none")
+        why = run_create_error(repo, role)
+        why = f" (run-create said: {why})" if why else ""
+        say(f"run {role}", "pending", f"no Run from its terminal after {RUN_WAIT:g}s{why}; peers find it in "
+            f"`orca-ide orchestration run-list` by the objective {title!r}, and the session makes one itself if it "
+            "has none")
     return True
 
 
 def recorded_session(checkout: Path, role: str, harness: str):
-    """The id the persona hook or plugin recorded for the checkout's <role> session, or None."""
-    load_harness(harness)
+    """The id the persona hook or plugin recorded for the checkout's <role> session, or None (also when the
+    harness no longer has that session: a resume of it would fail at once)."""
+    adapter = load_harness(harness)
     import harnesses
     try:
-        return harnesses.read_session(checkout, role, harness)
-    except OSError:
+        sid = harnesses.read_session(checkout, role, harness)
+        # resumable only while the harness still has it: its idle signal reads that session's own writes
+        return sid if sid and adapter.idle_minutes(checkout, time.time(), role) is not None else None
+    except Exception:  # an unreadable record or store (OSError, sqlite3.Error): start fresh
         return None
 
 
@@ -2757,6 +2787,20 @@ def native_project(repo: Path, name: str = "") -> dict:
         raise Fail(f"{store_dir(repo) / 'settings.json'}: {why}. Nothing was started or rendered")
     return {"pins": pins, "lead": lead, "mode": mode,
             "project": name or st.get("name") or repo.name, "attached": tuple(attached_of(st)), "st": st}
+
+
+def running_lanes(place: Place, repo: Path) -> list:
+    """Names of the project's lanes whose agent runs now: worktrees of the repo other than the main checkout and the
+    design lead's, with a terminal Orca marks as an agent's."""
+    rid = next((r["id"] for r in place.jrun("repo", "list")["result"]["repos"] if Path(r["path"]) == repo), None)
+    if rid is None:
+        return []
+    lanes = {Path(w["path"]): w.get("displayName") or Path(w["path"]).name
+             for w in place.jrun("worktree", "list")["result"]["worktrees"]
+             if w["id"].startswith(rid + "::") and Path(w["path"]) != repo and w.get("displayName") != "design-lead"}
+    rows = place.jrun("terminal", "list")["result"]["terminals"]
+    return sorted({lanes[Path(t["worktreePath"])] for t in rows
+                   if t.get("agentIdentity") and Path(t.get("worktreePath") or "/") in lanes})
 
 
 def running_sessions(place: Place, repo: Path, project: str, lead: bool) -> dict:
@@ -2982,7 +3026,8 @@ def main(argv=None) -> int:
                     help="default harness/model of the reviewer persona (default claude/opus); leads pick one per lane "
                          "from the tiers")
     ap.add_argument("--permission-mode", help="Claude permission mode (default auto); native-orca also takes "
-                                              "acceptEdits, plan and dontAsk for Claude roles")
+                                              "acceptEdits, plan and dontAsk for Claude roles (plan leaves an "
+                                              "unattended coordinator unable to act)")
     ap.add_argument("--port", type=int)
     ap.add_argument("--tiers", help="a full tier table to use as it is")
     ap.add_argument("--own-model", action="append", default=[], metavar="PROVIDER/MODEL",

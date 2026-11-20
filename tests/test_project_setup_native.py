@@ -59,6 +59,9 @@ class NativeEnv(Env):
         self.env.pop("COTAL_NAME", None)  # the tests may run inside an agent's shell
         self.env["XDG_CONFIG_HOME"] = str(self.home / ".config")
         self.env["XDG_STATE_HOME"] = str(self.home / ".local" / "state")
+        self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
+        self.env.pop("CLAUDE_CONFIG_DIR", None)
+        self.env["ORCA_TERMINAL_HANDLE"] = "term_owner"  # project-pause runs in one of Orca's terminals
 
     def run(self, *args, adapt=False, env_extra=None, script=SETUP):
         args = [*args, *([] if adapt else ["--skip-adapt"])]
@@ -368,7 +371,9 @@ class StartTests(Case):
         r = self.e.run(str(self.repo))
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         runs = self.e.settings(self.repo)["runs"]
-        objectives = {x["id"]: x["objective"] for x in json.loads(self.e.state.read_text())["runs"]}
+        # n1: a launcher holds the first message (it may carry the owner's open questions): gone once its Run is in
+        self.assertEqual(sorted((self.e.store(self.repo) / "launch").iterdir()), [])
+        objectives = {x["runId"]: x["objective"] for x in json.loads(self.e.state.read_text())["runs"]}
         self.assertEqual(objectives[runs["coordinator"]], "app coordinator")
         self.assertEqual(objectives[runs["design-lead"]], "app design lead")
 
@@ -429,7 +434,7 @@ class StartTests(Case):
 
     def test_a_running_session_is_not_started_twice(self):
         self.e.set_state(terminals=[{"handle": "term_9", "title": "✳ app coordinator",
-                                     "worktreePath": str(self.repo)}])
+                                     "worktreePath": str(self.repo), "agentIdentity": "claude"}])
         r = self.e.run(str(self.repo), "--no-design-lead")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.e.creates(), [])
@@ -565,6 +570,9 @@ class PauseTests(Case):
         rec = session_record(self.e, self.repo, "coordinator", "claude")
         rec.parent.mkdir(parents=True, exist_ok=True)
         rec.write_text("abc-123\n")
+        transcripts = self.e.home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.repo.resolve()))
+        transcripts.mkdir(parents=True)
+        (transcripts / "abc-123.jsonl").write_text("{}\n")
         self.e.pause("stop", str(self.repo), "--no-handover")
         r = self.e.pause("start", str(self.repo))
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
@@ -584,6 +592,15 @@ class PauseTests(Case):
         rec = session_record(self.e, self.repo, "coordinator", "opencode")
         rec.parent.mkdir(parents=True, exist_ok=True)
         rec.write_text("ses_42\n")
+        import sqlite3
+        db = self.e.home / ".local" / "share" / "opencode" / "opencode.db"
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.executescript("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, time_updated INTEGER);"
+                          "CREATE TABLE session_message (session_id TEXT, time_updated INTEGER);"
+                          "INSERT INTO session_v2 VALUES ('ses_42', NULL, 1);")
+        con.commit()
+        con.close()
         self.e.pause("stop", str(self.repo), "--no-handover")
         r = self.e.pause("start", str(self.repo))
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
@@ -678,6 +695,9 @@ class ReviewFixTests(Case):
         st = json.loads(st_file.read_text())
         del st["runs"]["design-lead"]
         st_file.write_text(json.dumps(st))
+        state = json.loads(self.e.state.read_text())  # and no Run of its name to find either
+        state["runs"] = [x for x in state["runs"] if x["objective"] != "app design lead"]
+        self.e.state.write_text(json.dumps(state))
         r = self.e.pause("stop", str(self.repo), "--wait", "1")
         self.assertEqual(r.returncode, 1)
         self.assertIn("app design lead", r.stderr)
@@ -889,6 +909,101 @@ class NoGitTests(Case):
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("project-setup:", r.stderr)
+
+
+class MinorTests(Case):
+    def titles(self):
+        return sorted(t.get("title") for t in json.loads(self.e.state.read_text())["terminals"])
+
+    def started(self, role="coordinator"):
+        return [x for x in self.e.sessions() if x["role"] == role]
+
+    def test_a_run_create_failure_is_recorded_and_shown(self):
+        # m1: run-create's error is kept, not sent to /dev/null.
+        self.e.set_state(run_create_fails=True)
+        r = self.e.run(str(self.repo), "--no-design-lead", env_extra={"LANE_RUN_WAIT": "0"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = next(l for l in r.stdout.splitlines() if l.startswith("run coordinator:"))
+        self.assertIn("pending", line)
+        self.assertIn("stub: run-create failed", line)
+
+    def test_stop_finds_a_sessions_own_later_run_by_its_name(self):
+        # m1: no Run recorded at the start, but the session made exactly one itself: stop asks it there.
+        self.e.set_state(run_create_fails=True)
+        self.e.run(str(self.repo), "--no-design-lead", env_extra={"LANE_RUN_WAIT": "0"})
+        state = json.loads(self.e.state.read_text())
+        state.update(run_create_fails=False, runs=[{"runId": "run_00000000abcd", "objective": "app coordinator"}],
+                     handover_on_send={"handover-latest": "new"})
+        self.e.state.write_text(json.dumps(state))
+        r = self.e.pause("stop", str(self.repo), "--wait", "2")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual([x["to"] for x in json.loads(self.e.state.read_text())["sent"]], ["run:run_00000000abcd"])
+
+    def test_stop_with_no_run_to_find_says_the_owner_must_ask(self):
+        self.e.set_state(run_create_fails=True)
+        self.e.run(str(self.repo), "--no-design-lead", env_extra={"LANE_RUN_WAIT": "0"})
+        r = self.e.pause("stop", str(self.repo), "--wait", "1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Ask app coordinator yourself", r.stderr)
+        self.assertIn("--no-handover", r.stderr)
+        self.assertNotIn("paused", self.e.settings(self.repo))  # nothing changed
+
+    def test_stop_outside_an_orca_terminal_sends_nothing_and_says_how(self):
+        # m2: Orca sends messages only from one of its own terminals.
+        self.e.run(str(self.repo), "--no-design-lead")
+        r = self.e.pause("stop", str(self.repo), "--wait", "1", env_extra={"ORCA_TERMINAL_HANDLE": ""})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Orca terminal", r.stderr)
+        self.assertNotIn("sent", json.loads(self.e.state.read_text()))
+        self.assertNotIn("paused", self.e.settings(self.repo))
+        self.assertIn("app coordinator", self.titles())
+
+    def test_a_session_whose_agent_exited_is_not_running(self):
+        # m3: the tab stays with a shell after the agent exits; that is not a running session.
+        self.e.set_state(agent_exits=True)
+        self.e.run(str(self.repo), "--no-design-lead")
+        self.e.set_state(agent_exits=False)
+        r = self.e.run(str(self.repo), "--no-design-lead")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.started()), 2)
+        self.assertIn("running", self.e.pause("status", str(self.repo)).stdout)
+
+    def add_lane(self):
+        state = json.loads(self.e.state.read_text())
+        path = str(self.e.home / "orca" / "workspaces" / "fix-login")
+        state["worktrees"].append({"repo": "repo-1", "name": "fix-login", "path": path, "parent": f"repo-1::{self.repo}"})
+        state["terminals"].append({"handle": "term_lane", "title": "Fix login", "worktreePath": path,
+                                   "agentIdentity": "claude"})
+        self.e.state.write_text(json.dumps(state))
+
+    def test_rest_and_stop_refuse_while_a_lane_runs(self):
+        # m6: as on the Cotal path, a running lane is named and nothing is paused or closed.
+        self.e.run(str(self.repo))
+        self.add_lane()
+        for cmd in (["rest"], ["stop", "--no-handover"]):
+            r = self.e.pause(cmd[0], str(self.repo), *cmd[1:])
+            self.assertEqual(r.returncode, 1, cmd)
+            self.assertIn("fix-login", r.stderr)
+            self.assertNotIn("paused", self.e.settings(self.repo))
+        self.assertIn("app coordinator", self.titles())
+
+    def test_a_recorded_session_whose_transcript_is_gone_starts_fresh(self):
+        # m7: --resume of a session Claude no longer has would fail at once.
+        rec = session_record(self.e, self.repo, "coordinator", "claude")
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        rec.write_text("gone-1\n")
+        self.e.run(str(self.repo), "--no-design-lead", "--no-start")
+        r = self.e.pause("start", str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertNotIn("--resume", self.started()[-1]["argv"])
+
+    def test_run_id_reads_orcas_own_shape(self):
+        # m10: run-create --json prints runId at the top of its result.
+        m = load()
+        self.assertEqual(m.run_id({"ok": True, "result": {"runId": "run_0123456789ab", "objective": "x", "next": []}}),
+                         "run_0123456789ab")
+        self.assertEqual(m.run_id({"result": {"run": {"id": "run_00000000000f"}}}), "run_00000000000f")
+        self.assertIsNone(m.run_id({"result": {"id": "msg_1"}}))
 
 
 if __name__ == "__main__":

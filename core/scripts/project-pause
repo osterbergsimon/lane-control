@@ -18,7 +18,11 @@ On native Orca (a project project-setup set up there) the verbs keep their meani
 and unmark the project paused in its settings store (the night manager skips it); stop also asks each standing
 session for its handover through its own Orca Run, waits (--wait SECONDS, default 600) until each one's handover memory changes
 (handover-latest, handover-design-lead), then closes their terminals (--no-handover closes them without asking); start starts the missing ones again, each
-resuming its recorded session. Nothing is typed into a session's terminal.
+resuming its recorded session (Claude --resume, OpenCode --session; a fresh session when the harness no longer has it).
+stop runs in an Orca terminal (Orca sends messages only from its own terminals), finds each session's Run (the one
+recorded at its start, else the one of its name that no earlier start made), and changes nothing when a Run, a
+handover or that terminal is missing. rest and stop refuse while a lane's agent runs. Each start makes the session a
+new Run; the older ones stay in Orca and are never used again. Nothing is typed into a session's terminal.
 
   project-pause stop <project> [--wait SECONDS] [--no-handover]
 
@@ -56,6 +60,16 @@ def handover(repo: Path, key: str) -> str:
         return ""
 
 
+def run_by_name(place, title: str, old: set):
+    """The one Run whose objective is the session's name and that no earlier start of it made (`old_runs`: those
+    belong to closed terminals), or None when there is none or more than one."""
+    rows = place.jrun("orchestration", "run-list", "--limit", "500")["result"]
+    rows = (rows.get("runs") or rows.get("items") or []) if isinstance(rows, dict) else rows
+    ids = [r.get("runId") or r.get("id") for r in rows if isinstance(r, dict) and r.get("objective") == title]
+    ids = [i for i in ids if i and i not in old]
+    return ids[0] if len(ids) == 1 else None
+
+
 def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
     """rest, wake, stop, start and status on native Orca: the paused mark is in the settings store (the night manager
     skips a paused project); stop asks each standing session for its handover through its own Run, never by typing."""
@@ -67,6 +81,11 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
     p = ps.native_project(repo)
     place = ps.Place()
     live = ps.running_sessions(place, repo, p["project"], p["lead"])
+    if cmd in ("rest", "stop"):  # as on the Orca + Cotal path: never while a lane runs
+        lanes = ps.running_lanes(place, repo)
+        if lanes:
+            raise ps.Fail(f"not pausing {p['project']}: lanes still running: {', '.join(lanes)}; finish or stop them "
+                          "first. Nothing was changed")
     if cmd == "rest":
         ps.settings(repo, paused=True)
         print(f"{p['project']} is resting: marked paused in its settings store, so the night manager leaves it alone; "
@@ -87,19 +106,28 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
         print(f"{p['project']}: {state if live or p['st'].get('paused') else 'stopped'} (sessions running: {names})")
         return 0
     # stop
-    ps.settings(repo, paused=True)
     if not live:
+        ps.settings(repo, paused=True)
         print(f"{p['project']} paused: no standing session was running.")
         return 0
     if ask:
-        # The Run recorded at each session's start; an older one of the same name may be a dead terminal's. All are
-        # looked up before any session is told to stop working.
-        runs = {role: (p["st"].get("runs") or {}).get(role) for role in live}
-        missing = [ps.session_title(r, p["project"]) for r, rid in runs.items() if not rid]
+        if not os.environ.get("ORCA_TERMINAL_HANDLE"):
+            raise ps.Fail("stop asks for the handovers by Orca message, and Orca sends one only from its own terminals "
+                          "(ORCA_TERMINAL_HANDLE is not set here). Run project-pause stop in an Orca terminal, or ask "
+                          "the sessions for their handovers yourself and run project-pause stop --no-handover. Nothing "
+                          "was changed")
+        # Each session's Run: the one recorded at its start, else the one Run of its name it made itself. All are
+        # found before any session is told to stop working.
+        runs = {role: (p["st"].get("runs") or {}).get(role) or run_by_name(place, ps.session_title(role, p["project"]), set(p["st"].get("old_runs") or []))
+                for role in live}
+        missing = [r for r, rid in runs.items() if not rid]
         if missing:
-            raise ps.Fail(f"no Run recorded for {', '.join(missing)}, so it cannot be asked for a handover without "
-                          "typing into its terminal; nothing was sent. Ask it yourself, then run project-pause stop "
-                          "--no-handover")
+            raise ps.Fail(" ".join(
+                f"Ask {ps.session_title(r, p['project'])} yourself, in its terminal, to write its handover (`bd "
+                f"remember {HANDOVER_KEYS[r]}`)." for r in missing) + " It has no Run project-pause can reach (none "
+                "recorded at its start, and not exactly one of its name in `orca-ide orchestration run-list`), and "
+                "nothing is typed into a session's terminal. Then run project-pause stop --no-handover. Nothing was "
+                "changed")
         before = {role: handover(repo, HANDOVER_KEYS[role]) for role in live}
         for role, rid in runs.items():
             place.jrun("orchestration", "send", "--to", f"run:{rid}", "--subject", HANDOVER_SUBJECT,
@@ -113,10 +141,11 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
             if time.time() >= end:
                 raise ps.Fail("no new handover after " + f"{int(wait)}s from " + ", ".join(
                     f"{ps.session_title(r, p['project'])} ({HANDOVER_KEYS[r]})" for r in waiting)
-                    + ", so every session keeps running (the project is marked paused). Run project-pause stop again "
-                    "later, or --no-handover to close them anyway")
+                    + ", so every session keeps running and the project is not marked paused. Run project-pause stop "
+                    "again later, or --no-handover to close them anyway")
             time.sleep(min(5, max(0.2, end - time.time())))
         ps.say("handover", "written", ", ".join(HANDOVER_KEYS[r] for r in live))
+    ps.settings(repo, paused=True)
     for role, t in live.items():
         place.jrun("terminal", "close", "--terminal", t["handle"])
         ps.say(f"session {role}", "stopped", ps.session_title(role, p["project"]))

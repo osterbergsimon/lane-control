@@ -98,17 +98,19 @@ def orca():
             subprocess.run(["sh", "-c", command], cwd=t["worktreePath"])
             state.clear()
             state.update(json.loads(state_path.read_text()))
-            if state.get("retitle"):  # the shell or the program renames the tab, as fish and OpenCode do
-                for x in state["terminals"]:
-                    if x["handle"] == t["handle"]:
+            for x in state["terminals"]:
+                if x["handle"] == t["handle"]:
+                    if state.get("retitle"):  # the shell or the program renames the tab, as fish and OpenCode do
                         x["title"] = state["retitle"]
+                    if not state.get("agent_exits"):  # Orca marks a terminal whose agent runs
+                        x["agentIdentity"] = "claude"
         out({"ok": True, "result": {"terminal": t}})
     if cmd == "orchestration run-create":
         if state.get("run_create_fails"):
             out({"ok": False, "error": {"message": "stub: run-create failed"}}, 1)
-        run = {"id": f"run_{len(state.setdefault('runs', [])) + 1:012x}", "objective": opt("--objective")}
+        run = {"runId": f"run_{len(state.setdefault('runs', [])) + 1:012x}", "objective": opt("--objective")}
         state["runs"].append(run)
-        out({"ok": True, "result": {"run": run}})
+        out({"ok": True, "result": {**run, "next": []}})  # Orca 1.4.250's concise shape
     if cmd == "orchestration run-list":
         out({"ok": True, "result": {"runs": state.get("runs", [])}})
     if cmd == "orchestration send":
