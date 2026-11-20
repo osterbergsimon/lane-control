@@ -5,6 +5,7 @@ else = skip the run, which costs nothing.
   night-precheck                 what is due now, one line each:
                                    DUE <name> idle=<n>min        a coordinator to check in on
                                    OFFLINE <runner,...> repo=<r> self-hosted runners not online
+                                   BUDGET push-and-handover (<why>) check-ins ask only to push and hand over
                                    BUDGET unknown (<why>) ...    no budget reading: no check-ins (said once a night)
   night-precheck --checked <name> record that <name> was just checked in on (the night manager runs it after
                                    each check-in), so it is not due again for RECHECK_MIN minutes
@@ -15,14 +16,17 @@ IDLE_MIN minutes and not checked in on for RECHECK_MIN minutes, or a runner of R
 newest write of the coordinator's own session (the one started with LANE_ROLE/LANE_PERSONA), read by its harness
 adapter; Orca's terminal output is no idle signal (status-line redraws keep it fresh).
 
-Budget gate (budget-state, free): at or above the no-new-work step no coordinator is due (a check-in would spend what
-is left); when the budget is unknown (no config, no usage feed, a feed that gives no reading) no coordinator is due
-either, and the precheck says so with one BUDGET line once a night (stamp ~/.cache/lane-control/night/.budget-unknown,
-16 h), not every hour. Runners are reported either way.
+Budget gate (budget-state, free), as the machine coordinator's night routine had it: at the no-new-work and
+push-and-handover steps, or with the short window at WINDOW_WARN_PCT (95) or WINDOW_STOP_PCT (98), check-ins still go
+out but only to have coordinators push and write their handover (a `BUDGET push-and-handover` line comes first); at
+the stop step none. When the budget is unknown (no config, no usage feed, a feed that gives no reading) nobody gets a
+check-in: if a coordinator would be due, one BUDGET line says so once a night (stamp
+~/.cache/lane-control/night/.budget-unknown, 16 h); otherwise only stderr does, and machine-check reports the unknown
+budget once. Runners are reported either way.
 
 A project marked paused in its settings store (project-pause) is skipped; a settings file that cannot be read means
-no check-in for it, said on stderr. Coordinators and runner repos come from ~/.config/lane-control/machine.conf (LANE_MACHINE_CONF). Check-in stamps are
-~/.cache/lane-control/night/<name>.
+no check-in for it, said on stderr. Coordinators and runner repos come from ~/.config/lane-control/machine.conf
+(LANE_MACHINE_CONF). Check-in stamps are ~/.cache/lane-control/night/<name>.
 
 Exit: 0 something is due; 1 nothing is due (a coordinator whose idle time is unknown, or a runner list gh cannot
 read, is named on stderr); 2 it cannot tell (no or a bad machine.conf, an unreadable session folder or store): the
@@ -65,7 +69,8 @@ UNKNOWN_QUIET_H = 16
 
 
 def budget_gate() -> "tuple[str, str]":
-    """('ok', ''), ('stopped', why) at or above no-new-work, or ('unknown', why)."""
+    """('ok', ''), ('push', why) at no-new-work or push-and-handover (or the window at 95 or 98), ('stopped', why) at
+    the stop step, or ('unknown', why)."""
     here = Path(__file__).resolve().parent
     try:
         r = subprocess.run([str(here / "budget-state")], capture_output=True, text=True, timeout=120)
@@ -80,12 +85,16 @@ def budget_gate() -> "tuple[str, str]":
         f = line.split()
         if len(f) > 1 and f[1] == "unknown":
             return "unknown", line
+    push = ""
     for line in lines:
-        f = line.split()
-        step = dict(x.split("=", 1) for x in f[1:] if "=" in x).get("step", "0")
-        if step.isdigit() and int(step) >= 2:
+        kv = dict(x.split("=", 1) for x in line.split()[1:] if "=" in x)
+        step, wstep = kv.get("step", "0"), kv.get("window_step", "0")
+        step = int(step) if step.isdigit() else 0
+        if step >= 4:
             return "stopped", line
-    return "ok", ""
+        if step >= 2 or (wstep.isdigit() and int(wstep) >= 1):
+            push = push or line
+    return ("push", push) if push else ("ok", "")
 
 
 def recently_checked(name: str, recheck_min: int, now: float) -> bool:
@@ -121,23 +130,6 @@ def main(argv: list) -> int:
     now, due, broken = time.time(), [], False
     if not coords:
         err(f"{machineconf.path()} lists no coordinators (is it still the unfilled example?): nobody to check in on")
-    gate, why = budget_gate() if coords else ("ok", "")
-    if gate == "stopped":
-        err(f"budget at or above the no-new-work step ({why}): no check-ins")
-        coords = []
-    elif gate == "unknown":
-        stamp = stamp_dir() / UNKNOWN_STAMP
-        try:
-            said = now - stamp.stat().st_mtime < UNKNOWN_QUIET_H * 3600
-        except FileNotFoundError:
-            said = False
-        if said:
-            err(f"budget unknown ({why}): no check-ins; already said so tonight")
-        else:
-            stamp.parent.mkdir(parents=True, exist_ok=True)
-            stamp.touch()
-            due.append(f"BUDGET unknown ({why}): no check-ins until the usage feed gives a reading")
-        coords = []
     for c in coords:
         try:
             if machineconf.paused(c.checkout):
@@ -158,6 +150,30 @@ def main(argv: list) -> int:
             continue
         if idle >= conf["IDLE_MIN"] and not recently_checked(c.name, conf["RECHECK_MIN"], now):
             due.append(f"DUE {c.name} idle={idle}min")
+    if due:  # coordinators due: the budget decides what, if anything, they get
+        gate, why = budget_gate()
+        if gate == "stopped":
+            err(f"budget at the stop step ({why}): no check-ins")
+            due = []
+        elif gate == "push":
+            due.insert(0, f"BUDGET push-and-handover ({why}): check-ins ask only to push and write the handover")
+        elif gate == "unknown":
+            stamp = stamp_dir() / UNKNOWN_STAMP
+            try:
+                said = now - stamp.stat().st_mtime < UNKNOWN_QUIET_H * 3600
+            except FileNotFoundError:
+                said = False
+            if said:
+                err(f"budget unknown ({why}): no check-ins; already said so tonight")
+                due = []
+            else:
+                stamp.parent.mkdir(parents=True, exist_ok=True)
+                stamp.touch()
+                due = [f"BUDGET unknown ({why}): no check-ins until the usage feed gives a reading"]
+    elif coords and not broken:
+        gate, why = budget_gate()
+        if gate == "unknown":
+            err(f"budget unknown ({why}): no check-ins would go out (nobody is due now)")
     for repo in machineconf.runner_repos(conf):
         try:
             off = machineconf.offline_runners(repo)

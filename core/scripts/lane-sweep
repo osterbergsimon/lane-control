@@ -10,28 +10,31 @@ machine (spec section 8; reliability.md entry 30).
   lane-sweep --changes          print the findings the last --precheck run found new (what its agent routes)
 
 A merged lane is removed (--apply) only if all hold: its branch has a merged PR and HEAD is that PR's head or behind
-it; `git status --porcelain --untracked-files=normal` is empty, whatever git's config says; no Orca terminal of it printed anything for 30
-minutes; and no agent process (claude, opencode, codex) has its cwd inside the worktree. Otherwise MERGED-KEEP says
-why. When the sweep cannot tell (the process list or an agent's cwd cannot be read, a terminal has no
-lastOutputAt, Orca's terminal list is cut short), it keeps the lane: it fails closed. Right before removing it reads
-the lane again (HEAD, status, terminals, agents), so nothing it saw before its gh calls decides. An open-PR lane is removed the same way (owner, 2026-11-19) when its PR's head is exactly HEAD, the tree is
-clean, no terminal printed for 30 minutes and no agent runs in it: the worktree then holds nothing GitHub lacks, and a
-fix round checks the PR branch out into a new worktree. In report mode such a lane is listed as PR-PARKED, which is
+it; `git status --porcelain --untracked-files=normal` is empty, whatever git's config says; no Orca terminal of it
+printed anything for 30 minutes; and no agent process (claude, opencode, codex) has its cwd inside the worktree.
+Otherwise MERGED-KEEP says why. When the sweep cannot tell (the process list or an agent's cwd cannot be read, a
+terminal has no lastOutputAt, Orca's terminal list is cut short), it keeps the lane: it fails closed. Right before
+removing it reads the lane again (HEAD, status, terminals, agents), so nothing it saw before its gh calls decides.
+An open-PR lane is removed the same way (owner, 2026-11-19) when its PR's head is exactly HEAD, the tree is clean,
+no terminal printed for 30 minutes and no agent runs in it: the worktree then holds nothing GitHub lacks, and a fix
+round checks the PR branch out into a new worktree. In report mode such a lane is listed as PR-PARKED, which is
 information only (it waits on the owner) and not a finding. Removing closes the lane's terminals and runs `orca-ide
 worktree rm --delete-branch`; the PR and the remote branch are kept. Nothing else is ever removed.
 
-The PR is looked up by the lane's upstream branch when the upstream is that same branch on a real remote (`x` for a local `x` or
-`<user>/x`), never by a base branch it tracks (a lane on `origin/develop` would match develop's old merged PRs).
-Stuck: no activity for --stuck-hours, where activity is the newest of Orca's lastActivityAt (which alone can be days
-old), the last push, the last commit and the last terminal output, and not parked. Parked: an open PR, HEAD equal to
-or behind the pushed branch, a clean tree, and either no live terminal or the PR's head is HEAD.
+The PR is looked up by the lane's upstream branch when the upstream is that same branch on a real remote (`x` for a
+local `x` or `<user>/x`), never by a base branch it tracks (a lane on `origin/develop` would match develop's old
+merged PRs). Stuck: no activity for --stuck-hours, where activity is the newest of Orca's lastActivityAt (which
+alone can be days old), the last push, the last commit and the last terminal output, and not parked. Parked: an open
+PR, HEAD equal to or behind the pushed branch, a clean tree, and either no live terminal or the PR's head is HEAD.
 
 Worktrees on another Orca host (hostId not local) are left to that machine's sweep. Lanes listed in
-~/.config/lane-control/lane-sweep.hold (one worktree path per line, `#` comments; LANE_SWEEP_HOLD)
-are skipped (`~` expands; an entry that matches no worktree is named on stderr). Folder workspaces (not git)
-are skipped. With machine.conf, each line ends `owner=<coordinator>`: the coordinator whose checkout the lane belongs
-to. Exit: 0 nothing found, 10 something reported; with --precheck 0 something reported, 1 nothing; 2 Orca or the
-machine could not be read (Orca, the process list, the hold file).
+~/.config/lane-control/lane-sweep.hold (one worktree path per line, `#` comments; LANE_SWEEP_HOLD) are skipped (`~`
+expands; an entry that matches no worktree is named on stderr). Folder workspaces (not git) are skipped. With
+machine.conf, each line ends `owner=<coordinator>`: the coordinator whose checkout the lane belongs to. Exit: 0
+nothing found, 10 something reported; with --precheck 0 something new, 1 nothing new; 2 Orca or the machine could
+not be read (Orca, the process list, the hold file). An agent is any process whose command line names claude,
+opencode or codex; "cannot tell" comes only from one that can really be an agent (argv[0] is one of them, or an
+interpreter running one) whose cwd cannot be read, and stderr names its pid and command.
 """
 import argparse
 import json
@@ -48,6 +51,9 @@ import machineconf  # noqa: E402
 QUIET_MIN = 30
 STATE = "lane-sweep.json"
 AGENT = re.compile(r"claude|opencode|codex")  # anywhere in the command line, as `pgrep -f` matched it
+# What can really be an agent, for a process whose cwd cannot be read: the program itself, or an interpreter running it.
+AGENT_NAME = re.compile(r"\.?(claude|opencode2?|codex)(-wrapped)?")
+INTERPRETER = re.compile(r"(node|bun|python[0-9.]*)")
 
 
 class SweepError(Exception):
@@ -106,13 +112,29 @@ def pr_of(path, branch: str, state: str) -> "dict | None":
     return rows[0] if rows else None
 
 
+def can_be_agent(argv: list) -> bool:
+    """argv[0] is claude, opencode(2) or codex, or an interpreter (node, bun, python) whose script is one of them."""
+    if not argv:
+        return False
+    if AGENT_NAME.fullmatch(os.path.basename(argv[0])):
+        return True
+    if INTERPRETER.fullmatch(os.path.basename(argv[0])):
+        script = next((a for a in argv[1:] if not a.startswith("-")), "")
+        base = os.path.basename(script)
+        stem = base.rsplit(".", 1)[0] if "." in base else base
+        return bool(AGENT_NAME.fullmatch(stem) or any(re.fullmatch(r"(claude|opencode2?|codex)([-.].*)?", part)
+                                                      for part in Path(script).parts[:-1]))
+    return False
+
+
 class Agents:
-    """The cwd of every agent process of this user (LANE_PROC_DIR, default /proc). `unknown` is set when an agent's
-    cwd cannot be read: it could be in any lane, so every lane is kept."""
+    """The cwd of every agent process of this user (LANE_PROC_DIR, default /proc): any process whose command line
+    names claude, opencode or codex. `blocking` lists the processes that can be an agent (can_be_agent) and whose cwd
+    cannot be read: they could be in any lane, so every lane is kept while there is one."""
 
     def __init__(self):
         proc, uid = Path(os.environ.get("LANE_PROC_DIR") or "/proc"), os.getuid()
-        self.cwds, self.unknown = [], False
+        self.cwds, self.blocking = [], []
         try:
             entries = [e for e in proc.iterdir() if e.name.isdigit()]
         except OSError as e:
@@ -121,12 +143,10 @@ class Agents:
             try:
                 if e.stat().st_uid != uid or int(e.name) == os.getpid():
                     continue
-                cmd = (e / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-            except (FileNotFoundError, ProcessLookupError, ValueError):
-                continue  # gone while we looked
-            except OSError:
-                self.unknown = True
-                continue
+                argv = [a.decode(errors="replace") for a in (e / "cmdline").read_bytes().split(b"\0") if a]
+            except (OSError, ValueError):
+                continue  # gone while we looked, or not ours to read: it shows no agent
+            cmd = " ".join(argv)
             if not AGENT.search(cmd):
                 continue
             try:
@@ -134,7 +154,12 @@ class Agents:
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:
-                self.unknown = True
+                if can_be_agent(argv):
+                    self.blocking.append(f"pid {e.name} ({cmd[:120]})")
+
+    @property
+    def unknown(self) -> bool:
+        return bool(self.blocking)
 
     def why(self, path: str) -> str:
         """Why an agent keeps this lane, or ''."""
@@ -357,6 +382,11 @@ def main(argv) -> int:
         last = {}
     if a.changes:
         print("\n".join(last.get("new", [])) or "no new findings")
+        if last.get("new"):  # read once: a manual "Run now" (no precheck) resends nothing
+            try:
+                sf.write_text(json.dumps({**last, "new": []}, indent=1) + "\n")
+            except OSError:
+                pass
         return 0
     sweep = Sweep(a.apply, a.stuck_hours)
     try:
@@ -376,19 +406,26 @@ def main(argv) -> int:
             continue
         sweep.lane(wt, terms, agents, own)
     if agents.unknown:
-        print("lane-sweep: cannot tell where every agent runs (a process's cwd or command line cannot be read): "
-              "no lane was removed for that reason", file=sys.stderr)
+        print("lane-sweep: cannot tell where every agent runs: the cwd of " + "; ".join(agents.blocking) +
+              " cannot be read, so no lane was removed", file=sys.stderr)
     for e in hold:
         if e not in used:
             print(f"lane-sweep: hold entry {e!r} matches no lane", file=sys.stderr)
     findings = [x for x in sweep.lines if not x.startswith(("PR-PARKED", "PR-KEEP"))]
     if a.precheck:
         before = set(last.get("findings", []))
-        new = [x for x in findings if key(x) not in before]
+        # a lane gh could not be asked about this time keeps what it was (a passing gh failure wakes nobody)
+        checks = {x.split()[1] for x in findings if x.startswith("CHECK")}
+        kept = {k for k in before if k.split(" ", 1)[-1] in checks}
+        new = [x for x in findings if key(x) not in before
+               and not (x.startswith("CHECK") and any(k.split(" ", 1)[-1] == x.split()[1] for k in kept))]
+        findings = [x for x in findings if not (x.startswith("CHECK") and x.split()[1] in
+                                                {k.split(" ", 1)[-1] for k in kept})]
         try:
             sf.parent.mkdir(parents=True, exist_ok=True)
             keep = new or last.get("new", [])  # what the last waking run found, for its agent's --changes
-            sf.write_text(json.dumps({"findings": sorted({key(x) for x in findings}), "new": keep}, indent=1) + "\n")
+            sf.write_text(json.dumps({"findings": sorted({key(x) for x in findings} | kept), "new": keep}, indent=1)
+                          + "\n")
         except OSError as e:
             print(f"lane-sweep: cannot write {sf} ({e})", file=sys.stderr)
             return 2

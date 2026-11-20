@@ -8,7 +8,8 @@ manager, lane sweep and machine check automations, the presence-based CI limits 
 Runs as a normal user on the machine whose coordinators it watches; with --host it copies what it needs to H over
 SSH (~/.local/share/lane-control, as project-setup does) and runs there with the same arguments, so a box gets its own
 machine coordinator, night manager and sweep. Every step is skipped when already done and says `exists`; nothing is
-started twice and an existing automation or machine.conf is never changed.
+started twice. An existing machine.conf is never changed; an automation of ours is changed only to repair its
+precheck and prompt, and never from a lane worktree.
 
 1. ~/.config/lane-control/machine.conf (LANE_MACHINE_CONF) from core/templates/machine.conf.example, mode 0600, if
    missing: fill in COORDINATORS and RUNNER_REPOS by hand.
@@ -233,7 +234,7 @@ OLDER_AUTOMATIONS = {"night manager": ("night-manager",), "lane sweep": ("lane-s
 OLDER_CI_TIMERS = ("ci-cpu.timer", "ci-cpu-mode.timer")
 
 
-def automations_step(folder: Path):
+def automations_step(folder: Path, from_lane: bool = False):
     have = {a.get("name"): a for a in orca("automations", "list").get("automations", []) or []}
     for name, trigger, precheck, timeout, prompt in automation_specs():
         if name in have:
@@ -241,6 +242,11 @@ def automations_step(folder: Path):
             pc = a.get("precheck") or {}
             if pc.get("command") == precheck and pc.get("timeoutSeconds") == timeout and a.get("prompt") == prompt:
                 say(name, "exists", "(automation)")
+                continue
+            if from_lane:
+                say(name, "left as it is", f"(automation {a['id']} points at {pc.get('command') or 'no precheck'}; "
+                                           "this run is from a lane worktree, which would be removed with its lane: "
+                                           "run machine-setup from the main checkout to repair it)")
                 continue
             orca("automations", "edit", a["id"], "--precheck", precheck, "--precheck-timeout", str(timeout),
                  "--prompt", prompt)
@@ -385,7 +391,7 @@ def main(argv) -> int:
             say(TITLE, "skipped", "(--no-start)")
         else:
             start_step(harness, model, a.permission_mode, folder, persona, a.trust_folder)
-        automations_step(folder)
+        automations_step(folder, from_lane=bool(warning))
         timer_step()
     except (Fail, ValueError, OSError) as e:
         print(f"machine-setup: {e}", file=sys.stderr)

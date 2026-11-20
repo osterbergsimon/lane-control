@@ -2,10 +2,11 @@
 # budget-state: each metered budget's step now, from its usage feed and weekly ceiling (the config's budgets; lib.sh).
 #
 #   budget-state          one line per metered budget:
-#                           <budget> weekly=<w> window=<s> ceiling=<c> step=<n> <name>
+#                           <budget> weekly=<w> window=<s> ceiling=<c> step=<n> <name> window_step=<m>
 #                           <budget> unknown (the usage feed gave no reading)
 #                         steps from the ceiling: 0 none, 1 pressure (ceiling-PRESSURE_MARGIN), 2 no-new-work
-#                         (-STEP_NO_NEW), 3 push-and-handover (-STEP_WIP_STOP), 4 stop (-STEP_STOP_ALL)
+#                         (-STEP_NO_NEW), 3 push-and-handover (-STEP_WIP_STOP), 4 stop (-STEP_STOP_ALL); the short
+#                         window's: 0 none, 1 no-new-work (WINDOW_WARN_PCT, 95), 2 push (WINDOW_STOP_PCT, 98)
 #   budget-state --mark   also writes the budget-stopped marker (LANE_BUDGET_STOPPED_FILE, default
 #                         ~/.config/lane-control/budget-stopped) while every metered budget a lane tier runs on is
 #                         stopped: weekly at its stop step (with the largest per-project COORD_CEILING_ADD, since one
@@ -36,7 +37,7 @@ set +u
 . "$here/lib.sh"
 set -u
 margin=${PRESSURE_MARGIN:-15} no_new=${STEP_NO_NEW:-7} wip=${STEP_WIP_STOP:-4} stop=${STEP_STOP_ALL:-2}
-window_stop=${WINDOW_STOP_PCT:-98}
+window_stop=${WINDOW_STOP_PCT:-98} window_warn=${WINDOW_WARN_PCT:-95}
 names=(none pressure no-new-work push-and-handover stop)
 add=0
 for p in "${!COORD_CEILING_ADD[@]}"; do
@@ -64,7 +65,9 @@ for b in $(metered | sort); do
   elif [ "$wk" -ge $((ceil - no_new)) ]; then step=2
   elif [ "$wk" -ge $((ceil - margin)) ]; then step=1
   fi
-  echo "$b weekly=$wk window=$ss ceiling=$ceil step=$step ${names[$step]}"
+  wstep=0
+  if [ "$ss" -ge "$window_stop" ]; then wstep=2; elif [ "$ss" -ge "$window_warn" ]; then wstep=1; fi
+  echo "$b weekly=$wk window=$ss ceiling=$ceil step=$step ${names[$step]} window_step=$wstep"
   if [[ "$lane_budgets" == *" $b "* ]]; then
     any_lane=1
     if [ "$wk" -lt $((ceil + add - stop)) ] && [ "$ss" -lt "$window_stop" ]; then all_stopped=no; fi

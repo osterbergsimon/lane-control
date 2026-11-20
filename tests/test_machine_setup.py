@@ -425,10 +425,24 @@ class NightPrecheckTests(MachineTest):
         self.assertIn("proj", r.stderr)
         self.assertIn("ermission", r.stderr)
 
-    def test_no_check_ins_at_no_new_work_or_above(self):
+    def test_push_and_handover_check_ins_from_no_new_work(self):
         co = self.claude_coordinator("proj", 90)
         self.conf(f"proj {co} claude proj coordinator")
-        for weekly in (86, 89, 92):
+        for weekly, window in ((86, 10), (89, 10), (20, 95), (20, 98)):
+            with self.subTest(weekly=weekly, window=window):
+                self.playbook(weekly, window, extra="WINDOW_WARN_PCT=95")
+                r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+                self.assertEqual(r.returncode, 0, r.stderr)
+                lines = r.stdout.splitlines()
+                self.assertRegex(lines[0], r"^BUDGET push-and-handover \(")
+                self.assertEqual(lines[1:], ["DUE proj idle=90min"])
+        self.playbook(80, 10)
+        self.assertEqual(self.run_script("night-precheck", env={"LANE_HOUR": "2"}).stdout, "DUE proj idle=90min\n")
+
+    def test_no_check_ins_at_the_stop_step(self):
+        co = self.claude_coordinator("proj", 90)
+        self.conf(f"proj {co} claude proj coordinator")
+        for weekly in (91, 92):
             with self.subTest(weekly=weekly):
                 self.playbook(weekly, 10)
                 r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
@@ -455,6 +469,15 @@ class NightPrecheckTests(MachineTest):
         self.env["PLAYBOOK_CONFIG"] = str(self.tmp / "none.sh")  # no budget config at all: the same
         age(self.home / ".cache" / "lane-control" / "night" / ".budget-unknown", 17 * 60)
         self.assertIn("BUDGET unknown", self.run_script("night-precheck", env={"LANE_HOUR": "2"}).stdout)
+
+    def test_unknown_budget_wakes_only_when_someone_is_due(self):
+        co = self.claude_coordinator("proj", 5)
+        self.conf(f"proj {co} claude proj coordinator")
+        self.playbook(None, None)
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("unknown", r.stderr)
+        self.assertFalse((self.home / ".cache" / "lane-control" / "night" / ".budget-unknown").exists())
 
     def test_no_coordinators_named_on_stderr(self):
         self.machine_conf((ROOT / "core" / "templates" / "machine.conf.example").read_text())
@@ -763,7 +786,32 @@ class LaneSweepTests(MachineTest):
         (d / "cwd").mkdir()  # readlink fails: where it runs cannot be told
         r = self.sweep("--apply")
         self.assertIn("cannot tell", r.stderr)
+        self.assertIn("pid 300 (claude)", r.stderr)  # names what blocks the sweep
         self.assertEqual(self.removed(), [])
+
+    def test_unreadable_cwd_of_a_non_agent_does_not_block(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        for pid, argv in ((301, [b"/usr/lib/claude-panel-applet", b"--tray"]), (302, [b"python3", b"-m", b"tray"]),
+                          (303, [b"bash", b"-c", b"echo claude"])):
+            d = self.proc / str(pid)
+            d.mkdir()
+            (d / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+            (d / "cwd").mkdir()  # its cwd cannot be read
+        r = self.sweep("--apply")
+        self.assertIn(f"REMOVED {path}", r.stdout)
+        self.assertNotIn("cannot tell", r.stderr)
+
+    def test_agent_run_by_an_interpreter_with_unreadable_cwd_blocks(self):
+        path, head = self.lane("done")
+        self.pr("done", "merged", head)
+        d = self.proc / "310"
+        d.mkdir()
+        (d / "cmdline").write_bytes(b"node\0--no-warnings\0/opt/x/bin/opencode\0--auto\0")
+        (d / "cwd").mkdir()
+        r = self.sweep("--apply")
+        self.assertEqual(self.removed(), [])
+        self.assertIn("pid 310", r.stderr)
 
     def test_agent_tool_shell_keeps_lane(self):
         path, head = self.lane("open")
@@ -871,8 +919,22 @@ class LaneSweepTests(MachineTest):
         self.assertEqual(r.returncode, 0)
         self.assertIn(f"MERGED {done}", r.stdout)
         self.assertNotIn("STUCK", r.stdout)
-        self.assertNotIn("STUCK", self.sweep("--changes").stdout)
+        changes = self.sweep("--changes").stdout
+        self.assertIn(f"MERGED {done}", changes)
+        self.assertNotIn("STUCK", changes)
+        self.assertIn("no new findings", self.sweep("--changes").stdout)  # read once: a manual run resends nothing
         self.assertEqual(self.sweep("--precheck").returncode, 1)
+
+    def test_a_passing_gh_failure_does_not_wake_again(self):
+        done, head = self.lane("done")
+        self.pr("done", "merged", head)
+        self.assertEqual(self.sweep("--precheck").returncode, 0)
+        gh = json.loads((self.tmp / "gh.json").read_text())
+        write_exec(self.bin / "gh", "#!/bin/sh\nexit 1\n")
+        r = self.sweep("--precheck")
+        self.assertEqual(r.returncode, 1, r.stdout)  # CHECK for a lane already reported: not new
+        self.gh(gh)
+        self.assertEqual(self.sweep("--precheck").returncode, 1)  # MERGED again: still not new
 
     def test_folder_workspace_skipped(self):
         folder = self.tmp / "folder-ws"
@@ -994,7 +1056,7 @@ class BudgetStateTests(BudgetTest):
                 self.playbook(weekly, 10)
                 r = self.run_script("budget-state")
                 self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertEqual(r.stdout, f"main weekly={weekly} window=10 ceiling=93 {step}\n")
+                self.assertEqual(r.stdout, f"main weekly={weekly} window=10 ceiling=93 {step} window_step=0\n")
         self.assertFalse(self.marker().exists())  # only --mark writes it
 
     def test_mark_when_stopped_and_clear(self):
@@ -1005,6 +1067,11 @@ class BudgetStateTests(BudgetTest):
         self.playbook(10, 10)
         self.run_script("budget-state", "--mark")
         self.assertFalse(self.marker().exists())
+
+    def test_window_steps(self):
+        for window, ws in ((94, 0), (95, 1), (98, 2)):
+            self.playbook(20, window, extra="WINDOW_WARN_PCT=95")
+            self.assertTrue(self.run_script("budget-state").stdout.endswith(f" window_step={ws}\n"))
 
     def test_window_stop_marks(self):
         self.playbook(20, 98)
@@ -1299,22 +1366,54 @@ class MachineSetupTests(BudgetTest):
         self.assertIn(str(main), ms_.lane_worktree_warning(self.tmp / "lane"))
         self.assertIsNone(ms_.lane_worktree_warning(self.tmp))  # not git at all (a copy on a host)
 
+    def lane_control_copy(self, dest: Path) -> Path:
+        """A copy of what machine-setup needs, outside any git repo (or inside one the caller makes)."""
+        import shutil
+        ignore = shutil.ignore_patterns("__pycache__")
+        dest.mkdir(parents=True)
+        (dest / ".lane-control-root").write_text((ROOT / ".lane-control-root").read_text())
+        shutil.copytree(ROOT / "core", dest / "core", ignore=ignore, symlinks=True)
+        shutil.copytree(ROOT / "orchestrators", dest / "orchestrators", ignore=ignore, symlinks=True)
+        return dest
+
+    def setup_from(self, root: Path, *args):
+        e = dict(self.env)
+        return subprocess.run([str(root / "core" / "scripts" / "machine-setup"), "--folder", str(self.folder),
+                               "--trust-folder", *args], env=e, capture_output=True, text=True, timeout=60)
+
     def test_existing_automation_with_an_old_path_is_repaired(self):
+        copy = self.lane_control_copy(self.tmp / "lc")
         self.orca({"automations": [{"id": "a1", "name": "lane sweep", "prompt": "old prompt",
                                     "precheck": {"command": "/gone/lane-sweep --precheck", "timeoutSeconds": 60}}]})
-        r = self.setup_machine("--no-start")
+        r = self.setup_from(copy, "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         (edit,) = self.creates(["automations", "edit"])
         self.assertEqual(edit[2], "a1")
         import shlex
-        self.assertEqual(edit[edit.index("--precheck") + 1], shlex.quote(f"{SCRIPTS}/lane-sweep") + " --precheck")
+        scripts = copy.resolve() / "core" / "scripts"
+        self.assertEqual(edit[edit.index("--precheck") + 1], shlex.quote(f"{scripts}/lane-sweep") + " --precheck")
         self.assertEqual(edit[edit.index("--precheck-timeout") + 1], "600")
         self.assertIn("lane-sweep", edit[edit.index("--prompt") + 1])
         self.assertIn("lane sweep: repaired", r.stdout)
         self.assertNotIn("lane sweep", self.automations())
         n = len(self.orca_calls())
-        self.assertIn("lane sweep: exists", self.setup_machine("--no-start").stdout)
+        self.assertIn("lane sweep: exists", self.setup_from(copy, "--no-start").stdout)
         self.assertEqual([c for c in self.orca_calls()[n:] if c[1:2] in (["edit"], ["create"])], [])
+
+    def test_no_repair_from_a_lane_worktree(self):
+        git = dict(self.env, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@e", GIT_CONFIG_GLOBAL="/dev/null")
+        main = self.lane_control_copy(self.tmp / "lc-main")
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "x"],
+                    ["worktree", "add", "-q", str(self.tmp / "lc-lane"), "-b", "lane"]):
+            subprocess.run(["git", "-C", str(main), *cmd], check=True, env=git, capture_output=True)
+        self.orca({"automations": [{"id": "a1", "name": "lane sweep", "prompt": "old prompt",
+                                    "precheck": {"command": "/main/lane-sweep --precheck", "timeoutSeconds": 600}}]})
+        r = self.setup_from(self.tmp / "lc-lane", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.creates(["automations", "edit"]), [])
+        self.assertIn("lane sweep: left as it is", r.stdout)
+        self.assertIn("lane worktree", r.stdout)
 
     def test_older_automations_are_reported_not_doubled(self):
         self.orca({"automations": [{"id": "old-nm", "name": "night-manager", "prompt": "x", "precheck": None},
@@ -1378,7 +1477,7 @@ class NightManagerDocTests(unittest.TestCase):
         text = (ROOT / "orchestrators" / "native-orca" / "night-manager.md").read_text()
         for needle in ("night-precheck", "--checked", "lane-sweep --stuck-hours 2", "SendMessage",
                        "orchestration send --to run:", "no-new-work", "machine.conf", "nothing", "BUDGET unknown",
-                       "stand down"):
+                       "stand down", "BUDGET push-and-handover"):
             self.assertIn(needle, text)
         self.assertNotIn("--apply", text.replace("never `--apply`", "").replace("never --apply", ""))
         for private in ("vellum", "calvin", "pasteur", "osterberg", "/home/", "10.10."):
