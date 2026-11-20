@@ -1689,6 +1689,32 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.e.agent_runs(), [])
         self.assertFalse((self.repo / GENERATED).exists())
 
+    def test_write_section_refuses_an_edit_made_after_the_check_and_keeps_it(self):
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        self.assertEqual(self.in_terminal("y")[0], 0)
+        m = load()
+        for name, edit in ((GENERATED, lambda t: t.replace("read them", "read them, and HAND EDIT")),
+                           ("AGENTS.md", lambda t: t + "a rule written by hand\n")):
+            with self.subTest(name=name):
+                f = self.repo / name
+                before = f.read_text()
+                f.write_text(edit(before))  # after any check: the owner's edit while an agent ran
+                edited = f.read_text()
+                with self.assertRaises(m.Fail) as cm:
+                    m.write_section(self.repo)
+                self.assertIn(f"{name} has uncommitted changes", str(cm.exception))
+                self.assertEqual(f.read_text(), edited)
+                f.write_text(before)
+
+    def test_a_negated_ignore_rule_lets_the_generated_file_through(self):
+        (self.repo / ".gitignore").write_text(f"AGENTS.*\n!AGENTS.md\n!{GENERATED}\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-q", "-m", "ignore all but ours", cwd=self.repo)
+        self.e.script_agents(sonnet=[WRITE], opus=[PASS])
+        status, out, _ = self.in_terminal("y")
+        self.assertEqual(status, 0, self.err + out)
+        self.assertIn(GENERATED, self.committed_paths())
+
     def test_write_section_writes_nothing_when_one_file_cannot_be_rewritten(self):
         m = load()
         (self.repo / "AGENTS.md").write_text(m.DOC.POINTER + "\n" + m.DOC.POINTER + "\n")

@@ -140,6 +140,12 @@ class AdapterTests(unittest.TestCase):
                       str(cm.exception))
         self.assertFalse((self.p / GENERATED).exists())
 
+    def test_setup_takes_a_generated_file_the_project_un_ignored(self):
+        git(self.p, "init", "-q")
+        (self.p / ".gitignore").write_text("AGENTS.*\n!AGENTS.lane-control.md\n")
+        self.assertTrue(self.a.setup(self.p, self.p))
+        self.assertTrue((self.p / GENERATED).exists())
+
     def test_unpaired_markers_refused(self):
         for name in ("AGENTS.md", GENERATED):
             with self.subTest(name=name):

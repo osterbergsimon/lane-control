@@ -106,6 +106,31 @@ class ReplacedTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["AGENTS.md"])
 
 
+class IgnoredTests(unittest.TestCase):
+    """R2-1: a project that un-ignored the file the way the message says is not refused again."""
+
+    def repo(self, ignore):
+        import subprocess
+        import tempfile
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        subprocess.run(["git", "init", "-q", d.name], check=True)
+        (Path(d.name) / ".gitignore").write_text(ignore)
+        return Path(d.name)
+
+    def test_a_plain_rule_is_named(self):
+        self.assertEqual(load().ignored(self.repo("AGENTS.*\n")), ".gitignore:1:AGENTS.*")
+
+    def test_a_negated_rule_is_not_ignored(self):
+        self.assertIsNone(load().ignored(self.repo("AGENTS.*\n!AGENTS.lane-control.md\n")))
+
+    def test_no_rule_and_no_repo_are_not_ignored(self):
+        self.assertIsNone(load().ignored(self.repo("*.log\n")))
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(load().ignored(Path(d)))
+
+
 class GeneratedFileTests(unittest.TestCase):
     def setUp(self):
         self.m = load()

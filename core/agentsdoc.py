@@ -136,13 +136,18 @@ def write_atomic(f: Path, text: str):
 
 
 def ignored(repo: Path, name: str = GENERATED):
-    """Where git ignores `name` in `repo` ("<file>:<line>:<pattern>"), or None (not ignored, tracked, or no repo)."""
+    """Where git ignores `name` in `repo` ("<file>:<line>:<pattern>"), or None (not ignored, un-ignored by a `!` rule,
+    tracked, or no repo). Plain check-ignore decides: with -v alone git also reports a negating rule, exit 0."""
+    def check(*flags):
+        return subprocess.run(["git", "-C", str(repo), "check-ignore", *flags, "--", name], capture_output=True,
+                              text=True, timeout=30)
     try:
-        r = subprocess.run(["git", "-C", str(repo), "check-ignore", "-v", "--", name], capture_output=True, text=True,
-                           timeout=30)
+        if check("-q").returncode != 0:
+            return None
+        r = check("-v")
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return r.stdout.split("\t", 1)[0].strip() if r.returncode == 0 and r.stdout.strip() else None
+    return r.stdout.split("\t", 1)[0].strip() or "a gitignore rule"
 
 
 def ignored_message(where: str) -> str:

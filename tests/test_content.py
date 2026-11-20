@@ -1282,7 +1282,23 @@ class NativeLaneSkillTests(unittest.TestCase):
 
 
 # --- review round 1 of UP-B ----------------------------------------------------------------------------------------
-WAIT_LOOP = re.compile(r"until \[|\bwhile\b.*\bsleep\b|\bsleep \d|--wait\b")
+WAIT_LOOP = re.compile(r"until \[|until test\b|\bwhile\b.*\bsleep\b|\bsleep \d|--wait\b|--watch\b|\bgh run watch\b|"
+                       r"\btail -f\b")
+PROHIBITION = re.compile(r"\bnever\b|\bdo not\b|\bdon't\b", re.I)
+
+
+def wait_outside_prohibition(lines: list, n: int):
+    """The wait on line n (0-based) that no prohibition covers, or None. A prohibition covers a wait when it comes
+    before it in the same clause: on that line, or at the end of the line before (prose wrapped between the two), with
+    no ". ", ": " or "; " between them."""
+    for m in WAIT_LOOP.finditer(lines[n]):
+        context = ((lines[n - 1][-60:] + " ") if n else "") + lines[n][:m.start()]
+        last = None
+        for p in PROHIBITION.finditer(context):
+            last = p
+        if last is None or re.search(r"[.:;] ", context[last.end():]):
+            return m.group(0)
+    return None
 
 
 def coordinator_facing():
@@ -1298,10 +1314,24 @@ class NoCoordinatorWaitLoopTests(unittest.TestCase):
         files = coordinator_facing()
         self.assertGreaterEqual(len(files), 10)
         for f in files:
-            for n, line in enumerate(f.read_text().splitlines(), 1):
-                if WAIT_LOOP.search(line):
-                    self.assertRegex(line.lower(), r"never|do not|don't",
-                                     f"{f.relative_to(ROOT)}:{n}: a wait outside a prohibition: {line.strip()}")
+            lines = f.read_text().splitlines()
+            for n in range(len(lines)):
+                self.assertIsNone(wait_outside_prohibition(lines, n),
+                                  f"{f.relative_to(ROOT)}:{n + 1}: a wait outside a prohibition: {lines[n].strip()}")
+
+    def test_the_wait_check_catches_loops_and_spares_prohibitions(self):
+        caught = ['until [ -e "$f" ]; do sleep 5; done', "do sleep 5; done", 'while ! test -e x; do sleep "$n"; done',
+                  "sleep 1m", "orca-ide orchestration check --wait", "gh run watch 123", "gh pr checks --watch",
+                  "tail -f build.log", "timeout 600 sh -c 'until test -e x; do :; done'",
+                  "never skip this: until [ -e x ]; do sleep 5; done"]
+        for line in caught:
+            self.assertIsNotNone(wait_outside_prohibition([line], 0), line)
+        spared = [["never `check --wait`, never `sleep 5`"], ["Do not use `gh run watch`."],
+                  ["Never type into it, and do not use Orca's", "`orchestration` skill (check --wait)."],
+                  ["waits are lane work: never", "  check --wait; it blocks"]]
+        for lines in spared:
+            self.assertIsNone(wait_outside_prohibition(lines, len(lines) - 1), lines)
+        self.assertIsNotNone(wait_outside_prohibition(["never mind.", "Then run tail -f x"], 1))
 
     def test_the_lane_waits_for_its_setup_script_not_the_coordinator(self):
         for brief in (BRIEF, NATIVE_BRIEF):
@@ -1315,21 +1345,29 @@ class NoCoordinatorWaitLoopTests(unittest.TestCase):
 
 GENERATED_NAME = "AGENTS.lane-control.md"
 # "Read AGENTS.md" or "then AGENTS.md" not followed by the generated file: an entry point that misses half the rules.
-AGENTS_ONLY = re.compile(r"(?:Read|then) AGENTS\.md(?! and AGENTS\.lane-control\.md)")
+AGENTS_ONLY = re.compile(r"(?:Read|then|reread)(?: the repo's)? AGENTS\.md(?! and AGENTS\.lane-control\.md)", re.I)
 
 
 class EntryPointsNameTheGeneratedFileTests(unittest.TestCase):
     """UP-5: AGENTS.md now holds one pointer line; every kickoff, brief and reviewer names the generated file too."""
 
     FILES = (ROOT / "core" / "scripts" / "project-setup", ROOT / "core" / "scripts" / "project-pause", BRIEF,
-             NATIVE_BRIEF, PERSONAS / "reviewer.md", NATIVE / "reviewer.md")
+             NATIVE_BRIEF, *sorted((ROOT / "orchestrators").glob("*/personas/*.md")))
+
+    def test_the_pattern_catches_each_wording(self):
+        for text in ("Read AGENTS.md fully", "then AGENTS.md;", "Read the repo's AGENTS.md (and CLAUDE.md)",
+                     "reread AGENTS.md"):
+            self.assertTrue(AGENTS_ONLY.search(text), text)
+        self.assertFalse(AGENTS_ONLY.search("Read the repo's AGENTS.md and AGENTS.lane-control.md (and CLAUDE.md)"))
 
     def test_every_entry_point_reads_both_files(self):
         for f in self.FILES:
             text = f.read_text()
             with self.subTest(f=f.relative_to(ROOT)):
-                self.assertIn(GENERATED_NAME, text)
-                self.assertEqual(AGENTS_ONLY.findall(" ".join(text.split())), [])
+                found = AGENTS_ONLY.findall(" ".join(text.split()))
+                self.assertEqual(found, [])
+                if "AGENTS.md" in text and found == [] and f.parent.name != "personas":
+                    self.assertIn(GENERATED_NAME, text)
 
 
 if __name__ == "__main__":

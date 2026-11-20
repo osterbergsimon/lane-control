@@ -64,8 +64,9 @@ own worker in the lane's worktree with the reviewer's persona `{{REVIEWER}}`, a 
 issue and the commit but not the lane's report, `blocker` and `major` must be fixed, at most two rounds.
 
 ## Rules
-- Read the repo's AGENTS.md (and CLAUDE.md) before you plan, and `.lane-control/project.md` and
-  `.lane-control/routing.md` when they exist; they add to this persona and never lower the quality floor.
+- Read the repo's AGENTS.md and AGENTS.lane-control.md (and CLAUDE.md) before you plan, and
+  `.lane-control/project.md` and `.lane-control/routing.md` when they exist; they add to this persona and never lower
+  the quality floor.
 - Before opening a lane run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner and
   the coordinator instead of starting it.
 - Heavy commands (builds, full test suites) run only through `~/.agents/bin/lane-heavy <command>`, waiting outside

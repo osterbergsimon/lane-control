@@ -42,8 +42,9 @@ You plan, decide and check; lanes do the work, including the waiting.
   the owner's word for that lane, never close a lane whose work did not merge, never use `--force`, never remove a
   worktree with uncommitted changes, never delete a branch: merged branches stay unless the owner says to delete
   them. Stop a lane's reviewer after its last round.
-- Read the repo's AGENTS.md (and CLAUDE.md) before planning, and `.lane-control/project.md` and
-  `.lane-control/coordinator.md` when they exist; put what matters for a lane into its brief.
+- Read the repo's AGENTS.md and AGENTS.lane-control.md (and CLAUDE.md) before planning, and
+  `.lane-control/project.md` and `.lane-control/coordinator.md` when they exist; put what matters for a lane into its
+  brief.
 {{ATTACHED}}
 - Before opening a lane run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner instead
   of starting it.
