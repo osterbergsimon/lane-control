@@ -1282,21 +1282,33 @@ class NativeLaneSkillTests(unittest.TestCase):
 
 
 # --- review round 1 of UP-B ----------------------------------------------------------------------------------------
-WAIT_LOOP = re.compile(r"until \[|until test\b|\bwhile\b.*\bsleep\b|\bsleep \d|--wait\b|--watch\b|\bgh run watch\b|"
-                       r"\btail -f\b")
+WAIT_LOOP = re.compile(r"until \[|until test\b|\buntil\b.*;\s*do\b|`until\b|\bwhile\b.*\bsleep\b|\bsleep (?:\d|\$)|"
+                       r"--wait\b|--watch\b|\bgh run watch\b|\bwatch -n\b|\btail -f\b|\bterminal wait\b")
 PROHIBITION = re.compile(r"\bnever\b|\bdo not\b|\bdon't\b", re.I)
+BOUNDARY = re.compile(r"[.:;] |, (?:but|then)\b")
+
+
+def _plain(context: str) -> str:
+    """The context with code spans (closed, or opened and still open at the wait) and e.g./i.e. blanked, so that their
+    punctuation is never taken for a clause boundary."""
+    out = re.sub(r"`[^`]*`", lambda m: " " * len(m.group()), context)
+    if out.count("`") % 2:
+        i = out.rindex("`")
+        out = out[:i] + " " * (len(out) - i)
+    return re.sub(r"\b(?:e\.g|i\.e)\.", lambda m: " " * len(m.group()), out, flags=re.I)
 
 
 def wait_outside_prohibition(lines: list, n: int):
     """The wait on line n (0-based) that no prohibition covers, or None. A prohibition covers a wait when it comes
     before it in the same clause: on that line, or at the end of the line before (prose wrapped between the two), with
-    no ". ", ": " or "; " between them."""
+    no ". ", ": ", "; ", ", but" or ", then" between them (a colon right after the prohibition word is its own)."""
     for m in WAIT_LOOP.finditer(lines[n]):
-        context = ((lines[n - 1][-60:] + " ") if n else "") + lines[n][:m.start()]
+        context = _plain(((lines[n - 1][-60:] + " ") if n else "") + lines[n][:m.start()])
         last = None
         for p in PROHIBITION.finditer(context):
             last = p
-        if last is None or re.search(r"[.:;] ", context[last.end():]):
+        after = context[last.end():] if last else ""
+        if last is None or BOUNDARY.search(after[1:] if after.startswith(":") else after):
             return m.group(0)
     return None
 
@@ -1333,6 +1345,18 @@ class NoCoordinatorWaitLoopTests(unittest.TestCase):
             self.assertIsNone(wait_outside_prohibition(lines, len(lines) - 1), lines)
         self.assertIsNotNone(wait_outside_prohibition(["never mind.", "Then run tail -f x"], 1))
 
+    def test_round_3_probes(self):
+        caught = ["sleep $n", "until curl -sf x; do :; done", "run `until bd ready | grep x` first", "watch -n 5 git status",
+                  "orca-ide terminal wait --terminal t", "never wait for CI, but run tail -f build.log",
+                  "do not poll it, then run gh run watch"]
+        for line in caught:
+            self.assertIsNotNone(wait_outside_prohibition([line], 0), line)
+        spared = ["Never: sleep 5, check --wait", "Do not: poll with tail -f", "never wait (e.g. check --wait)",
+                  "Never wait on CI, e.g. with gh run watch.", "Do not poll, and never run `until [ -e x ]; do sleep 5; done`",
+                  "warn once per step, not again until the step changes", "it stays until project-setup next runs"]
+        for line in spared:
+            self.assertIsNone(wait_outside_prohibition([line], 0), line)
+
     def test_the_lane_waits_for_its_setup_script_not_the_coordinator(self):
         for brief in (BRIEF, NATIVE_BRIEF):
             t = flat(brief)
@@ -1346,6 +1370,23 @@ class NoCoordinatorWaitLoopTests(unittest.TestCase):
 GENERATED_NAME = "AGENTS.lane-control.md"
 # "Read AGENTS.md" or "then AGENTS.md" not followed by the generated file: an entry point that misses half the rules.
 AGENTS_ONLY = re.compile(r"(?:Read|then|reread)(?: the repo's)? AGENTS\.md(?! and AGENTS\.lane-control\.md)", re.I)
+
+
+class AdaptTemplatesKnowTheGeneratedFileTests(unittest.TestCase):
+    """R3-1: the adapting agent and its reviewer are told where the generated section is now."""
+
+    def test_adapt_prompts_name_the_generated_file_and_the_pointer(self):
+        for name in ("prompt.md", "review-prompt.md"):
+            t = flat(ADAPT / name)
+            with self.subTest(name=name):
+                self.assertIn("AGENTS.lane-control.md", t)
+                self.assertIn("pointer line", t)
+                self.assertNotIn("The AGENTS.md section is added", t)
+                self.assertNotIn("the AGENTS.md block", t)
+                self.assertNotIn("The AGENTS.md block", t)
+
+    def test_a_lane_in_an_attached_repo_is_briefed_with_both_files(self):
+        self.assertIn("brief it with that repo's AGENTS.md and AGENTS.lane-control.md", flat(SKILL))
 
 
 class EntryPointsNameTheGeneratedFileTests(unittest.TestCase):

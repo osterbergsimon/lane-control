@@ -98,7 +98,8 @@ Your persona lists the project's attached repos when it has any. A lane there ru
 - Create it with `--repo path:<repo> --no-parent`, not `--parent-worktree active`: a parent in another repo was not
   tested, so these lanes sit beside yours in the Orca GUI. It branches from that repo's own default branch (origin
   HEAD); never pass `--base-branch`.
-- Start the agent with `cwd` that worktree, and brief it with that repo's AGENTS.md; all other steps are the same.
+- Start the agent with `cwd` that worktree, and brief it with that repo's AGENTS.md and AGENTS.lane-control.md; all
+  other steps are the same.
 - The lane's issue lives in that repo's own beads workspace: run `bd` for it from that repo's folder. Never move an
   issue between repos.
 

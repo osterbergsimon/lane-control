@@ -9,8 +9,8 @@ Repo visibility (read by the script from the git host, a fact): {{VISIBILITY}}
 Public, private or internal is certain. "unknown" means it could not be read.
 
 ## What you may touch
-Write only inside `.lane-control/`. Nothing else: not AGENTS.md, not CLAUDE.md, not .gitignore. The AGENTS.md section
-is added for you.
+Write only inside `.lane-control/`. Nothing else: not AGENTS.md, not AGENTS.lane-control.md, not CLAUDE.md, not
+.gitignore. The script writes its section to AGENTS.lane-control.md and one pointer line to it in AGENTS.md for you.
 
 Never: commit, stage, stash, switch branches, push; install anything; use the network; start another agent; run the
 project's code, tests, builds or scripts.
