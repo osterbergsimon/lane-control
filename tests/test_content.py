@@ -451,7 +451,7 @@ class LaneSkillCliTests(unittest.TestCase):
     def test_closes_shell_and_setup_tab_only_after_the_agent_started(self):
         t = self.flat
         i_wait, i_spawn, i_close, i_owner = (t.index(x) for x in (
-            "1. If the worktree's", "start the agent with the `cotal_spawn`", "3. Only then close the plain shell", "4. Give the owner a shell"))
+            "1. Never wait for the repo's setup script yourself", "start the agent with the `cotal_spawn`", "3. Only then close the plain shell", "4. Give the owner a shell"))
         self.assertTrue(i_wait < i_spawn < i_close < i_owner)
         for needle in ("an empty worktree may refuse the spawn and strand the agent's name", "Close the Setup tab only if the marker",
                        "If the marker never appeared, keep the Setup tab open", "With no marker in `orca.yaml`"):
@@ -1279,6 +1279,57 @@ class NativeLaneSkillTests(unittest.TestCase):
         for n, line in enumerate(self.text.splitlines(), 1):
             if not line.startswith(("description:", "for c in")):
                 self.assertLessEqual(len(line), 120, f"SKILL.md:{n}")
+
+
+# --- review round 1 of UP-B ----------------------------------------------------------------------------------------
+WAIT_LOOP = re.compile(r"until \[|\bwhile\b.*\bsleep\b|\bsleep \d|--wait\b")
+
+
+def coordinator_facing():
+    """Everything a coordinator, design lead or machine coordinator reads as its own instructions."""
+    o = ROOT / "orchestrators"
+    return sorted({*o.glob("*/skills/*/SKILL.md"), *o.glob("*/personas/coordinator.md"),
+                   *o.glob("*/personas/design-lead.md"), *o.glob("*/personas/machine-coordinator.md"),
+                   *HANDS_TEMPLATES})
+
+
+class NoCoordinatorWaitLoopTests(unittest.TestCase):
+    def test_no_coordinator_facing_file_has_a_wait_loop(self):
+        files = coordinator_facing()
+        self.assertGreaterEqual(len(files), 10)
+        for f in files:
+            for n, line in enumerate(f.read_text().splitlines(), 1):
+                if WAIT_LOOP.search(line):
+                    self.assertRegex(line.lower(), r"never|do not|don't",
+                                     f"{f.relative_to(ROOT)}:{n}: a wait outside a prohibition: {line.strip()}")
+
+    def test_the_lane_waits_for_its_setup_script_not_the_coordinator(self):
+        for brief in (BRIEF, NATIVE_BRIEF):
+            t = flat(brief)
+            self.assertIn("orca-setup-done", t, brief)
+            self.assertIn("before any check", t, brief)
+        skill = flat(SKILL)
+        self.assertIn("the lane waits for it", skill)
+        self.assertIn("Never wait for the repo's setup script yourself", skill)
+
+
+GENERATED_NAME = "AGENTS.lane-control.md"
+# "Read AGENTS.md" or "then AGENTS.md" not followed by the generated file: an entry point that misses half the rules.
+AGENTS_ONLY = re.compile(r"(?:Read|then) AGENTS\.md(?! and AGENTS\.lane-control\.md)")
+
+
+class EntryPointsNameTheGeneratedFileTests(unittest.TestCase):
+    """UP-5: AGENTS.md now holds one pointer line; every kickoff, brief and reviewer names the generated file too."""
+
+    FILES = (ROOT / "core" / "scripts" / "project-setup", ROOT / "core" / "scripts" / "project-pause", BRIEF,
+             NATIVE_BRIEF, PERSONAS / "reviewer.md", NATIVE / "reviewer.md")
+
+    def test_every_entry_point_reads_both_files(self):
+        for f in self.FILES:
+            text = f.read_text()
+            with self.subTest(f=f.relative_to(ROOT)):
+                self.assertIn(GENERATED_NAME, text)
+                self.assertEqual(AGENTS_ONLY.findall(" ".join(text.split())), [])
 
 
 if __name__ == "__main__":

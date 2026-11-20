@@ -54,7 +54,7 @@ def read(f: Path) -> str:
 
 
 def write(f: Path, text: str):
-    f.write_bytes(text.encode(errors="surrogateescape"))
+    DOC.write_atomic(f, text)
 
 
 def agents_md(repo: Path) -> Path:

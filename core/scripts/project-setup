@@ -14,9 +14,9 @@ Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, sect
 adapting agent and a reviewer, committed only on the owner's yes; the role files go to .lane-control/additions/ and
 AGENTS.lane-control.md gets the lane-control and native-orca sections, AGENTS.md one pointer line to it), then the
 personas of the coordinator, design lead, reviewer and debugger rendered into .lane-control/<role>.md with the
-project's additions at the end (kept out of git by .git/info/exclude), the persona hook of each standing role's harness (core/harnesses/), and the coordinator and
-design lead each started in its own Orca terminal titled "<project> coordinator" / "<project> design lead", which
-makes the session's own Orca Run before the agent starts (its id goes in the settings store). Claude and OpenCode
+project's additions at the end (kept out of git by .git/info/exclude), the persona hook of each standing role's
+harness (core/harnesses/), and the coordinator and design lead each started in its own Orca terminal titled
+"<project> coordinator" / "<project> design lead", which makes the session's own Orca Run before the agent starts (its id goes in the settings store). Claude and OpenCode
 (v2, opencode2) both take every role; nothing is ever typed into a terminal. A project keeps the orchestrator it was
 set up with (the store, or a .cotal/ folder) unless --orchestrator names another.
 
@@ -1463,7 +1463,11 @@ def agents_md(repo: Path) -> str:
 
 def check_agents_md(repo: Path):
     """AGENTS.md and AGENTS.lane-control.md must each be as committed, or exactly that plus our change: all the commit
-    is allowed to carry."""
+    is allowed to carry. A gitignored AGENTS.lane-control.md stops here, before anything is written or run: its commit
+    would fail after the owner's yes."""
+    where = DOC.ignored(repo)
+    if where:
+        raise Fail(DOC.ignored_message(where))
     path = agents_md(repo)
     head = head_text(repo, path)
     if read_raw(repo / path) not in (head, agents_text(head)):
@@ -1486,16 +1490,31 @@ def check_gitignore(repo: Path):
 
 def write_section(repo: Path):
     """The generated sections into AGENTS.lane-control.md, and AGENTS.md's one pointer line to it (a section found in
-    AGENTS.md is moved out). A re-run replaces in place and never adds a second block."""
-    for f, rewrite, what in ((repo / GENERATED, generated_text, "lane-control sections"),
-                             (repo / agents_md(repo), agents_text, f"pointer line to {GENERATED}")):
-        text = read_raw(f)
-        new = rewrite(text)
+    AGENTS.md is moved out). A re-run replaces in place and never adds a second block. Both texts are worked out
+    before either file is written, and each is written whole (core/agentsdoc.py). A section replaced or moved that
+    differs from what this lane-control writes (an older version or a hand edit) is named, with where its old text
+    is."""
+    files = ((repo / GENERATED, generated_text, "lane-control sections"),
+             (repo / agents_md(repo), agents_text, f"pointer line to {GENERATED}"))
+    plan = [(f, read_raw(f), rewrite(read_raw(f)), what) for f, rewrite, what in files]
+    blocks = [("lane-control", SECTION, SECTION_BEGIN, SECTION_END)]
+    if ORCHESTRATOR == "native-orca":
+        a = native_module("adapter")
+        blocks.append(("native-orca", a.TEMPLATE.read_text().rstrip("\n"), a.BEGIN, a.END))
+    head = current_head(repo)
+    for f, text, new, what in plan:
         if new == text:
             say("agents-md", "exists", f"{f.name}: {what}")
             continue
-        write_raw(f, new)
+        DOC.write_atomic(f, new)
         say("agents-md", "updated" if text else "created", f"{f.name}: {what}")
+        rel = f.resolve().relative_to(repo.resolve())
+        for name, block, begin, end in blocks:
+            if DOC.replaced(text, block, begin, end):
+                old = (f"git show {head}:{rel}" if head and text == head_text(repo, str(rel)) else
+                       "never committed (an earlier run's own uncommitted text)")
+                say("agents-md", "replaced", f"{rel}: its {name} section differed from what lane-control writes now "
+                    f"(an older version or a hand edit); the old text: {old}")
 
 
 def git_changes(repo: Path) -> list:
@@ -1907,7 +1926,8 @@ def leftover_text(kept: Path) -> str:
     return ""
 
 
-COORDINATOR_KICKOFF = "Read AGENTS.md and the orca-cotal-lanes skill, then tell the owner in one line that you are ready."
+COORDINATOR_KICKOFF = ("Read AGENTS.md and AGENTS.lane-control.md and the orca-cotal-lanes skill, then tell the "
+                       "owner in one line that you are ready.")
 
 
 def coordinator_kickoff() -> str:
@@ -2784,10 +2804,10 @@ TITLES = {"coordinator": "{project} coordinator", "design-lead": "{project} desi
 STANDING = tuple(TITLES)
 RUN_WAIT = float(os.environ.get("LANE_RUN_WAIT") or 20)  # seconds a start waits for the session's Run (slow hosts: more)
 NATIVE_KICKOFF = {
-    "coordinator": ("Read your persona, {persona}, then AGENTS.md and `bd recall handover-latest`; then tell the owner "
-                    "in one line that you are ready, and wait for them."),
-    "design-lead": ("Read your persona, {persona}, then AGENTS.md; then tell the coordinator in one line that you are "
-                    "ready (the Messages part of your persona), and wait."),
+    "coordinator": ("Read your persona, {persona}, then AGENTS.md and AGENTS.lane-control.md and `bd recall "
+                    "handover-latest`; then tell the owner in one line that you are ready, and wait for them."),
+    "design-lead": ("Read your persona, {persona}, then AGENTS.md and AGENTS.lane-control.md; then tell the "
+                    "coordinator in one line that you are ready (the Messages part of your persona), and wait."),
 }
 NATIVE_RESUME = ("You are back after a pause. Reread your persona, {persona}; then resume from `bd recall "
                  "{handover}`, `orca-ide orchestration run-current` and `orca-ide worktree list`, and tell the "
@@ -3971,7 +3991,8 @@ def main(argv=None) -> int:
                 setup_done = wait_for_setup(wt, "design-lead")
                 before = {t["handle"] for t in worktree_terminals(wt)}
             spawn(repo, space, "design-lead", *lead, modes["design-lead"], wt,
-                  "Read AGENTS.md and the orca-cotal-lanes skill, then cotal_dm coordinator one line: ready.")
+                  "Read AGENTS.md and AGENTS.lane-control.md and the orca-cotal-lanes skill, then cotal_dm "
+                  "coordinator one line: ready.")
             if created:
                 # Only now, so the worktree is never empty when the agent starts: an empty worktree may refuse the
                 # spawn and strand the name. A Setup tab that never finished stays, to read.

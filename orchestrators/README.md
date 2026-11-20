@@ -34,6 +34,11 @@ Generated coordination goes to its own file, never into the text the project's p
   project-setup or in the PR `scripts/orch` opens; hand-written text around it stays as it was.
 - Markers that do not pair, or two pointer lines, stop the run: fix them by hand, nothing is guessed.
 - `strip` removes its section; when the file holds no section any more, the file and the pointer line go too.
+- Each writer moves only its own markers: `scripts/orch setup --orchestrator native-orca` moves the native-orca
+  section, and a lane-control section still in AGENTS.md stays there until project-setup next runs.
+- A replaced or moved section that differs from what this lane-control writes (an older version or a hand edit) is
+  named: project-setup says where its old text is (`git show <commit>:<file>`), and `scripts/orch` lists it in its
+  PR, whose diff keeps it.
 
 The one implementation is `core/agentsdoc.py`, used by `core/scripts/project-setup` and both adapters.
 

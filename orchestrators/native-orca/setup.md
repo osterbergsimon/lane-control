@@ -28,9 +28,10 @@ facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writ
 - **Workers:** `orca-ide orchestration worker-start` starts a worker in its own worktree and branch, with its brief as
   the first message. Reusing a kept-open terminal is much faster than a fresh one; release kept-open terminals when
   done.
-- **Messages:** `send`, `ask`, `reply` and `check` (a coordinator never uses `check --wait`: waits are lane work). A message reaches the agent as a
-  one-line prompt in its composer telling it to run `check`; the content shows only after it does. If a worker that
-  also coordinates its own run seems not to get a reply, nudge it to run `check` (`record.md`, point 3).
+- **Messages:** `send`, `ask`, `reply` and `check` (a coordinator never uses `check --wait`: waits are lane work).
+  A message reaches the agent as a one-line prompt in its composer telling it to run `check`; the content shows only
+  after it does. If a worker that also coordinates its own run seems not to get a reply, nudge it to run `check`
+  (`record.md`, point 3).
 - **Nesting:** a worker may not start its own worker until the owner raises Settings > Orchestration > Nested worker
   depth (default 1). Prefer one coordinator level, or raise the depth knowingly.
 - **Between sessions:** never type into another session's terminal (`orca-ide terminal send`): it disturbs what the

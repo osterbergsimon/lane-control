@@ -74,6 +74,8 @@ class BlockTests(unittest.TestCase):
         self.assertEqual(self.m.drop_block("top\n\n" + BLOCK + "\n\nafter\n", B, E), "top\n\nafter\n")
         self.assertEqual(self.m.drop_block(BLOCK + "\n", B, E), "")
         self.assertEqual(self.m.drop_block(RULES, B, E), RULES)
+        self.assertEqual(self.m.drop_block(BLOCK + "\n# Mine\nrule\n", B, E), "# Mine\nrule\n")
+        self.assertEqual(self.m.drop_block(BLOCK + "\n\n# Mine\n", B, E), "# Mine\n")
 
     def test_unpaired_repeated_or_reversed_markers_are_refused(self):
         for text in (B, E, BLOCK + BLOCK, E + B):
@@ -81,6 +83,27 @@ class BlockTests(unittest.TestCase):
                 self.m.put_block(text, BLOCK, B, E)
             with self.subTest(text=text), self.assertRaises(ValueError):
                 self.m.drop_block(text, B, E)
+
+
+class ReplacedTests(unittest.TestCase):
+    def setUp(self):
+        self.m = load()
+
+    def test_replaced_names_a_block_that_differs_from_the_new_one(self):
+        edited = BLOCK.replace("body", "body\nHAND EDIT")
+        self.assertEqual(self.m.replaced("x\n" + edited + "\n", BLOCK, B, E), edited)
+        self.assertIsNone(self.m.replaced("x\n" + BLOCK + "\n", BLOCK, B, E))
+        self.assertIsNone(self.m.replaced("x\n", BLOCK, B, E))
+        self.assertIsNone(self.m.replaced(BLOCK.replace("\n", "\r\n"), BLOCK, B, E))  # line endings alone are not a change
+
+    def test_write_atomic_replaces_whole_files_and_follows_no_temp(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "AGENTS.md"
+            self.m.write_atomic(f, "one\n")
+            self.m.write_atomic(f, "caf\udce9\n")
+            self.assertEqual(f.read_bytes(), b"caf\xe9\n")
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["AGENTS.md"])
 
 
 class GeneratedFileTests(unittest.TestCase):

@@ -9,6 +9,11 @@ cannot be paired are refused, never guessed at. Text is handled as surrogate-esc
 
 project-setup and both adapters load this file by path (it has no imports of its own beyond the standard library).
 """
+import os
+import secrets
+import stat
+import subprocess
+from pathlib import Path
 
 GENERATED = "AGENTS.lane-control.md"
 POINTER_MARK = "<!-- lane-control:pointer -->"
@@ -53,6 +58,8 @@ def drop_block(text: str, begin: str, end: str) -> str:
         return text
     nl = _nl(text)
     rest = rest[len(nl):] if rest.startswith(nl) else rest[1:] if rest.startswith("\n") else rest
+    if not head.strip():  # the block opened the file: the text after it does now, with no blank line first
+        return rest.lstrip("\r\n")
     if not rest.strip():
         body = head.rstrip("\r\n")
         return body + nl if body else ""
@@ -105,3 +112,39 @@ def generated_base(text: str) -> str:
 def holds_nothing(text: str) -> bool:
     """True when the generated file has no section left (only the header, or nothing): it can go, and its pointer."""
     return text.strip() in ("", HEADER.strip())
+
+
+def replaced(text: str, new_block: str, begin: str, end: str):
+    """The block in `text` when it differs from `new_block` (line endings aside), else None: what a rewrite would
+    replace that lane-control did not write in this version (an older version, or a hand edit)."""
+    old = split_block(text, begin, end)[1]
+    if old is None or old.replace("\r\n", "\n") == new_block.replace("\r\n", "\n"):
+        return None
+    return old
+
+
+def write_atomic(f: Path, text: str):
+    """The whole file at once: written beside it, then renamed over it (keeps its mode; any bytes survive)."""
+    tmp = f.with_name(f".{f.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        tmp.write_bytes(text.encode(errors="surrogateescape"))
+        if f.exists():
+            os.chmod(tmp, stat.S_IMODE(f.stat().st_mode))
+        os.replace(tmp, f)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def ignored(repo: Path, name: str = GENERATED):
+    """Where git ignores `name` in `repo` ("<file>:<line>:<pattern>"), or None (not ignored, tracked, or no repo)."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "check-ignore", "-v", "--", name], capture_output=True, text=True,
+                           timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.split("\t", 1)[0].strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def ignored_message(where: str) -> str:
+    return (f"{GENERATED} is gitignored here ({where}), but lane-control commits it so that every lane worktree has "
+            f"it: un-ignore it (a `!{GENERATED}` line after that rule) and run again. Nothing was changed")

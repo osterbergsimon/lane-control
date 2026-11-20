@@ -21,6 +21,7 @@ orchestrator to another; everything that does depend on one is in `orchestrators
 | `templates/budget-ceiling.json`, `window-guard.service` | the weekly ceiling file and the guard's systemd unit |
 | `templates/machine.conf.example`, `ci-presence.service`, `ci-presence.timer` | the machine config's example and the ci-presence user units |
 | `lcroot.py` | finds the lane-control checkout by its marker file, `.lane-control-root` |
+| `agentsdoc.py` | where generated coordination goes in a project: `AGENTS.lane-control.md` and AGENTS.md's one pointer line (`orchestrators/README.md`) |
 
 Why shared: roles, routing, budgets, the heavy-work gate, beads and the reliability log are how we work, whatever
 starts the agents. A switch carries them over unchanged (`orchestrators/switching.md`).

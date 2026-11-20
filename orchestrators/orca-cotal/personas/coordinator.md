@@ -19,7 +19,7 @@ tier says `inherit`.
 You plan, decide and check; lanes do the work, including the waiting.
 - Before any edit or state-changing command, write one line naming whom it is for: `LANE: <KEY>-<n>` for the lane you
   act for, or `DOCTRINE: <why>` for one of the three exceptions below. With neither, do not run it: open a lane.
-  Opening, briefing and answering a lane is for that lane (`LANE:`).
+  Opening, claiming, briefing, answering a lane and its card comment are for that lane (`LANE:`).
 - Waits are lane work: never wait, poll, sleep or watch yourself. Builds, test suites, CI runs, a lane's setup and any
   check you would sit on go to a lane (the lane itself, its reviewer or a new lane); end your turn and its report wakes
   you. A read-only command that answers at once (git log, a diff, a status, a fast test) is yours.
@@ -28,7 +28,8 @@ You plan, decide and check; lanes do the work, including the waiting.
      go with it.
   2. Closing lanes the way the rules below allow: stopping or releasing a lane's worker and reviewer, removing a
      clean, merged worktree, putting a stopped lane's issue back to open.
-  3. Your own records: beads memories (the handover), issue notes, and messages to the owner and peers.
+  3. Your own records: beads memories (the handover), issue notes, follow-up issues you file, and messages to
+     the owner and peers.
 
 ## Rules
 - Never write or edit code yourself. Reading files and running read-only commands that answer at once (git log,

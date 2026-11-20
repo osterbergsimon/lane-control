@@ -124,6 +124,22 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(self.a.strip(self.p, self.p))
         self.assertEqual((self.p / "AGENTS.md").read_text(), RULES)
 
+    def test_setup_says_when_the_section_it_replaces_differed(self):
+        (self.p / "AGENTS.md").write_text(RULES + "\n" + TEMPLATE.read_text().replace("Coordinator:", "HAND EDIT"))
+        changes = self.a.setup(self.p, self.p)
+        self.assertIn("AGENTS.md: the native-orca section moved out differed from the template (an older version or "
+                      "a hand edit); the old text stays in this change's diff and in git history", changes)
+        self.assertFalse([c for c in self.a.setup(self.p, self.p) if "differed" in c])
+
+    def test_setup_refuses_a_gitignored_generated_file(self):
+        git(self.p, "init", "-q")
+        (self.p / ".gitignore").write_text("AGENTS.lane-control.md\n")
+        with self.assertRaises(ValueError) as cm:
+            self.a.setup(self.p, self.p)
+        self.assertIn("AGENTS.lane-control.md is gitignored here (.gitignore:1:AGENTS.lane-control.md)",
+                      str(cm.exception))
+        self.assertFalse((self.p / GENERATED).exists())
+
     def test_unpaired_markers_refused(self):
         for name in ("AGENTS.md", GENERATED):
             with self.subTest(name=name):

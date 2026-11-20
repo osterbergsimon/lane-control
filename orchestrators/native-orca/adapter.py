@@ -35,7 +35,7 @@ def read(f: Path) -> str:
 
 
 def write(f: Path, text: str):
-    f.write_bytes(text.encode(errors="surrogateescape"))
+    DOC.write_atomic(f, text)
 
 
 def agents_md(repo: Path) -> Path:
@@ -82,10 +82,18 @@ def pointer_text(text: str) -> str:
     return DOC.with_pointer(DOC.drop_block(text, BEGIN, END))
 
 
+DIFFERED = ("differed from the template (an older version or a hand edit); the old text stays in this change's diff "
+            "and in git history")
+
+
 def setup(project: Path, work: Path) -> list:
+    where = DOC.ignored(work)
+    if where:
+        raise ValueError(DOC.ignored_message(where))
     f, g = agents_md(work), work / GENERATED
     text, gen = read(f), read(g)
-    new_text, new_gen = pointer_text(text), section_text(gen)
+    new_text, new_gen = pointer_text(text), section_text(gen)  # both computed before either is written
+    block = TEMPLATE.read_text().rstrip("\n")
     changes = []
     if new_gen != gen:
         write(g, new_gen)
@@ -98,6 +106,10 @@ def setup(project: Path, work: Path) -> list:
         moved = split(text)[1] is not None
         changes.append(f"{name}: " + (f"moved the native-orca section to {GENERATED}" if moved else
                                       f"pointer line to {GENERATED}") + ("" if existed else " (new file)"))
+        if DOC.replaced(text, block, BEGIN, END):
+            changes.append(f"{name}: the native-orca section moved out {DIFFERED}")
+    if DOC.replaced(gen, block, BEGIN, END):
+        changes.append(f"{GENERATED}: the native-orca section replaced {DIFFERED}")
     return changes
 
 

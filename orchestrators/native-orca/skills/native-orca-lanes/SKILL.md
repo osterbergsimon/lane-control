@@ -16,7 +16,8 @@ is the Orca CLI, your persona says so.
 Never type into an agent's terminal: never `orca-ide terminal send` to a session or a worker, and never paste into its
 composer. Messages go by orchestration (`send`) or, Claude to Claude on this machine, by SendMessage.
 
-Your hands (your persona): before every state-changing command below write `LANE: <KEY>-<n>`, the lane it is for.
+Your hands (your persona): before every state-changing command below write `LANE: <KEY>-<n>` (the lane it is for)
+or `DOCTRINE: <why>` (an exception: merging and closing, section 7).
 Waits are lane work: you never sit on a build, a CI run, a lane's setup or a check.
 
 ## 1. Gate: before a lane opens
