@@ -32,6 +32,13 @@ REMOTE_DOC = ROOT / "orchestrators" / "native-orca" / "remote.md"
 
 FAKE_SSH = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
+def _envhit(tool):
+    import os as _o
+    hits = [k for k, v in _o.environ.items() if "orca://" in v or "dvtok-" in v]
+    if hits:
+        with open(_o.environ["STUB_LOG"] + ".envhits", "a") as f:
+            f.write(tool + " " + " ".join(hits) + "\n")
+_envhit('ssh')
 args = sys.argv[1:]
 with open(os.environ["STUB_LOG"] + ".ssh", "a") as f:
     f.write(json.dumps(args) + "\n")
@@ -42,6 +49,9 @@ while rest:
     a = rest.pop(0)
     if a in ("-F", "-o", "-R", "-L", "-i", "-p"):
         rest.pop(0)
+    elif a == "--":
+        host = rest.pop(0)
+        break
     elif a.startswith("-"):
         continue
     else:
@@ -61,6 +71,13 @@ sys.exit(subprocess.run(["sh", "-c", " ".join(rest)], env=env, cwd=box).returnco
 
 FAKE_NODE = r'''#!/usr/bin/env python3
 import hashlib, json, os, sys
+def _envhit(tool):
+    import os as _o
+    hits = [k for k, v in _o.environ.items() if "orca://" in v or "dvtok-" in v]
+    if hits:
+        with open(_o.environ["STUB_LOG"] + ".envhits", "a") as f:
+            f.write(tool + " " + " ".join(hits) + "\n")
+_envhit('node')
 args = sys.argv[1:]
 rec = {"argv": args}
 preload = None
@@ -89,6 +106,13 @@ os.execve(os.environ["STUB_ORCA"], ["orca", *args], env)
 
 FAKE_HOST_INSTALL = r'''#!/usr/bin/env python3
 import json, os, re, sys
+def _envhit(tool):
+    import os as _o
+    hits = [k for k, v in _o.environ.items() if "orca://" in v or "dvtok-" in v]
+    if hits:
+        with open(_o.environ["STUB_LOG"] + ".envhits", "a") as f:
+            f.write(tool + " " + " ".join(hits) + "\n")
+_envhit('orca-host-install')
 with open(os.environ["STUB_LOG"] + ".install", "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 host = sys.argv[1]
@@ -102,6 +126,13 @@ print("installed orcad-0.1.0\nstarted orcad 6769\npaired " + name)
 
 FAKE_SYSTEMCTL = r'''#!/usr/bin/env python3
 import os, signal, subprocess, sys
+def _envhit(tool):
+    import os as _o
+    hits = [k for k, v in _o.environ.items() if "orca://" in v or "dvtok-" in v]
+    if hits:
+        with open(_o.environ["STUB_LOG"] + ".envhits", "a") as f:
+            f.write(tool + " " + " ".join(hits) + "\n")
+_envhit('systemctl')
 args = sys.argv[1:]
 with open(os.environ["STUB_LOG"] + ".systemctl", "a") as f:
     f.write(" ".join(args) + "\n")
@@ -120,13 +151,15 @@ def stop(u):
 def start(u):
     if os.environ.get("STUB_TUNNEL_FAILS"):
         return
+    impostor = os.environ.get("STUB_TUNNEL_IMPOSTOR")  # the unit dies, another program holds the port
     name = u[len("lane-tunnel@"):-len(".service")]
     env = dict(l.split("=", 1) for l in open(os.path.join(conf, "lane-control", "tunnels", name + ".env")).read().splitlines() if "=" in l)
     p = subprocess.Popen([sys.executable, "-c", "import socket,sys,time\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
-                          "s.bind(('127.0.0.1',int(sys.argv[1])))\ns.listen()\ntime.sleep(120)", env["PORT"]],
+                          "s.bind((sys.argv[2],int(sys.argv[1])))\ns.listen()\ntime.sleep(120)", env["PORT"],
+                          "0.0.0.0" if os.environ.get("STUB_TUNNEL_EXPOSED") else "127.0.0.1"],
                          start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
-    open(pidfile(u), "w").write(str(p.pid))
+    open(pidfile(u) + (".impostor" if impostor else ""), "w").write(str(p.pid))
 for u in units:
     if "disable" in args or "stop" in args or "restart" in args:
         stop(u)
@@ -214,12 +247,14 @@ class RemoteEnv(NativeEnv):
         self.env.update(STUB_BOX=str(self.box), STUB_ORCA=str(self.bin / "orca"), LANE_ORCA_HOST_INSTALL=str(self.bin / "orca-host-install"),
                         LANE_MACHINE_SETUP=str(self.bin / "machine-setup"), LANE_PAIR_WAIT="0",
                         LANE_TUNNEL_WAIT="3")
+        (self.home / "tmp").mkdir()
+        self.env["TMPDIR"] = str(self.home / "tmp")  # a temp file a child writes is inside what the tests scan
         self.env.pop("ORCA_CLI", None)
         self.env.pop("LANE_SSH_CONFIG", None)
 
     def close(self):
         import signal
-        for f in self.home.glob("**/tunnel-*.pid"):
+        for f in self.home.glob("**/tunnel-*.pid*"):
             try:
                 os.kill(int(f.read_text()), signal.SIGTERM)
             except (OSError, ValueError):
@@ -420,6 +455,8 @@ class DirectionTwoTests(Case):
             data = f.read_bytes()
             for s in (self.link, self.token, self.code):
                 self.assertNotIn(s.encode(), data, f"{s[:12]}... found in {f}")
+        hits = self.e.lines(".envhits") + self.e.lines(".envhits", self.e.box)
+        self.assertEqual(hits, [], "a child got the link in its environment")
         node = [x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x]
         self.assertEqual(len(node), 1, node)
         self.assertEqual(node[0]["stdin_sha256"], hashlib.sha256(self.link.encode()).hexdigest())
@@ -440,6 +477,7 @@ class DirectionTwoTests(Case):
         self.assertIn("hidden", out)
         self.assertIn("Settings > Servers", out)  # where the owner makes the link
         self.assertIn("revoke", out.lower())  # what the link allows, and that it can be revoked
+        self.assertIn("Orca's own pairing store", out)  # the one place the box keeps what the link gives
 
     def test_the_tunnel_is_a_user_service_on_the_links_port(self):
         port = free_port()
@@ -539,6 +577,7 @@ class DirectionTwoTests(Case):
                                    env_extra={"STUB_TUNNEL_FAILS": "1"})
         self.assertNotEqual(rc, 0, out)
         self.assertIn("did not come up", out)
+        self.assertIn("key", out)  # the unit has no ssh agent: it needs a key that works without one
         self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
         self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service")
 
@@ -568,6 +607,131 @@ class DirectionTwoTests(Case):
         self.assertEqual(self.secrets_seen(out), [])
 
 
+# --- review round 1 ----------------------------------------------------------------------------------------------
+
+class ReviewRound1Tests(Case):
+    def test_show_over_a_host_installs_pairs_and_starts_nothing(self):
+        # M1: --show writes nothing; over a host it is the copy, the box's own --show, and nothing else.
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--no-machine-setup")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.e.state.write_text(json.dumps({**self.e.stub_state(), "environments": []}))  # the box's server is gone
+        before = len(self.e.jlines(".install"))
+        for flag in ("--show", "--refresh"):
+            rc, out = run_pty([sys.executable, str(SETUP), str(self.repo), "box", flag], self.e.env)
+            self.assertEqual(rc, 0, (flag, out))
+            self.assertEqual(len(self.e.jlines(".install")), before, flag)
+            self.assertEqual(self.e.lines(".machine-setup"), [], flag)
+            self.assertNotIn("share link", out, flag)
+            self.assertNotIn("seen here", out, flag)
+            self.assertEqual(self.e.lines(".systemctl"), [], flag)
+            if flag == "--show":
+                self.assertIn("native-orca", out)  # the box's own --show printed its store
+
+    def test_a_host_that_looks_like_an_option_is_refused_before_anything_runs(self):
+        # M2: argparse stops the plain positional form, not --host=-o... or --remove-host=-o...
+        for args in (["--host=-oProxyCommand=touch_x", str(self.repo)], ["--remove-host=-oProxyCommand=touch_x"],
+                     [str(self.repo), "--host", "box\nx"], [str(self.repo), "--host", "box name"],
+                     ["--remove-host", "box;id"]):
+            r = self.e.setup(*args, "--no-start")
+            self.assertEqual(r.returncode, 2, (args, r.stderr + r.stdout))
+            self.assertIn("host", r.stderr)
+        self.assertEqual(self.e.lines(".ssh"), [])
+        self.assertEqual(self.e.jlines(".install"), [])
+
+    def test_every_ssh_ends_its_options_before_the_host(self):
+        self.e.saved("box")
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        for argv in self.e.jlines(".ssh"):
+            self.assertIn("--", argv, argv)
+            self.assertEqual(argv[argv.index("--") + 1], "box", argv)
+
+    def test_setups_own_ssh_calls_never_wait_for_a_password(self):
+        # M3: only the host's own run (it may ask the owner, with a terminal) is interactive.
+        self.e.saved("box")
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=make_link()[0])
+        self.assertEqual(rc, 0, out)
+        for argv in self.e.jlines(".ssh"):
+            if "-t" in argv:
+                continue
+            opts = " ".join(argv[:argv.index("--")])
+            for o in ("BatchMode=yes", "ConnectTimeout=", "ServerAliveInterval="):
+                self.assertIn(o, opts, argv)
+        self.assertTrue(any("-t" in a for a in self.e.jlines(".ssh")))  # the host run keeps its terminal
+
+    def test_an_opencode2_coordinator_starts_on_the_host(self):
+        # m3: OpenCode v2 is first-class over a host too.
+        self.e.saved("box")
+        r = self.e.setup(str(self.repo), "box", "--no-design-lead", "--no-desktop-lanes", "--no-machine-setup",
+                         "--coordinator", "opencode/gateway/m1", "--own-model", "gateway/m1",
+                         env_extra={"LANE_RUN_WAIT": "0"})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        started = [json.loads(l) for l in (self.e.box / "sessions.log").read_text().splitlines()]
+        self.assertEqual([(s["bin"], s["role"]) for s in started], [("opencode2", "coordinator")])
+
+    def test_a_hosted_model_is_refused_here_before_the_host_is_touched(self):
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--coordinator", "opencode/opencode-go/m1")
+        self.assertEqual(r.returncode, 2, r.stderr + r.stdout)
+        self.assertIn("lane-tier", r.stderr)
+        self.assertEqual(self.e.lines(".ssh"), [])
+
+    def test_the_host_run_finds_an_agent_in_its_local_bin(self):
+        # m3: a non-interactive ssh shell's PATH lacks ~/.local/bin, where agents are often installed.
+        self.e.saved("box")
+        local = self.e.box / ".local" / "bin"
+        local.mkdir(parents=True)
+        (self.e.bin / "claude").rename(local / "claude")
+        cfg = self.e.box / ".claude.json"
+        cfg.write_text(json.dumps({"projects": {str(self.repo): {"hasTrustDialogAccepted": True}}}))
+        r = self.e.setup(str(self.repo), "box", "--no-design-lead", "--no-desktop-lanes", "--no-machine-setup",
+                         env_extra={"LANE_RUN_WAIT": "0"})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+
+class ReviewRound1PairingTests(Case):
+    def setUp(self):
+        super().setUp()
+        self.e.saved("box")
+        self.port = free_port()
+        self.link, self.token, self.code = make_link(self.port)
+
+    assert_nowhere = DirectionTwoTests.assert_nowhere
+
+    def test_a_port_held_by_another_program_after_our_unit_died_gets_no_link(self):
+        # m1: something listens, but it is not our tunnel.
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
+                                   env_extra={"STUB_TUNNEL_IMPOSTOR": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
+        self.assert_nowhere(out, self.link, self.token, self.code)
+
+    def test_a_tunnel_open_on_the_boxs_network_is_refused(self):
+        # m6: GatewayPorts yes on the box binds the forward on every address, whatever -R says.
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
+                                   env_extra={"STUB_TUNNEL_EXPOSED": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("GatewayPorts", out)
+        self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
+        self.assertEqual(self.e.lines(".systemctl")[-1], "--user disable --now lane-tunnel@box.service")
+
+    def test_a_box_cli_that_reads_stdin_does_not_take_the_link(self):
+        # m4: the code is read once on the box and given to node alone.
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
+                                   env_extra={"STUB_LIST_READS_STDIN": "1"})
+        self.assertEqual(rc, 0, out)
+        node = [x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x]
+        self.assertEqual([x["stdin_sha256"] for x in node], [hashlib.sha256(self.link.encode()).hexdigest()])
+
+    def test_only_a_this_computer_address_is_taken(self):
+        # N3: the tunnel binds 127.0.0.1 only, so localhost or ::1 would pair and never connect.
+        for address in ("localhost", "[::1]"):
+            link, token, code = make_link(self.port, address)
+            rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=link)
+            self.assertNotEqual(rc, 0, (address, out))
+            self.assertIn("127.0.0.1", out)
+            self.assert_nowhere(out, link, token, code)
+
+
 class PreloadTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node not installed")
     def test_the_preload_puts_the_stdin_code_in_argv_inside_the_process_only(self):
@@ -575,8 +739,10 @@ class PreloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             cli = Path(d) / "index.js"
             cli.write_text('const i = process.argv.indexOf("--pairing-code");\n'
+                           'const eq = process.argv.find(a => a.startsWith("--pairing-code="));\n'
+                           'const code = i >= 0 ? process.argv[i + 1] : eq && eq.slice("--pairing-code=".length);\n'
                            'const cmd = require("fs").readFileSync("/proc/self/cmdline", "utf8");\n'
-                           'console.log(JSON.stringify({code: process.argv[i + 1], inCmdline: cmd.includes("s3cr3t")}));\n')
+                           'console.log(JSON.stringify({code: code, inCmdline: cmd.includes("s3cr3t")}));\n')
             r = subprocess.run(["node", "--require", str(PRELOAD), str(cli), "environment", "add", "--name", "x",
                                 "--pairing-code", "-"], input="orca://pair?code=s3cr3t\n", capture_output=True,
                                text=True)
@@ -585,6 +751,14 @@ class PreloadTests(unittest.TestCase):
             r = subprocess.run(["node", "--require", str(PRELOAD), str(cli), "--pairing-code", "-"], input="",
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 2)
+            for given, stdin in ((["--pairing-code=-"], "orca://pair?code=s3cr3t"), (["--pairing-code", "-"], " \n\t")):
+                r = subprocess.run(["node", "--require", str(PRELOAD), str(cli), *given], input=stdin,
+                                   capture_output=True, text=True)
+                if stdin.strip():
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertEqual(json.loads(r.stdout), {"code": stdin, "inCmdline": False})
+                else:
+                    self.assertEqual(r.returncode, 2)
 
 
 class RemoveHostTests(Case):
@@ -621,6 +795,7 @@ class RemoveHostTests(Case):
         self.assertEqual(r.returncode, 1, r.stderr + r.stdout)
         self.assertIn("--user disable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
         self.assertIn("environment rm --environment deskbox", r.stdout + r.stderr)  # to run on the box later
+        self.assertTrue((self.e.home / ".config" / "lane-control" / "hosts" / "box.json").exists())  # for the retry
         self.assertIn("Settings > Servers", r.stdout)
 
 
@@ -660,6 +835,18 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--user disable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
         self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
+
+    def test_a_host_that_is_not_a_plain_name_is_refused(self):
+        for host in ("box\nSSH_CONFIG=/tmp/x", "-oProxyCommand=x", "box name", "box;id"):
+            self.assertEqual(self.tunnel("start", host, "6768").returncode, 2, host)
+        self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels").exists())
+
+    def test_stop_without_systemd_says_so_and_keeps_the_env(self):
+        self.tunnel("start", "box", "6768")
+        r = self.tunnel("stop", "box", env_extra={"STUB_NO_SYSTEMD": "1"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("systemd", r.stderr)
+        self.assertTrue((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
 
     def test_no_systemd_is_an_error_naming_it(self):
         r = self.tunnel("start", "box", "6768", env_extra={"STUB_NO_SYSTEMD": "1"})

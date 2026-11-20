@@ -64,6 +64,8 @@ def orca():
         out({"ok": True, "result": {"hosts": [{"kind": "local", "name": "this machine", "id": "local",
                                                "machineName": state.get("machine_name", "deskbox")}]}})
     if cmd == "environment list":
+        if os.environ.get("STUB_LIST_READS_STDIN"):  # a CLI that reads whatever its stdin holds
+            sys.stdin.read()
         out({"ok": True, "result": {"environments": [{"name": e["name"]} for e in state.get("environments", [])]}})
     if cmd == "environment add":
         if opt("--pairing-code") != "-" or not os.environ.get("STUB_PAIRED_BY_STDIN"):

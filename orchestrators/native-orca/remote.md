@@ -3,7 +3,10 @@
 `project-setup <repo> <host>` sets a project up on an SSH host (a box) and keeps it driven from this machine's Orca
 window (design: `docs/superpowers/specs/2026-11-19-native-orca-setup-design.md`, section 7). `<repo>` is a git URL or
 an absolute (or `~/`) path on the host; `<host>` is what ssh calls it (`LANE_SSH_CONFIG` names a separate ssh config,
-passed as `ssh -F`, for trial hosts). `--host <host>` means the same. Every step says `exists` on a re-run.
+passed as `ssh -F`, for trial hosts). `--host <host>` means the same. A host that is not a plain name (an option, a
+space, a newline) is refused before anything runs. Setup's own ssh calls never wait for a password (`BatchMode`,
+`ConnectTimeout`, keepalives); only the host's own run keeps a terminal, to ask the owner. With `--show` or
+`--refresh`, only the copy and the host's own `--show` or `--refresh` run. Every step says `exists` on a re-run.
 
 ## Direction 1: this machine drives the box
 1. lane-control is copied to `~/.local/share/lane-control` on the box, and the box's copy says which orchestrator the
@@ -17,7 +20,8 @@ passed as `ssh -F`, for trial hosts). `--host <host>` means the same. Every step
 3. The box's copy of `project-setup` runs there (`--via-host`, over `ssh -t` when there is a terminal). It does the
    native setup of phase 3 there: rendered personas, the persona hook, the AGENTS.md sections, the settings store
    and the coordinator (and design lead) in Orca terminals of the box's own server, which show in this machine's
-   window through the paired environment. With `--no-start` no agent needs to be on the box yet.
+   window through the paired environment. With `--no-start` no agent needs to be on the box yet; the run there adds
+   `~/.local/bin` and `~/bin` to its PATH, where agents are often installed.
 4. `core/scripts/machine-setup --host <host>` (skipped with `--no-machine-setup`): the box's own machine coordinator,
    night manager, lane sweep and machine check.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.
@@ -39,7 +43,10 @@ For what the box lacks (graphics, a browser, a GPU), its coordinator starts a la
    restarted always. Its host and port are in `~/.config/lane-control/tunnels/<host>.env`. It needs a systemd user
    manager here (`loginctl enable-linger $USER` keeps it without a login session); without one nothing is paired.
    Before it starts, the port must be free on the box (`--box-pairing port`): anything else listening there, such as
-   the box's own Orca server on 6768, would get the code. The link is sent only once the box's end is open.
+   the box's own Orca server on 6768, would get the code. The link is sent only once the box's end is open, the
+   unit is active, and the port is open on the box's loopback only (sshd's `GatewayPorts yes` would open it on the
+   box's network: setup refuses). The unit's ssh runs without your ssh agent, so it needs a key it can use alone,
+   with no passphrase (`IdentityFile` in the ssh config it uses).
 4. The link goes to the box on ssh's stdin. There `project-setup --box-pairing add <this machine>` runs Orca's CLI as
    the launcher Orca wrote (`~/.orca/cli/bin/orca`) does, plus `node --require core/scripts/pairing-code-stdin.cjs`,
    with `environment add --name <this machine> --pairing-code -`: the preload reads the code from stdin and puts it in

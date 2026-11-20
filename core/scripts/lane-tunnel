@@ -22,7 +22,9 @@ template=$here/../templates/lane-tunnel@.service
 
 [ $# -ge 2 ] || die "usage: lane-tunnel start <ssh-host> <port> | stop <ssh-host> | status <ssh-host>" 2
 op=$1 host=$2
-case $host in ''|-*) die "bad ssh host" 2 ;; esac
+case $host in
+  ''|-*|*[!A-Za-z0-9._@:%\[\]-]*) die "not an ssh host name: letters, digits and . _ @ : [ ] % - only, not starting with -" 2 ;;
+esac
 name=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
 unit=lane-tunnel@$name.service
 envfile=$tunnels/$name.env
@@ -62,7 +64,9 @@ case $op in
     echo "started $unit (127.0.0.1:$port on $host reaches 127.0.0.1:$port here)"
     ;;
   stop)
-    if have_systemd; then sd disable --now "$unit" >/dev/null 2>&1 || true; fi
+    # Without a user manager the unit cannot be stopped: keep its env file, so a running one is not left broken.
+    have_systemd || die "no systemd user manager here (systemctl --user), so $unit was not stopped; run lane-tunnel stop $host where one is"
+    sd disable --now "$unit" >/dev/null 2>&1 || true
     if [ -e "$envfile" ]; then unlink "$envfile"; fi
     echo "stopped $unit"
     ;;
