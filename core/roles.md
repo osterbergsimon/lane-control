@@ -64,8 +64,9 @@ Owner decision 2026-11-20: the coordinator plans, decides and checks; lanes do t
 - The three exceptions, and no others:
   1. Merging on the owner's word: a PR the owner said yes to, with the issue close, ledger row and beads sync that
      go with it.
-  2. Closing lanes the way the persona allows: stopping or releasing a lane's worker and reviewer, removing a clean,
-     merged worktree, putting a stopped lane's issue back to open.
+  2. Closing lanes the way the persona allows: stopping or releasing a lane's worker and reviewer (on native Orca
+     also `orchestration worker-abandon` of a dispatch that can no longer report, on the owner's word for that lane),
+     removing a clean, merged worktree, putting a stopped lane's issue back to open.
   3. Your own records: beads memories (the handover), issue notes, follow-up issues you file, and messages to
      the owner and peers.
 

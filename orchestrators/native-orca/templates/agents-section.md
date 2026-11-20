@@ -15,8 +15,8 @@ Coordinator:
 - Before any edit or state-changing command, write one line naming whom it is for: `LANE: <KEY>-<n>` for the lane
   you act for, or `DOCTRINE: <why>` for one of the three exceptions below. Waits are lane work: never wait, poll,
   sleep or watch yourself. Builds, CI and checks you would sit on go to a lane. The three exceptions, and no others:
-  1. Merging on the owner's word; 2. Closing lanes (workers, reviewers, merged worktrees); 3. Your own records
-  (beads memories, issue notes, messages).
+  1. Merging on the owner's word; 2. Closing lanes (workers, reviewers, merged worktrees; `worker-abandon` only on
+  the owner's word); 3. Your own records (beads memories, issue notes, messages).
 
 Worker:
 - Work only in your own worktree and branch. Report once at the end with `reply` (or `send`): branch, PR, gates run,

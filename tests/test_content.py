@@ -1282,8 +1282,10 @@ class NativeLaneSkillTests(unittest.TestCase):
 
 
 # --- review round 1 of UP-B ----------------------------------------------------------------------------------------
-WAIT_LOOP = re.compile(r"until \[|until test\b|\buntil\b.*;\s*do\b|`until\b|\bwhile\b.*\bsleep\b|\bsleep (?:\d|\$)|"
-                       r"--wait\b|--watch\b|\bgh run watch\b|\bwatch -n\b|\btail -f\b|\bterminal wait\b")
+WAIT_LOOP = re.compile(r"until \[|until test\b|\buntil\b.*;\s*do\b(?!\s+not\b|\s*n't)|`until\b|"
+                       r"\bwhile\b.*\bsleep\b|\bsleep (?:\d|\$)|"
+                       r"--wait\b|--watch\b|\bgh run watch\b|\bwatch -n\b|\btail -[fF]\b|\bterminal wait\b|"
+                       r"\borchestration wait\b")
 PROHIBITION = re.compile(r"\bnever\b|\bdo not\b|\bdon't\b", re.I)
 BOUNDARY = re.compile(r"[.:;] |, (?:but|then)\b")
 
@@ -1345,6 +1347,12 @@ class NoCoordinatorWaitLoopTests(unittest.TestCase):
             self.assertIsNone(wait_outside_prohibition(lines, len(lines) - 1), lines)
         self.assertIsNotNone(wait_outside_prohibition(["never mind.", "Then run tail -f x"], 1))
 
+    def test_round_4_probes(self):
+        for line in ("until the lane reports; do not poll it", "wait until it is done; do n't poll"):
+            self.assertIsNone(wait_outside_prohibition([line], 0), line)
+        for line in ("tail -F build.log", "orca-ide orchestration wait --dispatch d", "until x; do sleep 1; done"):
+            self.assertIsNotNone(wait_outside_prohibition([line], 0), line)
+
     def test_round_3_probes(self):
         caught = ["sleep $n", "until curl -sf x; do :; done", "run `until bd ready | grep x` first", "watch -n 5 git status",
                   "orca-ide terminal wait --terminal t", "never wait for CI, but run tail -f build.log",
@@ -1370,6 +1378,26 @@ class NoCoordinatorWaitLoopTests(unittest.TestCase):
 GENERATED_NAME = "AGENTS.lane-control.md"
 # "Read AGENTS.md" or "then AGENTS.md" not followed by the generated file: an entry point that misses half the rules.
 AGENTS_ONLY = re.compile(r"(?:Read|then|reread)(?: the repo's)? AGENTS\.md(?! and AGENTS\.lane-control\.md)", re.I)
+
+
+class NativeHandsAfterMainTests(unittest.TestCase):
+    """Final round: #41's worker-abandon sits under exception 2, still on the owner's word; a lost cross-host wake is
+    noticed by the night manager or the owner, never by a loop of the coordinator's."""
+
+    def test_exception_2_names_worker_abandon_on_the_owners_word(self):
+        for path in (ROOT / "core" / "roles.md", NATIVE / "coordinator.md",
+                     ROOT / "orchestrators" / "native-orca" / "templates" / "agents-section.md"):
+            t = flat(path)
+            two = t[t.index("2. Closing lanes"):t.index("3. Your own records")]
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertIn("worker-abandon", two)
+                self.assertIn("owner's word", two)
+
+    def test_who_notices_a_lost_cross_host_wake(self):
+        t = flat(NATIVE / "coordinator.md")
+        self.assertIn("If a cross-host wake is lost, the night manager's idle check or the owner notices it; you never "
+                      "loop on `check`.", t)
+        self.assertLess(t.index("is poll-only"), t.index("If a cross-host wake is lost"))
 
 
 class AdaptTemplatesKnowTheGeneratedFileTests(unittest.TestCase):

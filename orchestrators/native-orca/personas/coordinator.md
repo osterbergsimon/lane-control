@@ -26,8 +26,9 @@ You plan, decide and check; lanes do the work, including the waiting.
 - The three exceptions, and no others:
   1. Merging on the owner's word: a PR the owner said yes to, with the issue close, ledger row and beads sync that
      go with it.
-  2. Closing lanes the way the rules below allow: stopping or releasing a lane's worker and reviewer, removing a
-     clean, merged worktree, putting a stopped lane's issue back to open.
+  2. Closing lanes the way the rules below allow: stopping or releasing a lane's worker and reviewer (also
+     `orchestration worker-abandon` of a dispatch that can no longer report, on the owner's word for that lane),
+     removing a clean, merged worktree, putting a stopped lane's issue back to open.
   3. Your own records: beads memories (the handover), issue notes, follow-up issues you file, and messages to
      the owner and peers.
 
@@ -48,7 +49,8 @@ You plan, decide and check; lanes do the work, including the waiting.
   lane to run `check`.
 - A report from a lane on another host is poll-only: that it reaches you or wakes you is not verified
   (`{{LANE_CONTROL}}/orchestrators/native-orca/remote.md`, Reports across hosts). Run `orca-ide orchestration check`
-  yourself right after you start such a lane, and on each wake; do not rely on the wake reaching you.
+  yourself right after you start such a lane, and on each wake; do not rely on the wake reaching you. If a cross-host
+  wake is lost, the night manager's idle check or the owner notices it; you never loop on `check`.
 - A `Rejected worker_done` in `check` names a code and a dispatch. `missing_task_id` or `missing_dispatch_id`: tell the
   lane to send again with both ids. `worker_identity_changed`: that dispatch can no longer report, and the lane's work
   is on its branch: read the lane's branch, ask the owner before you abandon it, then run
