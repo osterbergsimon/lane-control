@@ -1259,5 +1259,22 @@ class CrossHostReportContractTests(unittest.TestCase):
                 self.assertNotIn("worker_done", path.read_text(errors="ignore"), path.name)
 
 
+class PublicRepoPathTests(unittest.TestCase):
+    """UP-6 review B1: a committed file never names a session scratch folder or a real home folder."""
+
+    def test_no_committed_test_or_script_names_a_private_path(self):
+        scratch = "/tmp/" + "claude-"
+        home = re.compile("/home/" + r"(?!u/)[A-Za-z0-9_.-]+")  # "/home/u/..." is the placeholder user
+        hits = []
+        for top in ("tests", "core", "orchestrators", "scripts"):
+            for path in sorted((ROOT / top).rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts or path.suffix in (".pyc", ".png", ".gz"):
+                    continue
+                text = path.read_text(errors="ignore")
+                if scratch in text or home.search(text):
+                    hits.append(str(path.relative_to(ROOT)))
+        self.assertEqual(hits, [])
+
+
 if __name__ == "__main__":
     unittest.main()

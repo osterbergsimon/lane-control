@@ -26,8 +26,11 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   is not committed, installs it in the design lead's own worktree too. A server may load both a user-level and a
   project-level copy: a copy of this version adds the persona to a request only when the request does not already
   carry the same text, so two copies of this version add it once. An older user-level copy has no such check, so a
-  project install also brings an existing user-level copy of ours (a file with `id: "lane-persona"`) to the same
-  bytes, and leaves any other plugin of that name alone. Not verified against a real OpenCode, and the first live
+  project install updates an existing user-level `lane-persona.js` of ours (it has `id: "lane-persona"`) when its
+  bytes are a version lane-control shipped (`lane-persona.sha256`; add the hash of the old version whenever the
+  plugin changes). A copy with other bytes (a local edit, a fork), a symlink, or another plugin's file is never
+  replaced; the first two are named in the output, with the warning that the persona may be added twice.
+  Not verified against a real OpenCode, and the first live
   check to run: that OpenCode 2.2.1 loads `<project>/.opencode/plugins/` at all, that it accepts two plugin files with
   the same id (it might keep one, which is fine, or refuse both, which is not), and whether it writes more files into
   `.opencode/` (1.x wrote `package.json` and `node_modules` beside plugins; they would show as untracked). The

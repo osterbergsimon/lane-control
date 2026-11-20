@@ -73,13 +73,23 @@ def number(low: float, high: float, name: str):
     return parse
 
 
+def whole(parse, name: str):
+    """An argparse type: what `parse` accepts, and a whole number (no 1.5 silently cut to 1)."""
+    def check(text: str) -> int:
+        v = parse(text)
+        if v != int(v):
+            raise argparse.ArgumentTypeError(f"{name} takes whole minutes, not {text!r}")
+        return int(v)
+    return check
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="lane-idle", description="Minutes a lane-control session has been idle.")
     ap.add_argument("--checkout", default=".", help="the folder the session was started in (default: here)")
     ap.add_argument("--role", default="coordinator", help="the session's LANE_ROLE (default coordinator)")
     ap.add_argument("--harness", choices=HARNESSES)
-    ap.add_argument("--wait", type=lambda t: int(number(0, 525600, "--wait")(t)), metavar="MINUTES",
-                    help="wait until idle at least this long (0 to 525600)")
+    ap.add_argument("--wait", type=whole(number(0, 525600, "--wait"), "--wait"), metavar="MINUTES",
+                    help="wait until idle at least this many whole minutes (0 to 525600)")
     ap.add_argument("--every", type=number(1, 3600, "--every"), default=30, metavar="SEC",
                     help="seconds between looks (1 to 3600, default 30)")
     ap.add_argument("--timeout", type=number(1, 2592000, "--timeout"), metavar="SEC",

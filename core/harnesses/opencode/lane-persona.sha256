@@ -1,0 +1,5 @@
+# SHA-256 of every lane-persona.js that lane-control shipped before the current one. A project-level install brings
+# an existing user-level copy up to date only when its bytes are one of these (adapter.py, SHIPPED_HASHES); a copy
+# that differs, such as one with a local edit, is left as it is and named in the output.
+# Add the hash of the old version here whenever the plugin changes: `sha256sum lane-persona.js` before the change.
+7ebab0d47da9dac235ac4326b2f6fb2f265b1b492430d9b89314e9d152ca3d32  # the first release (NO-1)

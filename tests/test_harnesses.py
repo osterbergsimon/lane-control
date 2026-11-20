@@ -525,31 +525,75 @@ class OpenCodeAdapterTests(HomeTest):
         self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
         self.assertEqual(self.a.plugin_path(self.checkout), dest)
 
-    OLD_PLUGIN = Path("/tmp/claude-1000/-home-tux-orca-workspaces-lane-control-up-c-contracts/21adb074-2158-4dbb-b73c-c73073054b27/scratchpad/old-plugin.js")
+    # A minimal plugin of an older lane-control version: our id, no dedupe. Its hash is made a "shipped" one per test.
+    OLD_PLUGIN = 'export default { id: "lane-persona", setup() { return undefined; } };\n'
 
-    def test_opencode_project_install_brings_an_old_user_copy_up_to_date(self):
-        # UP-6 review M3: an older user-level copy has no dedupe; with a project copy beside it the persona could
-        # be added twice, so the project install refreshes the user copy of ours (only ours) to the same bytes.
+    def with_old_plugin_known(self):
+        import hashlib
+        self.a.SHIPPED_HASHES = frozenset({hashlib.sha256(self.OLD_PLUGIN.encode()).hexdigest()})
+        self.addCleanup(setattr, self.a, "SHIPPED_HASHES", self.a.load_shipped_hashes())
         os.environ["LANE_OPENCODE_PLUGIN"] = "project"
         self.addCleanup(os.environ.pop, "LANE_OPENCODE_PLUGIN", None)
         user = self.plugin_dir() / "lane-persona.js"
-        user.parent.mkdir(parents=True)
-        user.write_bytes(self.OLD_PLUGIN.read_bytes())
+        user.parent.mkdir(parents=True, exist_ok=True)
+        return user
+
+    def test_opencode_project_install_brings_an_old_shipped_user_copy_up_to_date(self):
+        # UP-6 review M3: an older user-level copy has no dedupe, so a project install brings it to this version, but
+        # only when its bytes are a version lane-control shipped (R1: never discard someone's own edits).
+        user = self.with_old_plugin_known()
+        user.write_text(self.OLD_PLUGIN)
         changes = self.a.install_persona_hook(self.checkout)
         self.assertEqual(user.read_bytes(), PLUGIN.read_bytes())
         self.assertEqual(self.project_plugin().read_bytes(), PLUGIN.read_bytes())
         self.assertEqual(len(changes), 2)
         self.assertTrue(any(str(user) in c and "updated" in c for c in changes), changes)
         self.assertEqual(self.a.install_persona_hook(self.checkout), [])
-        # not ours: left alone, and said so
-        user.write_text("export default { id: 'someone-elses', setup() {} };\n")
+
+    def test_opencode_project_install_leaves_an_edited_user_copy_and_says_so(self):
+        user = self.with_old_plugin_known()
+        edited = self.OLD_PLUGIN + "// my own tweak\n"
+        user.write_text(edited)
         changes = self.a.install_persona_hook(self.checkout)
+        self.assertEqual(user.read_text(), edited)  # not overwritten, no backup needed
+        warn = [c for c in changes if str(user) in c]
+        self.assertEqual(len(warn), 1, changes)
+        self.assertIn("differs from every lane-control version", warn[0])
+        self.assertIn("not changed", warn[0])
+        self.assertIn("twice", warn[0])
+        self.assertEqual(self.project_plugin().read_bytes(), PLUGIN.read_bytes())  # the project copy is still made
+
+    def test_opencode_project_install_never_replaces_a_symlinked_user_copy(self):
+        user = self.with_old_plugin_known()
+        target = self.t / "dotfiles" / "lane-persona.js"
+        target.parent.mkdir()
+        target.write_text(self.OLD_PLUGIN)
+        user.symlink_to(target)
+        changes = self.a.install_persona_hook(self.checkout)
+        self.assertTrue(user.is_symlink())
+        self.assertEqual(target.read_text(), self.OLD_PLUGIN)
+        self.assertTrue(any(str(user) in c and "symlink" in c and "not changed" in c for c in changes), changes)
+
+    def test_opencode_project_install_ignores_another_plugin_and_makes_no_user_copy(self):
+        user = self.with_old_plugin_known()
+        user.write_text("export default { id: 'someone-elses', setup() {} };\n")  # not ours: left alone
+        self.assertEqual(len(self.a.install_persona_hook(self.checkout)), 1)  # only the project copy
         self.assertEqual(user.read_text(), "export default { id: 'someone-elses', setup() {} };\n")
-        self.assertEqual(changes, [])
-        # no user copy: none is made
         user.unlink()
         self.a.install_persona_hook(self.checkout)
-        self.assertFalse(user.exists())
+        self.assertFalse(user.exists())  # none is made
+
+    def test_the_shipped_hash_list_is_well_formed_and_current(self):
+        import hashlib
+        import re
+        lines = [l for l in (HARNESSES / "opencode" / "lane-persona.sha256").read_text().splitlines()
+                 if l.strip() and not l.startswith("#")]
+        self.assertTrue(lines)
+        for l in lines:
+            self.assertRegex(l, r"^[0-9a-f]{64}( +#.*)?$")
+        self.assertEqual(self.a.load_shipped_hashes(), frozenset(l.split()[0] for l in lines))
+        # the version in this tree is one that hash must never need to match: it is current, not "older"
+        self.assertNotIn(hashlib.sha256(PLUGIN.read_bytes()).hexdigest(), self.a.load_shipped_hashes())
 
     def test_opencode_plugin_scope_defaults_to_user_and_refuses_the_unknown(self):
         os.environ.pop("LANE_OPENCODE_PLUGIN", None)

@@ -156,7 +156,7 @@ class LaneIdleTests(unittest.TestCase):
         self.assertIn("a bug", err.getvalue())
 
     def test_refuses_nonsense(self):
-        for args in (("--wait", "-1"), ("--wait", "x"), ("--role", "../x"), ("--harness", "pi")):
+        for args in (("--wait", "-1"), ("--wait", "x"), ("--wait", "1.5"), ("--role", "../x"), ("--harness", "pi")):
             r = self.run_idle(*args)
             self.assertEqual(r.returncode, 2, args)
             self.assertEqual(r.stdout, "")
