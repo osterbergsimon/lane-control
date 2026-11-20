@@ -441,7 +441,7 @@ class StartTests(Case):
         with self.assertRaises(NotImplementedError) as e:
             m.Place("box")
         self.assertIn("phase 6", str(e.exception))
-        r = self.e.run("~/code/app", "--host", "box")
+        r = self.e.run("~/code/app", "--host", "box", "--orchestrator", "native-orca")
         self.assertEqual(r.returncode, 2)
         self.assertIn("phase 6", r.stderr)
         self.assertEqual(self.e.calls(), [])
@@ -831,6 +831,64 @@ class AnswersTests(Case):
         now = (self.repo / ".lane-control" / "coordinator.md").read_text()
         self.assertTrue(now.startswith(rendered.split("# Additions for this project")[0][:200]))
         self.assertIn("Use port 8080.", now)
+
+
+class HostTests(Case):
+    """M4: --host with no flag is the Orca + Cotal host path as on main; the host's own copy decides from its store."""
+
+    def ssh(self):
+        ssh = self.e.bin / "ssh"
+        ssh.write_text('#!/bin/sh\necho "ssh $*" >> "$STUB_LOG"\ncat > /dev/null\n')
+        ssh.chmod(0o755)
+
+    def test_the_orca_md_commands_copy_and_reexec_as_before(self):
+        self.ssh()
+        shapes = (["https://example.com/acme/shop.git", "--host", "user@host", "--name", "Shop", "--coordinator",
+                   "claude/opus", "--design-lead", "claude/opus", "--permission-mode", "bypassPermissions",
+                   "--reviewer", "claude/opus", "--trust-folder"],
+                  ["~/code/shop", "--host", "user@host", "--no-design-lead", "--no-start"])
+        for args in shapes:
+            self.e.log.unlink(missing_ok=True)
+            r = self.e.run(*args, adapt=True)
+            self.assertEqual(r.returncode, 0, (args, r.stderr))
+            calls = [c for c in self.e.calls() if c.startswith("ssh ")]
+            self.assertEqual(len(calls), 2, calls)
+            self.assertIn(".local/share/lane-control/scripts/project-setup", calls[1])
+            self.assertIn("--via-host", calls[1])
+            self.assertNotIn("--host", calls[1])
+            self.assertNotIn("--orchestrator", calls[1])
+
+    def test_a_cotal_only_permission_mode_is_still_refused_locally(self):
+        self.ssh()
+        r = self.e.run("~/code/shop", "--host", "user@host", "--permission-mode", "plan")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.e.calls(), [])
+
+    def test_on_the_host_a_cotal_project_runs_the_cotal_path(self):
+        (self.repo / ".cotal" / "agents").mkdir(parents=True)
+        r = self.e.run(str(self.repo), "--via-host", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue([c for c in self.e.calls() if c.startswith("cotal space")])
+
+    def test_on_the_host_a_native_project_stops_at_phase_6(self):
+        r = self.e.run(str(self.repo), "--via-host", "--no-start")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("phase 6", r.stderr)
+        self.assertIn("--orchestrator orca-cotal", r.stderr)
+        self.assertEqual(self.e.calls(), [])
+        self.assertFalse(self.e.store(self.repo).exists())
+
+
+class NoGitTests(Case):
+    def test_no_git_on_path_is_a_message_not_a_traceback(self):
+        # m9: the orchestrator lookup runs before anything else and must not crash.
+        import shutil
+        keep = [d for d in self.e.env["PATH"].split(":") if not (Path(d) / "git").exists()]
+        self.assertTrue(shutil.which("git"))
+        r = self.e.run(str(self.repo), "--no-start", env_extra={"PATH": ":".join(keep)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("project-setup:", r.stderr)
 
 
 if __name__ == "__main__":
