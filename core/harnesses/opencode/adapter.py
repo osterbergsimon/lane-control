@@ -97,7 +97,7 @@ def load_shipped_hashes() -> frozenset:
         lines = (Path(__file__).resolve().parent / "lane-persona.sha256").read_text().splitlines()
     except OSError:
         return frozenset()
-    return frozenset(l.split()[0] for l in lines if l.strip() and not l.startswith("#"))
+    return frozenset(l.split()[0] for l in lines if l.strip() and not l.startswith(("#", "current ")))
 
 
 SHIPPED_HASHES = load_shipped_hashes()
@@ -110,6 +110,11 @@ def _refresh_user_copy(want: bytes) -> list:
     import hashlib
     user = _xdg("XDG_CONFIG_HOME", ".config") / "opencode" / "plugins" / PLUGIN.name
     if user.is_symlink():
+        try:
+            if user.read_bytes() == want:  # a link to this version (lane-control's own file, or a copy): harmless
+                return []
+        except OSError:
+            pass  # a broken link or an unreadable target is named below
         return [f"{user}: a symlink; not changed. If it is an older lane-persona plugin, the persona may be added twice "
                 "(point it at this version, or remove it)"]
     if not user.is_file() or not _is_ours(user):

@@ -583,17 +583,44 @@ class OpenCodeAdapterTests(HomeTest):
         self.a.install_persona_hook(self.checkout)
         self.assertFalse(user.exists())  # none is made
 
-    def test_the_shipped_hash_list_is_well_formed_and_current(self):
+    def test_the_shipped_hash_list_is_well_formed_and_the_current_plugin_is_pinned(self):
+        # r3-1: the file names the current plugin's hash too, so changing the plugin fails here until the old hash
+        # has been moved into the shipped list and the new one written as current.
         import hashlib
         import re
-        lines = [l for l in (HARNESSES / "opencode" / "lane-persona.sha256").read_text().splitlines()
-                 if l.strip() and not l.startswith("#")]
-        self.assertTrue(lines)
-        for l in lines:
+        text = (HARNESSES / "opencode" / "lane-persona.sha256").read_text()
+        lines = [l for l in text.splitlines() if l.strip() and not l.startswith("#")]
+        current = [l for l in lines if l.startswith("current ")]
+        shipped = [l for l in lines if not l.startswith("current ")]
+        self.assertTrue(shipped)
+        self.assertEqual(len(current), 1)
+        for l in shipped:
             self.assertRegex(l, r"^[0-9a-f]{64}( +#.*)?$")
-        self.assertEqual(self.a.load_shipped_hashes(), frozenset(l.split()[0] for l in lines))
-        # the version in this tree is one that hash must never need to match: it is current, not "older"
-        self.assertNotIn(hashlib.sha256(PLUGIN.read_bytes()).hexdigest(), self.a.load_shipped_hashes())
+        self.assertRegex(current[0], r"^current [0-9a-f]{64}( +#.*)?$")
+        self.assertEqual(self.a.load_shipped_hashes(), frozenset(l.split()[0] for l in shipped))
+        now = hashlib.sha256(PLUGIN.read_bytes()).hexdigest()
+        self.assertEqual(current[0].split()[1], now,
+                         "lane-persona.js changed: move the old `current` hash into the list of shipped hashes in "
+                         "lane-persona.sha256, and write the new one as `current`")
+        self.assertNotIn(now, self.a.load_shipped_hashes())
+
+    def test_opencode_project_install_is_silent_about_a_symlink_to_the_current_version(self):
+        # r3-3: a link to lane-control's own current file is harmless
+        user = self.with_old_plugin_known()
+        user.symlink_to(PLUGIN)
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [f"{self.project_plugin()}: installed the "
+                         "lane-persona plugin; OpenCode servers started in this project load it at once, and it acts "
+                         "only in one started with LANE_ROLE and LANE_PERSONA set"])
+        self.assertTrue(user.is_symlink())
+        copy = self.t / "elsewhere" / "lane-persona.js"  # a link to another file with the same bytes: also fine
+        copy.parent.mkdir()
+        copy.write_bytes(PLUGIN.read_bytes())
+        user.unlink()
+        user.symlink_to(copy)
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+        user.unlink()
+        user.symlink_to(self.t / "nowhere.js")  # a broken link is still named
+        self.assertTrue(any(str(user) in c and "symlink" in c for c in self.a.install_persona_hook(self.checkout)))
 
     def test_opencode_plugin_scope_defaults_to_user_and_refuses_the_unknown(self):
         os.environ.pop("LANE_OPENCODE_PLUGIN", None)

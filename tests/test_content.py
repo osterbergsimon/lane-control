@@ -1260,20 +1260,56 @@ class CrossHostReportContractTests(unittest.TestCase):
 
 
 class PublicRepoPathTests(unittest.TestCase):
-    """UP-6 review B1: a committed file never names a session scratch folder or a real home folder."""
+    """UP-6 review B1 and r3-2: no tracked file names a session scratch folder or a real home folder, in any of the
+    shapes one leaks in. The placeholder user is `u` (/home/u/..., -home-u-..., /Users/u/...); any other name,
+    `alice` and `user` included, is flagged on purpose."""
 
-    def test_no_committed_test_or_script_names_a_private_path(self):
-        scratch = "/tmp/" + "claude-"
-        home = re.compile("/home/" + r"(?!u/)[A-Za-z0-9_.-]+")  # "/home/u/..." is the placeholder user
+    # Written in pieces so this file does not match its own patterns.
+    PATTERNS = {
+        "a session scratch folder": re.compile("/tmp/" + "claude-"),
+        "a home folder": re.compile("/ho" + "me/" + r"(?!u/)[A-Za-z0-9_.-]+"),
+        "an encoded home folder": re.compile("-ho" + "me-" + r"(?!u-)[A-Za-z0-9]+-"),
+        "a macOS home folder": re.compile("/Us" + "ers/" + r"(?!u/)[A-Za-z0-9_.-]+"),
+        "a user runtime folder": re.compile("/ru" + "n/user/[0-9]"),
+        "root's home folder": re.compile("/ro" + "ot/"),
+    }
+
+    # Documents that describe a root-owned trial setup; root's home is not a person's private path. No other file may
+    # name root's home folder.
+    ROOT_PATH_DOCS = ("docs/superpowers/plans/2026-11-06-project-setup.md", "orchestrators/wsp/docs/wsp.md")
+
+    @staticmethod
+    def tracked():
+        r = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout:
+            return [ROOT / n for n in r.stdout.split("\0") if n]
+        return [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.parts]  # no git: the working tree
+
+    def test_no_tracked_file_names_a_private_path(self):
         hits = []
-        for top in ("tests", "core", "orchestrators", "scripts"):
-            for path in sorted((ROOT / top).rglob("*")):
-                if not path.is_file() or "__pycache__" in path.parts or path.suffix in (".pyc", ".png", ".gz"):
+        for path in self.tracked():
+            if not path.is_file() or path.is_symlink() or "__pycache__" in path.parts or path.suffix in (
+                    ".pyc", ".png", ".jpg", ".gz", ".ico", ".woff2"):
+                continue
+            text = path.read_text(errors="ignore")
+            for what, pat in self.PATTERNS.items():
+                m = pat.search(text)
+                if m and what == "root's home folder" and str(path.relative_to(ROOT)) in self.ROOT_PATH_DOCS:
                     continue
-                text = path.read_text(errors="ignore")
-                if scratch in text or home.search(text):
-                    hits.append(str(path.relative_to(ROOT)))
+                if m:
+                    hits.append(f"{path.relative_to(ROOT)}: {what} ({m.group(0)})")
         self.assertEqual(hits, [])
+
+    def test_the_patterns_catch_what_they_are_for(self):
+        for what, sample in (("a session scratch folder", "/tmp/" + "claude-1000/x"),
+                             ("a home folder", "/ho" + "me/alice/code"), ("a home folder", "/ho" + "me/user/code"),
+                             ("an encoded home folder", "~/.claude/projects/-ho" + "me-alice-code-x"),
+                             ("a macOS home folder", "/Us" + "ers/alice/code"),
+                             ("a user runtime folder", "/ru" + "n/user/1000/x.sock"),
+                             ("root's home folder", "/ro" + "ot/.ssh")):
+            self.assertTrue(self.PATTERNS[what].search(sample), sample)
+        for ok in ("/ho" + "me/u/code/shop.app", "-ho" + "me-u-code-shop-app", "/Us" + "ers/u/code", "/home/ and /Users/"):
+            self.assertFalse(any(p.search(ok) for p in self.PATTERNS.values()), ok)
 
 
 if __name__ == "__main__":
