@@ -65,3 +65,22 @@ a single-level coordinator (or set nesting depth to 2 knowingly), report the rep
 "check your mail" nudge until it is fixed, keep OpenCode lanes on lane-control's sandboxed path (the sandbox was removed later
 the same day; the README's "Sandbox" section has the owner's decision), and pin the
 Orca version given the daily churn.
+
+### 2026-11-20 NO-6: `project-setup <repo> <host>` (Orca 1.4.250, an unprivileged container as the box)
+Phase 6 of the native-Orca plan (`remote.md`). The saved Orca SSH host trial-vps was unreachable (no route to host)
+and logs in as root, so the box was an unprivileged container (no extra capabilities or devices, sshd on
+127.0.0.1 only, no agent and no credentials in it); a second container's Orca server stood in for the desktop.
+- Direction 1: pass. `orca-host-install --pair` installed and paired the box's server; `project-setup <repo> <box>
+  --no-start --skip-adapt` copied lane-control there and the box's copy did the native setup (personas, hook,
+  AGENTS.md exclude, settings store, the repo in the box's Orca); `machine-setup --host` made the machine
+  coordinator's folder and the three automations there (removed again after the run). Starting the coordinator on
+  the box was not run: no agent may run in the container.
+- Direction 2, against the stand-in: pass. The link was typed at the hidden prompt (not echoed), sent on ssh's
+  stdin, and saved on the box by `environment add --pairing-code -` through `pairing-code-stdin.cjs`; Orca 1.4.250's
+  `environment add` takes the code only as an argument (no stdin, no file), which the preload works around inside
+  the process. The box then reached the stand-in through the reverse tunnel (the unit's own ExecStart line, run by
+  hand: the run used a logging systemctl so no user unit was installed here). Afterwards the token was in no file on
+  the box but Orca's own pairing store, and in none here. `--remove-host` removed it and printed where to revoke.
+- Not yet run, needs the owner: the desktop's own share link (Settings > Servers > "Share this computer"), a lane
+  started from a box coordinator showing in the desktop window, its `worker_done` reaching the box, and whether that
+  wakes an agent coordinator there (a box with a signed-in agent).

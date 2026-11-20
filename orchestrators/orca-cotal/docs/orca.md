@@ -129,11 +129,13 @@ composer. [tested]
 
 ### Project: one command
 ```bash
-scripts/project-setup <git-url | /abs/dir> [--host user@host] [--name Shop] \
+scripts/project-setup <git-url | /abs/dir> --orchestrator orca-cotal [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
   [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml (leaves an uncommitted draft as orca.yaml)] [--no-design-lead] [--trust-folder] [--no-start (opt-out of starting)] \
   [--private GLOB]...
 ```
+(`--orchestrator orca-cotal`: without it a new project goes to native Orca, here or with a host; a project already on
+Orca + Cotal keeps it either way.)
 It does each step only if it is not already done, so a re-run prints `exists` for every step:
 (Onboarding is safe to interrupt. The adapting agent's run is recorded as finished in the settings store only when it
 ends; files an interrupted run left under `.lane-control/` are never reviewed or committed as if complete, the agent
