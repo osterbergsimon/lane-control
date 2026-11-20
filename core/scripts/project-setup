@@ -8,6 +8,7 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
                 [--no-desktop-lanes] [--no-machine-setup] [--orca-port N]
+                [--orca-from DIR | --orca-bundle TAR] [--orca-version V]
                 [--tunnel-auth-sock PATH] [--tunnel-ssh PATH] [--tunnel-no-enable]
   project-setup --remove-host <host>
 
@@ -437,7 +438,8 @@ def copy_to_host(place: "Place") -> None:
 
 
 LOCAL_ONLY_FLAGS = {"--no-desktop-lanes": False, "--no-machine-setup": False, "--orca-port": True, "--host": True,
-                    "--tunnel-auth-sock": True, "--tunnel-ssh": True, "--tunnel-no-enable": False}
+                    "--tunnel-auth-sock": True, "--tunnel-ssh": True, "--tunnel-no-enable": False,
+                    "--orca-from": True, "--orca-bundle": True, "--orca-version": True}
 
 
 def host_argv(argv: list, value_flags: set, drop_positional: "str | None") -> list:
@@ -3345,10 +3347,12 @@ def wait_box_port(place: Place, port: int, want: str) -> bool:
         time.sleep(0.5)
 
 
-def host_server(place: Place, port: "int | None") -> None:
-    """Direction 1: Orca's server on the host, paired here (orca-host-install), unless it already answers."""
+def host_server(place: Place, port: "int | None", pin: "list | None" = None) -> None:
+    """Direction 1: Orca's server on the host, paired here (orca-host-install), unless it already answers. `pin` is
+    orca-host-install's --from/--bundle/--version for the server's source and version."""
     if place.reachable():
-        say("orca server", "exists", f"{place.host} (environment {place.env} answers here)")
+        unused = f"; {' '.join('--orca-' + x[2:] for x in pin[::2])} not used: the server is already there" if pin else ""
+        say("orca server", "exists", f"{place.host} (environment {place.env} answers here{unused})")
         return
     if port is None:  # the desktop's own listener is 6768, and the tunnel uses one port at both ends
         import socket
@@ -3363,7 +3367,8 @@ def host_server(place: Place, port: "int | None") -> None:
             raise Fail("no free port in 6769-6868 here for the tunnel to the host's Orca server; pass --orca-port")
     tool = tool_path("LANE_ORCA_HOST_INSTALL", "orchestrators/orca-cotal/scripts/orca-host-install")
     try:
-        r = subprocess.run([tool, place.host, "--pair", "--port", str(port)], stdin=subprocess.DEVNULL, timeout=900)
+        r = subprocess.run([tool, place.host, "--pair", "--port", str(port), *(pin or [])], stdin=subprocess.DEVNULL,
+                           timeout=900)
     except subprocess.TimeoutExpired:
         raise Fail(f"orca-host-install {place.host} --pair took more than 15 minutes; stopped") from None
     if r.returncode != 0:
@@ -3421,7 +3426,9 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
             return reexec(place, rest)
         if a.show or a.refresh:  # the host's own --show or --refresh, and nothing else: no server, link or machine
             return reexec(place, rest)
-        host_server(place, a.orca_port)
+        host_server(place, a.orca_port, [*(["--from", a.orca_from] if a.orca_from else []),
+                                         *(["--bundle", a.orca_bundle] if a.orca_bundle else []),
+                                         *(["--version", a.orca_version] if a.orca_version else [])])
         paired = None
         if a.no_desktop_lanes:
             say("desktop lanes", "skipped", "(--no-desktop-lanes)")
@@ -3618,6 +3625,13 @@ def main(argv=None) -> int:
     ap.add_argument("--no-desktop-lanes", action="store_true",
                     help="with a host: do not ask for this desktop's share link (no lanes from the host here)")
     ap.add_argument("--no-machine-setup", action="store_true", help="with a host: do not run machine-setup there")
+    ap.add_argument("--orca-from", metavar="DIR",
+                    help="with a host: install Orca's server there from this slot folder or folder of slots instead of "
+                         "this desktop's own (orca-host-install --from); pins a box to a known-good server")
+    ap.add_argument("--orca-bundle", metavar="TAR",
+                    help="with a host: the same from a tar (orca-host-install --bundle)")
+    ap.add_argument("--orca-version", metavar="V",
+                    help="with a host: install exactly this server version, or fail (orca-host-install --version)")
     ap.add_argument("--tunnel-auth-sock", metavar="PATH",
                     help="with a host: the ssh agent socket the tunnel to it uses (lane-tunnel start --auth-sock), for "
                          "a host that takes only a smartcard: unlock the card in that agent first")
@@ -3705,6 +3719,9 @@ def main(argv=None) -> int:
         print(f"project-setup: two hosts given ({a.host_pos} and --host {a.host}); give one", file=sys.stderr)
         return 2
     host = a.host or a.host_pos
+    if a.orca_from and a.orca_bundle:
+        print("project-setup: --orca-from and --orca-bundle exclude each other: give one source", file=sys.stderr)
+        return 2
     for flag, val in (("--tunnel-auth-sock", a.tunnel_auth_sock), ("--tunnel-ssh", a.tunnel_ssh)):
         if val is not None and (not val.startswith("/") or "\n" in val or "\r" in val):
             print(f"project-setup: {flag} takes an absolute path on this machine, with no line break", file=sys.stderr)

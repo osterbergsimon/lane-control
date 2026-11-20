@@ -342,6 +342,40 @@ class DirectionOneTests(Case):
         self.assertNotEqual(port, 6768)  # the desktop's own listener; the tunnel uses one port at both ends
         self.assertIn("orca server: created", r.stdout)
 
+    def test_the_server_can_be_pinned_to_a_version_and_a_source(self):
+        for flag, opt in (("--orca-from", "--from"), ("--orca-bundle", "--bundle")):
+            self.e.state.write_text("{}")
+            shutil.rmtree(self.e.box / ".config" / "lane-control", True)
+            r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", flag, "/srv/orca/pinned",
+                             "--orca-version", "0.1.0+abc123")
+            self.assertEqual(r.returncode, 0, (flag, r.stderr + r.stdout))
+            args = self.e.jlines(".install")[-1]
+            self.assertEqual(args[args.index(opt) + 1], "/srv/orca/pinned", args)
+            self.assertEqual(args[args.index("--version") + 1], "0.1.0+abc123", args)
+            self.assertNotIn(args[0], ("--from",))
+        # only this machine installs the server: the host's own run never sees the options
+        self.assertNotIn("--orca-", " ".join(" ".join(c) for c in self.e.jlines(".ssh")))
+
+    def test_without_pin_options_orca_host_install_gets_none(self):
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        args = self.e.jlines(".install")[0]
+        for opt in ("--from", "--bundle", "--version"):
+            self.assertNotIn(opt, args)
+
+    def test_a_source_given_twice_is_refused_before_anything_runs(self):
+        r = self.e.setup(str(self.repo), "box", "--orca-from", "/a", "--orca-bundle", "/b")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(self.e.jlines(".install"), [])
+
+    def test_pin_options_for_a_server_that_is_already_there_are_said_to_be_unused(self):
+        self.e.saved("box")
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--orca-version", "0.1.0+abc123")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.e.jlines(".install"), [])
+        self.assertIn("--orca-version", r.stdout)
+        self.assertIn("not used", r.stdout)
+
     def test_a_reachable_host_server_is_not_installed_again(self):
         self.e.saved("box")
         r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes")
@@ -1086,6 +1120,12 @@ class DocTests(unittest.TestCase):
         text = REMOTE_DOC.read_text()
         for s in ("--auth-sock", "SSH_AUTH_SOCK", "--ssh", "--no-enable", "--tunnel-auth-sock", "--tunnel-no-enable",
                   "journalctl", "smartcard"):
+            self.assertIn(s, text, s)
+
+    def test_remote_doc_says_how_to_pin_the_box_server(self):
+        text = REMOTE_DOC.read_text()
+        for s in ("--orca-version", "--orca-from", "--orca-bundle", "orca-host-install", "known-good", "server too old",
+                  "from <source>"):
             self.assertIn(s, text, s)
 
     def test_remote_doc_reserves_the_orca_tunnel_ports(self):

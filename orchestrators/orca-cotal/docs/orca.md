@@ -123,6 +123,9 @@ composer. [tested]
   - `--pair` keeps the tunnel up as a systemd user unit `orca-tunnel-<host>` on the workstation.
   - If orcad's port is taken (another user's Orca), the script refuses; pick another with `--port`.
   - After the desktop updates Orca, a re-run installs the new server and replaces the old running one.
+  - To pin the host to a known-good server instead of whatever the desktop has: `--version <v>` (an error when the
+    source has no such version), `--from <dir>` (a slot folder or a folder of slots) or `--bundle <tar>`. It prints
+    `installed|exists orcad-<ver> - from <source>`; it refuses a `--version` that is not the source's version.
   - `--pair --no-tunnel` starts orcad and prints its pairing code, without a tunnel or a saved environment.
   - A trial or throwaway host stays out of `~/.ssh/config`: set `LANE_SSH_CONFIG=<its ssh config>` and both scripts
     (and the tunnel unit) use `ssh -F` with it.

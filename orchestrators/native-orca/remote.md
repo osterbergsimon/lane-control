@@ -20,6 +20,14 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    one port at both ends. **Ports 6769 and up are reserved for Orca tunnels** (the range project-setup searches is
    6769-6868): do not put your own services there, on this machine or on a box, or setup takes the next free one and a
    later run may find yours in the way.
+   By default the server put there is the newest one this machine's Orca has built, so a box gets whatever the
+   desktop has, and a box whose server is older than its desktop later fails as "server too old". To pin a box to a
+   known-good server: `--orca-version <v>` installs exactly that version (and fails when the source has no such
+   version), `--orca-from <dir>` or `--orca-bundle <tar>` take it from a slot folder (or a folder of slots) or a tar
+   instead of this machine's own, and the three pass straight to `orca-host-install --version/--from/--bundle`. It
+   prints one line saying what it did: `installed orcad-<ver> - from <source>`, or `exists` when that version is
+   already on the box. The options matter only while the box has no answering server yet; on one that answers,
+   project-setup says it did not use them. To change a running box, run `orca-host-install` itself.
 3. The box's copy of `project-setup` runs there (`--via-host`, over `ssh -t` when there is a terminal). It does the
    native setup of phase 3 there: rendered personas, the persona hook, the AGENTS.md sections, the settings store
    and the coordinator (and design lead) in Orca terminals of the box's own server, which show in this machine's
