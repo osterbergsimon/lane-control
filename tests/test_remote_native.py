@@ -638,14 +638,14 @@ class DirectionTwoTests(Case):
         w = self.e.home / "card-ssh"
         w.write_text("#!/bin/sh\nexit 0\n")
         w.chmod(0o755)
-        return ["--tunnel-auth-sock", "/run/user/1000/card-agent.sock", "--tunnel-ssh", str(w)], str(w)
+        return ["--tunnel-auth-sock", "/tmp/lane-test/card-agent.sock", "--tunnel-ssh", str(w)], str(w)
 
     def test_tunnel_options_reach_the_unit_and_not_the_box(self):
         args, wrapper = self.agent_args()
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", *args, "--tunnel-no-enable", answer=self.link)
         self.assertEqual(rc, 0, out)
         env = (self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").read_text()
-        self.assertIn("SSH_AUTH_SOCK=/run/user/1000/card-agent.sock", env)
+        self.assertIn("SSH_AUTH_SOCK=/tmp/lane-test/card-agent.sock", env)
         self.assertIn(f"LANE_TUNNEL_SSH={wrapper}", env)
         sysctl = self.e.lines(".systemctl")
         self.assertIn("--user start lane-tunnel@box.service", sysctl)
@@ -1034,18 +1034,18 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertNotIn("LANE_TUNNEL_SSH", self.start_env())
 
     def test_an_agent_socket_goes_in_the_env_file(self):
-        r = self.tunnel("start", "--auth-sock", "/run/user/1000/card-agent.sock", "box", "6768")
+        r = self.tunnel("start", "--auth-sock", "/tmp/lane-test/card-agent.sock", "box", "6768")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("SSH_AUTH_SOCK=/run/user/1000/card-agent.sock\n", self.start_env() + "\n")
+        self.assertIn("SSH_AUTH_SOCK=/tmp/lane-test/card-agent.sock\n", self.start_env() + "\n")
 
     def test_the_agent_socket_can_come_from_the_environment(self):
-        r = self.tunnel("start", "box", "6768", env_extra={"LANE_TUNNEL_AUTH_SOCK": "/run/user/1000/a.sock"})
+        r = self.tunnel("start", "box", "6768", env_extra={"LANE_TUNNEL_AUTH_SOCK": "/tmp/lane-test/a.sock"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("SSH_AUTH_SOCK=/run/user/1000/a.sock", self.start_env())
+        self.assertIn("SSH_AUTH_SOCK=/tmp/lane-test/a.sock", self.start_env())
 
     def test_a_changed_agent_socket_restarts_a_running_tunnel(self):
         self.tunnel("start", "box", "6768")
-        self.tunnel("start", "--auth-sock", "/run/user/1000/a.sock", "box", "6768")
+        self.tunnel("start", "--auth-sock", "/tmp/lane-test/a.sock", "box", "6768")
         self.assertIn("--user restart lane-tunnel@box.service", self.e.lines(".systemctl"))
 
     def test_an_ssh_wrapper_goes_in_the_env_file(self):
@@ -1090,7 +1090,7 @@ class LaneTunnelTests(unittest.TestCase):
 
     def test_check_runs_the_same_rules_without_a_host_or_systemd(self):
         w = self.wrapper()
-        good = self.tunnel("check", "--auth-sock", "/run/user/1000/a.sock", "--ssh", w)
+        good = self.tunnel("check", "--auth-sock", "/tmp/lane-test/a.sock", "--ssh", w)
         self.assertEqual(good.returncode, 0, good.stderr)
         for flag, val in (("--auth-sock", "/run/a.sock "), ("--auth-sock", "/run/a\\b.sock"), ("--auth-sock", '"/x'),
                           ("--auth-sock", "a.sock"), ("--ssh", w + " "), ("--ssh", "ssh"), ("--ssh", str(self.e.home))):
@@ -1145,9 +1145,9 @@ class LaneTunnelTests(unittest.TestCase):
     def test_a_failure_names_the_agent_when_the_unit_had_none(self):
         r = self.tunnel("start", "box", "6768", env_extra={"STUB_TUNNEL_FAILS": "1"})
         self.assertIn("--auth-sock", r.stderr)
-        r = self.tunnel("start", "--auth-sock", "/run/user/1000/a.sock", "box", "6768",
+        r = self.tunnel("start", "--auth-sock", "/tmp/lane-test/a.sock", "box", "6768",
                         env_extra={"STUB_TUNNEL_FAILS": "1"})
-        self.assertIn("/run/user/1000/a.sock", r.stderr)  # which agent it used, so the owner can check it is unlocked
+        self.assertIn("/tmp/lane-test/a.sock", r.stderr)  # which agent it used, so the owner can check it is unlocked
 
     def test_a_unit_that_comes_up_and_then_fails_is_caught_during_the_settle_time(self):
         r = self.tunnel("start", "box", "6768", env_extra={"STUB_TUNNEL_FLAPS": "1", "LANE_TUNNEL_SETTLE": "2"})
@@ -1190,7 +1190,7 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertTrue((self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").exists())
 
     def test_the_diagnosis_names_an_authentication_failure(self):
-        r = self.tunnel("start", "--auth-sock", "/run/user/1000/a.sock", "box", "6768",
+        r = self.tunnel("start", "--auth-sock", "/tmp/lane-test/a.sock", "box", "6768",
                         env_extra={"STUB_TUNNEL_FAILS": "1"})
         self.assertIn("could not log in", r.stderr)
 
@@ -1215,7 +1215,7 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertNotIn("not enabled", r.stdout)
 
     def test_an_agent_socket_that_is_not_a_socket_is_noted_but_not_refused(self):
-        r = self.tunnel("start", "--auth-sock", "/run/user/1000/not-there.sock", "box", "6768")
+        r = self.tunnel("start", "--auth-sock", "/tmp/lane-test/not-there.sock", "box", "6768")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("not a socket", r.stderr)
         r = self.tunnel("start", "box", "6768")
