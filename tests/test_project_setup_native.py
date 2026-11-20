@@ -713,5 +713,68 @@ class ReviewFixTests(Case):
         self.assertIn(".lane-control/additions/", review)
 
 
+# --- coordinator's review of PR #39 ----------------------------------------------------------------------------------
+
+LANE_TIER = ROOT / "core" / "scripts" / "lane-tier"
+
+
+def store_bytes(e, repo):
+    d = e.store(repo)
+    return {p.name: p.read_bytes() for p in sorted(d.iterdir()) if p.is_file()} if d.is_dir() else {}
+
+
+class PinCheckTests(Case):
+    def test_lane_tier_judges_a_model_alone(self):
+        for model, code in (("opus", 0), ("gw/m1", 0), ("opencode-go/x", 4), ("opencode/big-pickle", 4)):
+            r = subprocess.run(["bash", str(LANE_TIER), "--model", model], capture_output=True, text=True)
+            self.assertEqual(r.returncode, code, (model, r.stderr))
+        r = subprocess.run(["bash", str(LANE_TIER), "--model"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+
+    def test_a_refused_run_leaves_the_store_byte_identical(self):
+        # M1: the refusal comes before anything is written.
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        before = store_bytes(self.e, self.repo)
+        for args in (["--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--permission-mode", "plan"],
+                     ["--design-lead", "opencode/gw/m1", "--own-model", "gw/m1", "--permission-mode", "dontAsk"]):
+            r = self.e.run(str(self.repo), *args, "--no-start")
+            self.assertEqual(r.returncode, 2, (args, r.stderr))
+            self.assertEqual(store_bytes(self.e, self.repo), before, args)
+
+    def test_a_model_lane_tier_refuses_is_refused_whatever_the_harness(self):
+        # m5: lane-tier is asked; it refuses an opencode-go/ model even with claude as the harness.
+        r = self.e.run(str(self.repo), "--coordinator", "claude/opencode-go/x", "--no-start")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("lane-tier", r.stderr)
+        self.assertEqual(self.e.calls(), [])
+
+    def edit_store(self, **kw):
+        f = self.e.store(self.repo) / "settings.json"
+        st = json.loads(f.read_text())
+        for k, v in kw.items():
+            if isinstance(v, dict):
+                st.setdefault(k, {}).update(v)
+            else:
+                st[k] = v
+        f.write_text(json.dumps(st))
+
+    def test_stored_pins_are_checked_again_on_pause_and_refresh(self):
+        # M1 and m4: a hand-edited store never starts a session the setup would refuse; a clean Fail, no traceback.
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        cases = ({"models": {"coordinator": "opencode/gw/m1"}, "own_models": ["gw/m1"], "permission_mode": "plan"},
+                 {"models": {"coordinator": "opencode/opencode-go/x"}},
+                 {"models": {"coordinator": "opencode/gw/m2"}})  # not declared own
+        for case in cases:
+            self.edit_store(**case)
+            for run in (lambda: self.e.pause("start", str(self.repo)),
+                        lambda: self.e.run(str(self.repo), "--refresh", adapt=True)):
+                r = run()
+                self.assertEqual(r.returncode, 1, (case, r.stderr + r.stdout))
+                self.assertNotIn("Traceback", r.stderr, case)
+                self.assertIn("coordinator", r.stderr, case)
+            self.assertEqual(self.e.creates(), [], case)
+            self.edit_store(models={"coordinator": "claude/opus"}, permission_mode="auto")
+
+
 if __name__ == "__main__":
     unittest.main()

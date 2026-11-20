@@ -603,9 +603,43 @@ def ignore_cotal(repo: Path) -> str:
 
 
 HOSTED_OPENCODE = ("opencode/", "opencode-go/")  # served by OpenCode, its region unknown
-NATIVE_TIER_RULE = (". It is the tier rule (core/scripts/lane-tier; model-routing.md, \"Sandbox per tier\"): OpenCode on "
-                    "an opencode/ or opencode-go/ model runs only where lane-tier allows it, and never as a standing "
-                    "role started by project-setup")
+
+
+class Refused(Fail):
+    """A choice project-setup will not run (exit 2), found before anything is written."""
+
+
+def lane_tier_refusal(model: str):
+    """None when lane-tier lets the model run (`lane-tier --model`), else its refusal: the one reader of the rule."""
+    try:
+        r = subprocess.run(["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--model", model],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Fail(f"cannot ask lane-tier about {model}: {e}")
+    if r.returncode == 0:
+        return None
+    if r.returncode == 4:
+        return " ".join(r.stderr.split()) or f"lane-tier refuses {model}"
+    raise Fail(f"lane-tier --model {model} failed: {r.stderr.strip() or r.returncode}")
+
+
+def native_pin_refusal(pins: dict, lead: bool, mode: str, own: set):
+    """None, or why the native path will not run these pins: a model lane-tier refuses (any role, any harness), an
+    OpenCode model nobody declared --own-model, or a standing OpenCode role with a Claude-only permission mode."""
+    oc = load_harness("opencode")
+    for role in ("coordinator",) + (("design-lead",) if lead else ()) + ("reviewer",):
+        h, m = pins[role]
+        why = lane_tier_refusal(m)
+        if why:
+            return f"the {role} pins {h}/{m}: {why}"
+        if h == "opencode" and m not in own:
+            return (f"the {role} pins {h}/{m}: this model would run bare on this machine, and nothing says it is "
+                    f"yours. Use claude/<model>, or add --own-model {m} only if it is on a gateway you run yourself")
+        if h == "opencode" and role != "reviewer" and mode not in oc.AUTO_MODES | oc.ASK_MODES:
+            return (f"the {role} runs on OpenCode, which has no permission mode {mode!r}: it takes "
+                    f"{', '.join(sorted(oc.AUTO_MODES))} (both --auto) or default. Pass one of those, or "
+                    f"claude/<model> for the {role}")
+    return None
 OWN_NOTE = ("This model runs on this machine. Choose only a model on a gateway you run yourself, offline or internal, "
             "not one a third party hosts.")
 MODEL_NAME = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:/-]+")
@@ -2295,6 +2329,11 @@ def resolve_settings(repo: Path, a) -> dict:
         changes["permission_mode"] = mode
     if a.name:
         changes["name"] = a.name
+    if ORCHESTRATOR == "native-orca":  # before anything is written: a refused run leaves the store as it was
+        own = {x for x in st.get("own_models") or [] if isinstance(x, str)} | set(getattr(a, "own_model", []) or [])
+        why = native_pin_refusal(pins, lead_on, mode, own)
+        if why:
+            raise Refused(why)
     settings(repo, **changes)
     return {"pins": pins, "lead": lead_on, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
 
@@ -2467,17 +2506,6 @@ def persona_hooks(checkout: Path, harnesses_used) -> None:
             raise Fail(f"persona hook for {h}: {e}")
         say(f"persona-hook {h}", "updated" if lines else "exists", "; ".join(lines) or str(checkout))
 
-
-
-def opencode_mode_refusal(pins: dict, lead: bool, mode: str):
-    """None, or the refusal for a standing OpenCode role with a Claude-only permission mode (printed by the caller)."""
-    oc = load_harness("opencode")
-    for role in ("coordinator",) + (("design-lead",) if lead else ()):
-        if pins[role][0] == "opencode" and mode not in oc.AUTO_MODES | oc.ASK_MODES:
-            return (f"project-setup: the {role} runs on OpenCode, which has no permission mode {mode!r}: it takes "
-                    f"{', '.join(sorted(oc.AUTO_MODES))} (both --auto) or default. Pass one of those, or "
-                    f"claude/<model> for the {role}")
-    return None
 
 
 def load_harness(name: str):
@@ -2678,7 +2706,11 @@ def native_project(repo: Path, name: str = "") -> dict:
     mode = st.get("permission_mode") or "auto"
     if mode not in NATIVE_MODES:
         raise Fail(f"{store_dir(repo) / 'settings.json'}: permission_mode {mode!r} must be one of {', '.join(NATIVE_MODES)}")
-    return {"pins": pins, "lead": st.get("design_lead", True) is not False, "mode": mode,
+    lead = st.get("design_lead", True) is not False
+    why = native_pin_refusal(pins, lead, mode, {x for x in st.get("own_models") or [] if isinstance(x, str)})
+    if why:  # a hand-edited store never starts what setup would refuse
+        raise Fail(f"{store_dir(repo) / 'settings.json'}: {why}. Nothing was started or rendered")
+    return {"pins": pins, "lead": lead, "mode": mode,
             "project": name or st.get("name") or repo.name, "attached": tuple(attached_of(st)), "st": st}
 
 
@@ -2802,10 +2834,10 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             raise Fail(f"{why}. Nothing was changed")
         beads_note(repo)
         validate_settings(repo, settings(repo))
-        cfg = resolve_settings(repo, a)
-        refusal = opencode_mode_refusal(cfg["pins"], cfg["lead"], cfg["mode"])
-        if refusal:
-            print(refusal, file=sys.stderr)
+        try:
+            cfg = resolve_settings(repo, a)
+        except Refused as e:
+            print(f"project-setup: {e}", file=sys.stderr)
             return 2
         root = attached_to(repo)
         if root is not None:
@@ -2955,10 +2987,20 @@ def main(argv=None) -> int:
             print(f"project-setup: --private takes a glob relative to the repo root, got {g!r}", file=sys.stderr)
             return 2
     for flag, pin in flag_pins:
-        if pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
+        if ORCHESTRATOR == "native-orca":
+            try:
+                why = lane_tier_refusal(pin[1])
+            except Fail as e:
+                print(f"project-setup: {e}", file=sys.stderr)
+                return 1
+            if why:
+                print(f"project-setup: {flag} {pin[0]}/{pin[1]}: {why} Use claude/<model>, or an "
+                      "opencode/<provider>/<model> on a gateway you run yourself", file=sys.stderr)
+                return 2
+        elif pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
             print(f"project-setup: {flag} {pin[0]}/{pin[1]}: project-setup starts no project agent on a hosted "
                   "OpenCode model. Use claude/<model>, or an opencode/<provider>/<model> on a gateway "
-                  "you run yourself" + (NATIVE_TIER_RULE if ORCHESTRATOR == "native-orca" else ""), file=sys.stderr)
+                  "you run yourself", file=sys.stderr)
             return 2
     if not a.skip_adapt and not a.refresh and {adapter[0], adapt_reviewer[0]} != {"claude"}:
         print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
