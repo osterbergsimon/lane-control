@@ -11,6 +11,9 @@
 // ${XDG_STATE_HOME:-~/.local/state}/lane-control/sessions/<server folder, each byte not a letter or digit as ->/
 // <role>.opencode, so the idle signal (opencode/adapter.py idle_minutes) reads that session and its sub-agent
 // sessions and no other in the checkout.
+// Installed once per user ($XDG_CONFIG_HOME/opencode/plugins/) or once per project (<checkout>/.opencode/plugins/);
+// with both present OpenCode loads both, and the persona is still added once per request (a copy skips a request
+// that already carries the persona text).
 // The persona file is read on every call, so a refreshed persona is picked up at once. A missing or unreadable file
 // adds nothing; the plugin never throws into OpenCode. OpenCode's TUI also loads plugins; it has no session hooks,
 // and the plugin does nothing there.
@@ -51,7 +54,9 @@ function record(sessionID) {
 async function add(input) {
   try {
     const text = Array.isArray(input?.system) ? persona() : null;
-    if (text) input.system.push({ type: "text", text });
+    // The same persona already in this request: another copy of this plugin (user-level and project-level installs
+    // are both loaded) added it first. Check and push are one synchronous step, so two copies never both add it.
+    if (text && !input.system.some((part) => part?.text === text)) input.system.push({ type: "text", text });
   } catch {
     // never break the session
   }

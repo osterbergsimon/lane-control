@@ -505,6 +505,135 @@ class OpenCodeAdapterTests(HomeTest):
         self.assertTrue((self.t / "xdg" / "opencode" / "plugins" / "lane-persona.js").is_file())
         self.assertFalse(self.plugin_dir().exists())
 
+    def project_plugin(self):
+        return self.checkout / ".opencode" / "plugins" / "lane-persona.js"
+
+    def test_opencode_plugin_project_level_install(self):
+        # UP-6: LANE_OPENCODE_PLUGIN=project puts the plugin in the project's .opencode/plugins/ instead of the user's.
+        os.environ["LANE_OPENCODE_PLUGIN"] = "project"
+        self.addCleanup(os.environ.pop, "LANE_OPENCODE_PLUGIN", None)
+        changes = self.a.install_persona_hook(self.checkout)
+        dest = self.project_plugin()
+        self.assertEqual(len(changes), 1)
+        self.assertIn(str(dest), changes[0])
+        self.assertIn("this project", changes[0])
+        self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
+        self.assertFalse(self.plugin_dir().exists())  # nothing in the user's folder
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+        dest.write_text("// an old copy\n")
+        self.assertTrue(self.a.install_persona_hook(self.checkout))
+        self.assertEqual(dest.read_bytes(), PLUGIN.read_bytes())
+        self.assertEqual(self.a.plugin_path(self.checkout), dest)
+
+    # A minimal plugin of an older lane-control version: our id, no dedupe. Its hash is made a "shipped" one per test.
+    OLD_PLUGIN = 'export default { id: "lane-persona", setup() { return undefined; } };\n'
+
+    def with_old_plugin_known(self):
+        import hashlib
+        self.a.SHIPPED_HASHES = frozenset({hashlib.sha256(self.OLD_PLUGIN.encode()).hexdigest()})
+        self.addCleanup(setattr, self.a, "SHIPPED_HASHES", self.a.load_shipped_hashes())
+        os.environ["LANE_OPENCODE_PLUGIN"] = "project"
+        self.addCleanup(os.environ.pop, "LANE_OPENCODE_PLUGIN", None)
+        user = self.plugin_dir() / "lane-persona.js"
+        user.parent.mkdir(parents=True, exist_ok=True)
+        return user
+
+    def test_opencode_project_install_brings_an_old_shipped_user_copy_up_to_date(self):
+        # UP-6 review M3: an older user-level copy has no dedupe, so a project install brings it to this version, but
+        # only when its bytes are a version lane-control shipped (R1: never discard someone's own edits).
+        user = self.with_old_plugin_known()
+        user.write_text(self.OLD_PLUGIN)
+        changes = self.a.install_persona_hook(self.checkout)
+        self.assertEqual(user.read_bytes(), PLUGIN.read_bytes())
+        self.assertEqual(self.project_plugin().read_bytes(), PLUGIN.read_bytes())
+        self.assertEqual(len(changes), 2)
+        self.assertTrue(any(str(user) in c and "updated" in c for c in changes), changes)
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+
+    def test_opencode_project_install_leaves_an_edited_user_copy_and_says_so(self):
+        user = self.with_old_plugin_known()
+        edited = self.OLD_PLUGIN + "// my own tweak\n"
+        user.write_text(edited)
+        changes = self.a.install_persona_hook(self.checkout)
+        self.assertEqual(user.read_text(), edited)  # not overwritten, no backup needed
+        warn = [c for c in changes if str(user) in c]
+        self.assertEqual(len(warn), 1, changes)
+        self.assertIn("differs from every lane-control version", warn[0])
+        self.assertIn("not changed", warn[0])
+        self.assertIn("twice", warn[0])
+        self.assertEqual(self.project_plugin().read_bytes(), PLUGIN.read_bytes())  # the project copy is still made
+
+    def test_opencode_project_install_never_replaces_a_symlinked_user_copy(self):
+        user = self.with_old_plugin_known()
+        target = self.t / "dotfiles" / "lane-persona.js"
+        target.parent.mkdir()
+        target.write_text(self.OLD_PLUGIN)
+        user.symlink_to(target)
+        changes = self.a.install_persona_hook(self.checkout)
+        self.assertTrue(user.is_symlink())
+        self.assertEqual(target.read_text(), self.OLD_PLUGIN)
+        self.assertTrue(any(str(user) in c and "symlink" in c and "not changed" in c for c in changes), changes)
+
+    def test_opencode_project_install_ignores_another_plugin_and_makes_no_user_copy(self):
+        user = self.with_old_plugin_known()
+        user.write_text("export default { id: 'someone-elses', setup() {} };\n")  # not ours: left alone
+        self.assertEqual(len(self.a.install_persona_hook(self.checkout)), 1)  # only the project copy
+        self.assertEqual(user.read_text(), "export default { id: 'someone-elses', setup() {} };\n")
+        user.unlink()
+        self.a.install_persona_hook(self.checkout)
+        self.assertFalse(user.exists())  # none is made
+
+    def test_the_shipped_hash_list_is_well_formed_and_the_current_plugin_is_pinned(self):
+        # r3-1: the file names the current plugin's hash too, so changing the plugin fails here until the old hash
+        # has been moved into the shipped list and the new one written as current.
+        import hashlib
+        import re
+        text = (HARNESSES / "opencode" / "lane-persona.sha256").read_text()
+        lines = [l for l in text.splitlines() if l.strip() and not l.startswith("#")]
+        current = [l for l in lines if l.startswith("current ")]
+        shipped = [l for l in lines if not l.startswith("current ")]
+        self.assertTrue(shipped)
+        self.assertEqual(len(current), 1)
+        for l in shipped:
+            self.assertRegex(l, r"^[0-9a-f]{64}( +#.*)?$")
+        self.assertRegex(current[0], r"^current [0-9a-f]{64}( +#.*)?$")
+        self.assertEqual(self.a.load_shipped_hashes(), frozenset(l.split()[0] for l in shipped))
+        now = hashlib.sha256(PLUGIN.read_bytes()).hexdigest()
+        self.assertEqual(current[0].split()[1], now,
+                         "lane-persona.js changed: move the old `current` hash into the list of shipped hashes in "
+                         "lane-persona.sha256, and write the new one as `current`")
+        self.assertNotIn(now, self.a.load_shipped_hashes())
+
+    def test_opencode_project_install_is_silent_about_a_symlink_to_the_current_version(self):
+        # r3-3: a link to lane-control's own current file is harmless
+        user = self.with_old_plugin_known()
+        user.symlink_to(PLUGIN)
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [f"{self.project_plugin()}: installed the "
+                         "lane-persona plugin; OpenCode servers started in this project load it at once, and it acts "
+                         "only in one started with LANE_ROLE and LANE_PERSONA set"])
+        self.assertTrue(user.is_symlink())
+        copy = self.t / "elsewhere" / "lane-persona.js"  # a link to another file with the same bytes: also fine
+        copy.parent.mkdir()
+        copy.write_bytes(PLUGIN.read_bytes())
+        user.unlink()
+        user.symlink_to(copy)
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])
+        user.unlink()
+        user.symlink_to(self.t / "nowhere.js")  # a broken link is still named
+        self.assertTrue(any(str(user) in c and "symlink" in c for c in self.a.install_persona_hook(self.checkout)))
+
+    def test_opencode_plugin_scope_defaults_to_user_and_refuses_the_unknown(self):
+        os.environ.pop("LANE_OPENCODE_PLUGIN", None)
+        self.assertEqual(self.a.plugin_path(self.checkout), self.plugin_dir() / "lane-persona.js")
+        for scope in ("user", ""):
+            os.environ["LANE_OPENCODE_PLUGIN"] = scope
+            self.assertEqual(self.a.plugin_path(self.checkout), self.plugin_dir() / "lane-persona.js", scope)
+        os.environ["LANE_OPENCODE_PLUGIN"] = "both"
+        self.addCleanup(os.environ.pop, "LANE_OPENCODE_PLUGIN", None)
+        with self.assertRaisesRegex(ValueError, "LANE_OPENCODE_PLUGIN.*user.*project"):
+            self.a.install_persona_hook(self.checkout)
+        self.assertFalse(self.plugin_dir().exists() or self.project_plugin().exists())
+
     def db(self, rows, messages=()):
         import sqlite3
         path = self.home / ".local" / "share" / "opencode" / "opencode.db"
@@ -640,11 +769,135 @@ console.log(JSON.stringify(out));
         self.run_plugin(clean_env(XDG_STATE_HOME=str(self.t / "state2")))
         self.assertFalse((self.t / "state2").exists())
 
+    TWO_COPIES = """
+import { pathToFileURL } from "node:url";
+// the same plugin loaded from two places (user folder and project folder), as one OpenCode server loads both
+const copies = [];
+for (const file of process.argv.slice(2)) copies.push((await import(pathToFileURL(file).href)).default);
+const hooks = { context: [], compaction: [] };
+const ctx = { session: { hook: async (name, fn) => { hooks[name].push(fn); return { dispose: async () => {} }; } } };
+for (const c of copies) await c.setup(ctx);
+const turn = { sessionID: "ses_1", system: [{ type: "text", text: "base" }], messages: [] };
+for (const fn of hooks.context) await fn(turn);
+const compaction = { sessionID: "ses_1", system: [], messages: [] };
+for (const fn of hooks.compaction) await fn(compaction);
+const next = { sessionID: "ses_1", system: [{ type: "text", text: "base" }], messages: [] };
+for (const fn of hooks.context) await fn(next);  // the next turn is built from a fresh system prompt
+console.log(JSON.stringify({ registered: hooks.context.length, turn: turn.system, compaction: compaction.system,
+                             next: next.system }));
+"""
+
+    def test_plugin_two_installs_inject_the_persona_once(self):
+        # UP-6: a user-level and a project-level copy are both loaded; the persona is still added once per request.
+        import json
+        second = self.t / "second-copy.mjs"
+        second.write_bytes(PLUGIN.read_bytes())
+        driver = self.t / "two.mjs"
+        driver.write_text(self.TWO_COPIES)
+        env = clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona), XDG_STATE_HOME=str(self.t / "state"))
+        r = subprocess.run([NODE, str(driver), str(self.copy), str(second)], capture_output=True, text=True,
+                           cwd=self.t, env=env, timeout=30)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        out = json.loads(r.stdout)
+        part = {"type": "text", "text": PERSONA_TEXT}
+        self.assertEqual(out["registered"], 2)
+        self.assertEqual(out["turn"], [{"type": "text", "text": "base"}, part])
+        self.assertEqual(out["compaction"], [part])
+        self.assertEqual(out["next"], [{"type": "text", "text": "base"}, part])
+
     def test_plugin_silent_missing_file(self):
         (self.t / "a-dir.md").mkdir()
         for path in (self.t / "missing.md", self.t / "a-dir.md"):
             out = self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(path)))
             self.assertEqual((out["turn"], out["compaction"]), ([{"type": "text", "text": "base"}], []))
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class SessionRecordInterfaceTests(HomeTest):
+    """UP-6: the session record is a published, stable interface (core/harnesses/session-record.md). These tests pin
+    what a reader outside lane-control may rely on, with the two real writers (the Claude hook and the OpenCode
+    plugin) producing it."""
+
+    ID = "ses_4f1c2e9a-0b7d"
+    DOC = HARNESSES / "session-record.md"
+
+    def write_with_hook(self, sid, role="coordinator"):
+        env = clean_env(LANE_ROLE=role, LANE_PERSONA=str(self.t / "p.md"), CLAUDE_PROJECT_DIR=str(self.checkout))
+        (self.t / "p.md").write_text(PERSONA_TEXT)
+        r = subprocess.run([str(HOOK)], input='{"session_id": "%s"}' % sid, capture_output=True, text=True,
+                           cwd=self.t, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0)
+
+    def write_with_plugin(self, sid, role="coordinator"):
+        (self.t / "p.md").write_text(PERSONA_TEXT)
+        mod = self.t / "plugin.mjs"
+        mod.write_bytes(PLUGIN.read_bytes())
+        driver = self.t / "driver.mjs"
+        driver.write_text('import { pathToFileURL } from "node:url";\n'
+                          'const def = (await import(pathToFileURL(process.argv[2]).href)).default;\n'
+                          'let turn;\nawait def.setup({ session: { hook: async (n, fn) => { if (n === "context") turn = fn; } } });\n'
+                          'await turn({ sessionID: process.argv[3], system: [] });\n')
+        r = subprocess.run([NODE, str(driver), str(mod), sid], capture_output=True, text=True, cwd=self.checkout,
+                           env=clean_env(LANE_ROLE=role, LANE_PERSONA=str(self.t / "p.md")), timeout=30)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+
+    def test_both_writers_make_the_same_record(self):
+        # path: $XDG_STATE_HOME or ~/.local/state, lane-control/sessions/<checkout as one folder name>/<role>.<harness>
+        # content: the session id and one newline, written whole (a rename), no other file left in the folder
+        os.environ["XDG_STATE_HOME"] = str(self.t / "state")
+        self.write_with_hook(self.ID)
+        self.write_with_plugin(self.ID, role="design-lead")
+        folder = self.t / "state" / "lane-control" / "sessions" / self.pkg.encode_path(self.checkout.resolve())
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["coordinator.claude", "design-lead.opencode"])
+        for name in ("coordinator.claude", "design-lead.opencode"):
+            self.assertEqual((folder / name).read_bytes(), self.ID.encode() + b"\n", name)
+        self.assertEqual(self.pkg.session_record(self.checkout, "coordinator", "claude"), folder / "coordinator.claude")
+        self.assertEqual(self.pkg.session_record(self.checkout, "design-lead", "opencode"),
+                         folder / "design-lead.opencode")
+
+    def test_a_new_session_replaces_the_record_whole(self):
+        os.environ["XDG_STATE_HOME"] = str(self.t / "state")
+        self.write_with_hook("first-session")
+        self.write_with_hook("second")
+        self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "claude"), "second")
+        self.write_with_plugin("first-session")
+        self.write_with_plugin("second")
+        self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "opencode"), "second")
+
+    def test_the_writers_skip_an_id_the_reader_would_refuse(self):
+        # UP-6 review m2: a 201-character id must not replace a good record (the plugin already checks; the hook too).
+        os.environ["XDG_STATE_HOME"] = str(self.t / "state")
+        long_id = "a" * 201
+        for write, harness in ((self.write_with_hook, "claude"), (self.write_with_plugin, "opencode")):
+            write("good-id")
+            write(long_id)
+            self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", harness), "good-id", harness)
+            write("a" * 200)
+            self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", harness), "a" * 200, harness)
+
+    def test_an_undecodable_record_is_no_record(self):
+        path = self.record("claude", "x")
+        path.write_bytes(b"\xff\xfe\x00abc\n")
+        self.assertIsNone(self.pkg.read_session(self.checkout, "coordinator", "claude"))
+
+    def test_reader_accepts_only_a_plain_id(self):
+        self.assertEqual(self.pkg.SESSION_ID.pattern, "[A-Za-z0-9_-]{1,200}")
+        for text, want in (("abc_DEF-123\n", "abc_DEF-123"), ("  abc\r\n", "abc"), ("a" * 200 + "\n", "a" * 200),
+                           ("a" * 201 + "\n", None), ("", None), ("\n", None), ("a b\n", None), ("a\nb\n", None),
+                           ("../x\n", None), ("a/b\n", None)):
+            path = self.record("claude", "x")
+            path.write_text(text)
+            self.assertEqual(self.pkg.read_session(self.checkout, "coordinator", "claude"), want, repr(text))
+
+    def test_the_interface_is_documented(self):
+        text = " ".join(self.DOC.read_text().split())
+        for needle in ("lane-control/sessions/<checkout>/<role>.<harness>", "$XDG_STATE_HOME", "~/.local/state",
+                       "[A-Za-z0-9_-]{1,200}", "one line", "a trailing newline", "renames it into place",
+                       "every byte that is not a letter or a digit becomes `-`", "no record means no marked session",
+                       "SessionStart", "session_v2", "lane-idle", "not a notification", "exit 3", "the hook's working directory",
+                       "A change to the path, the file format or the id pattern is a breaking change",
+                       "harnesses.read_session"):
+            self.assertIn(needle, text, needle)
 
 
 OPENCODE2 = shutil.which("opencode2")

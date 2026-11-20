@@ -38,6 +38,11 @@ in the project's main checkout (the first line of `git worktree list`).
   --subject "<KEY> <outcome>" --body "<report>"`, and ask while you work with `orca-ide orchestration ask --question
   "<one full question>"`. End your turn after either: a follow-up comes as a new Task, which you answer the same
   way.
+- If Orca refuses the report, do not send it again unchanged. `missing_task_id` or `missing_dispatch_id`: the call
+  lacked `--task-id` or `--dispatch-id`; send it again with both exactly as in your first message.
+  `worker_identity_changed`: this dispatch can no longer take your report (for example Orca's runtime restarted); a
+  report is accepted from this terminal only, so never send it from another one. Push your branch, write the report in your terminal, and end your
+  turn: your coordinator reads the branch.
 - Otherwise (an agent launch or `terminal create` started you), report by SendMessage to the session that started
   you. On OpenCode, which has no SendMessage, send it to its Run (`--to run:<id>`; `orca-ide orchestration run-list`,
   the objective is its session name), or, with no route, write it in your own terminal for the owner. Never type

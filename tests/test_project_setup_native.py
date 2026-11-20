@@ -277,6 +277,7 @@ class RenderTests(Case):
             self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         exclude = (self.repo / ".git" / "info" / "exclude").read_text()
         self.assertEqual(exclude.count("lane-control: begin"), 1)
+        self.assertIn("/.opencode/plugins/lane-persona.js", exclude)  # a project-level OpenCode plugin (UP-6)
         status = git("status", "--porcelain", "--untracked-files=all", cwd=self.repo)
         self.assertEqual(status, "")
         self.assertTrue((self.repo / ".claude" / "settings.local.json").is_file())
@@ -398,6 +399,26 @@ class StartTests(Case):
         self.assertEqual(opt(s["argv"], "--name"), "app design lead")
         hook = json.loads((wt / ".claude" / "settings.local.json").read_text())
         self.assertEqual(len(hook["hooks"]["SessionStart"]), 1)
+
+    def test_an_opencode_design_lead_gets_the_project_level_plugin_in_its_own_worktree(self):
+        # UP-6 review M2: the design lead runs in its own worktree, and the plugin file is not committed, so a
+        # project-level install has to be made there too (as Claude's hook is).
+        r = self.e.run(str(self.repo), "--design-lead", "opencode/gw/m1", "--own-model", "gw/m1",
+                       env_extra={"LANE_OPENCODE_PLUGIN": "project"})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        wt = Path(opt(self.create("app design lead"), "--worktree").split(":", 1)[1])
+        plugin = Path(".opencode") / "plugins" / "lane-persona.js"
+        self.assertTrue((self.repo / plugin).is_file())
+        self.assertTrue((wt / plugin).is_file(), "the design lead's worktree has no plugin")
+        self.assertFalse((self.e.home / ".config" / "opencode" / "plugins").exists())  # user folder untouched
+        self.assertIn("/.opencode/plugins/lane-persona.js", (self.repo / ".git" / "info" / "exclude").read_text())
+
+    def test_a_user_level_opencode_design_lead_needs_nothing_in_its_worktree(self):
+        r = self.e.run(str(self.repo), "--design-lead", "opencode/gw/m1", "--own-model", "gw/m1")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        wt = Path(opt(self.create("app design lead"), "--worktree").split(":", 1)[1])
+        self.assertFalse((wt / ".opencode").exists())
+        self.assertTrue((self.e.home / ".config" / "opencode" / "plugins" / "lane-persona.js").is_file())
 
     def test_no_design_lead_starts_only_the_coordinator(self):
         self.e.run(str(self.repo), "--no-design-lead")

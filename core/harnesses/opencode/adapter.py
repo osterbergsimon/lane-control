@@ -7,7 +7,8 @@ v2's interactive command has no --model flag; the model goes in through OPENCODE
 its own opencode2 agent. --standalone runs the session in a private server started from this command, so the
 markers reach the plugin; the shared background service would not see them.
 Persona: lane-persona.js in OpenCode's plugin folder ($XDG_CONFIG_HOME/opencode/plugins/, default
-~/.config/opencode/plugins/). Idle: the newest write of a session for the checkout in OpenCode's v2 store
+~/.config/opencode/plugins/), or with LANE_OPENCODE_PLUGIN=project in the project's .opencode/plugins/.
+Idle: the newest write of a session for the checkout in OpenCode's v2 store
 ($XDG_DATA_HOME/opencode/opencode.db, tables session_v2 and session_message, times in ms).
 """
 import json
@@ -50,24 +51,104 @@ def _xdg(var: str, default: str) -> Path:
     return Path(v) if v and os.path.isabs(v) else Path.home() / default
 
 
-def plugin_path() -> Path:
+SCOPES = ("user", "project")
+
+
+def plugin_scope() -> str:
+    """Where the plugin is installed: LANE_OPENCODE_PLUGIN=user (the default) or project. A project install is
+    <checkout>/.opencode/plugins/, loaded for OpenCode servers started in that project only."""
+    scope = os.environ.get("LANE_OPENCODE_PLUGIN") or "user"
+    if scope not in SCOPES:
+        raise ValueError(f"LANE_OPENCODE_PLUGIN={scope!r}: it takes {' or '.join(SCOPES)} (user: one copy in "
+                         "OpenCode's own plugin folder; project: one in the project's .opencode/plugins/)")
+    return scope
+
+
+def plugin_path(checkout: "Path | None" = None) -> Path:
+    if plugin_scope() == "project":
+        if checkout is None:
+            raise ValueError("a project-level plugin install needs the checkout")
+        return Path(checkout) / ".opencode" / "plugins" / PLUGIN.name
     return _xdg("XDG_CONFIG_HOME", ".config") / "opencode" / "plugins" / PLUGIN.name
 
 
-def install_persona_hook(checkout: Path) -> list:
-    """Copy lane-persona.js into OpenCode's plugin folder (one per user, not per checkout) unless the same bytes are
-    there already. Returns change lines; empty when it was in place."""
-    dest = plugin_path()
-    want = PLUGIN.read_bytes()
+def _write(dest: Path, want: bytes) -> "str | None":
+    """Make dest hold want; 'installed', 'updated', or None when it already did."""
     if dest.is_file() and dest.read_bytes() == want:
-        return []
+        return None
     what = "updated" if dest.exists() else "installed"
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
     tmp.write_bytes(want)
     tmp.replace(dest)
-    return [f"{dest}: {what} the lane-persona plugin; OpenCode loads it into every running OpenCode server of this "
-            "user at once, and it acts only in one started with LANE_ROLE and LANE_PERSONA set"]
+    return what
+
+
+def _is_ours(path: Path) -> bool:
+    try:
+        return 'id: "lane-persona"' in path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def load_shipped_hashes() -> frozenset:
+    """The SHA-256 of every earlier lane-persona.js lane-control shipped (lane-persona.sha256 beside the plugin)."""
+    try:
+        lines = (Path(__file__).resolve().parent / "lane-persona.sha256").read_text().splitlines()
+    except OSError:
+        return frozenset()
+    return frozenset(l.split()[0] for l in lines if l.strip() and not l.startswith(("#", "current ")))
+
+
+SHIPPED_HASHES = load_shipped_hashes()
+
+
+def _refresh_user_copy(want: bytes) -> list:
+    """With a project-level install, an older user-level copy of ours would still be loaded, and has no check against
+    adding the persona twice. Bring it to this version only when its bytes are a version lane-control shipped;
+    anything else (a local edit, a fork, a symlink) is left exactly as it is and named."""
+    import hashlib
+    user = _xdg("XDG_CONFIG_HOME", ".config") / "opencode" / "plugins" / PLUGIN.name
+    if user.is_symlink():
+        try:
+            if user.read_bytes() == want:  # a link to this version (lane-control's own file, or a copy): harmless
+                return []
+        except OSError:
+            pass  # a broken link or an unreadable target is named below
+        return [f"{user}: a symlink; not changed. If it is an older lane-persona plugin, the persona may be added twice "
+                "(point it at this version, or remove it)"]
+    if not user.is_file() or not _is_ours(user):
+        return []
+    have = user.read_bytes()
+    if have == want:
+        return []
+    if hashlib.sha256(have).hexdigest() in SHIPPED_HASHES:
+        _write(user, want)
+        return [f"{user}: updated the user-level lane-persona plugin from an older lane-control version, so it and the "
+                "project copy never add the persona twice"]
+    return [f"{user}: a lane-persona plugin that differs from every lane-control version; not changed. Both it and the "
+            "project copy are loaded, and the persona may be added twice (replace it with this version, or remove it)"]
+
+
+def install_persona_hook(checkout: Path) -> list:
+    """Copy lane-persona.js into OpenCode's plugin folder: one per user (the default) or, with
+    LANE_OPENCODE_PLUGIN=project, one per project in <checkout>/.opencode/plugins/. Unless the same bytes are there
+    already. Both may exist: the plugin adds the persona once per request, but only a copy of this version does, so a
+    project install also updates an existing user-level copy that is an older lane-control version (never a copy with
+    other bytes, another plugin's file or a symlink: those are named in the output and left alone). Returns change
+    lines; empty when everything was in place."""
+    want = PLUGIN.read_bytes()
+    dest = plugin_path(checkout)
+    lines = []
+    what = _write(dest, want)
+    if what:
+        reach = ("OpenCode servers started in this project load it at once" if plugin_scope() == "project" else
+                 "OpenCode loads it into every running OpenCode server of this user at once")
+        lines.append(f"{dest}: {what} the lane-persona plugin; {reach}, and it acts only in one started with "
+                     "LANE_ROLE and LANE_PERSONA set")
+    if plugin_scope() == "project":
+        lines += _refresh_user_copy(want)
+    return lines
 
 
 def db_path() -> Path:
