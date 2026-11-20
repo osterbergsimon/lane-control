@@ -411,10 +411,37 @@ def reexec_ssh_args():
 
 # --- steps -------------------------------------------------------------------------------------------------------
 
+class Place:
+    """Where setup's Orca calls go: this machine, or a saved Orca SSH host (phase 6 of the native-Orca plan, not built
+    yet). Every Orca command line of both paths is built here, the launcher's too, so the host path changes this
+    class and nothing else. (Files: the store, launcher, personas and hooks are written where project-setup runs.)"""
+
+    def __init__(self, host: "str | None" = None):
+        if host is not None:
+            raise NotImplementedError(f"native-Orca setup on the SSH host {host!r} is phase 6 of the native-Orca plan "
+                                      "and is not built yet")
+        self.host = host
+
+    def argv(self, *args) -> list:
+        return [ORCA, *args]
+
+    def found(self) -> bool:
+        return bool(shutil.which(self.argv()[0]))
+
+    def run(self, *args, **kw):
+        return run(self.argv(*args), **kw)
+
+    def jrun(self, *args):
+        return jrun(self.argv(*args, "--json"))
+
+
+LOCAL = Place()  # this machine
+
+
 def preflight(needed_harnesses):
-    if not shutil.which(ORCA):
+    if not LOCAL.found():
         raise Fail("Orca CLI not found (on an Orca host it is ~/.orca/cli/bin/orca; or set ORCA_CLI)")
-    p = run([ORCA, "status", "--json"], check=False, timeout=30)
+    p = LOCAL.run("status", "--json", check=False, timeout=30)
     try:
         rt = json.loads(p.stdout)["result"]["runtime"]
         ok = rt.get("reachable") and rt.get("state") == "ready"
@@ -482,13 +509,13 @@ def resolve_repo(target: str, dest: Path, name: str) -> Path:
     return d
 
 
-def orca_repo(repo: Path) -> str:
-    repos = jrun([ORCA, "repo", "list", "--json"])["result"]["repos"]
+def orca_repo(repo: Path, place: Place = LOCAL) -> str:
+    repos = place.jrun("repo", "list")["result"]["repos"]
     for r in repos:
         if Path(r["path"]) == repo:
             say("orca-repo", "exists", r["id"])
             return r["id"]
-    rid = jrun([ORCA, "repo", "add", "--path", str(repo), "--json"])["result"]["repo"]["id"]
+    rid = place.jrun("repo", "add", "--path", str(repo))["result"]["repo"]["id"]
     say("orca-repo", "created", rid)
     return rid
 
@@ -527,7 +554,7 @@ def skills():
     fresh = not dst.exists()
     changed = False
     if not (root / "orca-cli").exists():
-        run([ORCA, "skills", "install", "--skill", "orca-cli", "--agent", "universal", "--json"])
+        LOCAL.run("skills", "install", "--skill", "orca-cli", "--agent", "universal", "--json")
         changed = True
     for name, text in want.items():
         f = dst / name
@@ -1088,14 +1115,14 @@ def ensure_claude_trust(repo: Path, record: bool = False):
     say("claude-trust", "created", str(repo))
 
 
-def design_worktree(repo: Path, repo_id: str):
+def design_worktree(repo: Path, repo_id: str, place: Place = LOCAL):
     """The design lead's child worktree, and whether this run created it."""
-    for w in jrun([ORCA, "worktree", "list", "--json"])["result"]["worktrees"]:
+    for w in place.jrun("worktree", "list")["result"]["worktrees"]:
         if w["id"].startswith(repo_id + "::") and w.get("displayName") == "design-lead":
             say("worktree design-lead", "exists", w["path"])
             return Path(w["path"]), False
-    res = jrun([ORCA, "worktree", "create", "--repo", f"id:{repo_id}", "--name", "design-lead",
-                "--parent-worktree", f"path:{repo}", "--setup", "inherit", "--json"])["result"]
+    res = place.jrun("worktree", "create", "--repo", f"id:{repo_id}", "--name", "design-lead",
+                     "--parent-worktree", f"path:{repo}", "--setup", "inherit")["result"]
     path = Path(res["worktree"]["path"])
     say("worktree design-lead", "created", str(path))
     return path, True
@@ -1108,8 +1135,8 @@ def is_setup_tab(t: dict) -> bool:
             or "setup-runner.sh" in (t.get("preview") or ""))
 
 
-def worktree_terminals(wt: Path) -> list:
-    rows = jrun([ORCA, "terminal", "list", "--json"])["result"]["terminals"]
+def worktree_terminals(wt: Path, place: Place = LOCAL) -> list:
+    rows = place.jrun("terminal", "list")["result"]["terminals"]
     return [t for t in rows if Path(t.get("worktreePath") or "/") == wt]
 
 
@@ -1119,17 +1146,17 @@ def fresh_shell(t: dict) -> bool:
     return not t.get("agentIdentity") and len([l for l in (t.get("preview") or "").splitlines() if l.strip()]) == 1
 
 
-def close_startup_tabs(wt: Path, before: set, setup_done: bool):
+def close_startup_tabs(wt: Path, before: set, setup_done: bool, place: Place = LOCAL):
     """After the agent started: close the plain shell Orca opened and, if the setup script finished, its Setup tab.
     Only terminals listed in `before` (taken before the spawn) are considered, so the agent's own tab can never match.
     Never an agent's tab (`agentIdentity`, `cotal-` title), a Setup tab that has not finished, or a shell in use."""
-    for t in worktree_terminals(wt):
+    for t in worktree_terminals(wt, place):
         if t["handle"] not in before or t.get("agentIdentity") or (t.get("title") or "").startswith("cotal-"):
             continue
         if is_setup_tab(t) and not setup_done:
             continue
         if is_setup_tab(t) or fresh_shell(t):
-            jrun([ORCA, "terminal", "close", "--terminal", t["handle"], "--tab", "--json"])
+            place.jrun("terminal", "close", "--terminal", t["handle"], "--tab")
 
 
 def verify(repo: Path, space: str, wt):
@@ -1141,7 +1168,7 @@ def verify(repo: Path, space: str, wt):
         say("verify", "ok", "coordinator live (no design lead)")
         return
     missing = [n for n in ("coordinator", "design-lead") if n not in agents]
-    rows = jrun([ORCA, "worktree", "list", "--json"])["result"]["worktrees"]
+    rows = LOCAL.jrun("worktree", "list")["result"]["worktrees"]
     lead = [w for w in rows if Path(w["path"]) == wt]
     parent_ok = bool(lead) and (lead[0].get("parentWorktreeId") or "").endswith("::" + str(repo))
     if missing or not parent_ok:
@@ -2532,22 +2559,6 @@ NATIVE_RESUME = ("You are back after a pause. Reread your persona, {persona}; th
 HANDOVERS = {"coordinator": "handover-latest", "design-lead": "handover-design-lead"}  # project-pause stop asks for these
 
 
-class Place:
-    """Where the native steps run: this machine, or a saved Orca SSH host (phase 6 of the native-Orca plan, not built
-    yet). Every Orca call of the native path goes through one, so the host path changes this and nothing else."""
-
-    def __init__(self, host: "str | None" = None):
-        if host is not None:
-            raise NotImplementedError(f"native-Orca setup on the SSH host {host!r} is phase 6 of the native-Orca plan "
-                                      "and is not built yet")
-        self.host = host
-
-    def argv(self, *args) -> list:
-        return [ORCA, *args]
-
-    def jrun(self, *args):
-        return jrun(self.argv(*args, "--json"))
-
 
 def session_title(role: str, project: str) -> str:
     return TITLES[role].format(project=project)
@@ -2591,7 +2602,7 @@ def run_record(repo: Path, role: str) -> Path:
 
 
 def launcher(repo: Path, role: str, pin: tuple, mode: str, checkout: Path, title: str, kickoff: str,
-             resume: "str | None" = None) -> Path:
+             resume: "str | None" = None, place: Place = LOCAL) -> Path:
     """The session's start script, in the settings store: its own Run first (Orca binds a Run to the terminal that
     makes it), then the harness with the markers, started as the adapter says. Orca types --command into the login
     shell, so it only gets `sh <this file>`; the first message and the JSON go in here, quoted for sh."""
@@ -2604,7 +2615,7 @@ def launcher(repo: Path, role: str, pin: tuple, mode: str, checkout: Path, title
     rec, q = run_record(repo, role), shlex.quote
     script = (f"#!/bin/sh\n# {title}: written by project-setup at each start. The session's own Run, then the agent.\n"
               f"cd {q(str(checkout))} || exit 1\n"
-              f"{q(ORCA)} orchestration run-create --objective {q(title)} --json >{q(str(rec))}.tmp 2>/dev/null &&\n"
+              f"{shlex.join(place.argv('orchestration', 'run-create', '--objective', title, '--json'))} >{q(str(rec))}.tmp 2>/dev/null &&\n"
               f"    mv -f {q(str(rec))}.tmp {q(str(rec))}\n"
               f"exec {shlex.join(cmd)}\n")
     f = store_dir(repo) / "launch" / f"{role}.sh"
@@ -2635,7 +2646,7 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
     if session_terminal(place, title, stored_handle(repo, role)):
         say(f"session {role}", "exists", title)
         return False
-    f = launcher(repo, role, pin, mode, checkout, title, kickoff, resume)
+    f = launcher(repo, role, pin, mode, checkout, title, kickoff, resume, place)
     run_record(repo, role).unlink(missing_ok=True)
     st = settings(repo)  # an earlier start's Run and terminal are gone with it: never kept for this one
     settings(repo, runs={k: v for k, v in (st.get("runs") or {}).items() if k != role},
@@ -2675,16 +2686,16 @@ def start_standing(place: Place, repo: Path, project: str, pins: dict, lead: boo
     started = start_session(place, repo, "coordinator", pins["coordinator"], mode, repo, project,
                             kickoffs["coordinator"], sid(repo, "coordinator"))
     if lead:
-        wt, created = design_worktree(repo, repo_id)
+        wt, created = design_worktree(repo, repo_id, place)
         if created:
             setup_done = wait_for_setup(wt, "design-lead")
-            before = {t["handle"] for t in worktree_terminals(wt)}
+            before = {t["handle"] for t in worktree_terminals(wt, place)}
         if pins["design-lead"][0] == "claude":
             persona_hooks(wt, {"claude"})
         start_session(place, repo, "design-lead", pins["design-lead"], mode, wt, project, kickoffs["design-lead"],
                       sid(wt, "design-lead"))
         if created:
-            close_startup_tabs(wt, before, setup_done)
+            close_startup_tabs(wt, before, setup_done, place)
             place.jrun("terminal", "create", "--worktree", f"path:{wt}")  # the owner's shell
     return started
 
@@ -2774,18 +2785,19 @@ def resume_standing(repo: Path) -> int:
     if not (repo / ADAPTED / "coordinator.md").is_file():
         raise Fail(f"{repo} has no rendered persona in {ADAPTED}/: run project-setup on it first")
     pins = p["pins"]
-    native_preflight({pins["coordinator"][0]} | ({pins["design-lead"][0]} if p["lead"] else set()))
+    native_preflight({pins["coordinator"][0]} | ({pins["design-lead"][0]} if p["lead"] else set()), LOCAL)
     kickoffs = {r: NATIVE_RESUME.format(persona=repo / ADAPTED / f"{r}.md", handover=HANDOVERS[r]) for r in STANDING}
-    start_standing(Place(), repo, p["project"], pins, p["lead"], p["mode"], orca_repo(repo), kickoffs, resume=True)
+    place = Place()
+    start_standing(place, repo, p["project"], pins, p["lead"], p["mode"], orca_repo(repo, place), kickoffs, resume=True)
     settings(repo, paused=False)
     return 0
 
 
-def native_preflight(needed: set):
+def native_preflight(needed: set, place: Place = LOCAL):
     """Orca's runtime reachable and each standing role's harness on PATH; no Cotal."""
-    if not shutil.which(ORCA):
+    if not place.found():
         raise Fail("Orca CLI not found (orca-ide; on an Orca host ~/.orca/cli/bin/orca; or set ORCA_CLI)")
-    p = run([ORCA, "status", "--json"], check=False, timeout=30)
+    p = place.run("status", "--json", check=False, timeout=30)
     try:
         rt = json.loads(p.stdout)["result"]["runtime"]
         ok = rt.get("reachable") and rt.get("state") == "ready"
@@ -2824,7 +2836,8 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         bad = own_check(flag_pins, own_models | known_own_models(peek_repo(a.target, Path(a.dest).expanduser(), slug(base))))
         if bad:
             return bad
-        native_preflight(set())
+        place = Place()
+        native_preflight(set(), place)
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
         why = stale_checkout(repo, quick=a.skip_adapt)
@@ -2851,7 +2864,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         lead = pins["design-lead"] if cfg["lead"] else None
         PRIVATE_GLOBS[:] = cfg["private"]
         standing = {pins["coordinator"][0]} | ({lead[0]} if lead else set())
-        native_preflight(standing)
+        native_preflight(standing, place)
         tier_text = choose_tiers(repo, a, tiers)
         if "claude" in standing and not a.no_start:
             ensure_claude_trust(repo, record=a.trust_folder)
@@ -2871,9 +2884,9 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
                 if not onboard_attached(d, project, adapter, adapt_reviewer, a.readapt, lead is not None):
                     return STOPPED
                 publish_onboarding(d)
-        repo_id = orca_repo(repo)
+        repo_id = orca_repo(repo, place)
         for d in attached:
-            orca_repo(d)
+            orca_repo(d, place)
             setup_script(d, a.write_orca_yaml)
         lane_tools(Path(os.environ.get("HOME", str(Path.home()))))
         if own_models:
@@ -2893,7 +2906,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         COORDINATOR_KICKOFF = NATIVE_KICKOFF["coordinator"].format(persona=persona["coordinator"])
         kickoffs = {"coordinator": coordinator_kickoff(),
                     "design-lead": NATIVE_KICKOFF["design-lead"].format(persona=persona["design-lead"])}
-        LEFTOVER_DELIVERED = start_standing(Place(), repo, project, pins, lead is not None, cfg["mode"], repo_id,
+        LEFTOVER_DELIVERED = start_standing(place, repo, project, pins, lead is not None, cfg["mode"], repo_id,
                                             kickoffs)
         print(f"summary: {project} · native Orca · orca repo {repo_id} · sessions "
               + ", ".join(session_title(r, project) for r in STANDING if r == "coordinator" or lead))
@@ -3191,7 +3204,7 @@ def main(argv=None) -> int:
                 # Only now, so the worktree is never empty when the agent starts: an empty worktree may refuse the
                 # spawn and strand the name. A Setup tab that never finished stays, to read.
                 close_startup_tabs(wt, before, setup_done)
-                jrun([ORCA, "terminal", "create", "--worktree", f"path:{wt}", "--json"])  # the owner's shell
+                LOCAL.jrun("terminal", "create", "--worktree", f"path:{wt}")  # the owner's shell
         verify(repo, space, wt)
         print(f"summary: {project} · space {space} · broker 127.0.0.1:{settings(repo).get('port')} · orca repo {repo_id}")
         print(f"  open Orca: the project {repo.name}, its main checkout (coordinator)"

@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -774,6 +775,30 @@ class PinCheckTests(Case):
                 self.assertIn("coordinator", r.stderr, case)
             self.assertEqual(self.e.creates(), [], case)
             self.edit_store(models={"coordinator": "claude/opus"}, permission_mode="auto")
+
+
+class SeamTests(Case):
+    def test_no_orca_argv_is_built_outside_place(self):
+        # M2: Place is the one seam; phase 6 changes it and nothing else.
+        for script in (SETUP, PAUSE):
+            text = script.read_text()
+            m = re.search(r"\nclass Place:.*?(?=\n\n\n)", text, re.S)
+            rest = text.replace(m.group(0), "") if m else text
+            bad = [l.strip() for l in rest.splitlines() if re.search(r"(?<![\w\"])ORCA\b", l)
+                   and not re.search(r"^\s*(global\b|#)|\bORCA\s*=(?!=)|COTAL_ORCA_BIN", l)]
+            self.assertEqual(bad, [], script.name)
+
+    def test_the_launcher_takes_its_orca_cli_from_the_place(self):
+        m = load()
+
+        class Box(m.Place):
+            def argv(self, *args):
+                return ["/box/bin/orca-ide", "--environment", "box", *args]
+        with mock.patch.dict(os.environ, self.e.env, clear=True):
+            f = m.launcher(self.repo, "coordinator", ("claude", "opus"), "auto", self.repo, "app coordinator",
+                           "hello", place=Box())
+        self.assertIn("\n/box/bin/orca-ide --environment box orchestration run-create --objective 'app coordinator'",
+                      f.read_text())
 
 
 if __name__ == "__main__":
