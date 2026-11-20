@@ -22,6 +22,21 @@ Known problems that parked Orca + Cotal: auth, agents losing the mesh (`orca-cot
 - `adapter.py`: what `scripts/orch` needs (below). Scripts, docs, templates, skills and personas that only this
   orchestrator uses.
 
+## What lane-control writes into a project
+Generated coordination goes to its own file, never into the text the project's people write (coordinator's call
+2026-11-20; the owner may change it):
+- `AGENTS.lane-control.md` at the repo root holds every generated section: project-setup's lane-control section and
+  the native-orca adapter's section, each between its comment markers. Nobody edits it by hand.
+- `AGENTS.md` gets exactly one pointer line to that file (it ends `<!-- lane-control:pointer -->`) and nothing else;
+  the project's own rules stay there, untouched. A symlinked AGENTS.md gets the line in its target.
+- A re-run replaces each marked section in place and never adds a second block or a second pointer.
+- A generated section still in AGENTS.md (from before this file) is moved out on the next run, on the owner's yes in
+  project-setup or in the PR `scripts/orch` opens; hand-written text around it stays as it was.
+- Markers that do not pair, or two pointer lines, stop the run: fix them by hand, nothing is guessed.
+- `strip` removes its section; when the file holds no section any more, the file and the pointer line go too.
+
+The one implementation is `core/agentsdoc.py`, used by `core/scripts/project-setup` and both adapters.
+
 ## The checklist and the switch guide
 - `checklist.md`: the nine points every trial and retest records, and the result format.
 - `switching.md`: moving a project from one orchestrator to another: the human steps, in order, around

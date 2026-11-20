@@ -12,9 +12,9 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
 
 Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
 adapting agent and a reviewer, committed only on the owner's yes; the role files go to .lane-control/additions/ and
-AGENTS.md gets the lane-control and native-orca sections), then the personas of the coordinator, design lead,
-reviewer and debugger rendered into .lane-control/<role>.md with the project's additions at the end (kept out of git
-by .git/info/exclude), the persona hook of each standing role's harness (core/harnesses/), and the coordinator and
+AGENTS.lane-control.md gets the lane-control and native-orca sections, AGENTS.md one pointer line to it), then the
+personas of the coordinator, design lead, reviewer and debugger rendered into .lane-control/<role>.md with the
+project's additions at the end (kept out of git by .git/info/exclude), the persona hook of each standing role's harness (core/harnesses/), and the coordinator and
 design lead each started in its own Orca terminal titled "<project> coordinator" / "<project> design lead", which
 makes the session's own Orca Run before the agent starts (its id goes in the settings store). Claude and OpenCode
 (v2, opencode2) both take every role; nothing is ever typed into a terminal. A project keeps the orchestrator it was
@@ -46,8 +46,8 @@ and the agents still start. Nothing else is ever committed or pushed.
 --with attaches a second repo to the project (e.g. an app and its plugins repo): one space, one manager, one
 coordinator, rooted at the first repo; the attached one gets lanes from that coordinator and nothing else of its own. It
 gets the per-repo work the first one gets (Orca registration, the stale-checkout refusal, the private-file deny, the
-adapted files and short AGENTS.md section, orca.yaml, the same commit rules) but no space, manager, coordinator or
-design lead. --private globs apply to every repo of the project, each relative to its own root. The attached repos are kept in the project's settings store and covered by later runs, --refresh and --show.
+adapted files and generated sections with AGENTS.md's pointer line, orca.yaml, the same commit rules) but no space,
+manager, coordinator or design lead. --private globs apply to every repo of the project, each relative to its own root. The attached repos are kept in the project's settings store and covered by later runs, --refresh and --show.
 A repo that is its own project, or attached to another, is refused. Lanes branch from each repo's own default branch.
 
 --refresh is for a project set up earlier, after lane-control's personas or skill changed: it re-renders the personas
@@ -92,6 +92,19 @@ def _find_root():
 
 
 HERE = _find_root()  # lane-control checkout (or its copy on a host)
+
+
+def _agentsdoc():
+    """core/agentsdoc.py: where the generated sections go (AGENTS.lane-control.md) and AGENTS.md's one pointer line."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lc_agentsdoc", HERE / "core" / "agentsdoc.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+DOC = _agentsdoc()
+GENERATED = DOC.GENERATED  # the generated coordination's own file, at the repo root; AGENTS.md only points to it
 OC = HERE / "orchestrators" / "orca-cotal"  # this orchestrator's personas, skill and templates
 HARNESSES = ("claude", "opencode")
 MODES = ("auto", "bypassPermissions", "default")
@@ -103,7 +116,8 @@ PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_prox
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # the library first: a new tool never sees an old one
-HOST_FILES = (".lane-control-root", "core/lcroot.py", "scripts/project-setup", *(f"scripts/{t}" for t in LANE_TOOLS),
+HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "scripts/project-setup",
+              *(f"scripts/{t}" for t in LANE_TOOLS),
               "core/scripts/project-setup", "core/harnesses", "orchestrators/native-orca",
               "orchestrators/orca-cotal/scripts/project-setup", "orchestrators/orca-cotal/personas",
               "orchestrators/orca-cotal/skills", "orchestrators/orca-cotal/templates",
@@ -1402,29 +1416,32 @@ def without_section(text: str) -> str:
     return head + rest.split(SECTION_END, 1)[1]
 
 
-def with_section(text: str) -> str:
-    """text with lane-control's section: replaced in place when present, else added at the end; on native Orca also
-    the native-orca adapter's section (orchestrators/native-orca/adapter.py, the one implementation of it). Nothing
-    else changes."""
-    out = with_lane_control_section(text)
+def agents_text(text: str) -> str:
+    """AGENTS.md's text as project-setup leaves it: the hand-written text, any generated section from before
+    AGENTS.lane-control.md moved out (lane-control's; on native Orca the native-orca adapter's too), and exactly one
+    pointer line to that file. Nothing else changes (core/agentsdoc.py)."""
+    without_section(text)
+    out = DOC.drop_block(text, SECTION_BEGIN, SECTION_END)
+    try:
+        if ORCHESTRATOR == "native-orca":
+            return native_module("adapter").pointer_text(out)
+        return DOC.with_pointer(out)
+    except ValueError as e:
+        raise Fail(str(e))
+
+
+def generated_text(text: str) -> str:
+    """AGENTS.lane-control.md's text with lane-control's section, replaced in place when present, else added (a new
+    file starts with its header); on native Orca also the native-orca adapter's section
+    (orchestrators/native-orca/adapter.py, the one implementation of it). Anything else in the file is kept."""
+    without_section(text)
+    out = DOC.put_block(DOC.generated_base(text), SECTION, SECTION_BEGIN, SECTION_END)
     if ORCHESTRATOR != "native-orca":
         return out
     try:
         return native_module("adapter").section_text(out)
     except ValueError as e:
         raise Fail(str(e))
-
-
-def with_lane_control_section(text: str) -> str:
-    without_section(text)
-    nl = "\r\n" if "\r\n" in text else "\n"
-    block = SECTION.replace("\n", nl)
-    if SECTION_BEGIN in text:
-        head, rest = text.split(SECTION_BEGIN, 1)
-        return head + block + rest.split(SECTION_END, 1)[1]
-    if not text:
-        return block + nl
-    return text + ("" if text.endswith("\n") else nl) + nl + block + nl
 
 
 def head_text(repo: Path, path: str) -> str:
@@ -1445,13 +1462,17 @@ def agents_md(repo: Path) -> str:
 
 
 def check_agents_md(repo: Path):
-    """AGENTS.md must be as committed, or exactly that plus our section: all the commit is allowed to carry."""
+    """AGENTS.md and AGENTS.lane-control.md must each be as committed, or exactly that plus our change: all the commit
+    is allowed to carry."""
     path = agents_md(repo)
-    f = repo / path
     head = head_text(repo, path)
-    if read_raw(f) not in (head, with_section(head)):
-        raise Fail(f"{path} has uncommitted changes besides the lane-control section; commit or undo them and run "
+    if read_raw(repo / path) not in (head, agents_text(head)):
+        raise Fail(f"{path} has uncommitted changes besides lane-control's pointer line; commit or undo them and run "
                    "again. Nothing was committed")
+    head = head_text(repo, GENERATED)
+    if read_raw(repo / GENERATED) not in (head, generated_text(head)):
+        raise Fail(f"{GENERATED} has uncommitted changes besides lane-control's sections (it is generated: never edit "
+                   "it by hand); commit or undo them and run again. Nothing was committed")
 
 
 def check_gitignore(repo: Path):
@@ -1464,14 +1485,17 @@ def check_gitignore(repo: Path):
 
 
 def write_section(repo: Path):
-    f = repo / agents_md(repo)
-    text = read_raw(f)
-    new = with_section(text)
-    if new == text:
-        say("agents-md", "exists", "lane-control section")
-        return
-    write_raw(f, new)
-    say("agents-md", "updated" if text else "created", "lane-control section")
+    """The generated sections into AGENTS.lane-control.md, and AGENTS.md's one pointer line to it (a section found in
+    AGENTS.md is moved out). A re-run replaces in place and never adds a second block."""
+    for f, rewrite, what in ((repo / GENERATED, generated_text, "lane-control sections"),
+                             (repo / agents_md(repo), agents_text, f"pointer line to {GENERATED}")):
+        text = read_raw(f)
+        new = rewrite(text)
+        if new == text:
+            say("agents-md", "exists", f"{f.name}: {what}")
+            continue
+        write_raw(f, new)
+        say("agents-md", "updated" if text else "created", f"{f.name}: {what}")
 
 
 def git_changes(repo: Path) -> list:
@@ -1486,7 +1510,7 @@ def git_changes(repo: Path) -> list:
 
 
 def ours(repo: Path, path: str) -> bool:
-    return path in (agents_md(repo), ".gitignore") or path.startswith(ADAPTED + "/")
+    return path in (agents_md(repo), GENERATED, ".gitignore") or path.startswith(ADAPTED + "/")
 
 
 def fingerprint(f: Path):
@@ -1987,7 +2011,7 @@ def missing_for_lanes(repo: Path, lanes: str, yaml_pending: bool) -> list:
     orca.yaml when HEAD has commits for them that origin/<lanes> lacks, and an orca.yaml about to be committed. An
     orca.yaml of the owner's own, left alone, is not counted, nor is any other commit."""
     out = []
-    if onboarded(repo) and ahead_of_lanes_base(repo, lanes, [ADAPTED, agents_md(repo)]):
+    if onboarded(repo) and ahead_of_lanes_base(repo, lanes, [ADAPTED, agents_md(repo), GENERATED]):
         out.append("onboarding files")
     if yaml_pending or (orca_yaml_tracked(repo) and ahead_of_lanes_base(repo, lanes, ["orca.yaml"])):
         out.append("orca.yaml")
@@ -2087,28 +2111,35 @@ def publish_onboarding(repo: Path) -> None:
 
 def onboarded(repo: Path) -> bool:
     files = run(["git", "ls-tree", "-r", "--name-only", "HEAD", "--", ADAPTED], cwd=repo, check=False).stdout
-    return bool(files.strip()) and SECTION_BEGIN in head_text(repo, agents_md(repo))
+    return bool(files.strip()) and (SECTION_BEGIN in head_text(repo, GENERATED) or
+                                    SECTION_BEGIN in head_text(repo, agents_md(repo)))  # before AGENTS.lane-control.md
 
 
 def refresh_section(repo: Path) -> bool:
-    """An onboarded project whose committed AGENTS.md section is out of date: update it in place, on the owner's yes.
-    True when the Orca setup may run. Without a terminal nothing is written, so an unattended re-run still gets
-    there."""
+    """An onboarded project whose committed generated sections are out of date, or still in AGENTS.md from before
+    AGENTS.lane-control.md: update them in place, or move them there, on the owner's yes. True when the Orca setup may
+    run. Without a terminal nothing is written, so an unattended re-run still gets there."""
     path = agents_md(repo)
-    head = head_text(repo, path)
-    if with_section(head) == head:
-        say("agents-md", "exists", "lane-control section")
+    head, ghead = head_text(repo, path), head_text(repo, GENERATED)
+    if agents_text(head) == head and generated_text(ghead) == ghead:
+        say("agents-md", "exists", f"lane-control sections in {GENERATED}")
         return True
+    moving = SECTION_BEGIN in head
     if not has_terminal():
-        say("agents-md", "stale", "lane-control section left as it is; run again in a terminal to update it")
+        say("agents-md", "stale", ("lane-control section still in AGENTS.md; run again in a terminal to move it to "
+                                   f"{GENERATED}") if moving else
+            f"lane-control sections left as they are; run again in a terminal to update {GENERATED}")
         return True
     check_agents_md(repo)
     write_section(repo)
-    show_changes(repo, [(p, m) for p, m in git_changes(repo) if p == path])
+    paths = [p for p in (path, GENERATED) if read_raw(repo / p) != head_text(repo, p)]
+    show_changes(repo, [(p, m) for p, m in git_changes(repo) if p in paths])
     if not owner_says_yes():
-        say("adapt", "stopped", f"{path} left uncommitted, no Orca setup. Run again in a terminal to answer")
+        say("adapt", "stopped", f"{' and '.join(paths)} left uncommitted, no Orca setup. Run again in a terminal to "
+            "answer")
         return False
-    commit_adapted(repo, [path], "Update the lane-control section of AGENTS.md")
+    commit_adapted(repo, paths, f"Move lane-control's generated sections from AGENTS.md to {GENERATED}" if moving else
+                   f"Update the lane-control sections of {GENERATED}")
     return True
 
 

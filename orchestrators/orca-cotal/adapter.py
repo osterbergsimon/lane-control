@@ -3,8 +3,9 @@
 Markers (the union of what the strip PRs of 2026-11-15 removed from three projects, and what project-setup adds):
 - the adapted files in `.lane-control/` (coordinator, design lead, project, reviewer, routing): strip deletes those
   five and the folder once it is empty; it refuses a folder that is a symlink or holds any other file;
-- AGENTS.md's section between `<!-- lane-control:begin -->` and `<!-- lane-control:end -->` (in the symlink's target
-  when AGENTS.md is a link inside the repo);
+- the section between `<!-- lane-control:begin -->` and `<!-- lane-control:end -->` in AGENTS.lane-control.md, and the
+  one pointer line to that file in AGENTS.md once no section is left in it (core/agentsdoc.py); a section from before
+  that file, still in AGENTS.md, is removed there (in the symlink's target when AGENTS.md is a link inside the repo);
 - the `.cotal/` line in `.gitignore`;
 - `.cotal/` itself, Cotal's local agent state: never committed, so status reports it and strip leaves it (it goes
   when the old agents are stopped, a human step in orchestrators/switching.md).
@@ -15,6 +16,7 @@ setup runs `scripts/project-setup --no-start --orchestrator orca-cotal` on the p
 its adapting and reviewing agents, asks its own questions and commits on its own, so no PR is made and it says so
 first. It starts no coordinator or design lead; it prints how to start them.
 """
+import importlib.util
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,7 +31,19 @@ ADAPTED_FILES = ("coordinator.md", "design-lead.md", "project.md", "reviewer.md"
 BEGIN = "<!-- lane-control:begin -->"
 END = "<!-- lane-control:end -->"
 IGNORE_LINES = (".cotal/", ".cotal")
-SECTION = "AGENTS.md lane-control section"
+
+
+def _agentsdoc():
+    spec = importlib.util.spec_from_file_location("lc_agentsdoc", ROOT / "core" / "agentsdoc.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+DOC = _agentsdoc()
+GENERATED = DOC.GENERATED
+SECTION = "AGENTS.md lane-control section"  # where project-setup put it before AGENTS.lane-control.md
+GEN_SECTION = f"{GENERATED} lane-control section"
 WARNING = ("project-setup commits on its own; no PR is made. It edits the project's main checkout in place, runs its "
            "adapting and reviewing agents (headless) and asks its questions in this terminal. It starts no "
            "coordinator or design lead (--no-start).")
@@ -58,7 +72,8 @@ def agents_md(repo: Path) -> Path:
 def check_pairs(text: str):
     if text.count(BEGIN) != text.count(END) or text.count(BEGIN) > 1 or (
             BEGIN in text and text.index(END) < text.index(BEGIN)):
-        raise ValueError(f"AGENTS.md has unpaired or repeated {BEGIN} markers; fix it by hand and run again")
+        raise ValueError(f"AGENTS.md or {GENERATED} has unpaired or repeated {BEGIN} markers; fix it by hand and "
+                         "run again")
 
 
 def without_section(text: str) -> str:
@@ -90,6 +105,9 @@ def detect(project: Path) -> list:
         text = read(agents_md(project))
     except ValueError:
         text = read(project / "AGENTS.md")
+    gen = read(project / GENERATED)
+    if BEGIN in gen or END in gen:
+        found.append(GEN_SECTION)
     if BEGIN in text or END in text:
         found.append(SECTION)
     if ignore_lines(read(project / ".gitignore")):
@@ -101,12 +119,24 @@ def detect(project: Path) -> list:
 
 def strip(project: Path, work: Path) -> list:
     changes = []
-    f = agents_md(work)
-    text = read(f)
-    new = without_section(text)
+    f, g = agents_md(work), work / GENERATED
+    text, gen = read(f), read(g)
+    new, new_gen = without_section(text), without_section(gen)
+    name = f.resolve().relative_to(work.resolve()) if f.exists() else Path("AGENTS.md")
+    if new_gen != gen:
+        if DOC.holds_nothing(new_gen):
+            g.unlink()
+            changes.append(f"{GENERATED}: removed (it held only the lane-control section)")
+        else:
+            write(g, new_gen)
+            changes.append(f"{GENERATED}: removed the lane-control section")
+    if new != text:
+        changes.append(f"{name}: removed the lane-control section")
+    if not g.exists() and DOC.POINTER_MARK in new:
+        new = DOC.without_pointer(new)
+        changes.append(f"{name}: removed the pointer line")
     if new != text:
         write(f, new)
-        changes.append(f"{f.resolve().relative_to(work.resolve())}: removed the lane-control section")
     gi = work / ".gitignore"
     text = read(gi)
     if ignore_lines(text):

@@ -11,6 +11,7 @@ TEMPLATE = ROOT / "orchestrators" / "native-orca" / "templates" / "agents-sectio
 BEGIN = "<!-- orchestrator: native-orca -->"
 END = "<!-- /orchestrator: native-orca -->"
 RULES = "# Example project\n\n## Checks\n- `make test`.\n"
+GENERATED = "AGENTS.lane-control.md"
 
 
 def load():
@@ -44,48 +45,95 @@ class AdapterTests(unittest.TestCase):
     def test_actions(self):
         self.assertEqual(self.a.ACTIONS, frozenset({"status", "setup", "strip"}))
 
-    def test_setup_appends_section_once(self):
+    def doc(self):
+        spec = importlib.util.spec_from_file_location("agentsdoc_t", ROOT / "core" / "agentsdoc.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def gen(self):
+        f = self.p / GENERATED
+        return f.read_text() if f.exists() else None
+
+    def test_setup_writes_the_section_to_its_own_file_and_one_pointer_line(self):
         (self.p / "AGENTS.md").write_text(RULES)
         self.assertTrue(self.a.setup(self.p, self.p))
-        once = (self.p / "AGENTS.md").read_text()
-        self.assertTrue(once.startswith(RULES))
-        self.assertEqual(once.count(BEGIN), 1)
+        d = self.doc()
+        self.assertEqual((self.p / "AGENTS.md").read_text(), RULES + "\n" + d.POINTER + "\n")
+        self.assertEqual(self.gen(), d.HEADER + "\n" + TEMPLATE.read_text())
+        once = (self.gen(), (self.p / "AGENTS.md").read_text())
         self.assertEqual(self.a.setup(self.p, self.p), [])
-        self.assertEqual((self.p / "AGENTS.md").read_text(), once)
+        self.assertEqual((self.gen(), (self.p / "AGENTS.md").read_text()), once)
 
     def test_setup_creates_agents_md_if_missing(self):
         changes = self.a.setup(self.p, self.p)
         self.assertTrue(changes)
-        text = (self.p / "AGENTS.md").read_text()
-        self.assertEqual(text, TEMPLATE.read_text())
+        self.assertEqual((self.p / "AGENTS.md").read_text(), self.doc().POINTER + "\n")
+        self.assertEqual(self.gen().count(BEGIN), 1)
 
-    def test_setup_refreshes_an_older_section_in_place(self):
+    def test_setup_moves_a_section_out_of_agents_md(self):
         (self.p / "AGENTS.md").write_text(RULES + "\n" + BEGIN + "\nold text\n" + END + "\n\n## After\nkept\n")
-        self.a.setup(self.p, self.p)
+        changes = self.a.setup(self.p, self.p)
         text = (self.p / "AGENTS.md").read_text()
-        self.assertNotIn("old text", text)
-        self.assertEqual(text.count(BEGIN), 1)
-        self.assertTrue(text.endswith("## After\nkept\n"))
+        self.assertEqual(text, RULES + "\n## After\nkept\n\n" + self.doc().POINTER + "\n")
+        self.assertNotIn("old text", self.gen())
+        self.assertEqual(self.gen().count(BEGIN), 1)
+        self.assertIn("moved", " ".join(changes))
+        self.assertEqual(self.a.setup(self.p, self.p), [])
 
-    def test_detect_by_markers(self):
+    def test_setup_refreshes_an_older_section_in_the_generated_file_in_place(self):
+        (self.p / "AGENTS.md").write_text(RULES)
+        self.a.setup(self.p, self.p)
+        f = self.p / GENERATED
+        f.write_text(f.read_text().replace("Coordinator:", "OLD WORDING") + "\n## Kept\nhand text\n")
+        self.a.setup(self.p, self.p)
+        self.assertNotIn("OLD WORDING", self.gen())
+        self.assertEqual(self.gen().count(BEGIN), 1)
+        self.assertTrue(self.gen().endswith("## Kept\nhand text\n"))
+
+    def test_detect_by_markers_in_either_file(self):
         (self.p / "AGENTS.md").write_text(RULES)
         self.assertEqual(self.a.detect(self.p), [])
         self.a.setup(self.p, self.p)
+        self.assertEqual(self.a.detect(self.p), [f"{GENERATED} native-orca section"])
+        (self.p / GENERATED).unlink()
+        (self.p / "AGENTS.md").write_text(RULES + "\n" + TEMPLATE.read_text())
         self.assertEqual(self.a.detect(self.p), ["AGENTS.md native-orca section"])
 
-    def test_strip_removes_section_only(self):
+    def test_strip_removes_section_file_and_pointer(self):
         (self.p / "AGENTS.md").write_text(RULES)
         self.a.setup(self.p, self.p)
         self.assertTrue(self.a.strip(self.p, self.p))
         self.assertEqual((self.p / "AGENTS.md").read_text(), RULES)
+        self.assertFalse((self.p / GENERATED).exists())
         self.assertEqual(self.a.strip(self.p, self.p), [])
 
+    def test_strip_keeps_the_file_and_pointer_while_another_section_is_in_it(self):
+        (self.p / "AGENTS.md").write_text(RULES)
+        self.a.setup(self.p, self.p)
+        other = "<!-- lane-control:begin -->\nlc\n<!-- lane-control:end -->"
+        f = self.p / GENERATED
+        f.write_text(f.read_text() + "\n" + other + "\n")
+        self.a.strip(self.p, self.p)
+        self.assertNotIn(BEGIN, f.read_text())
+        self.assertIn(other, f.read_text())
+        self.assertIn(self.doc().POINTER_MARK, (self.p / "AGENTS.md").read_text())
+
+    def test_strip_removes_an_old_section_left_in_agents_md(self):
+        (self.p / "AGENTS.md").write_text(RULES + "\n" + TEMPLATE.read_text())
+        self.assertTrue(self.a.strip(self.p, self.p))
+        self.assertEqual((self.p / "AGENTS.md").read_text(), RULES)
+
     def test_unpaired_markers_refused(self):
-        (self.p / "AGENTS.md").write_text(RULES + BEGIN + "\n")
-        with self.assertRaises(ValueError):
-            self.a.setup(self.p, self.p)
-        with self.assertRaises(ValueError):
-            self.a.strip(self.p, self.p)
+        for name in ("AGENTS.md", GENERATED):
+            with self.subTest(name=name):
+                (self.p / GENERATED).unlink(missing_ok=True)
+                (self.p / "AGENTS.md").write_text(RULES)
+                (self.p / name).write_text(RULES + BEGIN + "\n")
+                with self.assertRaises(ValueError):
+                    self.a.setup(self.p, self.p)
+                with self.assertRaises(ValueError):
+                    self.a.strip(self.p, self.p)
 
 
 class CommandTests(OrchTest):
@@ -96,7 +144,8 @@ class CommandTests(OrchTest):
         self.assertEqual((p / "AGENTS.md").read_text(), RULES)
         self.assertEqual(len([c for c in self.e.gh_calls() if c.startswith("pr create")]), 1)
         branch = next(b for b in git(p, "ls-remote", "--heads", "origin").stdout.split() if "orch/setup-native-orca" in b)
-        self.assertIn(BEGIN, git(p, "show", f"{branch}:AGENTS.md").stdout)
+        self.assertIn(BEGIN, git(p, "show", f"{branch}:{GENERATED}").stdout)
+        self.assertIn("lane-control:pointer", git(p, "show", f"{branch}:AGENTS.md").stdout)
         r = self.e.run("status", str(p))
         self.assertIn("none detected", r.stdout)  # the main checkout changes only when the PR is merged and pulled
 

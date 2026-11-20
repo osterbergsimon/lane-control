@@ -17,9 +17,10 @@ Pin the Orca version you tested: Orca ships often and its orchestration commands
 - Check: `orca-ide orchestration --help` lists the commands below.
 
 ## A project
-`scripts/orch setup <project> --orchestrator native-orca` opens a PR that adds a short section to the project's
-AGENTS.md (`templates/agents-section.md`): how the coordinator works on Orca's orchestration, the heavy-work rule and
-where the handovers live. The project's own facts stay in its AGENTS.md.
+`scripts/orch setup <project> --orchestrator native-orca` opens a PR that adds a short section
+(`templates/agents-section.md`) to the project's `AGENTS.lane-control.md`, with one pointer line to it in AGENTS.md:
+how the coordinator works on Orca's orchestration, the heavy-work rule and where the handovers live. The project's own
+facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writes into a project").
 
 ## How a coordinator works
 - **Run and tasks:** the coordinator makes a run and its tasks (with dependencies), then starts every ready task
