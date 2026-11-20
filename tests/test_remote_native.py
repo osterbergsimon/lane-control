@@ -631,7 +631,11 @@ class ReviewRound1Tests(Case):
         # M2: argparse stops the plain positional form, not --host=-o... or --remove-host=-o...
         for args in (["--host=-oProxyCommand=touch_x", str(self.repo)], ["--remove-host=-oProxyCommand=touch_x"],
                      [str(self.repo), "--host", "box\nx"], [str(self.repo), "--host", "box name"],
-                     ["--remove-host", "box;id"]):
+                     ["--remove-host", "box;id"],
+                     # N9: the Orca + Cotal host path keeps its old ssh lines, so this check is what guards it
+                     ["--host=-oProxyCommand=touch_x", str(self.repo), "--orchestrator", "orca-cotal"],
+                     [str(self.repo), "--host", "box name", "--orchestrator", "orca-cotal"],
+                     [str(self.repo), "--host", "box\nx", "--orchestrator", "orca-cotal"]):
             r = self.e.setup(*args, "--no-start")
             self.assertEqual(r.returncode, 2, (args, r.stderr + r.stdout))
             self.assertIn("host", r.stderr)
@@ -675,6 +679,20 @@ class ReviewRound1Tests(Case):
         self.assertIn("lane-tier", r.stderr)
         self.assertEqual(self.e.lines(".ssh"), [])
 
+    def test_the_host_run_appends_its_own_bin_folders_to_path(self):
+        # N11: ~/bin and ~/.local/bin go after the system's PATH, so nothing there shadows git or python3.
+        for d in ("bin", ".local/bin"):
+            (self.e.box / d).mkdir(parents=True, exist_ok=True)
+        probe = self.e.box / "path.txt"
+        r = subprocess.run([sys.executable, "-c", "import os, runpy, sys; sys.argv = sys.argv[1:]; "
+                            "m = runpy.run_path(sys.argv[0], run_name='probe'); m['main'](sys.argv[1:]); "
+                            f"open({str(probe)!r}, 'w').write(os.environ['PATH'])",
+                            str(SETUP), str(self.repo), "--via-host", "--which-orchestrator"],
+                           env={**self.e.env, "HOME": str(self.e.box)}, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        parts = probe.read_text().split(":")
+        self.assertEqual(parts[-2:], [str(self.e.box / "bin"), str(self.e.box / ".local" / "bin")])
+
     def test_the_host_run_finds_an_agent_in_its_local_bin(self):
         # m3: a non-interactive ssh shell's PATH lacks ~/.local/bin, where agents are often installed.
         self.e.saved("box")
@@ -686,6 +704,30 @@ class ReviewRound1Tests(Case):
         r = self.e.setup(str(self.repo), "box", "--no-design-lead", "--no-desktop-lanes", "--no-machine-setup",
                          env_extra={"LANE_RUN_WAIT": "0"})
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+
+class LoopbackTests(unittest.TestCase):
+    def test_only_a_non_loopback_listener_counts_as_exposed(self):
+        # m6 / n1: what the box checks after the tunnel is up (Linux /proc/net/tcp*).
+        import socket
+        m = load()
+        cases = [(socket.AF_INET, "127.0.0.1", False), (socket.AF_INET, "0.0.0.0", True)]
+        if socket.has_ipv6:
+            cases += [(socket.AF_INET6, "::1", False), (socket.AF_INET6, "::ffff:127.0.0.1", False),
+                      (socket.AF_INET6, "::", True)]
+        for family, address, exposed in cases:
+            s = socket.socket(family)
+            try:
+                if family == socket.AF_INET6:
+                    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                try:
+                    s.bind((address, 0))
+                except OSError:
+                    continue  # no such address here (an IPv6-less container)
+                s.listen()
+                self.assertEqual(m.listens_beyond_loopback(s.getsockname()[1]), exposed, address)
+            finally:
+                s.close()
 
 
 class ReviewRound1PairingTests(Case):

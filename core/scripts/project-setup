@@ -3480,7 +3480,7 @@ def remove_host(host: str) -> int:
 def listens_beyond_loopback(port: int) -> bool:
     """Whether a TCP listener on this port has an address other than 127.0.0.0/8 or ::1 (from /proc/net/tcp*)."""
     for f, loop in (("/proc/net/tcp", lambda a: a[6:8] == "7F"),  # little-endian IPv4: 127.x.x.x ends in 7F
-                    ("/proc/net/tcp6", lambda a: a == "0" * 24 + "01000000" or a.startswith("0" * 20 + "FFFF0000")
+                    ("/proc/net/tcp6", lambda a: a == "0" * 24 + "01000000" or a.startswith("0" * 16 + "FFFF0000")
                      and a[30:32] == "7F")):
         try:
             rows = Path(f).read_text().splitlines()[1:]
@@ -3668,11 +3668,11 @@ def main(argv=None) -> int:
         if why:
             print(f"project-setup: {why}", file=sys.stderr)
             return 2
-    if a.via_host:  # a non-interactive ssh shell's PATH lacks the folders agents are often installed in
-        home = Path(os.environ.get("HOME", str(Path.home())))
+    if a.via_host:  # a non-interactive ssh shell's PATH lacks the folders agents are often installed in; they go
+        home = Path(os.environ.get("HOME", str(Path.home())))  # last, so nothing there shadows git or python3
         for d in (home / "bin", home / ".local" / "bin"):
             if d.is_dir() and str(d) not in os.environ.get("PATH", "").split(":"):
-                os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
+                os.environ["PATH"] = f"{os.environ.get('PATH', '')}:{d}"
     if a.remove_host:
         if a.target or a.host or a.host_pos:
             print("project-setup: --remove-host takes the host alone: project-setup --remove-host <host>", file=sys.stderr)

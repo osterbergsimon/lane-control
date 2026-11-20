@@ -5,7 +5,8 @@ window (design: `docs/superpowers/specs/2026-11-19-native-orca-setup-design.md`,
 an absolute (or `~/`) path on the host; `<host>` is what ssh calls it (`LANE_SSH_CONFIG` names a separate ssh config,
 passed as `ssh -F`, for trial hosts). `--host <host>` means the same. A host that is not a plain name (an option, a
 space, a newline) is refused before anything runs. Setup's own ssh calls never wait for a password (`BatchMode`,
-`ConnectTimeout`, keepalives); only the host's own run keeps a terminal, to ask the owner. With `--show` or
+`ConnectTimeout`, keepalives); only the host's own run keeps a terminal, to ask the owner. So run `ssh <host>` once
+by hand first: with `BatchMode` an unknown host key is refused ("Host key verification failed"), not asked about. With `--show` or
 `--refresh`, only the copy and the host's own `--show` or `--refresh` run. Every step says `exists` on a re-run.
 
 ## Direction 1: this machine drives the box
@@ -21,7 +22,7 @@ space, a newline) is refused before anything runs. Setup's own ssh calls never w
    native setup of phase 3 there: rendered personas, the persona hook, the AGENTS.md sections, the settings store
    and the coordinator (and design lead) in Orca terminals of the box's own server, which show in this machine's
    window through the paired environment. With `--no-start` no agent needs to be on the box yet; the run there adds
-   `~/.local/bin` and `~/bin` to its PATH, where agents are often installed.
+   `~/bin` and `~/.local/bin` to the end of its PATH, where agents are often installed.
 4. `core/scripts/machine-setup --host <host>` (skipped with `--no-machine-setup`): the box's own machine coordinator,
    night manager, lane sweep and machine check.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.
