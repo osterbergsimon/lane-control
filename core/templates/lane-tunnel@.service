@@ -1,0 +1,15 @@
+# lane-control: the reverse tunnel that lets SSH host %i reach this machine's Orca (native-Orca setup, direction 2:
+# the host's coordinator runs lanes here). Written by core/scripts/lane-tunnel; its host and port are in the
+# instance's env file. Same port at both ends, on 127.0.0.1 only, so the desktop's share link works on the host as is.
+[Unit]
+Description=lane-control tunnel: %i reaches this machine's Orca
+After=network-online.target
+
+[Service]
+EnvironmentFile=@TUNNELS@/%i.env
+ExecStart=/bin/sh -c 'exec ssh $${SSH_CONFIG:+-F "$$SSH_CONFIG"} -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R "127.0.0.1:$${PORT}:127.0.0.1:$${PORT}" "$$SSH_HOST"'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

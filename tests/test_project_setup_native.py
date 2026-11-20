@@ -443,13 +443,8 @@ class StartTests(Case):
     def test_where_to_run_is_one_seam(self):
         m = load()
         self.assertEqual(m.Place().argv("terminal", "list"), [m.ORCA, "terminal", "list"])
-        with self.assertRaises(NotImplementedError) as e:
-            m.Place("box")
-        self.assertIn("phase 6", str(e.exception))
-        r = self.e.run("~/code/app", "--host", "box", "--orchestrator", "native-orca")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("phase 6", r.stderr)
-        self.assertEqual(self.e.calls(), [])
+        # phase 6: a host's Place routes the same calls to its paired Orca server (tests/test_remote_native.py)
+        self.assertEqual(m.Place("box").argv("terminal", "list"), [m.ORCA, "terminal", "list", "--environment", "box"])
 
 
 # --- Task 3.4 ------------------------------------------------------------------------------------------------------
@@ -855,7 +850,8 @@ class AnswersTests(Case):
 
 
 class HostTests(Case):
-    """M4: --host with no flag is the Orca + Cotal host path as on main; the host's own copy decides from its store."""
+    """M4: --host with --orchestrator orca-cotal is the Orca + Cotal host path as on main (phase 6: without a flag it
+    is the native host path, tests/test_remote_native.py)."""
 
     def ssh(self):
         ssh = self.e.bin / "ssh"
@@ -866,8 +862,8 @@ class HostTests(Case):
         self.ssh()
         shapes = (["https://example.com/acme/shop.git", "--host", "user@host", "--name", "Shop", "--coordinator",
                    "claude/opus", "--design-lead", "claude/opus", "--permission-mode", "bypassPermissions",
-                   "--reviewer", "claude/opus", "--trust-folder"],
-                  ["~/code/shop", "--host", "user@host", "--no-design-lead", "--no-start"])
+                   "--reviewer", "claude/opus", "--trust-folder", "--orchestrator", "orca-cotal"],
+                  ["~/code/shop", "user@host", "--no-design-lead", "--no-start", "--orchestrator", "orca-cotal"])
         for args in shapes:
             self.e.log.unlink(missing_ok=True)
             r = self.e.run(*args, adapt=True)
@@ -876,12 +872,13 @@ class HostTests(Case):
             self.assertEqual(len(calls), 2, calls)
             self.assertIn(".local/share/lane-control/scripts/project-setup", calls[1])
             self.assertIn("--via-host", calls[1])
-            self.assertNotIn("--host", calls[1])
-            self.assertNotIn("--orchestrator", calls[1])
+            self.assertNotIn("--host", calls[1].replace("--via-host", ""))
+            self.assertNotIn(" user@host", calls[1].split(" ", 2)[2])  # the host is ssh's, not the host run's
+            self.assertIn("--orchestrator orca-cotal", calls[1])
 
     def test_a_cotal_only_permission_mode_is_still_refused_locally(self):
         self.ssh()
-        r = self.e.run("~/code/shop", "--host", "user@host", "--permission-mode", "plan")
+        r = self.e.run("~/code/shop", "--host", "user@host", "--permission-mode", "plan", "--orchestrator", "orca-cotal")
         self.assertEqual(r.returncode, 2)
         self.assertEqual(self.e.calls(), [])
 
@@ -891,15 +888,13 @@ class HostTests(Case):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertTrue([c for c in self.e.calls() if c.startswith("cotal space")])
 
-    def test_on_the_host_a_native_project_stops_at_phase_6(self):
+    def test_on_the_host_a_native_project_runs_the_native_path(self):
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)  # set up on native there already
-        before = (self.e.store(self.repo) / "settings.json").read_bytes()
         self.e.log.unlink()
         r = self.e.run(str(self.repo), "--via-host", "--no-start")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("phase 6", r.stderr)
-        self.assertEqual(self.e.calls(), [])
-        self.assertEqual((self.e.store(self.repo) / "settings.json").read_bytes(), before)  # never switched
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse([c for c in self.e.calls() if c.startswith("cotal")])
+        self.assertEqual(self.e.settings(self.repo)["orchestrator"], "native-orca")
 
 
 class NoGitTests(Case):
@@ -1033,12 +1028,12 @@ class Round2Tests(Case):
         limits = [c.split("--limit ", 1)[1].split()[0] for c in self.e.calls() if "run-list" in c]
         self.assertTrue(limits and all(int(x) <= 100 for x in limits), limits)
 
-    def test_a_new_project_over_host_runs_the_cotal_path_there(self):
-        # R2-2: the first orca.md command; the host's copy has no store and no .cotal/ for it yet.
+    def test_a_new_project_over_host_runs_the_native_path_there(self):
+        # R2-2, phase 6: the host's copy has no store and no .cotal/ for it yet, so it takes the default.
         r = self.e.run(str(self.repo), "--via-host", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        self.assertTrue([c for c in self.e.calls() if c.startswith("cotal space")])
-        self.assertEqual(self.e.settings(self.repo)["orchestrator"], "orca-cotal")
+        self.assertFalse([c for c in self.e.calls() if c.startswith("cotal")])
+        self.assertEqual(self.e.settings(self.repo)["orchestrator"], "native-orca")
 
     def live_agent(self, argv0, *args, role="coordinator", cwd=None):
         """A process whose argv[0] is argv0 (python, which ignores argv[0]; a multi-call coreutils would not run)."""
