@@ -4,11 +4,15 @@
 # Limits: presence, then the owner's per-machine file (limits.example.sh documents it), then defaults from cores,
 # memory and presence for whatever the file left unset:
 #   LANE_LIMITS_FILE   the file (default ~/.config/lane-control/limits.sh; absent is fine)
-#   LANE_AWAY_FILE     the owner is away while it is younger than 14 h (default ~/.config/lane-control/away)
+#   LANE_AWAY_FILE     the owner is away while it is younger than AWAY_HOURS, 14 h by default
+#                      (default ~/.config/lane-control/away; lane-away writes it)
+#   LANE_MACHINE_CONF  the machine config (default ~/.config/lane-control/machine.conf; absent is fine): night is
+#                      NIGHT_START-NIGHT_END there (default 23-07) and the away file lasts AWAY_HOURS. Only plain
+#                      `KEY=<digits>` lines are read; the file is never sourced here.
 #   LANE_BUDGET_STOPPED_FILE  the budget is at its stop step while it is younger than 1 h: agents sit idle until the
 #                      reset, so the machine is CI's (default ~/.config/lane-control/budget-stopped). Its writer
 #                      touches it on every check while the budget stays stopped and removes it after the reset.
-# Presence, for the file to branch on: LANE_PRESENCE is day or away (night 23-07, the away file, or the budget
+# Presence, for the file to branch on: LANE_PRESENCE is day or away (night, the away file, or the budget
 # stopped), and LANE_PRESENCE_WHY says which. It is for limits only. LANE_OWNER_AWAY is 1 only at night or with the
 # away file, whatever the budget: anything that would spend budget (a night check-in) reads that one, never
 # LANE_PRESENCE, since a stopped budget makes the machine CI's, not the owner absent. A running job keeps the limits
@@ -21,6 +25,7 @@ LANE_PROC_DIR=${LANE_PROC_DIR:-/proc}
 LANE_LIMITS_FILE=${LANE_LIMITS_FILE:-$HOME/.config/lane-control/limits.sh}
 LANE_AWAY_FILE=${LANE_AWAY_FILE:-$HOME/.config/lane-control/away}
 LANE_BUDGET_STOPPED_FILE=${LANE_BUDGET_STOPPED_FILE:-$HOME/.config/lane-control/budget-stopped}
+LANE_MACHINE_CONF=${LANE_MACHINE_CONF:-$HOME/.config/lane-control/machine.conf}
 
 # `--all`: plain nproc shrinks with OMP_NUM_THREADS and affinity, so two lanes could compute different limits.
 LANE_CORES=$(nproc --all 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
@@ -32,12 +37,27 @@ lane_at_least() { if [ "$1" -gt "$2" ]; then echo "$1"; else echo "$2"; fi; }
 lane_at_most() { if [ "$1" -lt "$2" ]; then echo "$1"; else echo "$2"; fi; }
 
 # Day, or night-or-away: the owner is not using the machine, so heavy work and CI may take more of it.
+# lane_conf <KEY> <default> <max>: a whole number from the machine config, or the default for a missing or junk one.
+lane_conf() {
+  local v
+  v=$(sed -n "s/^$1=[\"']\{0,1\}\([0-9]\{1,3\}\)[\"']\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p" "$LANE_MACHINE_CONF" 2>/dev/null | tail -1)
+  if [ -n "$v" ] && [ "$((10#$v))" -le "$3" ]; then echo "$((10#$v))"; else echo "$2"; fi
+}
+LANE_NIGHT_START=$(lane_conf NIGHT_START 23 23) LANE_NIGHT_END=$(lane_conf NIGHT_END 7 23)
+LANE_AWAY_HOURS=$(lane_conf AWAY_HOURS 14 999)
 lane_hour=${LANE_HOUR:-$(date +%H)}
 lane_hour=$((10#${lane_hour:-12}))
+# Night wraps past midnight when it starts later than it ends (23-07); equal start and end means no night.
+lane_night=
+if [ "$LANE_NIGHT_START" -gt "$LANE_NIGHT_END" ]; then
+  { [ "$lane_hour" -ge "$LANE_NIGHT_START" ] || [ "$lane_hour" -lt "$LANE_NIGHT_END" ]; } && lane_night=1
+elif [ "$lane_hour" -ge "$LANE_NIGHT_START" ] && [ "$lane_hour" -lt "$LANE_NIGHT_END" ]; then
+  lane_night=1
+fi
 LANE_PRESENCE=day LANE_PRESENCE_WHY=day LANE_OWNER_AWAY=
-if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -840 2>/dev/null)" ]; then
+if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -$((LANE_AWAY_HOURS * 60)) 2>/dev/null)" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY="owner away" LANE_OWNER_AWAY=1
-elif [ "$lane_hour" -ge 23 ] || [ "$lane_hour" -lt 7 ]; then
+elif [ -n "$lane_night" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY=night LANE_OWNER_AWAY=1
 elif [ -n "$(find "$LANE_BUDGET_STOPPED_FILE" -maxdepth 0 -mmin -60 2>/dev/null)" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY="budget stopped"

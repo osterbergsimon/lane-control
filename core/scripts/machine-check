@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""machine-check: the machine check automation's precheck (every 30 minutes; spec section 8). Exit 0 = something
+changed, so the automation's agent passes it on to the machine coordinator; anything else = skip, which costs nothing.
+
+  machine-check          compare budget steps, memory and runners with the last check; print one line per change:
+                           CHANGED budget <b>: step <n> <name> (weekly <w>%, ceiling <c>; was step <m> <name>)
+                           CHANGED budget <b>: unknown (...)           the usage feed or the config gives no reading
+                           CHANGED memory: low, <n>G available (...)   / ok again
+                           CHANGED runners <repo>: offline <a,b> (was none)
+  machine-check --last   print the changes the last check found (what the automation's agent passes on)
+
+Every run also writes or clears the budget-stopped marker (`budget-state --mark`), which needs a run at least hourly.
+Memory is low below lane-room's minimum (LANE_ROOM_MIN_MEM_GB from lane-limits.sh). Runners are RUNNER_REPOS from
+machine.conf; a runner list gh cannot read keeps the last known state. A first run counts the normal state (step 0,
+memory ok, no runner offline) as the last one. State: ~/.cache/lane-control/machine-check.json.
+Exit: 0 changed (or --last); 1 nothing changed; 2 the state file cannot be written.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import machineconf  # noqa: E402
+
+
+def state_file() -> Path:
+    v = os.environ.get("XDG_CACHE_HOME")
+    base = Path(v) if v and os.path.isabs(v) else Path.home() / ".cache"
+    return base / "lane-control" / "machine-check.json"
+
+
+def budgets() -> dict:
+    """{budget: {"step": n, "name": ..., "weekly": w, "ceiling": c} or {"step": "unknown", "why": ...}}."""
+    r = subprocess.run([str(HERE / "budget-state"), "--mark"], capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        why = (r.stderr.strip().splitlines() or ["budget-state failed"])[-1].removeprefix("budget-state: ")
+        return {"*": {"step": "unknown", "why": why}}
+    out = {}
+    for line in r.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 2 and f[1] == "unknown":
+            out[f[0]] = {"step": "unknown", "why": line.split(" ", 2)[2].strip("()")}
+        elif len(f) >= 6:
+            kv = dict(x.split("=", 1) for x in f[1:5])
+            out[f[0]] = {"step": int(kv["step"]), "name": f[5], "weekly": int(kv["weekly"]),
+                         "ceiling": int(kv["ceiling"])}
+    return out
+
+
+def mem_available_gb() -> int:
+    meminfo = Path(os.environ.get("LANE_PROC_DIR") or "/proc") / "meminfo"
+    for line in meminfo.read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) // 1048576
+    raise OSError(f"{meminfo}: no MemAvailable")
+
+
+def step_text(b: dict) -> str:
+    if b.get("step") == "unknown":
+        return "unknown"
+    return f"step {b.get('step', 0)} {b.get('name', 'none')}"
+
+
+def main(argv) -> int:
+    sf = state_file()
+    try:
+        old = json.loads(sf.read_text())
+    except FileNotFoundError:
+        old = {}
+    except (OSError, ValueError):
+        old = {}
+    if argv == ["--last"]:
+        print("\n".join(old.get("last", [])) or "machine-check: no change found yet")
+        return 0
+    if argv:
+        print("usage: machine-check [--last]", file=sys.stderr)
+        return 2
+    changes, new = [], {"budgets": {}, "runners": dict(old.get("runners", {}))}
+
+    now_budgets = budgets()
+    if "*" in now_budgets:  # budget-state itself failed: keep what is known per budget, report the failure once
+        now_budgets = {**{k: v for k, v in old.get("budgets", {}).items() if k != "*"}, "*": now_budgets["*"]}
+    for name, b in sorted(now_budgets.items()):
+        new["budgets"][name] = b
+        was = old.get("budgets", {}).get(name, {"step": 0, "name": "none"})
+        if b.get("step") == was.get("step"):
+            continue
+        label = "every budget" if name == "*" else name
+        if b["step"] == "unknown":
+            changes.append(f"CHANGED budget {label}: unknown ({b['why']}; was {step_text(was)})")
+        else:
+            changes.append(f"CHANGED budget {label}: {step_text(b)} (weekly {b['weekly']}%, ceiling {b['ceiling']}; "
+                           f"was {step_text(was)})")
+    for name in sorted(set(old.get("budgets", {})) - set(new["budgets"]) - {"*"}):
+        changes.append(f"CHANGED budget {name}: no longer metered")
+
+    try:
+        avail = mem_available_gb()
+        floor = int(machineconf.presence().get("LANE_ROOM_MIN_MEM_GB") or 2)
+    except (OSError, ValueError, machineconf.ConfError) as e:
+        avail, floor = None, 0
+        print(f"machine-check: memory unknown ({e})", file=sys.stderr)
+    new["memory"] = old.get("memory", "ok") if avail is None else ("low" if avail < floor else "ok")
+    if new["memory"] != old.get("memory", "ok"):
+        if new["memory"] == "low":
+            changes.append(f"CHANGED memory: low, {avail}G available (lane-room holds new lanes under {floor}G)")
+        else:
+            changes.append(f"CHANGED memory: ok again, {avail}G available")
+
+    try:
+        repos = machineconf.runner_repos(machineconf.load())
+    except machineconf.ConfError:
+        repos = []
+    for repo in repos:
+        try:
+            off = sorted(machineconf.offline_runners(repo))
+        except machineconf.RunnerError as e:
+            print(f"machine-check: runners of {e}: last known state kept", file=sys.stderr)
+            continue
+        was = old.get("runners", {}).get(repo, [])
+        new["runners"][repo] = off
+        if off != was:
+            now_txt = f"offline {','.join(off)}" if off else "all online"
+            changes.append(f"CHANGED runners {repo}: {now_txt} (was {('offline ' + ','.join(was)) if was else 'none'})")
+    new["runners"] = {r: v for r, v in new["runners"].items() if r in repos}
+
+    new["last"] = ([time.strftime("%Y-%m-%d %H:%M")] + changes) if changes else old.get("last", [])
+    try:
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        tmp = sf.with_name(sf.name + ".tmp")
+        tmp.write_text(json.dumps(new, indent=1) + "\n")
+        tmp.replace(sf)
+    except OSError as e:
+        print(f"machine-check: cannot write {sf} ({e}); skipping", file=sys.stderr)
+        return 2
+    for line in changes:
+        print(line)
+    return 0 if changes else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

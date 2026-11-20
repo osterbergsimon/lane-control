@@ -37,3 +37,25 @@ where the handovers live. The project's own facts stay in its AGENTS.md.
 Every build and full test suite runs through `~/.agents/bin/lane-heavy <command>`, one machine-wide gate for every
 project and lane (`core/machine.md`); open a lane only when `~/.agents/bin/lane-room` exits 0. A project can route
 its own heavy targets (a CI script, a make target) through `lane-heavy` so every caller gets the gate.
+
+## A machine
+`core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
+every step says `exists` on a re-run):
+- `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators
+  (name, checkout, harness, terminal title), the runner repos it watches, night hours, idle and recheck minutes, and
+  how long `lane-away on` lasts. Fill it in by hand; no value from it goes in a repo.
+- The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an
+  Orca terminal titled `machine coordinator` with its persona and hook.
+- Three Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
+  manager` hourly (`night-precheck`; the agent follows `night-manager.md`), `lane sweep` every 3 hours
+  (`lane-sweep --precheck`, report only, waking its agent only for findings new since the last run) and `machine check` every 30 minutes (`machine-check`: a budget step,
+  memory or runner state changed; it also keeps the `budget-stopped` marker for the CI limits).
+- The `ci-presence` user timer: the CI slice's CPU and memory follow presence (`lane-limits.sh`).
+- On a machine set up by hand before: automations named `night-manager` or `lane-sweep` and an older CI timer
+  (`ci-cpu`) are reported with the commands to remove them; nothing is doubled or replaced without the owner.
+- The usage feed check: without `~/.claude/usage-history.jsonl` written in the last hour, budget steps are unknown
+  and night check-ins stay off (the night precheck says so once a night).
+
+The owner says they leave or return with `core/scripts/lane-away on|off|status` (or asks the machine coordinator).
+A coordinator gets night check-ins only when it was started with `LANE_ROLE`/`LANE_PERSONA` (project-setup does
+this); one started by hand is named on the precheck's stderr instead.

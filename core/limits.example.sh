@@ -3,8 +3,8 @@
 # machine. With no file, the defaults below are worked out from this machine's cores, memory and presence. Whole
 # numbers only; $LANE_CORES and $LANE_MEM_GB are available for values that follow the machine.
 #
-# Presence: $LANE_PRESENCE is `day`, or `away` at night (23-07), while ~/.config/lane-control/away is younger than
-# 14 h, or while ~/.config/lane-control/budget-stopped is younger than 1 h (the budget is at its stop step and agents
+# Presence: $LANE_PRESENCE is `day`, or `away` at night (NIGHT_START-NIGHT_END in ~/.config/lane-control/machine.conf,
+# default 23-07), while ~/.config/lane-control/away (`lane-away on`) is younger than AWAY_HOURS (default 14 h), or while ~/.config/lane-control/budget-stopped is younger than 1 h (the budget is at its stop step and agents
 # sit idle until the reset, so CI gets the machine); $LANE_PRESENCE_WHY says which. $LANE_PRESENCE is for limits only:
 # $LANE_OWNER_AWAY is 1 only at night or with the away file, and anything that spends budget reads that one. Defaults
 # already follow presence; to set your own per presence, branch on it:

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# lane-away: tell this machine the owner is away, or back.
+#
+#   lane-away on       the owner is away: writes ~/.config/lane-control/away (LANE_AWAY_FILE). It counts for
+#                      AWAY_HOURS from machine.conf (default 14 h), so a forgotten `off` never lasts for days; run
+#                      `on` again to extend it.
+#   lane-away off      the owner is back: removes the file.
+#   lane-away status   presence as lane-limits.sh sees it now: for limits (day or away, and why) and whether the
+#                      owner counts as away (night or the away file; never a stopped budget).
+#
+# Away or night gives the CI slice (ci-presence) and lane-heavy their larger limits, and lets the night manager
+# check in on idle coordinators. The owner runs it, or asks the machine coordinator to. Exit: 0, or 2 for usage.
+set -u
+self=$(readlink -f "$0")
+# shellcheck source=lane-limits.sh
+. "${self%/*}/lane-limits.sh"
+
+case ${1:-} in
+  on)
+    mkdir -p "$(dirname "$LANE_AWAY_FILE")" && touch "$LANE_AWAY_FILE" || exit 1
+    echo "lane-away: away for ${LANE_AWAY_HOURS} h (until $(date -d "+${LANE_AWAY_HOURS} hours" '+%a %H:%M'));" \
+      "the CI slice follows within 15 minutes"
+    ;;
+  off)
+    rm -f "$LANE_AWAY_FILE" || exit 1
+    echo "lane-away: back; the CI slice follows within 15 minutes"
+    ;;
+  status)
+    if [ -e "$LANE_AWAY_FILE" ]; then
+      since=$(date -r "$LANE_AWAY_FILE" '+%a %H:%M')
+      if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -$((LANE_AWAY_HOURS * 60)) 2>/dev/null)" ]; then
+        echo "away file: since $since, counts for ${LANE_AWAY_HOURS} h"
+      else
+        echo "away file: since $since, expired (older than ${LANE_AWAY_HOURS} h)"
+      fi
+    else
+      echo "away file: none"
+    fi
+    echo "night: ${LANE_NIGHT_START}:00-${LANE_NIGHT_END}:00"
+    if [ "$LANE_PRESENCE" = day ]; then echo "presence: day"; else echo "presence: away ($LANE_PRESENCE_WHY)"; fi
+    if [ -n "$LANE_OWNER_AWAY" ]; then echo "owner away: yes ($LANE_PRESENCE_WHY)"; else echo "owner away: no"; fi
+    ;;
+  -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self" ;;
+  *) echo "usage: lane-away on|off|status" >&2; exit 2 ;;
+esac

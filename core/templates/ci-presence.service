@@ -1,0 +1,8 @@
+# Rendered and installed by core/scripts/machine-setup. Do not edit the installed copy: rerun machine-setup.
+[Unit]
+Description=lane-control ci-presence (the CI slice's CPU and memory limits follow presence; spends no tokens)
+
+[Service]
+Type=oneshot
+Environment="PATH=@PATH@"
+ExecStart=/usr/bin/env bash "@REPO@/core/scripts/ci-presence"
