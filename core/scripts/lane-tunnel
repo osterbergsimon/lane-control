@@ -6,6 +6,8 @@
 #                                         write and start lane-tunnel@<name>.service: ssh -N -R 127.0.0.1:<port>:127.0.0.1:<port>
 #   lane-tunnel stop <ssh-host>           stop and disable it, and forget its host and port
 #   lane-tunnel status <ssh-host>         exit 0 when it runs
+#   lane-tunnel check [--auth-sock PATH] [--ssh PATH]
+#                                         only check the values start would write (exit 2 when one is refused); no host
 #
 # --auth-sock PATH (or LANE_TUNNEL_AUTH_SOCK): the ssh agent the unit's ssh uses, as SSH_AUTH_SOCK in the instance's
 #   env file. Without it the unit has no agent and needs a key it can use alone. For a jump host that takes only a
@@ -41,14 +43,45 @@ units=$conf/systemd/user
 here=$(cd "$(dirname "$0")" && pwd)
 template=$here/../templates/lane-tunnel@.service
 
-usage="usage: lane-tunnel start [--no-enable] [--auth-sock PATH] [--ssh PATH] <ssh-host> <port> | stop <ssh-host> | status <ssh-host>"
-[ $# -ge 2 ] || die "$usage" 2
+# The values that go into the instance's env file, and the files they name, checked (exit 2); sets cfg.
+check_values() {
+  cfg=""
+  if [ -n "${LANE_SSH_CONFIG:-}" ]; then
+    case $LANE_SSH_CONFIG in
+      "~/"*) cfg=$HOME/${LANE_SSH_CONFIG#"~/"} ;;
+      /*) cfg=$LANE_SSH_CONFIG ;;
+      *) cfg=$(pwd)/$LANE_SSH_CONFIG ;;
+    esac
+  fi
+  # Every value goes into a file that systemd reads one line at a time: none may carry a newline,
+  nl=$(printf '\n_'); nl=${nl%_}
+  cr=$(printf '\r')
+  plain() {  # $1 the value, $2 what it is
+    case $1 in *"$nl"*|*"$cr"*) die "$2 has a line break, so it cannot go in the tunnel's env file" 2 ;; esac
+    # ... and systemd reads \ as an escape or a line continuation, a leading quote as quoting, trailing space as nothing.
+    case $1 in
+      *\\*|\"*|\'*|[[:space:]]*|*[[:space:]]) die "$2 has a backslash, a leading quote, or leading or trailing space, which systemd would read differently, so it cannot go in the tunnel's env file: $1" 2 ;;
+    esac
+  }
+  plain "$cfg" LANE_SSH_CONFIG; plain "$auth_sock" --auth-sock; plain "$ssh_bin" --ssh; plain "$PATH" PATH
+  if [ -n "$auth_sock" ]; then
+    case $auth_sock in /*) ;; *) die "--auth-sock must be an absolute path, got: $auth_sock" 2 ;; esac
+  fi
+  if [ -n "$ssh_bin" ]; then
+    case $ssh_bin in /*) ;; *) die "--ssh must be an absolute path, got: $ssh_bin" 2 ;; esac
+    [ -f "$ssh_bin" ] && [ -x "$ssh_bin" ] || die "--ssh $ssh_bin is not an executable file" 2
+  fi
+}
+
+usage="usage: lane-tunnel start [--no-enable] [--auth-sock PATH] [--ssh PATH] <ssh-host> <port> | stop <ssh-host> | status <ssh-host> | check [--auth-sock PATH] [--ssh PATH]"
+[ $# -ge 1 ] || die "$usage" 2
+[ "$1" = check ] || [ $# -ge 2 ] || die "$usage" 2
 op=$1; shift
 enable=1; auth_sock=${LANE_TUNNEL_AUTH_SOCK:-}; ssh_bin=${LANE_TUNNEL_SSH:-}
 while [ $# -gt 0 ]; do
   case $1 in
     --no-enable|--auth-sock|--ssh)
-      [ "$op" = start ] || die "$1 goes with start only: $usage" 2
+      [ "$op" = start ] || [ "$op" = check ] || die "$1 goes with start only: $usage" 2
       case $1 in
         --no-enable) enable=0 ;;
         *) [ $# -ge 2 ] || die "$1 needs a path" 2
@@ -61,6 +94,11 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+if [ "$op" = check ]; then  # only the values: for a caller that wants them refused before it does anything else
+  [ $# -eq 0 ] || die "$usage" 2
+  check_values
+  exit 0
+fi
 [ $# -ge 1 ] || die "$usage" 2
 host=$1; shift
 case $host in
@@ -81,30 +119,9 @@ case $op in
     port=$1
     case $port in ''|*[!0-9]*) die "bad port: $port" 2 ;; esac
     { [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "bad port: $port" 2
-    cfg=""
-    if [ -n "${LANE_SSH_CONFIG:-}" ]; then
-      case $LANE_SSH_CONFIG in
-        "~/"*) cfg=$HOME/${LANE_SSH_CONFIG#"~/"} ;;
-        /*) cfg=$LANE_SSH_CONFIG ;;
-        *) cfg=$(pwd)/$LANE_SSH_CONFIG ;;
-      esac
-    fi
-    # Every value goes into a file that systemd reads one line at a time: none may carry a newline.
-    nl=$(printf '\n_'); nl=${nl%_}
-    for v in "$cfg" "$auth_sock" "$ssh_bin" "$PATH"; do
-      case $v in *"$nl"*|*"$(printf '\r')"*) die "a value with a line break cannot go in the tunnel's env file" 2 ;; esac
-      # ... and systemd reads \ as an escape or a line continuation, a leading quote as quoting, trailing space as nothing.
-      case $v in
-        *\\*|\"*|\'*|[[:space:]]*|*[[:space:]]) die "a value with a backslash, a leading quote, or leading or trailing space would be read differently by systemd, so it cannot go in the tunnel's env file: $v" 2 ;;
-      esac
-    done
-    if [ -n "$auth_sock" ]; then
-      case $auth_sock in /*) ;; *) die "--auth-sock must be an absolute path, got: $auth_sock" 2 ;; esac
-      [ -S "$auth_sock" ] || echo "lane-tunnel: note: $auth_sock is not a socket (yet): the agent has to be running there for the unit to use it" >&2
-    fi
-    if [ -n "$ssh_bin" ]; then
-      case $ssh_bin in /*) ;; *) die "--ssh must be an absolute path, got: $ssh_bin" 2 ;; esac
-      [ -f "$ssh_bin" ] && [ -x "$ssh_bin" ] || die "--ssh $ssh_bin is not an executable file" 2
+    check_values
+    if [ -n "$auth_sock" ] && [ ! -S "$auth_sock" ]; then
+      echo "lane-tunnel: note: $auth_sock is not a socket (yet): the agent has to be running there for the unit to use it" >&2
     fi
     need_systemd
     mkdir -p "$tunnels" "$units"

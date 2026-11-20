@@ -101,11 +101,15 @@ slot_record() {  # $1 slot folder, $2 .version | app
   case $v in *[!A-Za-z0-9._+-]*) die "$1 has a $2 that is not a version (letters, digits and . _ + - only)" ;; esac
   printf '%s\n' "$v"
 }
+# A name like 1.4.251 reads as an Orca app version (slot names are 0.1.0+<hash>).
+app_shaped() { printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
 # Whether slot $1 says it is $2 (a slot name, its .version or its app version). The folder name counts as long as
 # the slot's own .version does not say something else.
 slot_is() {
   n=$(slot_version "$1"); dv=$(slot_record "$1" .version); av=$(slot_record "$1" app)
-  [ "$2" = "$n" ] && { [ -z "$dv" ] || [ "$dv" = "$n" ] || [ "$dv" = "$av" ]; } && return 0
+  # (with no .version, a name that reads as an app version must be the one out/package.json records)
+  [ "$2" = "$n" ] && { [ -z "$dv" ] || [ "$dv" = "$n" ] || [ "$dv" = "$av" ]; } \
+    && { [ -n "$dv" ] || [ -z "$av" ] || [ "$n" = "$av" ] || ! app_shaped "$n"; } && return 0
   [ -n "$dv" ] && [ "$2" = "$dv" ] && return 0
   [ -n "$av" ] && [ "$2" = "$av" ] && return 0
   return 1
@@ -191,6 +195,9 @@ if [ -n "$pin" ]; then
   dv=$(slot_record "$slot" .version); av=$(slot_record "$slot" app)
   if [ -n "$dv" ] && [ "$dv" != "$ver" ] && [ "$dv" != "$av" ]; then
     die "$label is named orcad $ver but its .version says $dv: not installing one server under another's name; nothing was copied"
+  fi
+  if [ -z "$dv" ] && [ -n "$av" ] && [ "$ver" != "$av" ] && app_shaped "$ver"; then
+    die "$label is named orcad $ver, which reads as an Orca app version, but its out/package.json says Orca $av and it has no .version to settle it: not installing one server under another's name; nothing was copied"
   fi
 fi
 [ -n "$bundle" ] || label=$slot

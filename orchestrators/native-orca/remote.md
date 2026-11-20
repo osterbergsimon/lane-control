@@ -102,6 +102,10 @@ never gives up (`StartLimitIntervalSec=0`): it retries every 10 seconds at first
 on a dead network after 15 seconds (`ConnectTimeout`). So a network that is down for an hour, or a box whose sshd still
 holds the old forward for a while (the next ssh fails on `ExitOnForwardFailure` until it lets go), ends with the tunnel
 back on its own, and a locked card costs about a dozen refused logins an hour, not a burst.
+The backoff counter adds up across all automatic restarts since the last manual start, not within one bad stretch, so
+after a bad stretch (or several blips over weeks) every later drop waits the full 5 minutes. To get back to the fast
+first retries, run `systemctl --user restart lane-tunnel@<host>` (or `lane-tunnel stop <host>`, then `start`); a plain
+`lane-tunnel start` does not reset it.
 
 `lane-tunnel start` looks again after a few seconds (`LANE_TUNNEL_SETTLE`, default 10), while you are there to read it.
 If the unit is not running it exits 1 and names the agent it used and `journalctl --user -u lane-tunnel@<host>.service`.

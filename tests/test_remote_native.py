@@ -671,6 +671,15 @@ class DirectionTwoTests(Case):
         self.assertEqual(rc, 2, out)
         self.assertEqual(self.e.jlines(".install"), [])
 
+    def test_tunnel_paths_get_lane_tunnels_rules_before_direction_one_runs(self):
+        for flag, val in (("--tunnel-auth-sock", "/run/a.sock "), ("--tunnel-auth-sock", "/run/a\\b.sock"),
+                          ("--tunnel-auth-sock", "'/run/a.sock"), ("--tunnel-ssh", str(self.e.home / "x") + " ")):
+            rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", flag, val, answer=self.link)
+            self.assertEqual(rc, 2, (flag, val, out))
+            self.assertIn(flag, out)  # named as the owner typed it, not as lane-tunnel's own option
+            self.assertEqual(self.e.jlines(".install"), [], (flag, val))
+            self.assertEqual(self.e.lines(".systemctl"), [])
+
     def test_a_failed_tunnel_start_is_stopped_and_forgotten(self):
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link,
                                    env_extra={"STUB_TUNNEL_FAILS": "1"})
@@ -1079,6 +1088,18 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels").exists())  # refused before writing
         self.assertEqual(self.e.lines(".systemctl"), [])
 
+    def test_check_runs_the_same_rules_without_a_host_or_systemd(self):
+        w = self.wrapper()
+        good = self.tunnel("check", "--auth-sock", "/run/user/1000/a.sock", "--ssh", w)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        for flag, val in (("--auth-sock", "/run/a.sock "), ("--auth-sock", "/run/a\\b.sock"), ("--auth-sock", '"/x'),
+                          ("--auth-sock", "a.sock"), ("--ssh", w + " "), ("--ssh", "ssh"), ("--ssh", str(self.e.home))):
+            r = self.tunnel("check", flag, val)
+            self.assertEqual(r.returncode, 2, (flag, val, r.stderr))
+        self.assertEqual(self.tunnel("check", env_extra={"PATH": "/usr/bin:/bin\\"}).returncode, 2)
+        self.assertEqual(self.e.lines(".systemctl"), [])
+        self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels").exists())
+
     def test_unknown_options_and_options_on_other_commands_are_refused(self):
         self.assertEqual(self.tunnel("start", "--bogus", "box", "6768").returncode, 2)
         self.assertEqual(self.tunnel("stop", "--no-enable", "box").returncode, 2)
@@ -1211,7 +1232,7 @@ class DocTests(unittest.TestCase):
     def test_remote_doc_covers_the_card_tunnel_and_its_failure(self):
         text = REMOTE_DOC.read_text()
         for s in ("--auth-sock", "SSH_AUTH_SOCK", "--ssh", "--no-enable", "--tunnel-auth-sock", "--tunnel-no-enable",
-                  "journalctl", "smartcard", "keeps retrying", "5 minutes"):
+                  "journalctl", "smartcard", "keeps retrying", "5 minutes", "systemctl --user restart lane-tunnel@"):
             self.assertIn(s, text, s)
         self.assertNotIn("5 times in 15 minutes", text)  # the unit never gives up now
 

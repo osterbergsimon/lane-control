@@ -352,6 +352,20 @@ class ContentTests(HostInstallCase):
         self.assertIn("0.1.0+aaaa", r.stderr)
         self.untouched()
 
+    def test_a_folder_named_like_an_app_version_that_its_package_json_contradicts_is_refused(self):
+        slot = make_slot(self.pinned, "orcad-1.4.251", app="1.4.250")  # no .version to settle it
+        for args in (["--from", str(slot)], ["--from", str(slot), "--version", "1.4.251"],
+                     ["--from", str(slot), "--version", "1.4.250"]):
+            r = self.install(*args)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertIn("1.4.250", r.stderr)
+            self.assertIn("1.4.251", r.stderr)
+            self.untouched()
+
+    def test_a_hash_named_folder_with_only_an_app_version_on_record_is_still_taken_by_name(self):
+        slot = make_slot(self.pinned, "0.1.0+aaaa", app="1.4.250")
+        self.assertEqual(self.install("--from", str(slot), "--version", "0.1.0+aaaa").returncode, 0)
+
     def test_a_slot_with_no_record_of_its_own_is_taken_by_name(self):
         slot = make_slot(self.pinned, "0.1.0+aaaa")
         self.assertEqual(self.install("--from", str(slot), "--version", "0.1.0+aaaa").returncode, 0)
