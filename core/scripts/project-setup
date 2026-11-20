@@ -3638,7 +3638,8 @@ def main(argv=None) -> int:
     ap.add_argument("--orca-bundle", metavar="TAR",
                     help="with a host: the same from a tar (orca-host-install --bundle)")
     ap.add_argument("--orca-version", metavar="V",
-                    help="with a host: install exactly this server version, or fail (orca-host-install --version)")
+                    help="with a host: install exactly this server version (a slot's name or the Orca app version it records, "
+                         "such as 1.4.251), or fail (orca-host-install --version)")
     ap.add_argument("--tunnel-auth-sock", metavar="PATH",
                     help="with a host: the ssh agent socket the tunnel to it uses (lane-tunnel start --auth-sock), for "
                          "a host that takes only a smartcard: unlock the card in that agent first")

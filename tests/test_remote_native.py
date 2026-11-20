@@ -1216,9 +1216,9 @@ class DocTests(unittest.TestCase):
         self.assertNotIn("5 times in 15 minutes", text)  # the unit never gives up now
 
     def test_remote_doc_says_how_to_pin_the_box_server(self):
-        text = REMOTE_DOC.read_text()
+        text = " ".join(REMOTE_DOC.read_text().split())
         for s in ("--orca-version", "--orca-from", "--orca-bundle", "orca-host-install", "known-good", "server too old",
-                  "from <source>"):
+                  "from <source>", "app version", "packaged app", "ORCA_ARTIFACTS", ".version"):
             self.assertIn(s, text, s)
 
     def test_remote_doc_reserves_the_orca_tunnel_ports(self):

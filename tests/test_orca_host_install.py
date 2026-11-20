@@ -40,11 +40,18 @@ def arch_of(t):
     return t.split("-")[1]
 
 
-def make_slot(root: Path, name: str, mtime: float = None, extra: str = "") -> Path:
+def make_slot(root: Path, name: str, mtime: float = None, extra: str = "", dotversion: str = None,
+              app: str = None) -> Path:
+    """dotversion: what the slot's .version says it is; app: the Orca app version in its out/package.json."""
     slot = root / name
     slot.mkdir(parents=True)
     (slot / "orcad.js").write_text(f"// fake orcad {name} {extra}\n")
     (slot / ".runtime-node").write_text(NODE_SHA + "\n")
+    if dotversion is not None:
+        (slot / ".version").write_text(dotversion + "\n")
+    if app is not None:
+        (slot / "out").mkdir()
+        (slot / "out" / "package.json").write_text('{"version":"%s","commit":"abc"}' % app)
     if mtime is not None:
         os.utime(slot, (mtime, mtime))
     return slot
@@ -303,10 +310,154 @@ class BundleTests(HostInstallCase):
         self.assertEqual(r.stdout.splitlines(), [f"installed orcad-0.3.0+cccc - from {tar}"])
 
 
+class ContentTests(HostInstallCase):
+    """The version is what the slot says it is (.version, out/package.json), not only what its folder is called."""
+
+    def setUp(self):
+        super().setUp()
+        self.pinned = self.tmp / "pinned"
+        self.pinned.mkdir()
+
+    def test_an_app_version_picks_the_slot_that_records_it_and_installs_it_under_its_own_name(self):
+        make_slot(self.art / self.target, "0.1.0+aaaa", mtime=1_000_000, dotversion="0.1.0+aaaa", app="1.4.251")
+        make_slot(self.art / self.target, "0.2.0+bbbb", mtime=1_000_100, dotversion="0.2.0+bbbb", app="1.4.255")
+        r = self.install("--version", "1.4.251")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [f"installed orcad-0.1.0+aaaa - from {self.art / self.target / '0.1.0+aaaa'}"])
+        self.assertTrue(self.on_box("0.1.0+aaaa").is_dir())
+        self.assertFalse(self.on_box("1.4.251").exists())
+
+    def test_the_slot_name_still_works_and_a_listing_names_both_kinds_of_version(self):
+        make_slot(self.art / self.target, "0.1.0+aaaa", dotversion="0.1.0+aaaa", app="1.4.251")
+        self.assertEqual(self.install("--version", "0.1.0+aaaa").returncode, 0)
+        r = self.install("--version", "9.9.9")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("0.1.0+aaaa", r.stderr)
+        self.assertIn("1.4.251", r.stderr)
+
+    def test_a_folder_named_for_one_version_that_holds_another_is_refused(self):
+        slot = make_slot(self.pinned, "orcad-1.4.251", dotversion="1.4.250")
+        for args in (["--from", str(slot)], ["--from", str(slot), "--version", "1.4.251"]):
+            r = self.install(*args)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertIn("1.4.250", r.stderr)
+            self.assertIn("1.4.251", r.stderr)
+            self.untouched()
+
+    def test_a_version_the_slots_content_does_not_back_is_refused_with_what_it_says(self):
+        slot = make_slot(self.pinned, "0.1.0+aaaa", dotversion="0.1.0+aaaa", app="1.4.250")
+        r = self.install("--from", str(slot), "--version", "1.4.251")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("1.4.250", r.stderr)
+        self.assertIn("0.1.0+aaaa", r.stderr)
+        self.untouched()
+
+    def test_a_slot_with_no_record_of_its_own_is_taken_by_name(self):
+        slot = make_slot(self.pinned, "0.1.0+aaaa")
+        self.assertEqual(self.install("--from", str(slot), "--version", "0.1.0+aaaa").returncode, 0)
+
+    def test_the_default_install_does_not_second_guess_the_desktops_own_slots(self):
+        make_slot(self.art / self.target, "0.1.0+aaaa", dotversion="something-else-entirely")
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_bare_slot_bundle_takes_its_version_from_its_own_record(self):
+        src = self.tmp / "bare"
+        make_slot(self.tmp, "bare", dotversion="0.3.0+cccc", app="1.4.251")
+        make_node_archive(src, arch_of(self.target))
+        tar = self.tmp / "bare.tar"
+        with tarfile.open(tar, "w") as tf:
+            for p in sorted(src.iterdir()):
+                tf.add(p, arcname=p.name)
+        r = self.install("--bundle", str(tar))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [f"installed orcad-0.3.0+cccc - from {tar}"])
+        shutil.rmtree(self.box / ".orca-remote")
+        self.assertEqual(self.install("--bundle", str(tar), "--version", "1.4.251").returncode, 0)
+        shutil.rmtree(self.box / ".orca-remote")
+        r = self.install("--bundle", str(tar), "--version", "0.9.9+zzzz")  # a word that the slot does not back
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("0.3.0+cccc", r.stderr)
+        self.untouched()
+
+    def test_a_bad_record_in_a_folder_of_slots_stops_the_run_even_in_a_slot_not_asked_for(self):
+        make_slot(self.art / self.target, "0.1.0+aaaa", mtime=1_000_000, dotversion="0.1.0+aaaa")
+        make_slot(self.art / self.target, "0.2.0+bbbb", mtime=1_000_100, dotversion="0.2.0; touch x")
+        r = self.install("--version", "0.1.0+aaaa")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(".version", r.stderr)
+        self.untouched()
+
+    def test_a_record_that_cannot_be_a_version_is_refused(self):
+        slot = make_slot(self.pinned, "0.1.0+aaaa", dotversion="0.1.0; touch x")
+        r = self.install("--from", str(slot))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(".version", r.stderr)
+        self.untouched()
+
+
+class AppDirTests(HostInstallCase):
+    def app_dir(self):
+        res = self.tmp / "app" / "resources"
+        tpl = make_slot(res, "orcad-template", app="1.4.250")
+        (tpl / "orcad-template.json").write_text('{"schemaVersion":4}')
+        (tpl / ".runtime-node").unlink()  # a template has the node sha per target, not a slot's own
+        return self.tmp / "app", res, tpl
+
+    def test_a_packaged_app_dir_is_recognised_and_refused_clearly(self):
+        app, res, tpl = self.app_dir()
+        for src in (app, res, tpl):
+            for extra in ([], ["--version", "1.4.250"]):
+                r = self.install("--from", str(src), *extra)
+                self.assertNotEqual(r.returncode, 0, (src, extra))
+                self.assertIn("packaged app", r.stderr)
+                self.assertIn("1.4.250", r.stderr)
+                self.assertIn("ORCA_ARTIFACTS", r.stderr)  # where to look instead
+                self.assertNotIn("has: template", r.stderr)
+                self.assertNotIn(".runtime-node", r.stderr)  # the old, misleading message
+                self.untouched()
+
+    def test_a_bundle_of_an_app_dir_is_refused_the_same_way(self):
+        app, res, tpl = self.app_dir()
+        tar = self.tmp / "app.tar"
+        with tarfile.open(tar, "w") as tf:
+            tf.add(res, arcname="resources")
+        r = self.install("--bundle", str(tar))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("packaged app", r.stderr)
+        self.untouched()
+
+
+class NodeSearchTests(HostInstallCase):
+    def test_a_bare_slot_bundle_does_not_search_outside_its_own_folder_for_node(self):
+        scratch = self.tmp / "scratch"
+        scratch.mkdir()
+        shutil.copytree(self.art / "node", scratch / "node")  # a stray node tarball, above where the tar unpacks
+        shutil.rmtree(self.art / "node")
+        src = self.tmp / "flat"
+        make_slot(self.tmp, "flat")
+        tar = self.tmp / "flat.tar"
+        with tarfile.open(tar, "w") as tf:
+            for p in sorted(src.iterdir()):
+                tf.add(p, arcname=p.name)
+        r = self.install("--bundle", str(tar), "--version", "0.3.0+cccc", env={"TMPDIR": str(scratch)})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("node", r.stderr)
+        self.untouched()
+
+    def test_a_runtime_node_that_is_not_a_sha_is_refused_up_front(self):
+        slot = make_slot(self.tmp / "p", "0.1.0+aaaa")
+        (slot / ".runtime-node").write_text("not-a-sha; touch x\n")
+        r = self.install("--from", str(slot))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("sha256", r.stderr)
+        self.untouched()
+
+
 class HelpTests(unittest.TestCase):
     def test_the_header_documents_the_options_and_the_provenance_line(self):
         out = subprocess.run(["sh", str(TOOL), "--help"], capture_output=True, text=True).stdout
-        for s in ("--from", "--bundle", "--version", "from <source>"):
+        for s in ("--from", "--bundle", "--version", "from <source>", "app version", "packaged app"):
             self.assertIn(s, out)
 
     def test_it_parses(self):

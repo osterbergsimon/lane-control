@@ -12,17 +12,22 @@
 #
 # Which orcad: by default the newest slot this desktop has built for the host's platform (ORCA_ARTIFACTS), so a box
 # gets whatever the desktop has. To pin a box to a known-good server instead:
-#   --version V   install orcad V (the slot folder's name, e.g. 0.1.0+b086a7d15d60; letters, digits and . _ + - only).
-#                 From the desktop's slots, from --from or from --bundle, that one, and an error when the source has
-#                 no V. Given with a source that is one slot, V must be that slot's version, or nothing is copied.
+#   --version V   install orcad V: a slot's folder name (e.g. 0.1.0+b086a7d15d60), its own .version, or the
+#                 app version its out/package.json records (e.g. 1.4.251, what "server too old" is about); letters,
+#                 digits and . _ + - only. It is installed under the slot's own name. From the desktop's slots, from
+#                 --from or from --bundle, that one, and an error listing what the source has when there is none. Given
+#                 with a source that is one slot, V must be what that slot says it is, or nothing is copied.
 #   --from DIR    take it from DIR instead of the desktop's slots: a slot folder (holds orcad.js and .runtime-node;
-#                 its name is its version, with or without a leading "orcad-"), or a folder of slots
+#                 its name is its version, with or without a leading "orcad-"; a .version that says another is
+#                 refused as mislabelled), or a folder of slots
 #                 (<DIR>/<platform>/<version>/ as ORCA_ARTIFACTS is laid out, or <DIR>/<version>/). Its node runtime
 #                 comes from node/archives/node-*-linux-<arch>.tar.gz beside the slot folders, else as for the default.
 #   --bundle TAR  the same from a tar (.tar, .tar.gz): unpacked in a temporary folder, refused when it names a path
 #                 outside itself, an absolute or ".." link or a device. A tar that is one bare slot has no name, so
 #                 --version must give it.
 # --from and --bundle exclude each other. A node binary is always checked against the sha the slot names.
+# An Orca app's own folder (resources/orcad-template, "the packaged app") is not a slot and is refused with a pointer:
+# connect a host once from that Orca and give --from its ORCA_ARTIFACTS/<platform> folder.
 #
 # --no-tunnel: start orcad and print its pairing code, but set up no tunnel and save no environment.
 # Output lines: "installed|exists orcad-<ver> - from <source>" (the slot folder, or the bundle; exists means a
@@ -83,6 +88,44 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 slot_version() { v=${1##*/}; printf '%s\n' "${v#orcad-}"; }
 # The folders under $1 that hold an orcad.js, newest first.
 list_slots() { ls -t "$1" | while IFS= read -r d; do if [ -f "$1/$d/orcad.js" ]; then printf '%s\n' "$d"; fi; done; }
+# What a slot says it is, besides its folder name: its .version, and the Orca app version in out/package.json (either
+# may be missing; both are only ever read as short words of [A-Za-z0-9._+-]).
+slot_record() {  # $1 slot folder, $2 .version | app
+  v=""
+  case $2 in
+    .version) if [ -f "$1/.version" ]; then v=$(tr -d '[:space:]' < "$1/.version"); fi ;;
+    app) if [ -f "$1/out/package.json" ]; then
+           v=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version") or "")' "$1/out/package.json" 2>/dev/null || true)
+         fi ;;
+  esac
+  case $v in *[!A-Za-z0-9._+-]*) die "$1 has a $2 that is not a version (letters, digits and . _ + - only)" ;; esac
+  printf '%s\n' "$v"
+}
+# Whether slot $1 says it is $2 (a slot name, its .version or its app version). The folder name counts as long as
+# the slot's own .version does not say something else.
+slot_is() {
+  n=$(slot_version "$1"); dv=$(slot_record "$1" .version); av=$(slot_record "$1" app)
+  [ "$2" = "$n" ] && { [ -z "$dv" ] || [ "$dv" = "$n" ] || [ "$dv" = "$av" ]; } && return 0
+  [ -n "$dv" ] && [ "$2" = "$dv" ] && return 0
+  [ -n "$av" ] && [ "$2" = "$av" ] && return 0
+  return 1
+}
+slot_says() {  # $1 slot folder, $2 its name if not the folder's: "<name> (.version <v>) (Orca <app version>)", as far as it differs
+  n=${2:-$(slot_version "$1")}; dv=$(slot_record "$1" .version); av=$(slot_record "$1" app)
+  out=$n
+  if [ -n "$dv" ] && [ "$dv" != "$n" ]; then out="$out (.version $dv)"; fi
+  if [ -n "$av" ]; then out="$out (Orca $av)"; fi
+  printf '%s' "$out"
+}
+# The Orca app's own folder (resources/orcad-template, not a slot: no target overlay, no node sha of its own).
+refuse_app_dir() {
+  for d in "$1" "$1/orcad-template" "$1/resources/orcad-template" "$1/resources"; do
+    if [ -f "$d/orcad-template.json" ]; then
+      av=$(slot_record "$d" app)
+      die "$2 is ${av:+Orca $av's }packaged app (orcad-template), not an orcad slot: a slot is what Orca builds from it for one platform. Connect a $target host once from that Orca, then use --from <its ORCA_ARTIFACTS>/$target (default ~/.config/orca/orcad-artifacts/$target), and --appimage-root <its resources folder> for its node runtime"
+    fi
+  done
+}
 srcroot=""
 if [ -n "$bundle" ]; then
   python3 - "$bundle" "$tmp/bundle" <<'PY' || die "cannot unpack $bundle: not a tar, or it holds a path outside itself, an absolute or .. link, or a device"
@@ -106,30 +149,54 @@ else
   [ -d "$artifacts/$target" ] || die "no $target slot in $artifacts (connect any $target host once from the Orca app, or use a matching host, or give --from or --bundle)"
   base=$artifacts/$target; label=$artifacts/$target
 fi
+refuse_app_dir "$base" "$label"
+pin=""; [ -z "$from$bundle$want" ] || pin=1
 if [ -f "$base/orcad.js" ]; then  # the source is one slot
   slot=$base
-  if [ "$base" = "$tmp/bundle" ]; then
-    [ -n "$want" ] || die "the bundle is one slot with no folder name to give its version: say it with --version" 2
-    ver=$want
+  if [ "$base" = "$tmp/bundle" ]; then  # a bare slot in a tar has no folder name: its own .version, else --version
+    ver=$(slot_record "$slot" .version)
+    [ -n "$ver" ] || ver=$want
+    [ -n "$ver" ] || die "the bundle is one slot with no folder name and no .version to give its version: say it with --version" 2
   else
     ver=$(slot_version "$base")
+  fi
+  if [ -n "$want" ]; then
+    if [ "$base" = "$tmp/bundle" ]; then  # no folder name: the slot's own records are all there is to check
+      dv=$(slot_record "$slot" .version); av=$(slot_record "$slot" app)
+      if { [ -n "$dv" ] || [ -n "$av" ]; } && [ "$want" != "$dv" ] && [ "$want" != "$av" ]; then ok=""; else ok=1; fi
+    else
+      if slot_is "$slot" "$want"; then ok=1; else ok=""; fi
+    fi
+    [ -n "$ok" ] || die "requested orcad $want, but $label is orcad $(slot_says "$slot" "$ver"); nothing was copied"
   fi
 else  # a folder of slots, possibly in a <platform> folder
   dir=$base; [ ! -d "$base/$target" ] || dir=$base/$target
   names=$(list_slots "$dir")
   [ -n "$names" ] || die "no orcad slot (a folder with orcad.js) in $label"
   if [ -n "$want" ]; then
-    pick=$(printf '%s\n' "$names" | while IFS= read -r d; do if [ "$(slot_version "$d")" = "$want" ]; then printf '%s\n' "$d"; break; fi; done)
-    [ -n "$pick" ] || die "$label has no orcad $want; it has: $(printf '%s\n' "$names" | while IFS= read -r d; do slot_version "$d"; done | tr '\n' ' ')"
+    # (read in this shell, not a $(...) one: a record that is not a version must stop the run, not just print)
+    printf '%s\n' "$names" > "$tmp/names"
+    while IFS= read -r d; do slot_record "$dir/$d" .version > /dev/null; slot_record "$dir/$d" app > /dev/null; done < "$tmp/names"
+    pick=$(printf '%s\n' "$names" | while IFS= read -r d; do if slot_is "$dir/$d" "$want"; then printf '%s\n' "$d"; break; fi; done)
+    [ -n "$pick" ] || die "$label has no orcad $want; it has: $(printf '%s\n' "$names" | while IFS= read -r d; do slot_says "$dir/$d"; printf '; '; done)"
   else
     pick=$(printf '%s\n' "$names" | head -1)
   fi
   slot=$dir/$pick; ver=$(slot_version "$pick")
 fi
 case $ver in ''|*[!A-Za-z0-9._+-]*) die "the slot $slot has no usable version name (letters, digits and . _ + - only), so it cannot be installed" ;; esac
-[ -z "$want" ] || [ "$ver" = "$want" ] || die "requested orcad $want, but $label is orcad $ver; nothing was copied"
+# A folder or tar the owner points at must be what it says: a .version that names another server than the folder does
+# is a mislabelled slot (the desktop's own slots, taken as they come, are not second-guessed).
+if [ -n "$pin" ]; then
+  dv=$(slot_record "$slot" .version); av=$(slot_record "$slot" app)
+  if [ -n "$dv" ] && [ "$dv" != "$ver" ] && [ "$dv" != "$av" ]; then
+    die "$label is named orcad $ver but its .version says $dv: not installing one server under another's name; nothing was copied"
+  fi
+fi
 [ -n "$bundle" ] || label=$slot
 nodesha=$(tr -d '[:space:]' < "$slot/.runtime-node") || die "$slot has no .runtime-node (not an orcad slot)"
+case $nodesha in ''|*[!0-9a-f]*) die "$slot/.runtime-node does not hold a sha256" ;; esac
+[ "${#nodesha}" = 64 ] || die "$slot/.runtime-node does not hold a sha256"
 # A packaged orca-ide (resources/bin/orca-ide) carries the node runtime two levels up; else the AppImage cache.
 if [ -z "$appimage_root" ] && [ -n "$pkg_cli" ]; then
   appimage_root=$(dirname "$(dirname "$(readlink -f "$pkg_cli")")")
@@ -142,13 +209,19 @@ if [ -n "$appimage_root" ] && [ -x "$appimage_root/node-runtime/bin/node" ] && [
   node=$appimage_root/node-runtime/bin/node
 fi
 if [ -z "$node" ] || [ "$(sha256sum "$node" | cut -d' ' -f1)" != "$nodesha" ]; then
-  # node's tarball: beside the slot folders of the source (or the slot), else the desktop's
+  # node's tarball: beside the slot folders of the source (or the slot), else the desktop's. A bundle is searched
+  # only inside its own unpacked folder.
   tarball=""
-  for d in "$slot" "$slot/.." "$slot/../.." "$srcroot" "$artifacts"; do
+  { printf '%s\n' "$slot"
+    if [ -n "$bundle" ]; then
+      d=$slot; while [ "$d" != "$tmp/bundle" ] && [ "$d" != / ]; do d=$(dirname "$d"); printf '%s\n' "$d"; done
+    else printf '%s\n%s\n%s\n' "$slot/.." "$slot/../.." "$srcroot"; fi
+    printf '%s\n' "$artifacts"; } > "$tmp/nodedirs"
+  while IFS= read -r d; do
     [ -n "$d" ] || continue
     tarball=$(ls "$d"/node/archives/node-*-linux-$a.tar.gz 2>/dev/null | head -1 || true)
     [ -z "$tarball" ] || break
-  done
+  done < "$tmp/nodedirs"
   [ -n "$tarball" ] || die "no node binary with sha $nodesha found (AppImage resources, or node/archives next to $slot or in $artifacts)"
   tar -xzf "$tarball" -C "$tmp" --wildcards '*/bin/node' --strip-components=1
   node=$tmp/bin/node
