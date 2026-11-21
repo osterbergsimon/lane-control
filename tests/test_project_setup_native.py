@@ -888,6 +888,20 @@ class RefreshTests(Case):
         self.assertEqual(self.e.creates(), [])  # a refresh starts nothing
         self.assertFalse([c for c in self.e.calls() if c.startswith("cotal")])
 
+    def test_refresh_installs_the_lane_tools_design_shots_among_them(self):
+        # review round 2, r2-m1: a box set up before the kit gets design-shots from a --refresh too
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        tool = self.e.home / ".agents" / "bin" / "design-shots"
+        tool.unlink()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue(tool.exists(), r.stdout)
+
+    def test_refresh_says_it_installs_the_lane_tools(self):
+        doc = " ".join(load().native_refresh.__doc__.split())
+        self.assertIn("install the skills and the lane tools (design-shots among them", doc)
+        self.assertNotIn("not refreshed", doc)
+
     def test_refresh_names_running_sessions_to_restart(self):
         self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
         add = self.repo / ".lane-control" / "additions"

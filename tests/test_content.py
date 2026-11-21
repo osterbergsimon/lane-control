@@ -1833,9 +1833,10 @@ class DesignKitOnABoxTests(unittest.TestCase):
         for needle in ("~/.agents/bin/design-shots", "`component-gallery` skill", "`design-skills missing`",
                        "git and the network on the box",
                        "Playwright and a browser on the box, which setup never installs",
-                       "next `project-setup <repo> <host>` (a `--refresh` brings the skills and the reviewer persona, not "
-                       "`design-shots`)"):
+                       "next `project-setup <repo> <host>` or `--refresh` (both install the lane tools, `design-shots` "
+                       "among them, and the skills)"):
             self.assertIn(needle, t, needle)
+        self.assertNotIn("not `design-shots`", t)  # review round 2, r2-m1: a refresh does install it
 
     def test_the_spec_no_longer_says_boxes_have_whatever_their_owner_installed(self):
         t = flat(ROOT / "docs" / "superpowers" / "specs" / "2026-11-21-design-kit-design.md")

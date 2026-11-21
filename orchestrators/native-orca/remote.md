@@ -50,8 +50,8 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    from their pinned upstream commits into the box's `~/.agents/skills`. That needs git and the network on the box;
    without them it says `design-skills missing`, and a frontend lane there reports `skills missing`, which the
    coordinator acts on as anywhere. Shots need Playwright and a browser on the box, which setup never installs; a skill
-   that runs Node needs Node there. A box set up before the kit gets it on its next `project-setup <repo> <host>` (a
-   `--refresh` brings the skills and the reviewer persona, not `design-shots`).
+   that runs Node needs Node there. A box set up before the kit gets it on its next `project-setup <repo> <host>` or
+   `--refresh` (both install the lane tools, `design-shots` among them, and the skills).
 4. `core/scripts/machine-setup --host <host>` (skipped with `--no-machine-setup`): the box's own machine coordinator,
    night manager, lane sweep and machine check.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.

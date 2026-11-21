@@ -3188,10 +3188,10 @@ def running_sessions(place: Place, repo: Path, project: str) -> dict:
 
 
 def native_refresh(repo: Path, a, tiers: Path) -> int:
-    """Re-render the personas (stored pins, current additions) and the hooks, and install the skills (the design
-    skills are fetched from upstream; the lane tools are not refreshed). Nothing is adapted or started; the only commit is a retired design
-    lead's additions moving into DESIGN.md, on the owner's yes. A running session rereads its persona at its next
-    compaction, or on a restart."""
+    """Re-render the personas (stored pins, current additions) and the hooks, and install the skills and the lane
+    tools (design-shots among them; the design skills are fetched from upstream). Nothing is adapted or started; the
+    only commit is a retired design lead's additions moving into DESIGN.md, on the owner's yes. A running session
+    rereads its persona at its next compaction, or on a restart."""
     root = attached_to(repo)
     if root is not None:
         raise Fail(f"{repo} is attached to the project at {root}, not a project of its own: run --refresh on {root}")
