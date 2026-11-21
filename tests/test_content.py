@@ -748,10 +748,10 @@ class OrchestratorRecordTests(unittest.TestCase):
 
 NATIVE = ROOT / "orchestrators" / "native-orca" / "personas"
 NATIVE_BRIEF = ROOT / "orchestrators" / "native-orca" / "templates" / "lane-brief.md"
-NATIVE_ROLES = ["coordinator", "design-lead", "reviewer", "debugger", "machine-coordinator"]
+NATIVE_ROLES = ["coordinator", "design-lead", "reviewer", "design-reviewer", "debugger", "machine-coordinator"]
 LANE_STARTERS = ["coordinator", "design-lead"]  # the personas that start lanes (spec 7.4: the cross-host check)
 LEADS = ["coordinator", "design-lead", "machine-coordinator"]  # long-lived sessions that message peers
-WORKERS = ["reviewer", "debugger"]  # started by a lead, report to it
+WORKERS = ["reviewer", "design-reviewer", "debugger"]  # started by a lead, report to it
 
 
 def load_script(name, path):
@@ -1745,6 +1745,44 @@ class FrontendBriefTests(unittest.TestCase):
         self.assertIn("design: DESIGN.md updated|unchanged · gallery +<n>|none · shots before+after|after|none · "
                       "skills missing <names>|none", t)
         self.assertLessEqual(len(FRONTEND_BRIEF.read_text().splitlines()), 40)
+
+
+class DesignReviewerTests(unittest.TestCase):
+    """The design reviewer (design-kit spec, section 5): run like the code reviewer, cold, phone and desktop."""
+
+    def setUp(self):
+        self.t = flat(NATIVE / "design-reviewer.md")
+
+    def test_read_only_like_the_code_reviewer(self):
+        for needle in ("You never edit, create or delete files, commit, push, merge, rebase or switch branches",
+                       "you start no other agents", "You were not given the lane's own report", "fresh eyes",
+                       "additions for this project", "never lower a finding's level"):
+            self.assertIn(needle, self.t, needle)
+
+    def test_runs_it_and_shoots_it(self):
+        for needle in ("`DESIGN.md`", "Seeing it run", "127.0.0.1", "design-shots shoot", "design-shots compare",
+                       "$(git rev-parse --git-dir)/design-shots/", "/before", "/after", "the lane took none",
+                       "stop every server you started", "the only change you leave"):
+            self.assertIn(needle, self.t, needle)
+
+    def test_checks_the_floor_by_hand(self):
+        for needle in ("390 px", "1280 px", "keyboard only", "visible focus", "reduced motion", "4.5:1", "3:1",
+                       "light and dark", "no horizontal scroll", "every state", *TEMPLATE_TELLS):
+            self.assertIn(needle, self.t, needle)
+
+    def test_names_the_skills_and_reads_without_them(self):
+        for s in DESIGN_SKILLS:
+            self.assertIn(f"`{s}`", self.t, s)
+        self.assertIn("that skill's base directory", self.t)
+        self.assertIn("this persona's checks stand on their own", self.t)
+
+    def test_verdict_and_report_shape(self):
+        for needle in ("design-review <KEY> @<sha7>: APPROVE|BLOCK · blocker <n> · major <n> · minor <n>",
+                       "shots: <dir> · before <base7>|none · 390, 1280 · light, dark",
+                       "exercised: <what you ran> | read only: <what you could not run>",
+                       "`BLOCK` when there is any `blocker` or `major`", "or it breaks `DESIGN.md`",
+                       "never inflate a level"):
+            self.assertIn(needle, self.t, needle)
 
 
 if __name__ == "__main__":
