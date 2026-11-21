@@ -351,12 +351,14 @@ never a real worker on an estate box and not the owner's desktop.
    target is refused by 267's server, so the first is the Run-level route and the second the cross-server one.)
    Check that each mail actually arrives, not only that no error is printed. `server_mail_unsupported` is decided by
    the Orca running on the box side, so on a 256+ box it cannot appear whatever the 250 server does: record what the
-   250 side produces, which may be a refusal or silence. The scratch 250 server must offer pairing and, having no
-   `--bind`, binds every interface: run it in a container or a network namespace, or at least stop it right after
-   pairing and say so. Same agent sign-in rule as step 6. Use the scratch 250 server as the server. Using the
-   owner's desktop for this starts an agent on it, after pairing a box to it and adding a repo to it: do that only
-   with the owner present and with a cleanup list (remove the environment on the box, remove the repo and worktrees
-   on the desktop, revoke the share link, close the agent).
+   250 side produces, which may be a refusal or silence. For `send --to dispatch:<id>`, which goes through the 263
+   side's relay to a worker on the 250 server, the relay may itself refuse or drop it: record which. The scratch 250
+   server must offer pairing and, having no `--bind`, binds every interface: run it only in a container or a network
+   namespace, because it has to keep running for the rest of the step (`worker-start --on` and the mail tests), so
+   stopping it after pairing is not an option. Same agent sign-in rule as step 6. Use the scratch 250 server as the
+   server. Using the owner's desktop for this starts an agent on it, after pairing a box to it and adding a repo to
+   it: do that only with the owner present and with a cleanup list (remove the environment on the box, remove the
+   repo and worktrees on the desktop, revoke the share link, close the agent).
 8. Then upgrade the desktop and all boxes to the same version (after 6 and 7).
 
 ## What was and was not done
@@ -370,3 +372,4 @@ the capability diff and what each capability means, the "too old" messages in th
 "Risks of 1.4.267 itself". Not done, on the rules: no desktop upgrade, no agent, no pairing, no `environment add`
 with a real code, no install on any box, no 250 versus 267 test of a lane with `orca.yaml` setup, and no direction-1
 or direction-2 run (steps 6 and 7).
+
