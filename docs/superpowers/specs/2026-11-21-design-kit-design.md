@@ -156,7 +156,7 @@ or `..._SKILLS` is set) and `~/.agents/skills`, plus the project's `.opencode`, 
 symlinks. It does not read Claude's plugins. Here `frontend-design` and `ui-ux-pro-max` are Claude plugins, so
 OpenCode lacks them; `modern-web-guidance` is in `~/.agents/skills`, so both have it. Before the kit, a box had
 whatever its owner installed; now the box's own setup run installs them there as below (`remote.md`, direction 1,
-step 3), and a box set up earlier gets them on its next setup or `--refresh`.
+step 3), and a box set up earlier gets them on its next setup (or `--refresh`).
 
 What project-setup does (native path, here and on a box, every setup and refresh, idempotent): for each skill in
 `core/design-skills.tsv` (name, upstream git URL, pinned commit, path in the repo, licence, the Claude plugin that

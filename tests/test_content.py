@@ -1833,7 +1833,8 @@ class DesignKitOnABoxTests(unittest.TestCase):
         for needle in ("~/.agents/bin/design-shots", "`component-gallery` skill", "`design-skills missing`",
                        "git and the network on the box",
                        "Playwright and a browser on the box, which setup never installs",
-                       "next `project-setup <repo> <host>` or `--refresh`"):
+                       "next `project-setup <repo> <host>` (a `--refresh` brings the skills and the reviewer persona, not "
+                       "`design-shots`)"):
             self.assertIn(needle, t, needle)
 
     def test_the_spec_no_longer_says_boxes_have_whatever_their_owner_installed(self):
