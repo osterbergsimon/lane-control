@@ -12,7 +12,8 @@ shoot   one Playwright `screenshot` run per page, width and theme: headless, a f
         --pages: the base URL itself, named "index". A pages file has one `[name] <path>` per line; # comments.
         The base URL must be http(s) on 127.0.0.1, localhost or [::1].
         --serve starts the project's server (sh -c, its own process group), waits up to --timeout seconds (60) for
-        the base URL to answer, and stops the group afterwards whatever happens.
+        the base URL to answer, and stops the whole group afterwards whatever happens (also on TERM or HUP, and
+        when the command put the server in the background).
 compare pairs <before> and <after> PNGs by name: `same|changed|added|removed <name>` on stdout (byte equality), and
         <out>/index.html showing each pair side by side.
 
@@ -103,18 +104,32 @@ def answers(url: str) -> bool:
 
 
 def stop(proc) -> None:
-    if proc is None or proc.poll() is not None:
+    """Stop the server's whole process group, even when its `sh` has already exited (`--serve "cmd &"`)."""
+    if proc is None:
         return
-    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(proc.pid, sig)
         except ProcessLookupError:
-            return
-        try:
-            proc.wait(timeout=wait)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+            break
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            proc.poll()  # reap the sh, so an exited leader does not keep the group alive
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                proc.poll()
+                return
+            time.sleep(0.1)
+    proc.poll()
+
+
+class Stopped(SystemExit):
+    pass
+
+
+def on_signal(signum, _frame):
+    raise Stopped(128 + signum)  # runs shoot()'s finally, so the server is stopped
 
 
 def shoot(args) -> int:
@@ -134,13 +149,15 @@ def shoot(args) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     server = None
+    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGHUP)}
     try:
         if args.serve:
             server = subprocess.Popen(["sh", "-c", args.serve], start_new_session=True,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             deadline = time.monotonic() + args.timeout
             while not answers(base + "/"):
-                if time.monotonic() > deadline or server.poll() is not None:
+                # an sh that exits 0 may have put the server in the background (`cmd &`): keep waiting for it
+                if time.monotonic() > deadline or server.poll() not in (None, 0):
                     print(f"design-shots: {base} never answered (--serve, {args.timeout:g}s)", file=sys.stderr)
                     return 4
                 time.sleep(0.3)
@@ -174,7 +191,13 @@ def shoot(args) -> int:
             print(f"design-shots: failed {line}", file=sys.stderr)
         return 1 if failed else 0
     finally:
-        stop(server)
+        for s in previous:
+            signal.signal(s, signal.SIG_IGN)  # a second signal must not cut the stop short
+        try:
+            stop(server)
+        finally:
+            for s, h in previous.items():
+                signal.signal(s, h)
 
 
 def compare(args) -> int:

@@ -3,6 +3,7 @@ a before/after comparison (docs/superpowers/specs/2026-11-21-design-kit-design.m
 that records its argv and writes a file, so no browser runs; one real-browser test runs when Playwright is found."""
 import json
 import os
+import signal
 import shutil
 import socket
 import subprocess
@@ -24,6 +25,9 @@ mode = os.environ.get("STUB_MODE", "")
 if mode == "nobrowser":
     sys.stderr.write("browserType.launch: Executable doesn't exist at /x/chrome\\n")
     sys.exit(1)
+if mode == "sleep":
+    import time
+    time.sleep(60)
 if mode == "fail" and "--color-scheme" in args and args[args.index("--color-scheme") + 1] == "dark":
     sys.exit(1)
 out = args[-1]
@@ -175,6 +179,72 @@ class DesignShotsTests(unittest.TestCase):
         time.sleep(0.5)
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+    def wait_gone(self, pid, what):
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        os.kill(pid, signal.SIGKILL)
+        self.fail(f"{what} was left running")
+
+    def kill_later(self, pidfile):
+        def kill():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+        self.addCleanup(kill)
+
+    def serve_site(self):
+        port = free_port()
+        site = self.t / "site"
+        site.mkdir(exist_ok=True)
+        (site / "index.html").write_text("<p>hi</p>")
+        return port, f"{sys.executable} -m http.server {port} --bind 127.0.0.1 -d {site}"
+
+    def test_a_term_or_hup_mid_shoot_stops_the_server(self):
+        # review M1: a lane's terminal closed mid-shoot sends HUP; a TERM from the coordinator; neither may leak it
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                if self.log.exists():
+                    self.log.unlink()
+                port, server = self.serve_site()
+                pidfile = self.t / f"server-{sig.name}.pid"
+                self.kill_later(pidfile)
+                p = subprocess.Popen([sys.executable, str(SCRIPT), "shoot", f"http://127.0.0.1:{port}/", "--out",
+                                      str(self.t / "o"), "--serve", f"echo $$ > {pidfile}; exec {server}",
+                                      "--timeout", "20"], env={**self.env, "STUB_MODE": "sleep"},
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.t)
+                try:
+                    for _ in range(200):  # the first shot has started, so the server is up
+                        if self.log.exists() and self.log.read_text():
+                            break
+                        time.sleep(0.1)
+                    else:
+                        self.fail("no shot started")
+                    p.send_signal(sig)
+                    p.wait(timeout=30)
+                finally:
+                    if p.poll() is None:
+                        p.kill()
+                    p.communicate()
+                self.assertNotEqual(p.returncode, 0)
+                self.wait_gone(int(pidfile.read_text()), "the server")
+                with socket.socket() as s:
+                    self.assertNotEqual(s.connect_ex(("127.0.0.1", port)), 0)
+
+    def test_a_serve_command_that_backgrounds_its_server_is_still_stopped(self):
+        # review M1: `--serve "cmd &"`: sh exits at once, the server stays in its process group
+        port, server = self.serve_site()
+        pidfile = self.t / "server.pid"
+        self.kill_later(pidfile)
+        r = self.run_shots("shoot", f"http://127.0.0.1:{port}/", "--out", str(self.t / "o"), "--widths", "390",
+                           "--themes", "light", "--serve", f"{server} & echo $! > {pidfile}", "--timeout", "20")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_gone(int(pidfile.read_text()), "the backgrounded server")
 
     def test_compare_pairs_by_name(self):
         before, after, out = self.t / "before", self.t / "after", self.t / "cmp"
