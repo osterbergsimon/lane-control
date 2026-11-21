@@ -1,6 +1,6 @@
 # Design kit: retire the design lead, give projects a frontend brief, a design file, a design reviewer and a gallery (design)
 
-Date: 2026-11-21. Status: draft for the owner (beads lc-jai, JAI-1).
+Date: 2026-11-21. Status: approved by the owner 2026-11-21 with the change in section 9 (beads lc-jai, JAI-1).
 
 ## 1. Intent
 
@@ -56,7 +56,8 @@ exact `design-shots` line) · **Decisions** (dated one-liners: what changed and 
 
 Appended to `templates/lane-brief.md` by the coordinator for any lane that changes what a user sees. In order:
 1. Read `DESIGN.md` (create it from the template if missing) and the skills `frontend-design`, `ui-ux-pro-max` and
-   `modern-web-guidance` where you have them. Name the ones you lack in the report; never block on them.
+   `modern-web-guidance` (Claude and OpenCode both have them after setup; section 9). Name any you lack in the
+   report; never block on them.
 2. Before the first edit: `design-shots` of the gallery (or the pages the issue touches) at the base, into
    `$(git rev-parse --git-dir)/design-shots/before/`.
 3. Plan before code: for a new screen or visual direction a token plan (colours, type, spacing, ASCII wireframe,
@@ -144,19 +145,45 @@ project-setup (setup and refresh) finds the old design lead by its committed add
 - `--design-lead <harness/model>` is refused with a pointer to this spec (it asks for something that no longer
   exists); `--no-design-lead` is accepted and does nothing, so old command lines keep working.
 
-## 9. Without the skills
+## 9. The skills, on every harness and host
 
-On this machine the three skills are there for Claude only: `frontend-design` and `ui-ux-pro-max` are Claude Code
-plugins, `modern-web-guidance` is a user skill in `~/.agents/skills` linked into Claude's skills. OpenCode's skill
-folder has none of them, and remote boxes have whatever their owner installed. lane-control never installs or copies
-them (third-party content, per-harness plugin managers).
-- The brief and the design reviewer keep the floor and the tells in their own words, so a lane without the skills
-  still has the rules; the report names what it lacked.
-- The coordinator gives work that sets a visual direction (a new screen, a redesign, a project's first `DESIGN.md`)
-  only to a Claude lane on a machine that has `frontend-design` and `ui-ux-pro-max`; fixes inside an existing
-  direction may run on any harness or host.
-- project-setup prints which of the three it finds for each harness on the machine it runs on (here or the box),
-  as a note, never a stop.
+The owner, 2026-11-21: "We should allow opencode as well. We should make sure the skills are installed there too."
+OpenCode lanes may do frontend and visual-direction work; `lane-tier` still decides which models run where.
+
+Where the skills are found. Claude Code reads `~/.claude/skills` and its plugins. OpenCode v2 (2.2.1, checked
+with a scratch HOME) reads `~/.config/opencode/skills`, `~/.claude/skills` (unless `OPENCODE_DISABLE_CLAUDE_CODE`
+or `..._SKILLS` is set) and `~/.agents/skills`, plus the project's `.opencode`, `.claude` and `.agents`, and follows
+symlinks. It does not read Claude's plugins. Here `frontend-design` and `ui-ux-pro-max` are Claude plugins, so
+OpenCode lacks them; `modern-web-guidance` is in `~/.agents/skills`, so both have it. Boxes have whatever their owner
+installed.
+
+What project-setup does (native path, here and on a box, every setup and refresh, idempotent): for each skill in
+`core/design-skills.tsv` (name, upstream git URL, pinned commit, path in the repo, licence, the Claude plugin that
+also carries it):
+- `~/.agents/skills/<name>` already there and not ours (the owner installed it): left alone, reported `exists`.
+- Otherwise a sparse checkout of that path at that commit into `~/.agents/skill-sources/<name>@<commit12>/`, and
+  `~/.agents/skills/<name>` a symlink into it (swapped by rename, older checkouts of ours removed). OpenCode reads it
+  there; nothing goes into `~/.config/opencode/skills`.
+- Claude gets a link `~/.claude/skills/<name>` to it only when its own plugin for that skill is not installed (no
+  skill twice) and nothing is at that path.
+- No git or no network: `design-skills missing <names>: <why>`, never a stop.
+- The output names each skill and what happened (`created`, `updated`, `exists`, `missing`).
+
+Sources, checked 2026-11-21; nothing of theirs is committed here, only the URL and commit:
+| Skill | Upstream | Licence |
+|---|---|---|
+| `frontend-design` | anthropics/claude-plugins-official, `plugins/frontend-design/skills/frontend-design` | Apache-2.0 |
+| `ui-ux-pro-max` | nextlevelbuilder/ui-ux-pro-max-skill, `.claude/skills/ui-ux-pro-max` | MIT |
+| `modern-web-guidance` | GoogleChrome/modern-web-guidance, `skills/modern-web-guidance` | Apache-2.0 |
+
+`ui-ux-pro-max` runs its search script as `${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/scripts/...`, which
+is unset outside a Claude plugin. OpenCode prints each skill's base directory when it loads one, so the brief says:
+where a skill names `${CLAUDE_PLUGIN_ROOT}/.claude/skills/<skill>/`, use that skill's base directory.
+`modern-web-guidance` runs `npx modern-web-guidance`, so it needs Node and the network where the lane runs.
+
+Still, without a skill: the brief and the design reviewer keep the floor and the tells in their own words, and the
+report names what was missing; the coordinator does not give visual-direction work to a lane that lacks
+`frontend-design` or `ui-ux-pro-max`.
 
 ## 10. Approaches
 
@@ -165,32 +192,37 @@ them (third-party content, per-harness plugin managers).
 2. **A design lead started per batch of frontend work.** Rejected: still a session with an address, a Run and
    messages, still stacks lanes on its branch, and brings back the lost-wake gap.
 3. **The method in the reviewer only.** Rejected: review catches design late; the lane must plan before code.
-4. **Vendor the skills into the repo or install them.** Rejected: the owner asked not to copy them; licences and
-   drift; each harness has its own installer.
-5. **lane-control ships a gallery package.** Rejected: projects differ; the framework's own tool or a plain route
+4. **Vendor the skills into the repo.** Rejected: the owner asked not to; licences and drift.
+5. **Link OpenCode to Claude's plugin folders.** Rejected: the paths carry a version that changes on update (dangling
+   links), and a box without Claude has none. A pinned upstream checkout is the same on every machine.
+6. **Install through each harness's own installer (`claude plugin install`, the `skills` CLI).** Rejected: two
+   installers, unpinned versions, and OpenCode has no plugin installer for these.
+7. **Only report which skills are found.** Rejected by the owner, 2026-11-21: OpenCode must have them too.
+8. **lane-control ships a gallery package.** Rejected: projects differ; the framework's own tool or a plain route
    fits each better, and a package would be a dependency of every project.
-6. **Screenshots through the Playwright MCP or the terminal browser.** Rejected as the base: not on every harness or
+9. **Screenshots through the Playwright MCP or the terminal browser.** Rejected as the base: not on every harness or
    box, not batchable. Agents may still use them to look around.
-7. **Pixel diffs (pixelmatch, odiff).** Rejected for now: a dependency for little gain over side-by-side pairs.
-8. **The reviewer builds the base itself in a throwaway worktree.** Rejected as the default: a full install per
+10. **Pixel diffs (pixelmatch, odiff).** Rejected for now: a dependency for little gain over side-by-side pairs.
+11. **The reviewer builds the base itself in a throwaway worktree.** Rejected as the default: a full install per
    review. The lane shoots `before` first thing, in the same worktree the reviewer later reads.
-9. **The design file in `.lane-control/`.** Rejected: it is the project's knowledge, not lane-control's.
+12. **The design file in `.lane-control/`.** Rejected: it is the project's knowledge, not lane-control's.
 
-## 11. Decisions for the owner
+## 11. Decisions (owner, 2026-11-21)
 
-1. The issue asks to remove the design lead from the parked Orca + Cotal path too. Recommended: yes, mechanically
-   (persona, adapt template, fixture, its spawn and verify), since the flags and settings are shared; Cotal gets the
-   migration notice but no design reviewer.
-2. Every frontend lane gets the design reviewer (recommended, as the design lead reviewed every one), or only from
-   review tier B up?
-3. `--design-lead` refused, `--no-design-lead` a no-op (recommended), or both refused?
+1. The design lead goes from the parked Orca + Cotal path too, mechanically (persona, adapt template, fixture, its
+   spawn and verify); Cotal gets the migration notice but no design reviewer and no design skills install.
+2. Every frontend lane gets the design reviewer.
+3. `--design-lead` is refused; `--no-design-lead` is accepted and does nothing.
+4. OpenCode lanes may do frontend work, and setup installs the skills for OpenCode too (section 9).
 
 ## 12. Tests (phase 2, test first)
 
 Content tests: the brief addition, design reviewer, skill and template carry their rules; no persona, skill or doc
 names the design lead except the migration. project-setup tests (stubbed Orca): the migration asks, moves and
 commits on yes, writes nothing on no or without a terminal, never stops a session, drops the settings, refuses
-`--design-lead`; the design reviewer is rendered; the skill and `design-shots` are installed. `design-shots` tests
+`--design-lead`; the design reviewer is rendered; the skill and `design-shots` are installed; the design skills are installed from local
+git repos standing in for upstream into a scratch HOME (never the real one): created, exists, updated, the owner's own
+left alone, no Claude link when the plugin is installed, missing on a failed fetch. `design-shots` tests
 with a stub Playwright and a local `python3 -m http.server`: the page x width x theme matrix, names, `shots.tsv`,
 `--serve` cleanup, the refusals, `compare`. One real-browser test, skipped when no Playwright is found, run through
 `lane-heavy`. Not tested: a real project migrated, a remote box.
