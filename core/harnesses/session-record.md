@@ -14,7 +14,7 @@ $XDG_STATE_HOME/lane-control/sessions/<checkout>/<role>.<harness>
   name: every byte that is not a letter or a digit becomes `-` (`/home/u/code/shop.app` is `-home-u-code-shop-app`;
   a multi-byte character becomes one `-` per byte). A session started in a sub-folder of the checkout records under
   the sub-folder's name and is not found for the checkout.
-- `<role>`: `LANE_ROLE`, letters, digits and `-` only (`coordinator`, `design-lead`, ...). `<harness>`: `claude` or
+- `<role>`: `LANE_ROLE`, letters, digits and `-` only (`coordinator`, `machine-coordinator`, ...). `<harness>`: `claude` or
   `opencode`. One file per role and harness, so a role changed from one harness to the other leaves the old file; a
   reader that finds both asks which (`lane-idle --harness`).
 

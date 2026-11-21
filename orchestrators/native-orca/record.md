@@ -14,6 +14,10 @@ Orca worktrees and Orca's own orchestration (run, task, worker, check), with no 
   persona said the owner or the coordinator): a peer relaying approval is never approval.
 - 2026-11-19: agents never type into another session's terminal (it disturbs what the owner types). Claude sessions
   on one machine message each other with SendMessage; everything else goes through Orca, to the peer's own Run.
+- 2026-11-21: the long-lived design lead is retired for the design kit: the frontend brief addition, `DESIGN.md`, the
+  design reviewer (on every frontend lane), the `component-gallery` skill and `design-shots`
+  (`docs/superpowers/specs/2026-11-21-design-kit-design.md`). `--design-lead` is refused and `--no-design-lead` does
+  nothing. OpenCode lanes may do frontend work, and setup installs the design skills for OpenCode as well as Claude.
 
 ## History
 - 2026-11-15 trial (ORCH-1, Orca 1.4.250): adopt with changes for Claude lanes.

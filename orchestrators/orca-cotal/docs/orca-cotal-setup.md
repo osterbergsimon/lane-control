@@ -18,7 +18,7 @@ from its bundled docs (`cotal_docs`), not from memory.
                                               │   stack-delivery delivery daemon (durable DMs and channels, wakes)  │
                                               │   mgr            manager service on the Orca runtime: spawns seats  │
                                               │                  as Orca tabs, mints and renews their credentials   │
-                                              │   seats          coordinator, design lead, lanes, reviewers         │
+                                              │   seats          coordinator, lanes, reviewers                      │
                                               │                  (Claude via the Cotal plugin, OpenCode via         │
                                               │                   its Cotal plugin)                                 │
                                               │ per machine:                                                       │
@@ -36,13 +36,13 @@ from its bundled docs (`cotal_docs`), not from memory.
 | delivery daemon | serves durable DMs and channel delivery and the membership feed; holds a lease per space | same root | `cotal up` with the broker |
 | `mgr` | the space's manager as a saved Cotal service on the Orca runtime. It launches each seat as an Orca tab and mints a 24-hour seat credential, which it renews at 75% of its life. It carries `envRefs` for PATH and the proxy variables | definition `<repo>/.cotal/mgr-service.json`; log via `cotal service logs mgr -s <space>` | `cotal svc add/start mgr` (project-setup step 6) |
 | seat | one agent process in an Orca tab, joined to the mesh under its own identity | its worktree; credential `<repo>/.cotal/auth/` (secret: never open) | `cotal spawn -d` (project-setup) or `cotal_spawn` (coordinator) |
-| personas | the coordinator, design-lead and reviewer prompts, rendered from `orchestrators/orca-cotal/personas/` | `<repo>/.cotal/agents/` (Cotal reads them there) | project-setup step 5, `--refresh` |
+| personas | the coordinator and reviewer prompts, rendered from `orchestrators/orca-cotal/personas/` | `<repo>/.cotal/agents/` (Cotal reads them there) | project-setup step 5, `--refresh` |
 | Claude plugin and wake channel | Cotal's Claude Code plugin: it gives a managed session its mesh tools and wakes an idle session on a message (Claude "channels") | `~/.cotal/claude-plugin/` | `cotal setup -H claude ... --configure-only` (project-setup step 4) |
 | settings store, tier table | per-project choices and `lanes.tsv`, outside the repo | `~/.config/lane-control/projects/<folder>-<hash>/` | project-setup (`--show` prints it) |
 | skills | `orca-cli` and `orca-cotal-lanes`, user level, because a lane worktree carries only committed files | `~/.agents/skills/`, linked into Claude and OpenCode | project-setup step 3 |
 | window guard | budget orders and the low-memory notice by `cotal send`; spends no tokens | systemd user unit `lane-control-window-guard.service` | `scripts/window-guard-install` |
 | machine coordinator | one agent per machine in the space `machine` | `~/code/machine-coordinator` | `scripts/machine-coordinator-setup` |
-| `project-pause` | `rest`/`wake` (a guard marker only), `stop`/`start` (also the coordinator and design lead) | marker next to the guard's state file | the owner or a coordinator |
+| `project-pause` | `rest`/`wake` (a guard marker only), `stop`/`start` (also the coordinator) | marker next to the guard's state file | the owner or a coordinator |
 
 How a message travels: an agent calls `cotal_dm`, its seat publishes to the broker, and the delivery daemon stores
 the message durably. The receiving seat's connector takes it and delivers it as its own turn. Claude gets it through
@@ -64,7 +64,7 @@ Run as the agent user, never root. Pass `-s <space>` to every `cotal` call (`orc
 | 3 | Sign in to Claude once (`claude`); for bypass mode, accept its warning once | `claude --version` | a version and no login prompt |
 | 4 | `scripts/project-setup <repo>` (`orchestrators/orca-cotal/docs/orca.md` §5b) | `cotal space` | the space `● reachable` at `nats://127.0.0.1:<port>` |
 | 5 | (same run) broker, delivery daemon, `mgr` | `cotal svc -s <space>` | `mgr`, `stack-broker`, `stack-delivery` all `running`. `auth-service`, `web` and the other optional built-ins show `not started`, which is normal on a static-auth space |
-| 6 | (same run) coordinator and design lead | `cotal ps -s <space>` | both rows show `running` under PROCESS and `idle` or `working` under MESH. In Orca, the tab `cotal-<name>` sits in the main checkout and in the `design-lead` task |
+| 6 | (same run) coordinator | `cotal ps -s <space>` | its row shows `running` under PROCESS and `idle` or `working` under MESH. In Orca, the tab `cotal-<name>` sits in the main checkout |
 | 7 | Manager health | `cotal manager status -s <space>`; `cotal service logs mgr -s <space>` | `Process observation: running`, `Readiness observation: endpoint-serving`; no line starting `!` that recurs |
 | 8 | Credential health | `cotal doctor auth --space <space> --plain` (run in the repo; read-only without `--fix`) | live seats, `delivery.creds` and `membership-rw.creds` all `healthy`. `near-expiry` or `expired` ("the broker denies this credential") is expected for seats already reaped, and so is the closing line `! local credential findings remain` that they cause |
 | 9 | Claude wake path (once per machine, by hand) | the agent's tab shows no `Cotal incoming auto-wake is unavailable` notice at startup; a `cotal send -s <space> -t coordinator "test, no reply"` wakes an idle coordinator | the coordinator takes a turn |

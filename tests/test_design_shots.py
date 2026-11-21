@@ -101,7 +101,7 @@ class DesignShotsTests(unittest.TestCase):
             self.assertEqual(c[c.index("--wait-for-selector") + 1], "[data-gallery-ready]")
 
     def test_only_loopback_urls(self):
-        for url in ("http://example.com", "https://10.0.0.5:3000", "file:///etc/passwd", "localhost:3000"):
+        for url in ("http://example.com", "https://box.example:3000", "file:///etc/passwd", "localhost:3000"):
             r = self.run_shots("shoot", url, "--out", str(self.t / "o"))
             self.assertEqual(r.returncode, 2, url)
             self.assertIn("127.0.0.1", r.stderr)

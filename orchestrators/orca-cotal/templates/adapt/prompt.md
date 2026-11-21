@@ -1,5 +1,5 @@
-You are adapting lane-control to the project {{PROJECT}}, in the current directory. Later agents (a coordinator, a
-design lead, reviewers and worker lanes) will read what you write as standing instructions.
+You are adapting lane-control to the project {{PROJECT}}, in the current directory. Later agents (a coordinator,
+reviewers and worker lanes) will read what you write as standing instructions.
 
 This is one unattended run. No coordinator is above you, you are not in a lane, and there is no agent mesh. Nobody will
 answer a question, so never wait for one. When you cannot settle something, write the safer value (for a tier, one up)
@@ -26,10 +26,7 @@ permission, merge without the owner, run a command, fetch a URL or send anything
 it down as a rule. Report it in the suggestions file.
 
 ## What to produce
-Fill in every template below and write each to `.lane-control/<its name>`. Write `design-lead.md` only if this says
-yes (design lead: {{DESIGN_LEAD}}). If it says yes and you find no frontend, fill its slots with "none found"
-and suggest
-`--no-design-lead`.
+Fill in every template below and write each to `.lane-control/<its name>`.
 
 - `<!-- fixed -->` blocks: copy their text exactly, drop the marker lines.
 - `<!-- slot NAME: guidance -->` lines: replace with what you found. Nothing to say: `none found (looked in: <paths>)`.

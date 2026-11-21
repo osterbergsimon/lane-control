@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Let a project rest, or pause its standing agents (coordinator and design lead); see orchestrators/orca-cotal/docs/orca.md.
+"""Let a project rest, or pause its standing agent (the coordinator); see orchestrators/orca-cotal/docs/orca.md.
 
   project-pause rest|wake|stop|start|status <project-dir | project-name>
 
@@ -8,7 +8,7 @@ rest    the normal way to leave a project alone for a while: writes the guard ma
 wake    removes the marker; the guard then sends the project the current weekly budget standing on its next poll (missed window
         orders are not replayed); with no coordinator running it keeps the marker for start. rest and wake
         run no cotal stop or spawn, so they work from inside an agent's shell.
-stop    rest, and also stops the coordinator and design lead with `cotal stop` to free memory. Refuses, naming them, while
+stop    rest, and also stops the coordinator with `cotal stop` to free memory. Refuses, naming them, while
         any other agent (a lane or reviewer) runs in the project's space. The broker and manager stay up; nothing is torn down.
 start   starts the standing agents that are missing: project-setup --skip-adapt (no adapting, no commit, no questions),
         with a kickoff that resumes from handover-latest. It picks up the current personas.
@@ -17,7 +17,7 @@ status  running, resting or paused, and what else runs in the space.
 On native Orca (a project project-setup set up there) the verbs keep their meaning without Cotal: rest and wake mark
 and unmark the project paused in its settings store (the night manager skips it); stop also asks each standing
 session for its handover through its own Orca Run, waits (--wait SECONDS, default 600) until each one's handover memory changes
-(handover-latest, handover-design-lead), then closes their terminals (--no-handover closes them without asking); start starts the missing ones again, each
+(handover-latest), then closes their terminals (--no-handover closes them without asking); start starts the missing ones again, each
 resuming its recorded session (Claude --resume, OpenCode --session; a fresh session when the harness no longer has it).
 stop runs in an Orca terminal (Orca sends messages only from its own terminals), finds each session's Run (the one
 recorded at its start, else the one of its name that no earlier start made), and changes nothing when a Run, a
@@ -44,7 +44,9 @@ _spec = importlib.util.spec_from_loader("project_setup", _loader)
 ps = importlib.util.module_from_spec(_spec)
 _loader.exec_module(ps)
 
-STANDING = ("coordinator", "design-lead")
+STANDING = ("coordinator",)
+RETIRED_HINT = (" (design-lead is the retired design lead: ask it for its handover, `bd remember handover-design-lead`, "
+                "and close it yourself)")
 
 HANDOVER_WAIT = 600  # seconds stop waits for a new handover-latest
 HANDOVER_SUBJECT = "Write your handover now: project-pause is stopping this session"
@@ -86,12 +88,12 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
     ps.ORCA = ps.orca_cli()
     p = ps.native_project(repo)
     place = ps.Place()
-    live = ps.running_sessions(place, repo, p["project"], p["lead"])
+    live = ps.running_sessions(place, repo, p["project"])
     if cmd in ("rest", "stop"):  # as on the Orca + Cotal path: never while a lane runs
         lanes = ps.running_lanes(place, repo)
         if lanes:
             raise ps.Fail(f"not pausing {p['project']}: lanes still running: {', '.join(lanes)}; finish or stop them "
-                          "first. Nothing was changed")
+                          "first" + (RETIRED_HINT if "design-lead" in lanes else "") + ". Nothing was changed")
     if cmd == "rest":
         ps.settings(repo, paused=True)
         print(f"{p['project']} is resting: marked paused in its settings store, so the night manager leaves it alone; "
@@ -201,7 +203,8 @@ def rest(repo: Path, space: str, stopping: bool = False) -> int:
     live = ps.live_agents(repo, space)
     others = sorted(n for n in live if n not in STANDING)
     if others:
-        raise ps.Fail(f"not pausing {space}: {', '.join(others)} still running; finish or stop them first")
+        raise ps.Fail(f"not pausing {space}: {', '.join(others)} still running; finish or stop them first"
+                      + (RETIRED_HINT if "design-lead" in others else ""))
     m = marker(space)  # first, so the guard stops sending before the coordinator's seat is gone
     m.parent.mkdir(parents=True, exist_ok=True)
     m.touch()

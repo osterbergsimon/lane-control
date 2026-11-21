@@ -1,8 +1,8 @@
 """orca-cotal adapter for scripts/orch: what project-setup leaves in a project, found and removed exactly.
 
 Markers (the union of what the strip PRs of 2026-11-15 removed from three projects, and what project-setup adds):
-- the adapted files in `.lane-control/` (coordinator, design lead, project, reviewer, routing): strip deletes those
-  five and the folder once it is empty; it refuses a folder that is a symlink or holds any other file;
+- the adapted files in `.lane-control/` (coordinator, project, reviewer, routing, and a retired design lead's): strip
+  deletes those and the folder once it is empty; it refuses a folder that is a symlink or holds any other file;
 - the section between `<!-- lane-control:begin -->` and `<!-- lane-control:end -->` in AGENTS.lane-control.md, and the
   one pointer line to that file in AGENTS.md once no section is left in it (core/agentsdoc.py); a section from before
   that file, still in AGENTS.md, is removed there (in the symlink's target when AGENTS.md is a link inside the repo);
@@ -14,7 +14,7 @@ ours either; it is for whoever reviews the strip PR.
 
 setup runs `scripts/project-setup --no-start --orchestrator orca-cotal` on the project as it is: that script edits the main checkout, runs
 its adapting and reviewing agents, asks its own questions and commits on its own, so no PR is made and it says so
-first. It starts no coordinator or design lead; it prints how to start them.
+first. It starts no coordinator; it prints how to start it.
 """
 import importlib.util
 import shutil
@@ -46,7 +46,7 @@ SECTION = "AGENTS.md lane-control section"  # where project-setup put it before 
 GEN_SECTION = f"{GENERATED} lane-control section"
 WARNING = ("project-setup commits on its own; no PR is made. It edits the project's main checkout in place, runs its "
            "adapting and reviewing agents (headless) and asks its questions in this terminal. It starts no "
-           "coordinator or design lead (--no-start).")
+           "coordinator (--no-start).")
 
 
 def read(f: Path) -> str:
@@ -175,6 +175,6 @@ def setup(project: Path, work, dry: bool = False) -> int:
         print(f"dry run: would run {script} {project} --no-start --orchestrator orca-cotal")
         return 0
     code = subprocess.run([str(script), str(project), "--no-start", "--orchestrator", "orca-cotal"]).returncode
-    print(f"To start its coordinator and design lead, run `{ROOT / 'scripts' / 'project-setup'} {project}` "
+    print(f"To start its coordinator, run `{ROOT / 'scripts' / 'project-setup'} {project}` "
           "(a rerun only does what is missing).", flush=True)
     return code

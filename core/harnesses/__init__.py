@@ -14,6 +14,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PERSONA_HOOK = HERE / "persona-hook.sh"
 SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,200}")
+# design-lead: retired 2026-11-21 (the design kit), kept so a design lead still running keeps its session record
 ROLES = frozenset({"coordinator", "design-lead", "reviewer", "debugger", "machine-coordinator"})
 _cache: dict = {}
 

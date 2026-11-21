@@ -38,14 +38,6 @@ class PersonaTests(unittest.TestCase):
         self.assertIn("role:lane", keys["capabilities"])
         self.assertIn("orca-cotal-lanes", body)
 
-    def test_design_lead_frontmatter(self):
-        keys, body = frontmatter(PERSONAS / "design-lead.md")
-        self.assertEqual(keys["name"], "design-lead")
-        self.assertEqual(keys["role"], "design")
-        self.assertIn("spawn", keys["capabilities"])
-        self.assertIn("role:lane", keys["capabilities"])
-        self.assertIn("orca-cotal-lanes", body)
-
     def test_reviewer_frontmatter_and_rules(self):
         keys, body = frontmatter(PERSONAS / "reviewer.md")
         self.assertEqual(keys["name"], "reviewer")
@@ -56,15 +48,13 @@ class PersonaTests(unittest.TestCase):
         for ph in ("{{HARNESS}}", "{{MODEL}}", "{{LAUNCH}}", "{{PROJECT}}"):
             self.assertIn(ph, (PERSONAS / "reviewer.md").read_text())
 
-    def test_leads_point_at_the_reviewer(self):
-        for name in ("coordinator.md", "design-lead.md"):
-            self.assertIn("{{REVIEWER}}", (PERSONAS / name).read_text(), name)
+    def test_the_coordinator_points_at_the_reviewer(self):
+        self.assertIn("{{REVIEWER}}", (PERSONAS / "coordinator.md").read_text())
 
-    def test_leads_check_for_room_before_opening_a_lane(self):
-        for name in ("coordinator.md", "design-lead.md"):
-            text = (PERSONAS / name).read_text()
-            self.assertIn("~/.agents/bin/lane-room", text, name)
-            self.assertIn("hold the lane and tell the owner", " ".join(text.split()), name)
+    def test_the_coordinator_checks_for_room_before_opening_a_lane(self):
+        text = (PERSONAS / "coordinator.md").read_text()
+        self.assertIn("~/.agents/bin/lane-room", text)
+        self.assertIn("hold the lane and tell the owner", " ".join(text.split()))
 
     def test_coordinator_keeps_its_checkout_on_the_default_branch(self):
         text = " ".join((PERSONAS / "coordinator.md").read_text().split())
@@ -80,10 +70,9 @@ class PersonaTests(unittest.TestCase):
         self.assertIn("A design lead skips this", skill)
 
     def test_personas_carry_placeholders(self):
-        for name in ("coordinator.md", "design-lead.md"):
-            text = (PERSONAS / name).read_text()
-            for ph in ("{{HARNESS}}", "{{MODEL}}", "{{LAUNCH}}", "{{PROJECT}}", "{{MODE}}", "{{TIERS}}"):
-                self.assertIn(ph, text, f"{name} lacks {ph}")
+        text = (PERSONAS / "coordinator.md").read_text()
+        for ph in ("{{HARNESS}}", "{{MODEL}}", "{{LAUNCH}}", "{{PROJECT}}", "{{MODE}}", "{{TIERS}}"):
+            self.assertIn(ph, text, f"coordinator.md lacks {ph}")
 
 
 class SkillTests(unittest.TestCase):
@@ -120,11 +109,10 @@ class AttachedRepoContentTests(unittest.TestCase):
 
 class SettingsStoreContentTests(unittest.TestCase):
     def test_lanes_are_pointed_at_the_store_not_at_cotal(self):
-        for f in (SKILL, PERSONAS / "coordinator.md", PERSONAS / "design-lead.md"):
+        for f in (SKILL, PERSONAS / "coordinator.md"):
             text = f.read_text()
             self.assertNotIn(".cotal/lanes.tsv", text, f.name)
         self.assertIn("~/.config/lane-control/projects/<project>/", SKILL.read_text())
-        self.assertIn("{{TIERS}}", (PERSONAS / "design-lead.md").read_text())
         self.assertIn("{{TIERS}}", (PERSONAS / "coordinator.md").read_text())
 
 
@@ -183,8 +171,8 @@ class BypassOptionTests(unittest.TestCase):
 
 
 ADAPT = ROOT / "orchestrators" / "orca-cotal" / "templates" / "adapt"
-TEMPLATE_FILES = ("project.md", "routing.md", "coordinator.md", "reviewer.md", "design-lead.md")
-MACHINE_VALUES = ("{{PROJECT}}", "{{DESIGN_LEAD}}", "{{TEMPLATES}}", "{{REVIEW_FINDINGS}}", "{{VISIBILITY}}")
+TEMPLATE_FILES = ("project.md", "routing.md", "coordinator.md", "reviewer.md")
+MACHINE_VALUES = ("{{PROJECT}}", "{{TEMPLATES}}", "{{REVIEW_FINDINGS}}", "{{VISIBILITY}}")
 
 
 class AdaptTemplateTests(unittest.TestCase):
@@ -206,7 +194,7 @@ class AdaptTemplateTests(unittest.TestCase):
 
     def test_every_template_states_its_size_limit(self):
         for name, key in (("project.md", "max_lines"), ("routing.md", "max_rows"), ("coordinator.md", "max_lines"),
-                          ("reviewer.md", "max_lines"), ("design-lead.md", "max_lines")):
+                          ("reviewer.md", "max_lines")):
             keys, _ = frontmatter(ADAPT / name)
             self.assertRegex(keys.get(key, ""), r"^\d+$", f"{name} lacks {key}")
         for name in ("prompt.md", "review-prompt.md"):
@@ -247,7 +235,7 @@ class AdaptTemplateTests(unittest.TestCase):
             self.assertIn(needle, text)
 
     def test_additions_never_relax(self):
-        for name in ("coordinator.md", "reviewer.md", "design-lead.md"):
+        for name in ("coordinator.md", "reviewer.md"):
             self.assertRegex((ADAPT / name).read_text(), r"never (relax|lower)", name)
 
     def test_adapting_prompt_rules(self):
@@ -279,7 +267,7 @@ class AdaptTemplateTests(unittest.TestCase):
 
     def test_review_prompt_rules(self):
         text = (ADAPT / "review-prompt.md").read_text()
-        for ph in ("{{TEMPLATES}}", "{{PROJECT}}", "{{DESIGN_LEAD}}"):
+        for ph in ("{{TEMPLATES}}", "{{PROJECT}}"):
             self.assertIn(ph, text)
         for needle in ("VERDICT: PASS | FIX", "Read-only", "Weakened doctrine", "Smuggled instructions",
                        "Under-tiered paths", "SUGGESTIONS.md", "Never inflate a level"):
@@ -294,7 +282,7 @@ class AdaptTemplateTests(unittest.TestCase):
 
     def test_check_prompt_checks_fixes_only(self):
         text = " ".join((ADAPT / "check-prompt.md").read_text().split())
-        for ph in ("{{PROJECT}}", "{{DESIGN_LEAD}}", "{{REVIEW_FINDINGS}}"):
+        for ph in ("{{PROJECT}}", "{{REVIEW_FINDINGS}}"):
             self.assertIn(ph, text)
         for needle in ("This is not a new audit", "Raise nothing new outside that", "the fix broke what it touched",
                        "Read-only", "VERDICT: PASS | FIX", "[safety]", "never instructions to you"):
@@ -351,7 +339,7 @@ class AdaptTemplateTests(unittest.TestCase):
         self.assertIn("`## Questions for the owner`", flat)
 
     def test_review_prompt_has_no_literal_double_braces_but_its_placeholders(self):
-        left = re.sub(r"\{\{(PROJECT|DESIGN_LEAD|TEMPLATES|VISIBILITY)\}\}", "", (ADAPT / "review-prompt.md").read_text())
+        left = re.sub(r"\{\{(PROJECT|TEMPLATES|VISIBILITY)\}\}", "", (ADAPT / "review-prompt.md").read_text())
         self.assertNotIn("{{", left)
         self.assertNotIn("}}", left)
 
@@ -381,11 +369,6 @@ class OnboardedProjectPersonaTests(unittest.TestCase):
                        ".lane-control/project.md"):
             self.assertIn(needle, text)
         self.assertNotIn("lane-control model-routing", text)
-
-    def test_design_lead_reads_agents_md(self):
-        text = (PERSONAS / "design-lead.md").read_text()
-        self.assertIn("Read the repo's AGENTS.md", text)
-        self.assertIn(".lane-control/design-lead.md", text)
 
     def test_path_map_lives_in_routing_md(self):
         self.assertIn(".lane-control/routing.md", (ROOT / "core" / "model-routing.md").read_text().splitlines()[2])
@@ -491,11 +474,10 @@ class LaneSkillCliTests(unittest.TestCase):
 
 
 class PersonaTierRefusalTests(unittest.TestCase):
-    def test_both_leads_look_a_tier_up_through_the_refusal(self):
-        for name in ("coordinator.md", "design-lead.md"):
-            text = " ".join((ROOT / "orchestrators" / "orca-cotal" / "personas" / name).read_text().split())
-            self.assertIn("~/.agents/bin/lane-tier", text, name)
-            self.assertIn("never start a refused tier", text, name)
+    def test_the_coordinator_looks_a_tier_up_through_the_refusal(self):
+        text = " ".join((ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md").read_text().split())
+        self.assertIn("~/.agents/bin/lane-tier", text)
+        self.assertIn("never start a refused tier", text)
 
 
 class BeadsSteeringTests(unittest.TestCase):
@@ -514,8 +496,8 @@ class BeadsSteeringTests(unittest.TestCase):
         for needle, why in self.RULES:
             self.assertIn(needle.lower(), low, f"{path.name}: {why}")
 
-    def test_coordinator_design_lead_and_brief_carry_the_rules(self):
-        for path in (PERSONAS / "coordinator.md", PERSONAS / "design-lead.md", BRIEF):
+    def test_coordinator_and_brief_carry_the_rules(self):
+        for path in (PERSONAS / "coordinator.md", BRIEF):
             self.check(path, path.read_text())
 
     def test_lane_key_is_a_label_everywhere(self):
@@ -568,15 +550,12 @@ class CleanupSteeringTests(unittest.TestCase):
         return " ".join(path.read_text().lower().split())
 
     def test_personas_close_merged_clean_lanes_and_keep_the_rest_with_the_owner(self):
-        for name in ("coordinator.md", "design-lead.md"):
-            t = self.flat(PERSONAS / name)
-            for needle in ("clean, pushed and an ancestor of the branch its pr merged into", "never use `--force`",
-                           "uncommitted changes", "never delete a branch", "reviewer after its last round"):
-                self.assertIn(needle, t, f"{name}: {needle}")
+        t = self.flat(PERSONAS / "coordinator.md")
+        for needle in ("clean, pushed and an ancestor of the branch its pr merged into", "never use `--force`",
+                       "uncommitted changes", "never delete a branch", "reviewer after its last round"):
+            self.assertIn(needle, t, needle)
         self.assertIn("without the owner's word for that lane, never close a lane whose work did not merge",
                       self.flat(PERSONAS / "coordinator.md"))
-        self.assertIn("without the owner's word for that lane, never close a lane whose work did not merge",
-                      self.flat(PERSONAS / "design-lead.md"))
         self.assertNotIn("close a lane, stop an agent", self.flat(PERSONAS / "coordinator.md"))
 
     def test_skill_gives_the_checks_and_the_order(self):
@@ -748,9 +727,9 @@ class OrchestratorRecordTests(unittest.TestCase):
 
 NATIVE = ROOT / "orchestrators" / "native-orca" / "personas"
 NATIVE_BRIEF = ROOT / "orchestrators" / "native-orca" / "templates" / "lane-brief.md"
-NATIVE_ROLES = ["coordinator", "design-lead", "reviewer", "design-reviewer", "debugger", "machine-coordinator"]
-LANE_STARTERS = ["coordinator", "design-lead"]  # the personas that start lanes (spec 7.4: the cross-host check)
-LEADS = ["coordinator", "design-lead", "machine-coordinator"]  # long-lived sessions that message peers
+NATIVE_ROLES = ["coordinator", "reviewer", "design-reviewer", "debugger", "machine-coordinator"]
+LANE_STARTERS = ["coordinator"]  # the personas that start lanes (spec 7.4: the cross-host check)
+LEADS = ["coordinator", "machine-coordinator"]  # long-lived sessions that message peers
 WORKERS = ["reviewer", "design-reviewer", "debugger"]  # started by a lead, report to it
 
 
@@ -839,7 +818,7 @@ class NativePersonaTests(unittest.TestCase):
             self.assertIn(f".lane-control/{role}.md", flat(NATIVE / f"{role}.md"), role)
 
     def test_project_additions_live_in_the_rendered_persona(self):
-        for role in ("coordinator", "design-lead", "reviewer"):
+        for role in ("coordinator", "reviewer", "design-reviewer"):
             self.assertIn("additions for this project", flat(NATIVE / f"{role}.md"), role)
 
     def test_workers_reread_their_persona_after_compaction(self):
@@ -898,9 +877,8 @@ class NativePersonaTests(unittest.TestCase):
                        "If that send fails, tell the owner"):
             self.assertIn(needle, t, needle)
 
-    def test_the_coordinator_reaches_the_design_lead_and_starts_debugger_lanes(self):
+    def test_the_coordinator_starts_debugger_lanes(self):
         t = flat(NATIVE / "coordinator.md")
-        self.assertIn("`{{PROJECT}} design lead`", t)
         self.assertIn("a failing test, a CI run or a bug report", t)
         self.assertIn(".lane-control/debugger.md", t)
 
@@ -922,17 +900,6 @@ class NativePersonaTests(unittest.TestCase):
         for needle in ("only for what this machine lacks", "its own clone", "pushes to GitHub",
                        "~/.config/lane-control/projects/"):
             self.assertIn(needle, t, needle)
-
-    def test_design_lead_keeps_its_design_method_and_reports_to_the_coordinator(self):
-        t = flat(NATIVE / "design-lead.md")
-        for needle in ("Plan before code", "AI-template tells", "Quality floor", "phone width", "`APPROVE` or `BLOCK`",
-                       "Never edit a lane's code yourself", "{{PROJECT}} coordinator", "the same lines, by message"):
-            self.assertIn(needle, t, needle)
-
-    def test_design_lead_merges_only_on_the_owners_own_word(self):
-        t = flat(NATIVE / "design-lead.md")
-        self.assertIn("Merge only when the owner says so", t)
-        self.assertNotIn("Merge only when the owner or the coordinator says so", t)
 
     def test_reviewer_stays_read_only_and_reports_once(self):
         keys, body = frontmatter(NATIVE / "reviewer.md")
@@ -1000,33 +967,32 @@ class NativePersonaTests(unittest.TestCase):
             self.assertEqual(self.harness_only_names(path.read_text()), [], path.name)
         self.assertEqual(self.harness_only_names("use the Agent tool, then /compact"), ["Agent tool", "/compact"])
 
-    def render(self, role, harness="claude", model="opus", design_lead=True, attached=()):
+    def render(self, role, harness="claude", model="opus", attached=()):
         # the native values first (orchestrators/native-orca/render.py), then project-setup's render_persona
         native = load_script("native_orca_render", ROOT / "orchestrators" / "native-orca" / "render.py")
         ps = load_script("project_setup_native", ROOT / "scripts" / "project-setup")
-        text = native.prepare((NATIVE / f"{role}.md").read_text(), design_lead=design_lead, attached=attached)
+        text = native.prepare((NATIVE / f"{role}.md").read_text(), attached=attached)
         out = ps.render_persona(text, harness, model, "auto", "Shop", tiers="/store/lanes.tsv",
-                                reviewer="/repo/.lane-control/reviewer.md", design_lead=design_lead, attached=attached)
+                                reviewer="/repo/.lane-control/reviewer.md", attached=attached)
         return out.replace("{{NOTES}}", "/mc/notes.md") if role == "machine-coordinator" else out
 
     def test_every_placeholder_is_one_the_render_step_fills(self):
         for role in NATIVE_ROLES:
             for harness, model in (("claude", "opus"), ("opencode", "opencode/some-model")):
-                for lead in (True, False):
-                    for attached in ((), ("../shop-api",)):
-                        out = self.render(role, harness, model, design_lead=lead, attached=attached)
-                        self.assertNotIn("{{", out, (role, harness, lead, attached))
+                for attached in ((), ("../shop-api",)):
+                    out = self.render(role, harness, model, attached=attached)
+                    self.assertNotIn("{{", out, (role, harness, attached))
 
     def test_rendered_coordinator_has_native_text_only(self):
-        with_lead = " ".join(self.render("coordinator", attached=("../shop-api",)).split())
-        self.assertIn("The project's design lead (session `Shop design lead`, role `design-lead`)", with_lead)
-        self.assertIn("attached repos, which you open lanes in: `../shop-api`", with_lead)
-        self.assertIn("--worktree new-top-level --repo path:<attached repo>", with_lead)
-        self.assertIn("design lead's review of how it looks and works", with_lead)
-        without = " ".join(self.render("coordinator", design_lead=False).split())
-        self.assertIn("This project has no design lead", without)
+        with_attached = " ".join(self.render("coordinator", attached=("../shop-api",)).split())
+        self.assertIn("attached repos, which you open lanes in: `../shop-api`", with_attached)
+        self.assertIn("--worktree new-top-level --repo path:<attached repo>", with_attached)
+        self.assertIn("`/repo/.lane-control/design-reviewer.md`", with_attached.replace(
+            "`design-reviewer.md` next to `/repo/.lane-control/reviewer.md`", "`/repo/.lane-control/design-reviewer.md`"))
+        without = " ".join(self.render("coordinator").split())
         self.assertNotIn("attached repos", without)
-        for out in (with_lead, without):
+        for out in (with_attached, without):
+            self.assertNotIn("design lead", out.lower())
             for needle in ("skill's section", "role `design`)", "cotal", "orca-cotal-lanes"):
                 self.assertNotIn(needle, out.lower() if needle == "cotal" else out, needle)
 
@@ -1271,9 +1237,8 @@ class NativeLaneSkillTests(unittest.TestCase):
                     self.assertRegex(line.lower(), r"never|do not|don't", f"'{bad}' outside a prohibition: {line}")
 
     def test_native_lane_starters_read_the_skill(self):
-        for role in ("coordinator", "design-lead"):
-            t = flat(ROOT / "orchestrators" / "native-orca" / "personas" / f"{role}.md")
-            self.assertIn("the `native-orca-lanes` skill", t, role)
+        t = flat(ROOT / "orchestrators" / "native-orca" / "personas" / "coordinator.md")
+        self.assertIn("the `native-orca-lanes` skill", t)
 
     def test_lines_fit(self):
         for n, line in enumerate(self.text.splitlines(), 1):
@@ -1316,17 +1281,17 @@ def wait_outside_prohibition(lines: list, n: int):
 
 
 def coordinator_facing():
-    """Everything a coordinator, design lead or machine coordinator reads as its own instructions."""
+    """Everything a coordinator or machine coordinator reads as its own instructions."""
     o = ROOT / "orchestrators"
     return sorted({*o.glob("*/skills/*/SKILL.md"), *o.glob("*/personas/coordinator.md"),
-                   *o.glob("*/personas/design-lead.md"), *o.glob("*/personas/machine-coordinator.md"),
+                   *o.glob("*/personas/machine-coordinator.md"),
                    *HANDS_TEMPLATES})
 
 
 class NoCoordinatorWaitLoopTests(unittest.TestCase):
     def test_no_coordinator_facing_file_has_a_wait_loop(self):
         files = coordinator_facing()
-        self.assertGreaterEqual(len(files), 10)
+        self.assertGreaterEqual(len(files), 8)
         for f in files:
             lines = f.read_text().splitlines()
             for n in range(len(lines)):
@@ -1656,15 +1621,15 @@ class CrossHostRouteTests(unittest.TestCase):
                        "`orca-ide orchestration reply --id <msg_id>`", "`reply --on` is refused",
                        "read from Orca's source, not yet run across two servers",
                        "If a cross-host wake is lost, the night manager's idle check or the owner notices it",
-                       "a design lead's lost wake is noticed by the owner"):
+                       "covers coordinators, the only long-lived sessions that start lanes"):
             self.assertIn(needle, t)
 
     def test_lane_starters_say_who_notices_a_lost_cross_host_wake(self):
-        # night-precheck measures idle for coordinators only, so a design lead's lost wake is the owner's to notice
+        # night-precheck measures idle for coordinators, and since the design lead is retired (2026-11-21) only
+        # coordinators start lanes: the DAC-1 gap (a design lead's lost wake at night) does not come back
         self.assertIn("If a cross-host wake is lost, the night manager's idle check or the owner notices it; you "
                       "never loop on `check`.", flat(NATIVE / "coordinator.md"))
-        self.assertIn("If a cross-host wake is lost, the owner notices it (the night manager's idle check covers "
-                      "coordinators, not design leads); you never loop on `check`.", flat(NATIVE / "design-lead.md"))
+        self.assertEqual(LANE_STARTERS, ["coordinator"])
 
     def test_the_design_spec_corrects_its_environment_route(self):
         t = flat(ROOT / "docs" / "superpowers" / "specs" / "2026-11-19-native-orca-setup-design.md")
@@ -1783,6 +1748,43 @@ class DesignReviewerTests(unittest.TestCase):
                        "`BLOCK` when there is any `blocker` or `major`", "or it breaks `DESIGN.md`",
                        "never inflate a level"):
             self.assertIn(needle, self.t, needle)
+
+
+class DesignLeadRetiredTests(unittest.TestCase):
+    """The owner, 2026-11-21: the long-lived design lead is retired for the design kit (design-kit spec)."""
+
+    def test_no_design_lead_persona_template_or_fixture_is_left(self):
+        for path in (*ROOT.glob("orchestrators/*/personas/design-lead.md"),
+                     *ROOT.glob("orchestrators/*/templates/adapt/design-lead.md"),
+                     *ROOT.glob("tests/fixtures/*/.lane-control/design-lead.md")):
+            self.fail(f"{path} is left")
+
+    def test_no_native_prompt_names_a_design_lead(self):
+        native = ROOT / "orchestrators" / "native-orca"
+        for path in (*sorted((native / "personas").glob("*.md")), native / "skills" / "native-orca-lanes" / "SKILL.md",
+                     native / "templates" / "lane-brief.md", native / "remote.md", FRONTEND_BRIEF, GALLERY_SKILL):
+            t = flat(path).lower()
+            for needle in ("design lead", "design-lead", "{{design_route}}", "{{design_review}}"):
+                self.assertNotIn(needle, t, (path.name, needle))
+
+    def test_the_coordinator_routes_frontend_lanes_through_the_kit(self):
+        t = flat(NATIVE / "coordinator.md")
+        for needle in ("## Frontend lanes", "changes what a user sees", "~/.agents/skills/native-orca-lanes/frontend-brief.md",
+                       "an open design question", "`frontend-design` and `ui-ux-pro-max`", "`skills missing`",
+                       "Claude or OpenCode", "`gallery: none`", "file one issue", "`DESIGN.md`"):
+            self.assertIn(needle, t, needle)
+
+    def test_every_frontend_lane_gets_the_design_reviewer(self):
+        t = flat(NATIVE / "coordinator.md")
+        for needle in ("Every frontend lane also gets the design reviewer, at any review tier",
+                       "`design-reviewer.md` next to `{{REVIEWER}}`", "a different model from the lane's",
+                       "its `BLOCK` holds the merge"):
+            self.assertIn(needle, t, needle)
+
+    def test_the_lane_skill_names_the_frontend_brief(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "skills" / "native-orca-lanes" / "SKILL.md")
+        self.assertIn("`frontend-brief.md` next to this skill", t)
+        self.assertIn("design reviewer", t)
 
 
 if __name__ == "__main__":
