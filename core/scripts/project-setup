@@ -2845,7 +2845,8 @@ def drop_design_lead_settings(repo: Path) -> None:
         return
     settings(repo, drop=("design_lead",),
              **({"models": {k: v for k, v in models.items() if k != "design-lead"}} if pin else {}))
-    say("design-lead", "retired", "its on/off setting and model pin are dropped from the settings store")
+    was = f" (it was design-lead={models['design-lead']})" if pin else ""
+    say("design-lead", "retired", f"its on/off setting and model pin are dropped from the settings store{was}")
 
 
 def design_lead_body(text: str) -> str:
@@ -2883,6 +2884,12 @@ def move_design_lead_files(repo: Path, rels: list) -> None:
     for rel in rels:
         (repo / rel).unlink()
     commit_adapted(repo, ["DESIGN.md", *rels], "Move the retired design lead's additions into DESIGN.md")
+    if run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode == 0:
+        branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo, check=False).stdout.strip()
+        lanes = default_branch(repo, branch)
+        if lanes and ahead_of_lanes_base(repo, lanes, ["DESIGN.md"]):
+            say("design-lead", "moved", f"DESIGN.md committed, not pushed: lanes start from origin/{lanes}, so push "
+                "it before the next frontend lane starts, or that lane makes its own DESIGN.md")
 
 
 def leftover_worktree_state(wt: Path) -> str:

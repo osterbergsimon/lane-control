@@ -758,6 +758,7 @@ class RetireDesignLeadTests(Case):
         self.assertNotIn("design_lead", st)
         self.assertNotIn("design-lead", st["models"])
         self.assertIn("dropped from the settings store", r.stdout)
+        self.assertIn("design-lead=claude/opus", r.stdout)  # review m5: the dropped pin stays in the output
 
     def test_on_yes_the_additions_move_into_design_md_in_one_commit(self):
         self.with_old_design_lead()
@@ -773,6 +774,20 @@ class RetireDesignLeadTests(Case):
         files = git("show", "--name-status", "--format=%s", "HEAD", cwd=self.repo).splitlines()
         self.assertIn("design lead", files[0].lower())
         self.assertEqual(sorted(files[2:]), sorted([f"D\t{self.ADD}", "A\tDESIGN.md"]))
+        self.assertNotIn("not pushed", out)  # no origin: lanes start from this branch, which has the commit
+
+    def test_on_yes_with_an_origin_it_says_lanes_lack_the_commit_until_pushed(self):
+        # review m5: Orca starts lanes from origin's default branch, so a local commit is not there yet
+        self.with_old_design_lead()
+        bare = self.e.home / "origin.git"
+        git("init", "-q", "--bare", "-b", "main", str(bare), cwd=self.e.home)
+        git("remote", "add", "origin", str(bare), cwd=self.repo)
+        git("push", "-q", "origin", "main", cwd=self.repo)
+        git("remote", "set-head", "origin", "main", cwd=self.repo)
+        status, out = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertIn("DESIGN.md committed, not pushed: lanes start from origin/main", out)
+        self.assertNotEqual(git("rev-parse", "HEAD", cwd=self.repo), git("rev-parse", "origin/main", cwd=self.repo))
 
     def test_an_existing_design_md_gets_the_additions_at_its_end(self):
         self.with_old_design_lead()
