@@ -167,6 +167,9 @@ also carries it):
 - Claude gets a link `~/.claude/skills/<name>` to it only when its own plugin for that skill is not installed (no
   skill twice) and nothing is at that path.
 - No git or no network: `design-skills missing <names>: <why>`, never a stop.
+- Each row is checked in code before git runs (a lowercase name, a full 40-hex commit, a plain relative path, an
+  https URL; `file://` only from a `LANE_DESIGN_SKILLS` table, the tests' stand-in): a bad row is `missing (refused:
+  <why>)`.
 - The output names each skill and what happened (`created`, `updated`, `exists`, `missing`).
 
 Sources, checked 2026-11-21; nothing of theirs is committed here, only the URL and commit:

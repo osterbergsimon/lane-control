@@ -628,6 +628,36 @@ class DesignSkillsTests(Case):
         self.assertEqual(list((self.e.home / ".agents" / "skill-sources").glob("*")), [])
         self.assertTrue((self.repo / ".lane-control" / "coordinator.md").exists())
 
+    def test_a_bad_row_is_refused_before_any_git_runs(self):
+        # review m2: LANE_DESIGN_SKILLS can replace the table, so the code checks each row, not only the shipped file
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        good = ("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-")
+        bad = {"a/b": ("a/b",) + good[1:], "star": ("*",) + good[1:], "dots": ("..",) + good[1:],
+               "branch": ("bad-commit-branch", good[1], "main") + good[3:],
+               "short": ("bad-commit-short", good[1], sha[:12]) + good[3:],
+               "up": ("bad-path-up", good[1], sha, "skills/../../x") + good[4:],
+               "abs": ("bad-path-abs", good[1], sha, "/etc") + good[4:],
+               "ext": ("bad-url-ext", "ext::sh -c 'touch pwned'", sha) + good[3:],
+               "http": ("bad-url-http", "http://example.com/x.git", sha) + good[3:],
+               "dash": ("bad-url-dash", "-uhttps://x", sha) + good[3:]}
+        self.table(*bad.values(), good)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("modern-web-guidance created", r.stdout)
+        self.assertEqual(r.stdout.count("refused:"), len(bad), r.stdout)
+        sources = sorted(p.name for p in (self.e.home / ".agents" / "skill-sources").iterdir())
+        self.assertEqual(sources, [f"modern-web-guidance@{sha[:12]}"])
+        self.assertEqual(sorted(p.name for p in self.skills().iterdir() if not p.name.startswith(".")),
+                         sorted(["modern-web-guidance", "native-orca-lanes", "component-gallery"]))
+        self.assertEqual(list(self.e.home.rglob("pwned")), [])
+
+    def test_the_shipped_table_needs_https(self):
+        m = load()
+        row = ("frontend-design", "file:///tmp/x", "0" * 40, "skills/frontend-design", "Apache-2.0", "-")
+        self.assertIn("https", m.bad_skill_row(row, override=False))
+        self.assertIsNone(m.bad_skill_row(row, override=True))  # a test's local stand-in for upstream
+        self.assertIsNone(m.bad_skill_row(("x", "https://github.com/a/b.git", "0" * 40, "s/x", "MIT", "-"), False))
+
     def test_the_real_table_pins_upstream_repos_with_open_licences(self):
         rows = [l.split("\t") for l in (ROOT / "core" / "design-skills.tsv").read_text().splitlines()
                 if l and not l.startswith("#")]

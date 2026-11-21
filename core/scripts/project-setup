@@ -756,6 +756,27 @@ def design_skill_rows() -> list:
     return rows
 
 
+SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+SKILL_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def bad_skill_row(row: tuple, override: bool) -> "str | None":
+    """Why a design-skills row is refused, or None. The name and path become paths under ~/.agents and the commit is
+    compared as given, so all are checked here, not only in the shipped file's test. The shipped table fetches over
+    https only; a LANE_DESIGN_SKILLS table (tests' local stand-ins for upstream) may also use file://."""
+    name, url, commit, path = row[:4]
+    if not SKILL_NAME.fullmatch(name):
+        return "the name is not lowercase letters, digits and dashes"
+    if not SKILL_COMMIT.fullmatch(commit):
+        return "the commit is not a full 40-hex commit"
+    if any(part in ("", ".", "..") for part in path.split("/")):  # also refuses "" and a leading or double "/"
+        return "the path is not a plain relative path"
+    schemes = ("https://", "file://") if override else ("https://",)
+    if not url.startswith(schemes):
+        return f"the URL is not {' or '.join(s[:-3] for s in schemes)}"
+    return None
+
+
 def claude_plugins(home: Path) -> set:
     """The plugins Claude Code has installed (~/.claude/plugins/installed_plugins.json), as `<plugin>@<marketplace>`."""
     try:
@@ -808,7 +829,13 @@ def design_skills(home: Path) -> None:
     skills_dir, sources = home / ".agents" / "skills", home / ".agents" / "skill-sources"
     plugins = claude_plugins(home)
     done = []
-    for name, url, commit, path, _licence, plugin in rows:
+    override = bool(os.environ.get("LANE_DESIGN_SKILLS"))
+    for row in rows:
+        name, url, commit, path, _licence, plugin = row
+        why = bad_skill_row(row, override)
+        if why:
+            done.append((name, f"missing (refused: {why})"))
+            continue
         link, src = skills_dir / name, sources / f"{name}@{commit[:12]}"
         target = src / path
         ours = link.is_symlink() and os.readlink(link).startswith(str(sources) + os.sep)
