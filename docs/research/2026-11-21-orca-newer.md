@@ -217,7 +217,10 @@ and data folder, stopped afterwards; the desktop's port 6768 was never touched a
 - Not decisive: with the repo's `orca.yaml` (`scripts.setup` touching `orca-setup-done`), `worktree create` ran **no
   setup on either version** on a headless server (250 was run the same way on a second scratch server, also stopped
   afterwards). So the setup-approval change (252) could not be confirmed or ruled out here; setup needs a desktop
-  window.
+  window. (Later, in the canary, `worker-start --worktree new-child` on a headless 1.4.268 `serve` did run the setup,
+  receipt `source orchestration_default`. The two differ in path, `worktree create` against `worker-start`, and in
+  version, 267 against 268; `worktree create` was not repeated on 268, so which of the two made the difference is not
+  known. Lanes start through `worker-start`, so that is the result that counts for them, on a headless server.)
 
 ## The suite with 1.4.267 on PATH: unaffected, as expected [ran]
 
@@ -237,13 +240,13 @@ or flag lane-control uses has gone.
 | Where | Change |
 |---|---|
 | `core/scripts/pairing-code-stdin.cjs` header, `native-orca/record.md` NO-6, `remote.md` | Say "through 1.4.267" instead of "1.4.250's `environment add` reads the code only from argv". The script stays. Note that a code is now single-use and expires (link 60 minutes): a failed `environment add` needs a new code, never a retry with the old one. |
-| `docs/superpowers/specs/2026-11-19-native-orca-setup-design.md` (line on "no CLI for the desktop's pairing link") | From 1.4.254 `orca pair` prints the access link without Settings. It needs the desktop (or serve) to be on 254+; a 250 desktop has no `pair`. Say too that anything with a terminal on the desktop can now mint a link, so a lane's terminal on the desktop can too: keep the owner's step as the default and decide `orca pair` knowingly. |
+| `docs/superpowers/specs/2026-11-19-native-orca-setup-design.md` (line on "no CLI for the desktop's pairing link") | From 1.4.254 `orca pair` prints the access link without Settings. It needs the desktop (or serve) to be on 254+; a 250 desktop has no `pair`. Say too that anything with a terminal on the desktop can now mint a link, so a lane's terminal on the desktop can too: keep the owner's step as the default and decide `orca pair` knowingly. **Superseded by the canary:** `orca pair` was refused on a scratch 268 `serve` pinned with `--bind` ("refusing to widen to all interfaces"; Canary results, step 5), so the spec keeps the Settings link and says `orca pair` is not a tested stand-in. |
 | `native-orca/setup.md` (Nesting) | Default depth is 4 after 251, and an existing 1 moves to 4. Either state "set it back to 1 if you want one level" or say reviewers as sub-workers now work out of the box. |
 | `orca-host-install` | **Does not accept the official server tarball** [ran, see below]. Add that (the slot is `orcad/` inside `orca-server-<ver>-<target>/`, named by its `.version`) **and** the tarball's Node at `runtimes/node-<sha>/bin/node` (see below). Add `--bind 127.0.0.1` to any `orca serve` we document. |
 | `native-orca/remote.md` ("server too old" paragraph) | Name the actual gates (below) and say desktop and boxes are upgraded together. |
 | `coordinator.md` (line 75), `design-lead.md`, `machine-coordinator.md`, `debugger.md`, `reviewer.md`, `night-manager.md`: "an agent on another host: find its Run in `run-list` and `send --to run:<id>`" | No route across servers on 256+: refused with `--on` ("--to term_... or orca_session_id:... not run:...") and delivered nowhere without it. It has to be `send --on <server> --to term_...|orca_session_id:...` (256+ at both ends) or the owner. Filed as its own bug; this PR only documents it. |
 | `coordinator.md` (lines 43-44), `design-lead.md` (line 27), `native-orca-lanes/SKILL.md` (line 56): "Orca refuses `new-child` and `current` there" | Stale on 267: with `--on`, `new-child` is accepted when it comes with `--repo`, and falls back to top-level with a warning when the server is too old to nest. `current` is still invalid. |
-| `native-orca/remote.md` line "Orca 1.4.250 has no CLI for it" (the share link) | Same fix as the spec row: `orca pair` from 254. |
+| `native-orca/remote.md` line "Orca 1.4.250 has no CLI for it" (the share link) | Superseded by the canary: `orca pair` is not a tested stand-in (refused on a pinned `--bind`; Canary results, step 5). remote.md now says to keep the Settings link. |
 | `native-orca/remote.md` "Reports across hosts" (marked 1.4.250) | 251 (mail after finishing, `worker_done` included, leaves the finished task unchanged) and 258 (#40983, a lost worker is reported to its coordinator) change what it says. |
 | Lookups of another session's Run by objective in `run-list`: `night-manager.md` (Messages), the coordinator, design-lead, machine-coordinator, debugger and reviewer personas, `project-setup`'s fallback hint | With 262's retention a quiet day removes the Run. The personas' "if `run-current` shows none, create it" copes for one's own Run only; lookups of another session's Run do not. |
 | `core/harnesses/{codex,pi}/record.md`, `docs/superpowers/specs/2026-11-06-project-setup-design.md` (version strings) | Bump only after the canary, with the others. |
@@ -331,8 +334,8 @@ never a real worker on an estate box and not the owner's desktop.
 3. `worker-abandon` and a worker whose terminal is closed: does the coordinator now hear that it was lost (1.4.258)?
 4. Close the desktop and reopen it, then `run-list`: the Run is still there; wait a day and see it go, and check the
    lookups by objective listed in the docs table.
-5. Pair a box to the upgraded desktop (`orca pair` or the Settings link) with `project-setup <repo> <box>` and
-   confirm `pairing-code-stdin.cjs` still saves the code, once.
+5. Pair a box to the upgraded desktop (the Settings link; `orca pair` was refused in the canary) with `project-setup
+   <repo> <box>` and confirm `pairing-code-stdin.cjs` still saves the code, once.
 6. Direction 1 (older client, newer server), before the upgrade: a scratch 250 server (the installed package's own
    files, a scratch HOME and data folder, its own port) as the client, paired with `environment add` to a scratch
    267 server from the tarball (127.0.0.1 and a scratch repo). The saved environment lives only in the scratch 250
@@ -343,18 +346,17 @@ never a real worker on an estate box and not the owner's desktop.
    not part of this step. Expect it to work without the new features. Agent sign-in: a scratch HOME has none, so the
    owner signs the agent in once there; never copy credentials into a scratch profile.
 7. Direction 2 (newer client, older server), the likely incident: a scratch server and CLI pinned to one version,
-   1.4.263 from its tarball (there is no server tarball before 256, and 251-255 lack `send --on`), paired to the
-   scratch 250 server of step 6, with a scratch repo. Run from an agent terminal on the 263 side (`terminal create`,
-   `run-create --from <handle>`, then `--from <handle>`): `worker-start --on <scratch 250> --worktree new-top-level
-   --repo <scratch repo>` and the same with `--worktree new-child --repo <scratch repo>` (to see the nesting warning
-   or refusal). Test mail in two separate ways: `send --to dispatch:<id>` to the worker, without `--on`, and `send
-   --on <scratch 250> --to term_<the agent on the 250 side>`. (`send --on` with a `dispatch:`, `run:` or `task:`
-   target is refused by 267's server, so the first is the Run-level route and the second the cross-server one.)
-   Check that each mail actually arrives, not only that no error is printed. `server_mail_unsupported` is decided by
-   the Orca running on the box side; this doc expected it could not appear on a 256+ box, but the canary saw the 263
-   side refuse with it, judging the 250 server's capabilities (Canary results). For `send --to dispatch:<id>`, which
-   goes through the 263 side's relay to a worker on the 250 server, the relay may itself refuse or drop it: record
-   which. The scratch 250
+   1.4.263 from its tarball (there is no server tarball before 256, and 251-255 lack `send --on`), paired to the scratch
+   250 server of step 6, with a scratch repo. Run from an agent terminal on the 263 side (`terminal create`, `run-create
+   --from <handle>`, then `--from <handle>`): `worker-start --on <scratch 250> --worktree new-top-level --repo <scratch
+   repo>` and the same with `--worktree new-child --repo <scratch repo>` (to see the nesting warning or refusal). Test
+   mail in two separate ways: `send --to dispatch:<id>` to the worker, without `--on`, and `send --on <scratch 250> --to
+   term_<the agent on the 250 side>`. (`send --on` with a `dispatch:`, `run:` or `task:` target is refused by 267's
+   server, so the first is the Run-level route and the second the cross-server one.) Check that each mail actually
+   arrives, not only that no error is printed. `server_mail_unsupported` is decided by the Orca running on the box side;
+   this doc expected it could not appear on a 256+ box, but the canary saw the 263 side refuse with it (our reading:
+   from what the 250 server reports it can do; Canary results). For `send --to dispatch:<id>`, which goes through the
+   263 side's relay to a worker on the 250 server, the relay may itself refuse or drop it: record which. The scratch 250
    server must offer pairing and, having no `--bind`, binds every interface: run it only in a container or a network
    namespace, because it has to keep running for the rest of the step (`worker-start --on` and the mail tests), so
    stopping it after pairing is not an option. Same agent sign-in rule as step 6. Use the scratch 250 server as the
@@ -395,30 +397,71 @@ non-root user, an empty HOME per container), never the desktop, its port, profil
 | 4 | Stop the server (SIGINT), start it again, `run-list`, then mail to the idle coordinator | [ran] for the restart: both Runs listed, the coordinator's terminal and agent survived (the terminal daemon is separate). The mail was accepted with "Queued. run:<run> has not settled at its prompt (…); delivery waits until it does." and woke the idle coordinator about 2 minutes later, by itself. [not run: deleting a settled Run a day after its last activity needs a quiet day; the lookups by objective in the docs table stay as listed]. |
 | 5 | Box-side pairing as `project-setup` does it: `project-setup --box-pairing add <name>` on the box, the desk server's link on stdin; then `status`; the same link again under another name; an empty stdin | [ran] `paired`, then `reachable`; the box's CLI reaches the desk as 1.4.268. The used link again: "environment add …: unauthorized: The host refused this pairing code. It may have expired or already been used by another device. …". Empty stdin: the preload exits 2, which `project-setup` reports only as "failed: exit 2". `orca pair` on the desk refused: "Runtime bind address is pinned to <ip>; refusing to widen to all interfaces" (also with `--address 127.0.0.1`); on a 268 `serve` started without `--bind` (it listens on 0.0.0.0) it printed a link to the container's network address. [not run: the whole `project-setup <repo> <box>`, which would start the adapting agents and install the `lane-tunnel@` systemd user unit; the step that uses `pairing-code-stdin.cjs` is the one above]. |
 | 6 | Direction 1: the 250 CLI saves the 268 desk with `environment add` (code through `pairing-code-stdin.cjs`), then from a 250 terminal `run-create --from`, `worker-start --on <268> --worktree new-top-level --repo <scratch> --agent claude --model haiku` | [ran] Paired; `status --environment` says 1.4.268. The start was `ready`, setup ran on the 268 side, and the worker's `worker_done` came back to the 250 Run (`check` lists it). `--worktree new-child` with `--on` is refused by the 250 CLI before anything starts: "--on requires an exact remote worktree selector or new-top-level". `send --on` does not exist in 250. |
-| 7 | Direction 2: a 263 server and CLI save the 250 server, then from a 263 terminal `worker-start --on <250>` with `new-top-level` and with `new-child`; mail by `send --to dispatch:<id>` and by `send --on <250> --to term_<worker>`. Also a 263 client against the 268 desk, the same way | [ran] Against 250: both starts are accepted (`ready`); `new-child` warns "Not nested under main: <server> needs an Orca update to nest across machines, so the worktree was created top-level." The worker's `worker_done` is listed at the 263 Run as `[HIGH]` "Rejected worker_done … expected handle <unknown>, pane <legacy>; received handle dispatch:<id>, pane <missing>" (`sender_not_assignee`) though the task settles as completed and the worker was told "Recorded". `send --to dispatch:<id>` arrived and woke the worker ("Accepted for relay … its delivery state is unknown here."), but haiku would not answer it: its brief names the coordinator as "Run home (relayed by Orca)" and the mail came from a raw `term_…`. `send --on` was refused on the 263 side: `server_mail_unsupported`, "Server <server> runs an older Orca that cannot receive agent mail from another server. Update Orca on <server>, then send again. Nothing was sent." So, unlike what step 7 expected, the 256+ side does produce it, from the old server's capabilities. `worker-list --on <250>` listed the 250 server's own Run's worker, not the two it ran for the 263 Run. Against 268: `new-top-level` worked, both mail routes arrived and woke the worker, and its answer came back to the 263 Run. `new-child` there was refused naming the wrong server ("… s250 has no workspace on this server for --worktree new-child"), apparently carried over from that terminal's earlier Run. The literal "server too old" text was not produced; the nearest are the two messages above. |
+| 7 | Direction 2: a 263 server and CLI save the 250 server, then from a 263 terminal `worker-start --on <250>` with `new-top-level` and with `new-child`; mail by `send --to dispatch:<id>` and by `send --on <250> --to term_<worker>`. Also a 263 client against the 268 desk, the same way | [ran] Against 250: both starts are accepted (`ready`); `new-child` warns "Not nested under main: <server> needs an Orca update to nest across machines, so the worktree was created top-level." The worker's `worker_done` is listed at the 263 Run as `[HIGH]` "Rejected worker_done … expected handle <unknown>, pane <legacy>; received handle dispatch:<id>, pane <missing>" (`sender_not_assignee`) though the task settles as completed and the worker was told "Recorded". `send --to dispatch:<id>` arrived and woke the worker ("Accepted for relay … its delivery state is unknown here."), but haiku would not answer it; it said the sender was not its coordinator's handle (our reading of why: its brief names the coordinator only as "Run home (relayed by Orca)" and the mail came from a raw `term_…`). `send --on` was refused on the 263 side: `server_mail_unsupported`, "Server <server> runs an older Orca that cannot receive agent mail from another server. Update Orca on <server>, then send again. Nothing was sent." So, unlike what step 7 expected, the 256+ side does produce it (our reading: from what the old server reports it can do). `worker-list --on <250>` listed the 250 server's own Run's worker, not the two it ran for the 263 Run. Against 268: `new-top-level` worked, both mail routes arrived and woke the worker, and its answer came back to the 263 Run. `new-child` there was refused naming the wrong server ("… s250 has no workspace on this server for --worktree new-child"); our reading is that it was carried over from that terminal's earlier Run, which ran a worker on the 250 server. The literal "server too old" text was not produced; the nearest are the two messages above. |
 
-**Go for Orca 1.4.268**, desktop and every box on that one version. Nothing lane-control calls broke on 268: lanes
-start with their setup, report, wake the coordinator and clean up; a lost worker is reported; pairing through
-`pairing-code-stdin.cjs` works and codes are single-use. Mixed versions are only safe in one direction: an older box
-against a 268 desktop worked (250 and 263 clients, steps 6 and 7), while a newer box against the 250 desktop loses
-cross-server mail and gets its reports flagged as rejected (step 7). That is the exposure while the desktop stays on
-250, and a reason to move it first and the boxes after it.
+Because the pin moved from 267 to 268, the two checks this doc made for 267 were redone for 268 [ran], with freshly
+downloaded tarballs of both that matched `orca-server-sha256sums.txt`, each CLI run with `env -i`, a scratch HOME and
+a scratch `ORCA_USER_DATA_PATH`:
+- The 267-to-268 CLI diff (`agent-context --json`, 413 commands in 267, 417 in 268): no command and no flag removed.
+  Added: `slack canvas|list|pin|scheduled`. Changed shared commands, 7: `orchestration send` gains `--file` (with
+  `--item`, for bots) and merges two notes; `slack post` gains `--at`; `orchestration worker-start`, `host list` and
+  `project setups` gain a note on finding the server a project is set up on (`project setups --environment <id>`);
+  `auth login` and `emulator type` change a note or summary. Every `orca`/`orca-ide` command named in `core/`,
+  `orchestrators/`, `scripts/`, `AGENTS.md` and `README.md` exists in 268 (a scan of the text; its only misses were
+  prose words such as "Orca adapter").
+- The suite with 268's `orca-ide` first on PATH and every `ORCA_*` variable unset, through lane-heavy, on this
+  branch merged with main: **1153 tests, OK, 4 skipped, 460 s**. As for 267, the suite stubs Orca, so this shows that
+  268 on PATH breaks nothing, not that 268 behaves; the diff and the steps above are the real checks.
+
+**Go for Orca 1.4.268 on the desktop; the boxes follow once the first lane on the upgraded desktop passes.** That
+lane passes when, on the desktop itself, `orca.yaml`'s setup ran (`orca-setup-done` in its git dir, no approval prompt
+left waiting), the agent started and worked, and its `worker_done` woke the coordinator without a nudge. Until it
+passes, no box moves; if it fails, roll the desktop back (below) and keep the boxes where they are. Then every box goes
+to 1.4.268 too, one version for all.
+
+What the canary supports: nothing lane-control calls broke on 268 in the steps above (lanes start with their setup,
+report, wake the coordinator and clean up; a lost worker is reported; pairing through `pairing-code-stdin.cjs` works
+and codes are single-use), and the 267-to-268 CLI diff below removes nothing. Mixed versions are only safe in one
+direction: an older box against a 268 desktop worked (250 and 263 clients, steps 6 and 7), while a newer box against
+the 250 desktop loses cross-server mail and gets its reports flagged as rejected (step 7). That is the exposure while
+the desktop stays on 250, and why the desktop moves first. What it does not support: anything about the Electron app
+on the desktop, which is why the first desktop lane is the gate.
+
+How the desktop moves:
+- Only with no live lanes. Upgrading restarts the app. The canary restarted only a headless `serve` (SIGINT) with no
+  worker mid-dispatch; a worker that was running across the restart and then cannot report is the
+  `worker_identity_changed` case in remote.md ("A dispatch that can no longer report"), and whether the desktop's
+  terminals outlive quitting the app depends on its own terminal-persistence setting. So: let lanes finish (or park
+  them) first; any lane that still cannot report afterwards is handled as remote.md says.
+- Back up the Orca profile first (`~/.config/orca`, with the app quit): whether 1.4.250 can read a profile 1.4.268
+  has written is not known.
+- Rollback: the desktop is pinned by its nix package, so moving back is putting that package back to 1.4.250 and
+  restoring the profile backup. Boxes that have not moved need nothing.
 
 Risks that remain:
-- The real desktop runs the Electron app, not `serve`: whether its window adds a setup-approval prompt for lanes
-  (the orchestration path passed no approval and needed none here), and the project's start-immediately or
-  wait-for-setup setting there, are only seen on the desktop. Check the first lane after the upgrade.
-- `orca pair` is not a way to make the desktop's share link (step 5); remote.md says so. The Settings link with
+- The real desktop runs the Electron app, not `serve`. Step 1 saw no approval prompt, but a headless server has no
+  window that could show one, so that says nothing about the app; whether its window asks before a lane's setup,
+  and which startup setting (start-immediately or wait-for-setup) the project has there, are seen only on the
+  desktop. The first-lane gate above is for this.
+- A worker's report after a restart of the desktop app (as above) was not run; nor was quitting the Electron app.
+- `orca pair` is not a tested way to make the desktop's share link (step 5); remote.md says so. The Settings link with
   127.0.0.1 stays the owner's step.
 - After a server restart, mail to an idle agent waited about 2 minutes (step 4). A coordinator that seems not to hear
-  a report right after a restart should run `check` itself.
+  a report right after a restart should run `check` itself. Whether this relates to 268's #45370 ("hold orchestration
+  mail until the turn ends") is not known: that note was not checked separately.
 - Run retention (deleted a day after the last activity, 262) was not observed; lookups of another session's Run by
   objective still need the fix in the docs table.
 - Cross-server wakes of an agent coordinator were not tested (the coordinator on the starting side was a shell);
   remote.md keeps reports across hosts poll-only.
-- 268 was hours old; the next pin is re-evaluated the same way (diff `agent-context --json`, rerun this canary).
+- 268 was hours old. The reasons for picking it over 267 are release-note claims: the wake on a final report and one
+  record per Dispatch fit what step 2 saw, #45370 was not checked. If a regression shows up in the first desktop lane,
+  rolling back is cheaper than chasing it; the next pin is evaluated the same way (diff `agent-context --json`, a
+  suite run with it on PATH, and this canary).
 - `orca-host-install` still refuses the official tarball (CLI diff section), so boxes are pinned with
   `--orca-version` from the desktop's own slot after the desktop moves.
+
+Where a table row gives a cause rather than output, it is the canary worker's reading, marked "(our reading)". The
+exact commands are kept in a note on lc-seu; the transcripts went with the containers.
 
 Cleanup: every worker was released or stopped and every agent terminal closed; the scratch worktrees were removed;
 the containers `lcc-desk`, `lcc-box` and `lcc-s250` (with their HOMEs, scratch servers, repos, saved environments

@@ -1544,8 +1544,12 @@ class OrcaCanaryTests(unittest.TestCase):
             row = re.search(rf"^\| {step} \|.*$", res, re.M)
             self.assertIsNotNone(row, f"no table row for step {step}")
             self.assertRegex(row.group(0), r"\[ran\]|\[not run: ", f"step {step} is not marked")
-        self.assertRegex(flat_text(res), r"\*\*Go for Orca 1\.4\.268\*\*")
-        for needle in ("Risks that remain", "Cleanup", "server_mail_unsupported",
+        self.assertEqual(flat_text(res).count("**Go for Orca 1.4.268"), 1)
+        self.assertIn("**Go for Orca 1.4.268 on the desktop; the boxes follow once the first lane on the upgraded "
+                      "desktop passes.**", flat_text(res))
+        for needle in ("Risks that remain", "Cleanup", "server_mail_unsupported", "Only with no live lanes",
+                       "Back up the Orca profile", "Rollback:", "`worker_identity_changed`", "(our reading",
+                       "267-to-268 CLI diff",
                        "needs an Orca update to nest across machines", "refusing to widen to all interfaces"):
             self.assertIn(needle, flat_text(res), needle)
 
@@ -1560,6 +1564,12 @@ class OrcaCanaryTests(unittest.TestCase):
         for needle in ("runs an older Orca that cannot receive agent mail from another server",
                        "needs an Orca update to nest across machines", "expected handle <unknown>, pane <legacy>"):
             self.assertIn(needle, t, needle)
+
+    def test_after_abandon_a_retained_release_means_closing_the_terminal(self):
+        # canary step 3: release after worker-abandon answered `retained`, `identity_unproven`; the terminal stayed
+        for name, t in [("remote.md", flat(self.REMOTE))] + [(r, flat(NATIVE / f"{r}.md")) for r in LANE_STARTERS]:
+            self.assertRegex(t, r"`retained`[^.]*close[^.]*terminal[^.]*yourself", name)
+            self.assertIn("orca-ide terminal close --terminal <handle>", t, name)
 
     def test_cross_server_reports_stay_poll_only_after_the_canary(self):
         t = flat(self.REMOTE)
@@ -1674,12 +1684,14 @@ class CrossHostRouteTests(unittest.TestCase):
 
     def test_every_route_doc_says_how_to_use_the_cross_host_route(self):
         for f in ROUTE_DOCS:
+            self.assertNotIn("not yet run across two servers", flat(f), f.relative_to(ROOT))  # the canary ran it
             t = flat(f)
             with self.subTest(doc=f.relative_to(ROOT)):
                 for needle in ("1.4.256 or newer", "`runtime.appVersion` in `orca-ide status --json`",
                                "`orca-ide status --environment <environment> --json`",
                                "`orca-ide terminal list --environment <environment> --json`",
-                               "send --on <environment> --to term_<id> --subject", "not yet run across two servers"):
+                               "send --on <environment> --to term_<id> --subject",
+                               "has run only between scratch servers"):
                     self.assertIn(needle, t)
                 self.assertRegex(t, r"(?i)(?:older|no terminal)[^.]*owner")
 
@@ -1696,7 +1708,8 @@ class CrossHostRouteTests(unittest.TestCase):
         for needle in ("send --on <environment> --to term_<id> --subject", "orca_session_id:<id>", "1.4.256 or newer",
                        "`run:` targets are refused with `--on`", "orca-ide terminal list --environment <environment> --json",
                        "`orca-ide orchestration reply --id <msg_id>`", "`reply --on` is refused",
-                       "read from Orca's source, not yet run across two servers",
+                       "run once between scratch servers in the canary", "`server_mail_unsupported`",
+                       "`send --to dispatch:<id>`", "no route to a peer session",
                        "If a cross-host wake is lost, the night manager's idle check or the owner notices it",
                        "a design lead's lost wake is noticed by the owner"):
             self.assertIn(needle, t)

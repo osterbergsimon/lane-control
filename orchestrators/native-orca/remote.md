@@ -22,13 +22,14 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    later run may find yours in the way.
    By default the server put there is the newest one this machine's Orca has built, so a box gets whatever the
    desktop has, and a box whose server is older than its desktop later fails as "server too old". A newer Orca
-   reaching an older server names the gap itself (canary 2026-11-21, a 1.4.263 box against a 1.4.250 server):
-   `send --on` is refused with `server_mail_unsupported` ("Server <name> runs an older Orca that cannot receive agent
-   mail from another server. Update Orca on <name>, then send again. Nothing was sent."), `worker-start --on` with
-   `new-child` starts top-level ("Not nested under main: <name> needs an Orca update to nest across machines, so the
-   worktree was created top-level."), and the worker's `worker_done` arrives as a `Rejected worker_done` (see Reports
-   across hosts). Keep the desktop and every box on one version. To pin a box to a
-   known-good server: `--orca-version <v>` installs exactly that version (and fails when the source has no such
+   reaching an older server (canary 2026-11-21, a 1.4.263 box against a 1.4.250 server) names the gap in two of three
+   cases: `send --on` is refused with `server_mail_unsupported` ("Server <name> runs an older Orca that cannot receive
+   agent mail from another server. Update Orca on <name>, then send again. Nothing was sent."), and `worker-start --on`
+   with `new-child` starts top-level ("Not nested under main: <name> needs an Orca update to nest across machines, so
+   the worktree was created top-level."). The third names nothing about versions and looks like a bug: the worker's
+   `worker_done` arrives as a `Rejected worker_done` (`sender_not_assignee`) while the worker is told "Recorded" (see
+   Reports across hosts). Keep the desktop and every box on one version. To pin a box to a known-good server:
+   `--orca-version <v>` installs exactly that version (and fails when the source has no such
    version): a slot's folder name, its own `.version`, or the Orca app version its `out/package.json` records (the
    `1.4.251` of a "server too old" complaint); it goes on the box under the slot's own name. `--orca-from <dir>` or
    `--orca-bundle <tar>` take it from a slot folder (or a folder of slots) or a tar instead of this machine's own, and
@@ -57,10 +58,11 @@ For what the box lacks (graphics, a browser, a GPU), its coordinator starts a la
 is poll-only (Reports across hosts, below).
 1. The owner makes a share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this
    computer's own address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a
-   link). Orca 1.4.250 has no CLI for it. `orca pair` (1.4.254 and later) is no stand-in: on 1.4.268 it makes its
-   offer by widening the server to every interface, and on a server pinned with `--bind` it refuses ("Runtime bind
-   address is pinned to <ip>; refusing to widen to all interfaces", canary 2026-11-21). Keep to the Settings >
-   Servers link with 127.0.0.1.
+   link). Orca 1.4.250 has no CLI for it. `orca pair` (1.4.254 and later) is not a tested stand-in: in the canary
+   (2026-11-21) a scratch 1.4.268 `serve` pinned with `--bind` to its container-network address refused it, also with
+   `--address 127.0.0.1` ("Runtime bind address is pinned to <ip>; refusing to widen to all interfaces"). That wording
+   says the offer widens the server to every interface; the widening itself was not observed, and a desktop listening
+   on 127.0.0.1 was not tried. Keep to the Settings > Servers link with 127.0.0.1.
 2. `project-setup <repo> <host>` asks for the link on a hidden prompt, in a terminal only (Enter, no terminal or
    `--no-desktop-lanes` skips it; a box already paired is not asked again). A terminal that cannot hide what is
    typed is refused instead of asked.
@@ -133,8 +135,9 @@ tunnel stopped, and the command to run there later is printed. Direction 1 stays
 that drop it too.
 
 ## Reports across hosts
-What a worker's report (`worker_done`) does, as far as it is known. Orca 1.4.250; "tested" means run on one machine
-in a scratch Run with a plain shell as the worker and no agent (`record.md`, 2026-11-20 UP-3).
+What a worker's report (`worker_done`) does, as far as it is known. "Known" below is Orca 1.4.250, where "tested"
+means run on one machine in a scratch Run with a plain shell as the worker and no agent (`record.md`, 2026-11-20
+UP-3); the canary block further down is 1.4.250, 1.4.263 and 1.4.268 on scratch servers.
 
 Known:
 - On one machine, mail to a coordinator's Run reaches its session as Orca's one-line message prompt (it waits while
@@ -153,9 +156,14 @@ Messages to a session on the other host: a `run:` target does not cross hosts. W
 where that Run does not exist; `run:` targets are refused with `--on` ("--on sends to one agent or bot on that server"), on
 any pair of servers; `--environment` from an agent delivers no mail or is refused. The one route is `orca-ide orchestration
 send --on <environment> --to term_<id> --subject "<subject>" --body "<message>"`, and only when both servers are 1.4.256 or
-newer (peer mail). It is read from Orca's source, not yet run across two servers (the canary in
-`docs/research/2026-11-21-orca-newer.md`): a send that raises no error proves nothing, so treat nothing sent this way as
-"delivered" until a reply or the peer's own word says so.
+newer (peer mail). It was run once between scratch servers in the canary (`docs/research/2026-11-21-orca-newer.md`,
+Canary results: a 1.4.263 shell terminal sending to a haiku agent on 1.4.268): the mail arrived, woke the agent, and its
+answer came back to the sender's `check`. To a 1.4.250 server it is refused before anything is sent
+(`server_mail_unsupported`, "runs an older Orca that cannot receive agent mail from another server"). Not yet run with
+the owner's desktop or between two agent sessions, so a send that raises no error still proves nothing: treat nothing
+sent this way as "delivered" until a reply or the peer's own word says so. `send --to dispatch:<id>` without `--on`
+reached a coordinator's own worker on the other server through the Run's relay (to 1.4.250 and to 1.4.268), but it
+needs a dispatch of yours, so it is no route to a peer session: for that, the route above or the owner.
 1. Versions: `runtime.appVersion` in `orca-ide status --json` and in `orca-ide status --environment <environment> --json`
    (`runtime.capabilities` lists `orchestration.peer-mail`). If either is older, or does not say, the handoff goes
    through the owner.
@@ -184,8 +192,9 @@ started the lane, a haiku worker on the other; docs/research/2026-11-21-orca-new
 - Client newer than the worker's server (1.4.263 against 1.4.250): the task settles as completed, but the report is
   listed as `Rejected worker_done` [HIGH] ("expected handle <unknown>, pane <legacy>; received handle
   dispatch:<id>, pane <missing>", `sender_not_assignee`) while the worker is told "Recorded". `send --to
-  dispatch:<id>` reaches the worker, whose brief names its coordinator only as "Run home (relayed by Orca)", so a
-  careful worker may not act on it; `send --on` is refused (`server_mail_unsupported`).
+  dispatch:<id>` reaches the worker, but the haiku worker would not act on it, saying the sender was not its
+  coordinator's handle (our reading: its brief names the coordinator only as "Run home (relayed by Orca)"); `send
+  --on` is refused (`server_mail_unsupported`).
 - Whether a report wakes an agent coordinator across hosts is not verified: on one server it does (Orca prompts the
   idle coordinator to run `check`), across servers only the Run's mail was seen. Reports across hosts stay poll-only.
 
@@ -202,7 +211,10 @@ Coordinator:
    silence or `unverifiable` liveness never proves it). Then
    `orca-ide orchestration worker-abandon --dispatch <dispatch>` (fences the dispatch, no process is touched;
    on one that already failed it says so and changes nothing) and `orca-ide orchestration worker-release --dispatch
-   <dispatch>` (closes the worker's own terminal when it has one, else says `retained`).
+   <dispatch>` (closes the worker's own terminal when it has one, else says `retained`). After `worker-abandon` the
+   canary saw `retained` with `identity_unproven` for a worker that did have its own terminal, and it stayed open:
+   then close that terminal yourself with `orca-ide terminal close --terminal <handle>` (the handle is in
+   `worker-show`).
 4. Start the work again on the same task (untested): `orca-ide orchestration worker-start --task <task> --retry-of
    <dispatch> --worktree path:<the lane's worktree> --agent <id> --model <model>` (add `--on <environment>` for a
    lane on the other server: placement is not inherited). Per Orca's help, `--retry-of` names the failed task's
