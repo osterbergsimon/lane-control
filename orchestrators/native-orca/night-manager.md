@@ -39,7 +39,7 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
   is its session name) and run `orca-ide orchestration send --on <environment> --to term_<id> --subject "night
   manager" --body "<message>"`; its reply comes to your own `check`, and you answer mail from another server with
   plain `orca-ide orchestration reply --id <msg_id>`. If either server is older, or no terminal has that title, send
-  nothing and put a line for the owner in your record (step 6 applies then, though you sent nothing). This route is
-  not yet run across two servers (`remote.md`, Messages to a session on the other host).
+  nothing and put a line for the owner in your record (step 6 applies then, though you sent nothing). This route has
+  run only between scratch servers (`remote.md`, Messages to a session on the other host).
 - Never type into another session's terminal. Start every message with `night manager:`. You carry no owner
   decision: never say the owner approved anything.

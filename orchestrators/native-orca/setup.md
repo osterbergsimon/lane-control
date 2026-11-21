@@ -42,7 +42,7 @@ facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writ
   --environment <environment> --json`), take the peer's handle from `orca-ide terminal list --environment <environment>
   --json` (the terminal whose `title` is its session name), and `orca-ide orchestration send --on <environment> --to
   term_<id> --subject "<subject>" --body "<message>"`. If either server is older, or no terminal has that title, the owner
-  carries the message. This route is not yet run across two servers (`remote.md`, Messages to a session on the other
+  carries the message. This route has run only between scratch servers (`remote.md`, Messages to a session on the other
   host).
 
 ## Heavy work
