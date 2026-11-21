@@ -97,7 +97,8 @@ Verified end to end on 2026-11-06 (trial box, user `dev`, Orca 1.4.250, Cotal 0.
 2.1.319). Each project gets:
 - its own Cotal space;
 - a **coordinator** in the main checkout;
-- a **frontend design lead** in its own Orca worktree, nested under the main checkout.
+- (until 2026-11-21 also a frontend design lead in its own worktree; it is retired, `docs/superpowers/specs/2026-11-21-design-kit-design.md`, and setup now names
+  what is left of one instead of starting it).
 
 Lanes are Orca child tasks with one Cotal agent each, routed by tier to OpenCode or Claude. Messages never type into a
 composer. [tested]
@@ -135,8 +136,8 @@ composer. [tested]
 ### Project: one command
 ```bash
 scripts/project-setup <git-url | /abs/dir> --orchestrator orca-cotal [--host user@host] [--name Shop] \
-  [--coordinator claude/opus] [--design-lead claude/opus] [--permission-mode auto|bypassPermissions|default] \
-  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml (leaves an uncommitted draft as orca.yaml)] [--no-design-lead] [--trust-folder] [--no-start (opt-out of starting)] \
+  [--coordinator claude/opus] [--permission-mode auto|bypassPermissions|default] \
+  [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml (leaves an uncommitted draft as orca.yaml)] [--trust-folder] [--no-start (opt-out of starting)] \
   [--private GLOB]...
 ```
 (`--orchestrator orca-cotal`: without it a new project goes to native Orca, here or with a host; a project already on
@@ -199,7 +200,7 @@ and the answers' changes and asks only the questions still on the list.)
    `~/.config/opencode/skills/`): Orca's `orca-cli` and lane-control's `orca-cotal-lanes`. They are user-level
    because a lane worktree carries only committed files.
 4. Creates the Cotal space (`cotal space create`; plus `cotal setup -H claude` for the Claude plugin and wake channel).
-5. Renders the personas from `orchestrators/orca-cotal/personas/` (coordinator, design lead, reviewer) into `.cotal/agents/` (Cotal reads them
+5. Renders the personas from `orchestrators/orca-cotal/personas/` (coordinator, reviewer) into `.cotal/agents/` (Cotal reads them
    there) and the tier table `orchestrators/orca-cotal/templates/lanes.tsv` into the project's settings store (below), and gitignores `.cotal/`.
    Each persona names the tier table and the reviewer persona by absolute path, and the project's Claude permission
    mode.
@@ -245,12 +246,10 @@ and the answers' changes and asks only the questions still on the list.)
    this, so it writes `hasTrustDialogAccepted` for the folder into `~/.claude.json` the way Claude does: atomically,
    keeping everything else, refusing a file it can't parse, and checking afterwards that a running Claude session
    didn't overwrite it.
-8. Creates the Orca worktree `design-lead` as a child of the main checkout, waits for the setup script, starts the design lead there, and only then closes
-   Orca's startup shell and the Setup tab (kept if the script never finishes; an empty worktree may refuse the spawn),
-   then opens a shell after the agent's tab. With
-   `--no-design-lead` (a project without a frontend) there is no design lead: the coordinator routes any UI work
-   itself and its persona says so.
-9. Verifies that the agents are live and that the design lead's task is nested.
+8. The design lead is retired: a committed `.lane-control/design-lead.md` moves into `DESIGN.md` on the owner's yes, a
+   running `design-lead` agent is named and left alone, and the coordinator routes UI work itself (its persona says
+   so). `--design-lead` is refused; `--no-design-lead` does nothing.
+9. Verifies that the coordinator is live.
 
 With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
 
@@ -270,7 +269,7 @@ path, so `~/code/x` and `~/work/x` have separate settings, tables and ports. It 
 and not in the repo:
 
 - `settings.json`: `root` (the checkout), `name`, `models` (harness/model
-  per role: coordinator, design-lead, reviewer), `design_lead` (on or off), `permission_mode`, `private` (the `--private`
+  per role: coordinator, reviewer), `permission_mode`, `private` (the `--private`
   globs), `own_models`, `port` (the broker's) and `claude_setup`. Mode 600 in a 700 folder. Only these names are ever
   written, and never a secret (keys stay in their own files); committed project knowledge stays in `.lane-control/`.
 - `lanes.tsv`: the tier table. Lanes reach it by this absolute path, so worktrees do not matter.
@@ -279,17 +278,17 @@ Machine-wide limits (`lane-limits.sh`, `lane-heavy`, `lane-room`) stay in their 
 in `.cotal/agents/`.
 
 A run reads the store: a flag wins over the stored value, which wins over the default, and the flag is stored (`--coordinator`,
-`--design-lead`, `--reviewer`, `--permission-mode`, `--name`, `--no-design-lead`, `--own-model`). `--private` adds to the
-stored list and never drops an entry; to remove one, edit `settings.json`. `--design-lead` turns a design lead
-that was switched off back on. `--refresh` keeps each persona's own harness and model, takes the design lead and mode from the
+`--reviewer`, `--permission-mode`, `--name`, `--own-model`). `--private` adds to the
+stored list and never drops an entry; to remove one, edit `settings.json`. A retired design lead's `design_lead` and
+pin are dropped from the store, said in the output. `--refresh` keeps each persona's own harness and model, takes the mode from the
 store, and fills in what the store lacks from the personas.
 
 `project-setup <dir> --show` prints the store (settings and the table's tiers) and writes nothing.
 
 **Migration.** A project set up before the store existed has `.cotal/lane-control.json` and `.cotal/lanes.tsv`. The next
 `project-setup` run on it, also `--refresh`, moves them once and prints `settings: moved ...`: the record's keys go into
-`settings.json`, the table is copied byte for byte (an edited table is kept as it is) and the old files are removed; models,
-design lead and permission mode, which the old record never held, are read from the rendered personas. If the store already
+`settings.json`, the table is copied byte for byte (an edited table is kept as it is) and the old files are removed; models
+and permission mode, which the old record never held, are read from the rendered personas. If the store already
 has a different table, it wins and the old file stays, with a warning. A store folder keyed on the folder name alone (the
 first version) is renamed to the new key, unless its `root` names another checkout. `--show` moves nothing and says
 what is not moved yet.
@@ -311,13 +310,13 @@ repo's own beads workspace; nothing moves between trackers.
 ```bash
 scripts/project-setup <dir> --refresh [--name Shop]
 ```
-For a project set up earlier. It re-renders the coordinator, design lead (if the project has one) and reviewer
+For a project set up earlier. It re-renders the coordinator and reviewer
 personas in `.cotal/agents/`, each keeping the harness, model and permission mode it already has, and reinstalls the
 skill. The project's own `lanes.tsv` in the store is never replaced (it names the rows that differ from the defaults; new default
 rows are for the owner to copy over). It starts no adapting or reviewing agent, broker, coordinator or worktree, and
 commits nothing. Running agents keep the old persona and skill until restarted, so the last line (`restart: needed
 ...`) names the ones to stop and start again. A reviewer persona from before it existed is created (from `--reviewer`). All personas are checked before any is
-written. Changing an agent's harness or model is not a refresh: `--coordinator`, `--design-lead`, `--no-design-lead` and
+written. Changing an agent's harness or model is not a refresh: `--coordinator`, `--own-model` and
 `--permission-mode` are refused with `--refresh`.
 
 
@@ -334,7 +333,7 @@ missed while resting are not replayed). The owner says
 "resume" to the coordinator or machine coordinator, who runs `project-pause wake`. `rest` and `wake` call no
 `cotal stop` or spawn, so they work from inside an agent's shell.
 
-`stop` is for freeing memory: it does `rest`, and also stops the coordinator and design lead with `cotal stop` (broker and
+`stop` is for freeing memory: it does `rest`, and also stops the coordinator with `cotal stop` (broker and
 manager stay up, never `cotal down`). A stopped coordinator cannot be told to resume: `start` brings back the missing
 agents with project-setup `--skip-adapt` (no adapting, no commit, no questions), as a fresh session told to resume from
 `bd recall handover-latest`, `cotal who` and `orca worktree list`, on the current persona, and removes the marker (so
@@ -345,7 +344,7 @@ coordinator that crashed has no marker and still warns. `status` says running, r
 Reruns are harmless. cotal refuses `stop` and `start` from inside an agent's shell: run them from a plain shell.
 
 ### Lanes
-The coordinator (or the design lead, for its own frontend lanes) follows the `orca-cotal-lanes` skill:
+The coordinator follows the `orca-cotal-lanes` skill:
 1. Pick the tier per `model-routing.md`, then run `~/.agents/bin/lane-tier <the table your persona names> <tier>` for its harness and model.
 2. Run `orca worktree create --name <key> --parent-worktree active --json`, so the new task nests under the caller in
    the GUI. Wait for `orca-setup-done` when the setup script writes it, start the agent (step 3), and only then close
@@ -374,7 +373,7 @@ goes one tier up. `lane-tier` refuses every OpenCode tier (exit 4: harness `open
 project-setup warns about an OpenCode row in a project's table (on a run, `--refresh` and `--show`): set its harness to
 `none`. A table from before may still have a `sandbox` column; `lane-tier` ignores it.
 
-The agents setup starts itself are narrower: `--coordinator`, `--design-lead` and `--reviewer` refuse every
+The agents setup starts itself are narrower: `--coordinator` and `--reviewer` refuse every
 `opencode/<provider>/<model>` unless `--own-model <provider>/<model>` declares it yours, and refuse a hosted `opencode/` or
 `opencode-go/` model outright, as does `--own-model` itself. `--refresh` warns about a persona that already pins a hosted
 one. Marking a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`)

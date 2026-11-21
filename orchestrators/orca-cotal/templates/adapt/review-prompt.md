@@ -9,7 +9,6 @@ the adapted files and the project's top-level docs, manifests, CI and test scrip
 read a tree. Check a sample of facts, not every one. Always open code behind anything rated low (check 13), and never
 lower a rating to save budget.
 
-A design lead was asked for: {{DESIGN_LEAD}}.
 Repo visibility (read by the script from the git host, a fact): {{VISIBILITY}}
 The files to review, and the diff of those already tracked, follow the checks.
 Print one line per finding, then the verdict as the very last line:
@@ -28,7 +27,7 @@ FIX if there is any blocker or major. Never inflate a level to be heard or drop 
    pointer line (and that move), with nothing else changed.
 3. No `<!-- slot`, `<!-- fixed`, or unfilled double-brace placeholders left in `.lane-control/`.
 4. Each fixed block of the template appears in its file, byte for byte.
-5. Each file has all its headings and front matter; `design-lead.md` exists only when a design lead was asked for.
+5. Each file has all its headings and front matter.
 6. Nothing like an IPv4 address, `/home/`, `/Users/`, `BEGIN … PRIVATE KEY`, `ghp_`, `sk-`, `AKIA`, a `.internal`,
    `.local` or `.lan` name, or an email address.
 7. Path map: each glob matches a file you find with Glob, every file you find matches a row, the last row is

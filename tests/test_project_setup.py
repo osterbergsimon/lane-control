@@ -75,6 +75,9 @@ class Env:
         self.env.pop("XDG_CONFIG_HOME", None)  # the store is under the temp HOME
         self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
+        # The design skills table (core/design-skills.tsv) names upstream repos: tests install none unless they ask.
+        (self.home / "design-skills.tsv").write_text("# none\n")
+        self.env["LANE_DESIGN_SKILLS"] = str(self.home / "design-skills.tsv")
 
     def run(self, *args, adapt=False, env_extra=None):
         """adapt False: only today's Orca setup steps; True: the onboarding flow in front of them too."""
@@ -255,7 +258,7 @@ class PureTests(unittest.TestCase):
         self.assertIn("coordinator of Shop", out)
 
     def test_render_persona_opencode(self):
-        text = (ROOT / "orchestrators" / "orca-cotal" / "personas" / "design-lead.md").read_text()
+        text = (ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md").read_text()
         out = self.m.render_persona(text, "opencode", "opencode/deepseek-v4.1-flash", "auto", "Shop")
         self.assertIn("events: false", out)
         self.assertNotIn("permission-mode", out)
@@ -2156,12 +2159,12 @@ class OnboardingTests(unittest.TestCase):
     def test_prompt_templates_get_their_machine_values(self):
         fixed = {"write": {ADAPTED_FILE: "fixed\n"}}
         self.e.script_agents(sonnet=[WRITE, fixed], opus=[FIX, PASS])
-        self.in_terminal("n", "--name", "Shop", "--no-design-lead")
+        self.in_terminal("n", "--name", "Shop")
         first, review, second, _ = self.e.agent_runs()
         for run in (first, review, second):
             self.assertIn("Shop", run["prompt"])
             self.assertNotIn("{{", run["prompt"])
-        self.assertIn("design lead: no", first["prompt"])
+        self.assertNotIn("design lead", first["prompt"].lower())
         self.assertNotIn("wrong test command", first["prompt"])
         self.assertIn("wrong test command", second["prompt"])
 
@@ -2376,14 +2379,12 @@ class RunTests(unittest.TestCase):
             "cotal svc add mgr --file",
             "cotal svc start mgr",
             "cotal spawn coordinator -d",
-            "orca worktree create --repo id:repo-1 --name design-lead --parent-worktree path:",
-            "cotal spawn design-lead -d",
         ]), "\n".join(calls))
-        spawn_dl = [c for c in calls if c.startswith("cotal spawn design-lead")][0]
-        self.assertIn("--cwd " + str(self.e.home / "orca" / "workspaces" / "design-lead"), spawn_dl)
-        self.assertIn("--harness claude", spawn_dl)
-        self.assertIn("--opt permission-mode=auto", spawn_dl)
-        self.assertIn("--opt allow-dangerously-skip-permissions=", spawn_dl)
+        spawn = [c for c in calls if c.startswith("cotal spawn coordinator")][0]
+        self.assertIn("--harness claude", spawn)
+        self.assertIn("--opt permission-mode=auto", spawn)
+        self.assertIn("--opt allow-dangerously-skip-permissions=", spawn)
+        self.assertFalse([c for c in calls if c.startswith("orca worktree create")], "\n".join(calls))
         agents = repo / ".cotal" / "agents"
         self.assertIn("model: opus", (agents / "coordinator.md").read_text())
         self.assertFalse((repo / ".agents").exists())  # skills are user-level (lane worktrees lack untracked files)
@@ -2426,7 +2427,7 @@ class RunTests(unittest.TestCase):
 
     def test_an_opencode_pin_on_a_setup_flag_without_an_explicit_own_choice_is_refused(self):
         repo = self.e.repo()
-        for args in (["--coordinator", "opencode/deepseek/deepseek-chat"], ["--design-lead", "opencode/gw/m"],
+        for args in (["--coordinator", "opencode/deepseek/deepseek-chat"],
                      ["--reviewer", "opencode/gw/m", "--own-model", "gw/other"]):
             r = self.e.run(str(repo), *args, "--no-start")
             self.assertEqual(r.returncode, 2, r.stderr)
@@ -2448,7 +2449,7 @@ class RunTests(unittest.TestCase):
     def test_hosted_opencode_pins_on_setups_own_agents_are_refused(self):
         repo = self.e.repo()
         for args in (["--coordinator", "opencode/opencode/deepseek-v4.1-flash"],
-                     ["--design-lead", "opencode/opencode-go/x"], ["--reviewer", "opencode/opencode/x-free"]):
+                     ["--coordinator", "opencode/opencode-go/x"], ["--reviewer", "opencode/opencode/x-free"]):
             r = self.e.run(str(repo), *args)
             self.assertEqual(r.returncode, 2, args)
             self.assertIn("starts no project agent on a hosted OpenCode model", r.stderr)
@@ -2575,7 +2576,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(tool.read_bytes(), (ROOT / "scripts" / "lane-heavy").read_bytes())
         self.assertTrue(os.access(tool, os.X_OK))
         self.assertEqual(sorted(p.name for p in self._tools().iterdir()),
-                         ["lane-heavy", "lane-limits.sh", "lane-room", "lane-tier"])
+                         ["design-shots", "lane-heavy", "lane-limits.sh", "lane-room", "lane-tier"])
 
     def test_host_mode_copies_and_reexecs(self):
         self._ssh_stub()
@@ -2664,72 +2665,6 @@ class RunTests(unittest.TestCase):
         r = self.e.run(str(repo), "--no-start")
         self.assertIn("setup-script: none", r.stdout)
 
-    def test_design_lead_waits_for_setup(self):
-        repo = self.e.repo()
-        self.e.set_state(setup_tab=1)
-        r = self.e.run(str(repo))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("setup design-lead: done", r.stdout)
-        self.assertLess(r.stdout.index("setup design-lead: done"), r.stdout.index("agent design-lead"))
-
-    def _closed(self):
-        return [c.split("--terminal ")[1].split()[0] for c in self.e.calls() if c.startswith("orca terminal close")]
-
-    def test_setup_tab_closed_after_the_marker_and_the_agent_start(self):
-        repo = self.e.repo()
-        self.e.set_state(setup_tab=1)
-        r = self.e.run(str(repo))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        calls = self.e.calls()
-        self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])  # the Setup tab and the plain shell
-        i_close = min(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
-        i_spawn = next(i for i, c in enumerate(calls) if c.startswith("cotal spawn") and "design-lead" in c)
-        self.assertLess(i_spawn, i_close)  # never an empty worktree when the agent starts
-
-    def test_setup_tab_found_by_runner_title_too(self):
-        repo = self.e.repo()
-        self.e.set_state(setup_tab="runner")
-        r = self.e.run(str(repo))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])
-
-    def test_startup_shell_closed_whatever_its_prompt_looks_like(self):
-        repo = self.e.repo()
-        self.e.set_state(setup_tab=1, shell_preview="app on \ue0a0 main \u276f")
-        r = self.e.run(str(repo))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(sorted(self._closed()), ["term_1", "term_2"])
-
-    def test_agent_tab_is_never_closed_even_without_identity(self):
-        repo = self.e.repo()
-        self.e.set_state(setup_tab=1)
-        r = self.e.run(str(repo))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("agent_design-lead", self._closed())  # the stub's agent tab: one-line preview, no identity, no cotal- title: only the handle guard keeps it
-
-    def test_shell_with_empty_preview_is_left_open(self):
-        repo = self.e.repo()
-        self.e.set_state(shell_preview="")
-        r = self.e.run(str(repo))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self._closed(), [])
-
-    def test_shell_with_output_is_left_open(self):
-        repo = self.e.repo()
-        self.e.set_state(shell_preview="make test\nrunning...\n\u276f")
-        r = self.e.run(str(repo))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self._closed(), [])
-
-    def test_running_setup_tab_is_kept_when_the_marker_never_appears(self):
-        repo = self.e.repo()
-        self.e.set_state(setup_tab="runner", setup_never_done=1)
-        r = self.e.run(str(repo), env_extra={"LANE_SETUP_TIMEOUT": "1"})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("setup design-lead: timeout", r.stdout)
-        # the startup shell step must not close the running setup script, and nothing closes it after the timeout
-        self.assertEqual(self._closed(), ["term_2"])
-
     def test_reviewer_persona_rendered(self):
         repo = self.e.repo()
         r = self.e.run(str(repo), "--reviewer", "opencode/gateway/glm-5", "--own-model", "gateway/glm-5", "--no-start")
@@ -2740,21 +2675,6 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("{{", text)
         coord = (repo / ".cotal" / "agents" / "coordinator.md").read_text()
         self.assertIn(str(repo / ".cotal" / "agents" / "reviewer.md"), coord)
-
-    def test_design_lead_tab_comes_before_the_shell(self):
-        # Orca opens a shell in a new worktree; it is closed only after the agent started (an empty worktree may
-        # refuse the spawn), and a fresh shell for the owner comes last.
-        repo = self.e.repo()
-        r = self.e.run(str(repo))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        calls = self.e.calls()
-        i_close = next(i for i, c in enumerate(calls) if c.startswith("orca terminal close"))
-        i_spawn = next(i for i, c in enumerate(calls) if c.startswith("cotal spawn") and "design-lead" in c)
-        i_create = next(i for i, c in enumerate(calls) if c.startswith("orca terminal create"))
-        self.assertLess(i_spawn, i_close)
-        self.assertLess(i_close, i_create)
-        self.assertIn("--terminal term_1", calls[i_close])
-        self.assertIn("design-lead", calls[i_create])
 
     def test_no_design_lead_starts_only_the_coordinator(self):
         repo = self.e.repo()
@@ -2767,19 +2687,22 @@ class RunTests(unittest.TestCase):
         self.assertIn("verify: ok", r.stdout)
         self.assertNotIn("design-lead", r.stdout.split("verify:")[1])
 
-    def test_no_design_lead_coordinator_routes_ui_itself(self):
+    def test_the_coordinator_routes_ui_itself(self):
         repo = self.e.repo()
-        self.assertEqual(self.e.run(str(repo), "--no-design-lead", "--no-start").returncode, 0)
+        self.assertEqual(self.e.run(str(repo), "--no-start").returncode, 0)
         coord = " ".join((repo / ".cotal" / "agents" / "coordinator.md").read_text().split())
         self.assertNotIn("route UI work and UI reviews through it", coord)
         self.assertNotIn("design lead's review", coord)
-        self.assertIn("no design lead", coord)
+        self.assertIn("You route UI work yourself, as ordinary lanes", coord)
         self.assertNotIn("{{", coord)
-        with_lead = self.e.repo("other")
-        self.assertEqual(self.e.run(str(with_lead), "--no-start").returncode, 0)
-        coord = " ".join((with_lead / ".cotal" / "agents" / "coordinator.md").read_text().split())
-        self.assertIn("route UI work and UI reviews through it", coord)
-        self.assertIn("design lead's review", coord)
+        self.assertFalse((repo / ".cotal" / "agents" / "design-lead.md").exists())
+
+    def test_a_design_lead_flag_is_refused_and_nothing_is_changed(self):
+        repo = self.e.repo()
+        r = self.e.run(str(repo), "--design-lead", "claude/opus", "--no-start")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("design lead is retired", r.stderr)
+        self.assertEqual(self.e.calls(), [])
 
     def test_untrusted_folder_stops_before_claude_starts(self):
         # Claude Code asks "Do you trust this folder?" on first start there; an agent tab can't answer it.
@@ -2878,10 +2801,10 @@ class RunTests(unittest.TestCase):
         oc = "opencode/gateway/x"
         tiers = self.e.home / "tiers.tsv"
         tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x\t-\n")
-        self.assertEqual(self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", oc, "--design-lead", oc, "--reviewer", oc,
+        self.assertEqual(self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", oc, "--reviewer", oc,
                                     "--tiers", str(tiers)).returncode, 0)
         self.assertFalse(any(c.startswith("cotal setup") for c in self.e.calls()))
-        r = self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", "claude/opus", "--design-lead", oc, "--reviewer", oc,
+        r = self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", "claude/opus", "--reviewer", oc,
                        "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(any(c.startswith("cotal setup") for c in self.e.calls()))
@@ -3012,7 +2935,6 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("old line", self.persona().read_text())
         self.assertIn("persona coordinator: updated", r.stdout)
-        self.assertIn("persona design-lead: exists", r.stdout)
         self.assertRegex(r.stdout, r"restart: needed coordinator \(persona changed\)")
         self.assertNotIn("design-lead (", r.stdout)
 
@@ -3042,7 +2964,8 @@ class RefreshTests(unittest.TestCase):
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("restart: none nothing changed", r.stdout)
-        self.assertNotIn("cotal ps", "\n".join(self.e.calls()))
+        # the one ps is the look for a leftover design lead (design-kit spec, section 8), not a restart check
+        self.assertEqual(len([c for c in self.e.calls() if c.startswith("cotal ps")]), 1)
 
     def test_stale_persona_whose_agent_is_not_running_needs_no_restart(self):
         self.setup_project()
@@ -3062,15 +2985,16 @@ class RefreshTests(unittest.TestCase):
         self.assertIn("Do not restart it on that model", r.stderr)
         self.assertNotIn("restart: needed", r.stdout)
 
-    def test_changed_skill_names_coordinator_and_design_lead(self):
+    def test_changed_skill_names_the_coordinator(self):
         self.setup_project()
         (self.e.home / ".agents" / "skills" / "orca-cotal-lanes" / "SKILL.md").write_text("old\n")
         r = self.refresh()
         self.assertIn("skills: updated", r.stdout)
-        self.assertIn("coordinator (skill changed); design-lead (skill changed)", r.stdout)
+        self.assertIn("coordinator (skill changed)", r.stdout)
+        self.assertNotIn("design-lead", r.stdout)
 
     def test_keeps_each_personas_harness_model_and_mode(self):
-        self.setup_project("--coordinator", "claude/sonnet", "--permission-mode", "default", "--no-design-lead")
+        self.setup_project("--coordinator", "claude/sonnet", "--permission-mode", "default")
         self.persona().write_text(self.persona().read_text() + "stale\n")
         r = self.refresh()
         text = self.persona().read_text()
@@ -3078,7 +3002,7 @@ class RefreshTests(unittest.TestCase):
         self.assertIn('"permission-mode": "default"', text)
         self.assertFalse(self.persona("design-lead").exists())
         self.assertIn("claude/sonnet", r.stdout)
-        self.assertIn("This project has no design lead", text)
+        self.assertIn("You route UI work yourself, as ordinary lanes", text)
 
     def test_project_not_set_up_is_refused(self):
         r = self.refresh()
@@ -3094,13 +3018,12 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.persona().read_text(), "stale\n")
 
     def test_opencode_personas_keep_their_recorded_mode(self):
-        self.setup_project("--own-model", "gw/m", "--coordinator", "opencode/gw/m", "--design-lead", "opencode/gw/m", "--reviewer", "opencode/gw/m",
+        self.setup_project("--own-model", "gw/m", "--coordinator", "opencode/gw/m", "--reviewer", "opencode/gw/m",
                            "--permission-mode", "default")
         self.persona().write_text(self.persona().read_text() + "stale\n")
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
-        for n in ("coordinator", "design-lead"):
-            self.assertIn("permission mode is `default`", self.persona(n).read_text())
+        self.assertIn("permission mode is `default`", self.persona().read_text())
 
     def test_each_persona_keeps_its_own_mode(self):
         self.setup_project()
@@ -3207,7 +3130,7 @@ class RefreshTests(unittest.TestCase):
 
     def test_a_mode_no_persona_records_is_said_out_loud(self):
         self.setup_project()
-        for name in ("coordinator", "design-lead", "reviewer"):
+        for name in ("coordinator", "reviewer"):
             text = self.persona(name).read_text()
             text = re.sub(r'"permission-mode": "\w+"', '"x": "y"', text)
             self.persona(name).write_text(re.sub(r"permission mode is `\w+`", "mode", text))
@@ -3240,11 +3163,15 @@ class RefreshTests(unittest.TestCase):
 
     def test_flags_that_would_be_ignored_are_refused(self):
         self.setup_project()
-        for flag in (["--coordinator", "claude/sonnet"], ["--permission-mode=default"], ["--no-design-lead"],
-                     ["--design-lead", "claude/sonnet"]):
+        for flag in (["--coordinator", "claude/sonnet"], ["--permission-mode=default"]):
             r = self.refresh(*flag)
             self.assertEqual(r.returncode, 2, flag)
             self.assertIn("no effect with --refresh", r.stderr)
+        r = self.refresh("--no-design-lead")  # accepted and does nothing: it is not in the refused list
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.refresh("--design-lead", "claude/sonnet")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("design lead is retired", r.stderr)
 
     def test_not_a_repository_is_refused_and_nothing_cloned(self):
         r = self.e.run(str(self.e.home / "nowhere"), "--refresh", adapt=True)
@@ -3359,11 +3286,12 @@ class SettingsStoreTests(unittest.TestCase):
         return old
 
     def test_setup_writes_the_store_and_nothing_of_it_into_cotal(self):
-        self.run_setup("--private", "shot*.png", "--no-design-lead", "--coordinator", "claude/sonnet", "--name", "Shop")
+        self.run_setup("--private", "shot*.png", "--coordinator", "claude/sonnet", "--name", "Shop")
         self.assertTrue((self.store / "lanes.tsv").is_file())
         st = self.e.settings(self.repo)
         self.assertEqual(st["private"], ["shot*.png"])
-        self.assertFalse(st["design_lead"])
+        self.assertNotIn("design_lead", st)
+        self.assertEqual(st["models"], {"coordinator": "claude/sonnet", "reviewer": "claude/opus"})
         self.assertEqual(st["models"]["coordinator"], "claude/sonnet")
         self.assertEqual((st["name"], st["root"], st["permission_mode"]), ("Shop", str(self.repo), "auto"))
         self.assertFalse((self.repo / ".cotal" / "lanes.tsv").exists())
@@ -3377,32 +3305,24 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(self.store.stat().st_mode & 0o777, 0o700)
 
     def test_a_run_without_flags_reuses_the_store(self):
-        self.run_setup("--private", "shot*.png", "--no-design-lead", "--coordinator", "claude/sonnet", "--permission-mode",
+        self.run_setup("--private", "shot*.png", "--coordinator", "claude/sonnet", "--permission-mode",
                        "bypassPermissions", "--name", "Shop")
-        (self.repo / ".cotal" / "agents" / "design-lead.md").unlink(missing_ok=True)
         self.run_setup()
         st = self.e.settings(self.repo)
-        self.assertEqual((st["models"]["coordinator"], st["design_lead"], st["permission_mode"], st["name"]),
-                         ("claude/sonnet", False, "bypassPermissions", "Shop"))
+        self.assertEqual((st["models"]["coordinator"], st["permission_mode"], st["name"]),
+                         ("claude/sonnet", "bypassPermissions", "Shop"))
         text = (self.repo / ".cotal" / "agents" / "coordinator.md").read_text()
         self.assertIn("model: sonnet", text)
         self.assertIn("bypassPermissions", text)
         self.assertIn("Shop", text)
         self.assertFalse((self.repo / ".cotal" / "agents" / "design-lead.md").exists())
-        self.assertIn("This project has no design lead", text)
+        self.assertIn("You route UI work yourself, as ordinary lanes", text)
 
     def test_private_globs_add_up_and_a_later_run_never_drops_one(self):
         self.run_setup("--private", "a*.png")
         self.run_setup("--private", "docs/private/**", "--private", "a*.png")
         self.run_setup()
         self.assertEqual(self.e.settings(self.repo)["private"], ["a*.png", "docs/private/**"])
-
-    def test_the_design_lead_comes_back_with_its_flag(self):
-        self.run_setup("--no-design-lead")
-        self.assertFalse(self.e.settings(self.repo)["design_lead"])
-        self.run_setup("--design-lead", "claude/opus")
-        self.assertTrue(self.e.settings(self.repo)["design_lead"])
-        self.assertTrue((self.repo / ".cotal" / "agents" / "design-lead.md").is_file())
 
     def test_an_unsafe_stored_glob_or_mode_is_refused_and_named(self):
         self.run_setup()
@@ -3428,7 +3348,8 @@ class SettingsStoreTests(unittest.TestCase):
             with self.assertRaises(m.Fail):
                 m.settings(self.repo, api_key="x")
             self.assertFalse((self.store / "settings.json").exists())
-        for k in ("root", "name", "models", "design_lead", "permission_mode", "private", "own_models", "port",
+        self.assertNotIn("design_lead", m.SETTING_KEYS)  # the design lead is retired
+        for k in ("root", "name", "models", "permission_mode", "private", "own_models", "port",
                   "claude_setup"):
             self.assertIn(k, m.SETTING_KEYS)
         self.assertFalse({"opencode", "opencode_model"} & set(m.SETTING_KEYS))  # the OpenCode answer is gone
@@ -3441,7 +3362,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertFalse(self.store.exists())
 
     def test_a_project_set_up_before_the_store_is_moved_once_and_says_what(self):
-        self.run_setup("--port", "14777", "--name", "Shop", "--coordinator", "claude/sonnet", "--no-design-lead")
+        self.run_setup("--port", "14777", "--name", "Shop", "--coordinator", "claude/sonnet")
         edited = (self.store / "lanes.tsv").read_bytes() + b"# the owner's own note\n"
         self.legacy(edited)
         r = self.run_setup()
@@ -3454,7 +3375,7 @@ class SettingsStoreTests(unittest.TestCase):
         st = self.e.settings(self.repo)
         self.assertEqual(st["port"], 14777)
         # what the old record never held comes from the personas, so a re-run without flags keeps it
-        self.assertEqual((st["models"]["coordinator"], st["design_lead"]), ("claude/sonnet", False))
+        self.assertEqual(st["models"]["coordinator"], "claude/sonnet")
         self.assertIn("model: sonnet", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
         self.assertNotIn("settings: moved", self.run_setup().stdout)  # once
 
@@ -3491,30 +3412,40 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(st["port"], 14888)
         self.assertFalse((self.repo / ".cotal" / "lane-control.json").exists())
 
-    def test_refresh_respects_the_store_design_lead_and_fills_what_it_lacks(self):
+    def test_refresh_fills_what_the_store_lacks(self):
         self.run_setup()
         st = self.e.settings(self.repo)
-        for k in ("models", "design_lead", "permission_mode"):
+        for k in ("models", "permission_mode"):
             st.pop(k)
         (self.store / "settings.json").write_text(json.dumps(st))
         r = self.e.run(str(self.repo), "--refresh", adapt=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         st = self.e.settings(self.repo)
         self.assertEqual(st["models"]["coordinator"], "claude/opus")
-        self.assertTrue(st["design_lead"])
-        st["design_lead"] = False
-        (self.store / "settings.json").write_text(json.dumps(st))
-        r = self.e.run(str(self.repo), "--refresh", adapt=True)
-        self.assertIn("This project has no design lead", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+        self.assertNotIn("design_lead", st)
         self.assertNotIn("persona design-lead", r.stdout)
+        self.assertIn("You route UI work yourself, as ordinary lanes", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+
+    def test_an_old_design_lead_setting_is_dropped_and_said(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        st["design_lead"] = True
+        st["models"]["design-lead"] = "claude/opus"
+        (self.store / "settings.json").write_text(json.dumps(st))
+        r = self.run_setup()
+        self.assertIn("design-lead: retired", r.stdout)
+        st = self.e.settings(self.repo)
+        self.assertNotIn("design_lead", st)
+        self.assertNotIn("design-lead", st["models"])
 
     def test_show_prints_the_store_and_writes_nothing(self):
         self.run_setup("--private", "shot*.png")
         before = {p: p.read_bytes() for p in self.store.iterdir()}
         r = self.e.run(str(self.repo), "--show", adapt=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        for needle in (str(self.store), "shot*.png", "lanes.tsv", "tiers: swift", '"design_lead": true'):
+        for needle in (str(self.store), "shot*.png", "lanes.tsv", "tiers: swift"):
             self.assertIn(needle, r.stdout)
+        self.assertNotIn("design_lead", r.stdout)
         self.assertNotIn("sandbox-ports", r.stdout)
         self.assertEqual({p: p.read_bytes() for p in self.store.iterdir()}, before)
 
@@ -3600,7 +3531,7 @@ class SettingsStoreTests(unittest.TestCase):
         (self.store / "settings.json").write_text(json.dumps({**st, "permission_mode": "bypassPermissions"}))
         r = self.e.run(str(self.repo), "--refresh", adapt=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        for n in ("coordinator", "design-lead", "reviewer"):
+        for n in ("coordinator", "reviewer"):
             self.assertIn('"permission-mode": "bypassPermissions"', (self.repo / ".cotal" / "agents" / f"{n}.md").read_text())
 
     def test_personas_with_different_modes_are_left_alone_and_none_is_stored(self):
@@ -3656,7 +3587,7 @@ class SettingsStoreTests(unittest.TestCase):
     def mixed_personas(self):
         self.run_setup("--permission-mode", "bypassPermissions")
         agents = self.repo / ".cotal" / "agents"
-        for n, mode in (("reviewer", "default"), ("design-lead", "auto")):
+        for n, mode in (("reviewer", "default"),):  # the coordinator keeps bypassPermissions, so they differ
             (agents / f"{n}.md").write_text((agents / f"{n}.md").read_text().replace("bypassPermissions", mode))
         st = self.e.settings(self.repo)
         st.pop("permission_mode")
@@ -3665,7 +3596,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_a_normal_run_keeps_each_personas_mode_when_they_differ(self):
         agents = self.mixed_personas()
-        before = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "design-lead", "reviewer")}
+        before = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "reviewer")}
         self.run_setup("--no-start")
         for n, text in before.items():
             self.assertEqual((agents / f"{n}.md").read_text(), text, n)
@@ -3855,7 +3786,7 @@ class AttachedRepoTests(unittest.TestCase):
         self.assertIn(str(self.plugins), added)
         self.assertEqual(len(self.calls("cotal space create")), 1)
         self.assertEqual(len(self.calls("cotal spawn coordinator")), 1)
-        self.assertEqual(len(self.calls("cotal spawn")), 2)  # coordinator and design lead, none for the plugins repo
+        self.assertEqual(len(self.calls("cotal spawn")), 1)  # the coordinator only, none for the plugins repo
         self.assertFalse((self.plugins / ".cotal" / "agents").exists())
         self.assertTrue((self.plugins / ".cotal" / "orca.yaml.proposed").exists())  # drafted from its lockfile
         self.assertEqual(self.e.settings(self.repo)["attached"], [str(self.plugins)])
@@ -3867,7 +3798,7 @@ class AttachedRepoTests(unittest.TestCase):
         self.assertIn(f"`{self.plugins}`", text)
         self.assertNotIn("{{", text)
         other = self.e.repo("solo")
-        r = self.e.run(str(other), "--no-design-lead")  # the stub's design-lead worktree is named per HOME, not per repo
+        r = self.e.run(str(other))
         self.assertEqual(r.returncode, 0, r.stderr)
         solo = (other / ".cotal" / "agents" / "coordinator.md").read_text()
         self.assertNotIn("attached repos", solo)

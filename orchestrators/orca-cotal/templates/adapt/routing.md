@@ -1,7 +1,7 @@
 ---
 lane_control_template: 1
 max_rows: 40
-read_by: coordinator, design lead, reviewer
+read_by: coordinator, reviewer
 ---
 <!-- fixed -->
 How lanes are routed in this project. Tier by the paths a task touches: the highest tier wins, in doubt one tier up.

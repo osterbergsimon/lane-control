@@ -42,9 +42,16 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    project-setup says it did not use them. To change a running box, run `orca-host-install` itself.
 3. The box's copy of `project-setup` runs there (`--via-host`, over `ssh -t` when there is a terminal). It does the
    native setup of phase 3 there: rendered personas, the persona hook, the AGENTS.md sections, the settings store
-   and the coordinator (and design lead) in Orca terminals of the box's own server, which show in this machine's
+   and the coordinator in an Orca terminal of the box's own server, which shows in this machine's
    window through the paired environment. With `--no-start` no agent needs to be on the box yet; the run there adds
    `~/bin` and `~/.local/bin` to the end of its PATH, where agents are often installed.
+   The design kit goes on the box the same way (design-kit spec, section 9): `~/.agents/bin/design-shots`, the
+   `component-gallery` skill, the frontend brief and the design reviewer persona, and the design skills fetched there
+   from their pinned upstream commits into the box's `~/.agents/skills`. That needs git and the network on the box;
+   without them it says `design-skills missing`, and a frontend lane there reports `skills missing`, which the
+   coordinator acts on as anywhere. Shots need Playwright and a browser on the box, which setup never installs; a skill
+   that runs Node needs Node there. A box set up before the kit gets it on its next `project-setup <repo> <host>` or
+   `--refresh` (both install the lane tools, `design-shots` among them, and the skills).
 4. `core/scripts/machine-setup --host <host>` (skipped with `--no-machine-setup`): the box's own machine coordinator,
    night manager, lane sweep and machine check.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.
@@ -181,7 +188,7 @@ reaches, or wakes, an agent coordinator on the box. Across hosts, treat a report
 `orca-ide orchestration check` right after it starts the lane, on each wake, and before it calls a quiet lane lost
 (`orca-ide orchestration worker-show --dispatch <dispatch>` says what Orca knows of the worker). The personas say so
 too. If a cross-host wake is lost, the night manager's idle check or the owner notices it; the coordinator never loops
-on `check`. The night manager's idle check covers coordinators only, so a design lead's lost wake is noticed by the owner. A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
+on `check`. The night manager's idle check covers coordinators, the only long-lived sessions that start lanes (frontend lanes and the design reviewer report to the coordinator too). A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
 it is run, nothing here may be read as "delivered".
 
 Canary 2026-11-21 (scratch servers in containers, a plain shell terminal as the coordinator on the side that
