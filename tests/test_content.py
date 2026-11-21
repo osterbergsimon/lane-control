@@ -1527,6 +1527,48 @@ class CrossHostReportContractTests(unittest.TestCase):
                 self.assertNotIn("worker_done", path.read_text(errors="ignore"), path.name)
 
 
+class OrcaCanaryTests(unittest.TestCase):
+    """lc-seu: the canary for one Orca version (docs/research/2026-11-21-orca-newer.md, "Canary results"), and what
+    its results force in remote.md: `orca pair` is no stand-in for the share link, the "too old" texts a newer box
+    meets on an older server, and how a report crosses servers of different versions."""
+
+    REMOTE = ROOT / "orchestrators" / "native-orca" / "remote.md"
+    RESEARCH = ROOT / "docs" / "research" / "2026-11-21-orca-newer.md"
+
+    def test_the_research_doc_has_a_step_table_and_one_verdict(self):
+        t = self.RESEARCH.read_text()
+        self.assertIn("\n## Canary results\n", t)
+        res = t[t.index("\n## Canary results\n"):]
+        res = res[:res.index("\n## ", 5)] if "\n## " in res[5:] else res
+        for step in range(1, 8):
+            row = re.search(rf"^\| {step} \|.*$", res, re.M)
+            self.assertIsNotNone(row, f"no table row for step {step}")
+            self.assertRegex(row.group(0), r"\[ran\]|\[not run: ", f"step {step} is not marked")
+        self.assertRegex(flat_text(res), r"\*\*Go for Orca 1\.4\.268\*\*")
+        for needle in ("Risks that remain", "Cleanup", "server_mail_unsupported",
+                       "needs an Orca update to nest across machines", "refusing to widen to all interfaces"):
+            self.assertIn(needle, flat_text(res), needle)
+
+    def test_remote_doc_says_orca_pair_is_no_stand_in_for_the_share_link(self):
+        t = flat(self.REMOTE)
+        step = t[t.index("1. The owner makes a share link"):t.index("2. `project-setup <repo> <host>` asks")]
+        for needle in ("`orca pair`", "refusing to widen to all interfaces", "Settings > Servers"):
+            self.assertIn(needle, step, needle)
+
+    def test_remote_doc_names_the_too_old_texts_a_newer_box_meets(self):
+        t = flat(self.REMOTE)
+        for needle in ("runs an older Orca that cannot receive agent mail from another server",
+                       "needs an Orca update to nest across machines", "expected handle <unknown>, pane <legacy>"):
+            self.assertIn(needle, t, needle)
+
+    def test_cross_server_reports_stay_poll_only_after_the_canary(self):
+        t = flat(self.REMOTE)
+        reports = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
+        self.assertIn("poll-only", reports)
+        self.assertIn("Canary 2026-11-21", reports)
+        self.assertRegex(reports, r"(?i)agent coordinator[^.]*not (verified|tested)")
+
+
 class PublicRepoPathTests(unittest.TestCase):
     """UP-6 review B1 and r3-2: no tracked file names a session scratch folder or a real home folder, in any of the
     shapes one leaks in. The placeholder user is `u` (/home/u/..., -home-u-..., /Users/u/...); any other name,

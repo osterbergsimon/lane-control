@@ -21,7 +21,13 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    6769-6868): do not put your own services there, on this machine or on a box, or setup takes the next free one and a
    later run may find yours in the way.
    By default the server put there is the newest one this machine's Orca has built, so a box gets whatever the
-   desktop has, and a box whose server is older than its desktop later fails as "server too old". To pin a box to a
+   desktop has, and a box whose server is older than its desktop later fails as "server too old". A newer Orca
+   reaching an older server names the gap itself (canary 2026-11-21, a 1.4.263 box against a 1.4.250 server):
+   `send --on` is refused with `server_mail_unsupported` ("Server <name> runs an older Orca that cannot receive agent
+   mail from another server. Update Orca on <name>, then send again. Nothing was sent."), `worker-start --on` with
+   `new-child` starts top-level ("Not nested under main: <name> needs an Orca update to nest across machines, so the
+   worktree was created top-level."), and the worker's `worker_done` arrives as a `Rejected worker_done` (see Reports
+   across hosts). Keep the desktop and every box on one version. To pin a box to a
    known-good server: `--orca-version <v>` installs exactly that version (and fails when the source has no such
    version): a slot's folder name, its own `.version`, or the Orca app version its `out/package.json` records (the
    `1.4.251` of a "server too old" complaint); it goes on the box under the slot's own name. `--orca-from <dir>` or
@@ -51,7 +57,10 @@ For what the box lacks (graphics, a browser, a GPU), its coordinator starts a la
 is poll-only (Reports across hosts, below).
 1. The owner makes a share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this
    computer's own address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a
-   link). Orca 1.4.250 has no CLI for it.
+   link). Orca 1.4.250 has no CLI for it. `orca pair` (1.4.254 and later) is no stand-in: on 1.4.268 it makes its
+   offer by widening the server to every interface, and on a server pinned with `--bind` it refuses ("Runtime bind
+   address is pinned to <ip>; refusing to widen to all interfaces", canary 2026-11-21). Keep to the Settings >
+   Servers link with 127.0.0.1.
 2. `project-setup <repo> <host>` asks for the link on a hidden prompt, in a terminal only (Enter, no terminal or
    `--no-desktop-lanes` skips it; a box already paired is not asked again). A terminal that cannot hide what is
    typed is refused instead of asked.
@@ -146,6 +155,19 @@ reaches, or wakes, an agent coordinator on the box. Across hosts, treat a report
 (`orca-ide orchestration worker-show --dispatch <dispatch>` says what Orca knows of the worker). The personas say so
 too. A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
 it is run, nothing here may be read as "delivered".
+
+Canary 2026-11-21 (scratch servers in containers, a plain shell terminal as the coordinator on the side that
+started the lane, a haiku worker on the other; docs/research/2026-11-21-orca-newer.md, Canary results):
+- Client older than or equal to the worker's server (1.4.250 or 1.4.263 against 1.4.268): the worker's `worker_done`
+  reaches the Run home and `check` there lists it; `send --to dispatch:<id>` and `send --on <server> --to term_...`
+  (263 against 268) both reach the worker and wake it, and its answer comes back to the Run.
+- Client newer than the worker's server (1.4.263 against 1.4.250): the task settles as completed, but the report is
+  listed as `Rejected worker_done` [HIGH] ("expected handle <unknown>, pane <legacy>; received handle
+  dispatch:<id>, pane <missing>", `sender_not_assignee`) while the worker is told "Recorded". `send --to
+  dispatch:<id>` reaches the worker, whose brief names its coordinator only as "Run home (relayed by Orca)", so a
+  careful worker may not act on it; `send --on` is refused (`server_mail_unsupported`).
+- Whether a report wakes an agent coordinator across hosts is not verified: on one server it does (Orca prompts the
+  idle coordinator to run `check`), across servers only the Run's mail was seen. Reports across hosts stay poll-only.
 
 ## A dispatch that can no longer report
 A worker can finish its work and still be unable to report: a runtime restart left its dispatch with another owner
