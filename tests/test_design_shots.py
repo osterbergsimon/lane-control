@@ -105,11 +105,28 @@ class DesignShotsTests(unittest.TestCase):
             self.assertEqual(c[c.index("--wait-for-selector") + 1], "[data-gallery-ready]")
 
     def test_only_loopback_urls(self):
-        for url in ("http://example.com", "https://box.example:3000", "file:///etc/passwd", "localhost:3000"):
+        for url in ("http://example.com", "https://box.example:3000", "file:///etc/passwd", "localhost:3000",
+                    "http://127.0.0.1.example.com", "http://localhost@example.com"):  # review m6: look-alikes
             r = self.run_shots("shoot", url, "--out", str(self.t / "o"))
             self.assertEqual(r.returncode, 2, url)
             self.assertIn("127.0.0.1", r.stderr)
         self.assertEqual(self.calls(), [])
+
+    def test_hostile_page_names_stay_one_argument_and_a_safe_file_name(self):
+        # review m6: a page from a pages file or --page never reaches a shell, and its file name is slugged
+        pages = self.t / "gallery.pages"
+        pages.write_text("a;b /x;touch${IFS}pwned1\n$(touch${IFS}pwned2) /y\n`touch${IFS}pwned3` /z\n")
+        out = self.t / "shots"
+        r = self.run_shots("shoot", "http://127.0.0.1:8000", "--out", str(out), "--pages", str(pages),
+                           "--page=-rf", "--widths", "390", "--themes", "light")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(p.name for p in out.glob("*.png")),
+                         ["a-b--390--light.png", "rf--390--light.png", "touch-ifs-pwned2--390--light.png",
+                          "touch-ifs-pwned3--390--light.png"])
+        urls = sorted(c[-2] for c in self.calls())
+        self.assertEqual(urls, ["http://127.0.0.1:8000/-rf", "http://127.0.0.1:8000/x;touch${IFS}pwned1",
+                                "http://127.0.0.1:8000/y", "http://127.0.0.1:8000/z"])
+        self.assertEqual(list(self.t.glob("pwned*")), [])
 
     def test_no_playwright_exits_3_and_downloads_nothing(self):
         env = {k: v for k, v in self.env.items() if k != "DESIGN_SHOTS_PLAYWRIGHT"}
