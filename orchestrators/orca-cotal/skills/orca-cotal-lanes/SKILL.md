@@ -1,6 +1,6 @@
 ---
 name: orca-cotal-lanes
-description: Open, brief, watch and close worker lanes as Orca child tasks, each run by its own Cotal agent (OpenCode or Claude, chosen by tier). Use when you are a project coordinator or design lead and need to start work in a new lane, route it to a harness and model, mirror its state in the Orca GUI, or close it. Use it instead of Orca's orchestration skill.
+description: Open, brief, watch and close worker lanes as Orca child tasks, each run by its own Cotal agent (OpenCode or Claude, chosen by tier). Use when you are a project coordinator and need to start work in a new lane, route it to a harness and model, mirror its state in the Orca GUI, or close it. Use it instead of Orca's orchestration skill.
 ---
 
 # Lanes: Orca worktrees with a Cotal agent in each
@@ -42,7 +42,7 @@ First check that the machine has room: run `~/.agents/bin/lane-room`. If it exit
 hold the lane and tell the owner what it printed, instead of starting it. The coordinator then runs `git fetch origin`,
 `git status -sb` and `git rev-list --count HEAD..origin/<default>` in its own checkout: if it is detached, on a branch
 other than the default, or behind origin, it holds the lane and tells the owner (behind only and clean:
-`git merge --ff-only origin/<default>` is fine). A design lead skips this: its lanes branch from its own branch.
+`git merge --ff-only origin/<default>` is fine).
 
 From your own worktree (its cwd makes the new task your child):
 
@@ -139,8 +139,7 @@ scope. Merge only when the owner says so.
 Close a lane once its PR is merged, without asking, if its worktree is clean (`git status --ignored` shows nothing but known build output and the `.beads` symlink; any other ignored
 file, such as a local `.env` or notes, goes to the owner first), pushed, and its
 branch is an ancestor of the branch its PR merged into: run `git fetch origin`, then
-`git merge-base --is-ancestor <branch> origin/<base>` (`<base>` is main, or the design lead's branch for a design
-lane). The lane's issue is already
+`git merge-base --is-ancestor <branch> origin/<base>` (`<base>` is the branch its PR merged into, usually main). The lane's issue is already
 closed at merge. Do these in order, and set nothing else:
 
 ```

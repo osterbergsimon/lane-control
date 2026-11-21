@@ -67,7 +67,7 @@ class PersonaTests(unittest.TestCase):
         self.assertIn("git status -sb", skill)
         self.assertIn("git fetch origin", skill)
         self.assertIn("holds the lane and tells the owner", skill)
-        self.assertIn("A design lead skips this", skill)
+        self.assertNotIn("design lead", skill.lower())  # retired (review m1, JAI-1): no lane branches from its branch
 
     def test_personas_carry_placeholders(self):
         text = (PERSONAS / "coordinator.md").read_text()
@@ -1858,6 +1858,18 @@ class DesignLeadRetiredTests(unittest.TestCase):
             t = flat(path).lower()
             for needle in ("design lead", "design-lead", "{{design_route}}", "{{design_review}}"):
                 self.assertNotIn(needle, t, (path.name, needle))
+
+    def test_no_cotal_prompt_names_a_design_lead(self):
+        # owner decision 1: also from the parked Orca + Cotal path (review m1); its history and records keep the name
+        cotal = ROOT / "orchestrators" / "orca-cotal"
+        for path in (*sorted((cotal / "personas").glob("*.md")), *sorted((cotal / "skills").glob("**/*.md")),
+                     *sorted(p for p in (cotal / "templates").glob("**/*") if p.is_file())):
+            t = flat(path).lower()
+            for needle in ("design lead", "design-lead", "{{design_route}}", "{{design_review}}"):
+                self.assertNotIn(needle, t, (str(path.relative_to(ROOT)), needle))
+        self.assertIn("You route UI work yourself, as ordinary lanes, and it gets the code reviewer only",
+                      flat(cotal / "personas" / "coordinator.md"))
+        self.assertNotIn("NO_DESIGN_ROUTE", (ROOT / "core" / "scripts" / "project-setup").read_text())
 
     def test_the_coordinator_routes_frontend_lanes_through_the_kit(self):
         t = flat(NATIVE / "coordinator.md")

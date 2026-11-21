@@ -2693,7 +2693,7 @@ class RunTests(unittest.TestCase):
         coord = " ".join((repo / ".cotal" / "agents" / "coordinator.md").read_text().split())
         self.assertNotIn("route UI work and UI reviews through it", coord)
         self.assertNotIn("design lead's review", coord)
-        self.assertIn("This project has no design lead: you route any UI work yourself", coord)
+        self.assertIn("You route UI work yourself, as ordinary lanes", coord)
         self.assertNotIn("{{", coord)
         self.assertFalse((repo / ".cotal" / "agents" / "design-lead.md").exists())
 
@@ -3002,7 +3002,7 @@ class RefreshTests(unittest.TestCase):
         self.assertIn('"permission-mode": "default"', text)
         self.assertFalse(self.persona("design-lead").exists())
         self.assertIn("claude/sonnet", r.stdout)
-        self.assertIn("This project has no design lead", text)
+        self.assertIn("You route UI work yourself, as ordinary lanes", text)
 
     def test_project_not_set_up_is_refused(self):
         r = self.refresh()
@@ -3316,7 +3316,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertIn("bypassPermissions", text)
         self.assertIn("Shop", text)
         self.assertFalse((self.repo / ".cotal" / "agents" / "design-lead.md").exists())
-        self.assertIn("This project has no design lead", text)
+        self.assertIn("You route UI work yourself, as ordinary lanes", text)
 
     def test_private_globs_add_up_and_a_later_run_never_drops_one(self):
         self.run_setup("--private", "a*.png")
@@ -3424,7 +3424,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(st["models"]["coordinator"], "claude/opus")
         self.assertNotIn("design_lead", st)
         self.assertNotIn("persona design-lead", r.stdout)
-        self.assertIn("This project has no design lead", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
+        self.assertIn("You route UI work yourself, as ordinary lanes", (self.repo / ".cotal" / "agents" / "coordinator.md").read_text())
 
     def test_an_old_design_lead_setting_is_dropped_and_said(self):
         self.run_setup()

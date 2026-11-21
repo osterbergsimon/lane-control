@@ -156,7 +156,6 @@ def harness_model(spec: str) -> tuple:
     return harness, model
 
 
-NO_DESIGN_ROUTE = "This project has no design lead: you route any UI work yourself, and it gets the code reviewer only."
 DESIGN_KIT = "docs/superpowers/specs/2026-11-21-design-kit-design.md"  # the design lead's retirement (owner, 2026-11-21)
 RETIRED = ("the design lead is retired (owner, 2026-11-21): frontend work runs as ordinary lanes with the design kit, "
            f"and every frontend lane gets the design reviewer ({DESIGN_KIT})")
@@ -174,8 +173,7 @@ def render_persona(text: str, harness: str, model: str, mode: str, project: str,
     rule = ATTACHED_RULE.format(paths=", ".join(f"`{a}`" for a in attached)) if attached else ""
     return (text.replace("{{ATTACHED}}\n", rule).replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
             .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
-            .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(HERE))
-            .replace("{{DESIGN_ROUTE}}", NO_DESIGN_ROUTE).replace("{{DESIGN_REVIEW}}", ""))
+            .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(HERE)))
 
 
 def orca_cli() -> str:
