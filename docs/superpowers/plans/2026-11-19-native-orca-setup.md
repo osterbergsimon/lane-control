@@ -70,7 +70,8 @@ is silent).
 - Messaging (owner, 2026-11-19: typing into terminals interferes with what the owner types): Claude to Claude on
   one machine uses Claude Code's SendMessage (address = session name from ListAgents; phase 3 starts Claude with
   `--name`); OpenCode sessions and other hosts use Orca's orchestration messages (dispatch, ask, reply,
-  worker_done, check, `send --to run:<id>`); never type into a session the owner uses. Each standing session
+  worker_done, check, `send --to run:<id>` (same host; see remote.md)); never type into a session the owner uses.
+  Each standing session
   (coordinator, design lead, machine coordinator) owns an Orca Run so peers can reach it with `--to run:<id>`.
 - Peer discovery (NO-2, 2026-11-19): Orca terminal titles `<project> coordinator`, `<project> design lead`,
   `machine coordinator`. Claude overwrites a terminal's title with its session title, so phases 3, 4 and 6 set the

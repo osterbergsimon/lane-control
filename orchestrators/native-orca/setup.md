@@ -36,8 +36,14 @@ facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writ
   depth (default 1). Prefer one coordinator level, or raise the depth knowingly.
 - **Between sessions:** never type into another session's terminal (`orca-ide terminal send`): it disturbs what the
   owner types (owner, 2026-11-19). Claude sessions on one machine message each other with SendMessage; everything
-  else goes to the peer's own Run (`orca-ide orchestration run-create` from its own terminal, then `send --to
-  run:<id>`).
+  else on this machine goes to the peer's own Run (`orca-ide orchestration run-create` from its own terminal, then
+  `send --to run:<id>`). A peer on another host has no `run:` route (without `--on` it goes to this Orca; with `--on` the server refuses it).
+  Check that both servers are 1.4.256 or newer (`runtime.appVersion` in `orca-ide status --json` and in `orca-ide status
+  --environment <environment> --json`), take the peer's handle from `orca-ide terminal list --environment <environment>
+  --json` (the terminal whose `title` is its session name), and `orca-ide orchestration send --on <environment> --to
+  term_<id> --subject "<subject>" --body "<message>"`. If either server is older, or no terminal has that title, the owner
+  carries the message. This route is not yet run across two servers (`remote.md`, Messages to a session on the other
+  host).
 
 ## Heavy work
 Every build and full test suite runs through `~/.agents/bin/lane-heavy <command>`, one machine-wide gate for every

@@ -104,6 +104,7 @@ Direction 2, a box's coordinator runs a lane here: Orca pairing both ways (owner
 runs an Orca runtime the box pairs to (`environment add` from a pairing code, through an SSH-forwarded port or the
 LAN, never a port open to the internet, never desktop control). The box's coordinator starts and steers the lane
 with `--environment <this machine>`; the lane reports back with `--environment <the box>`.
+(Corrected 2026-11-21: from an agent, `--environment` is refused for `send` and `worker-start` on 1.4.267 and delivers no mail on 1.4.263; lanes start with `worker-start --on`, and the one cross-host message route is `send --on`; see `orchestrators/native-orca/remote.md`, Messages to a session on the other host.)
 SPIKE-2 (lc-8ox, 2026-11-19, Orca 1.4.250, an unprivileged container as the box) found:
 - Direction 1 works: `scripts/orca-host-install <host> --pair --port <p>` installs and pairs Orca's server; terminal
   create, send and read with `--environment <box>` all work. A supervised worker on the box needs a real agent
