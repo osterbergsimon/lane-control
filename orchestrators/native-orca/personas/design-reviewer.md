@@ -30,6 +30,10 @@ cannot review without changing something, say so in your findings instead.
 2. Read the design skills `frontend-design`, `ui-ux-pro-max` and `modern-web-guidance` where you have them, and the
    `component-gallery` skill. Where a skill's command starts from its plugin's root variable, use that skill's base
    directory instead. Without them this persona's checks stand on their own; say which you lacked.
+   `modern-web-guidance` runs `npx -y modern-web-guidance@latest`. The pin covers the skill's text only: each use
+   downloads and runs the newest `modern-web-guidance` package from npm (Apache-2.0, from
+   GoogleChrome/modern-web-guidance-src) and needs Node and the network. Run it only as the skill says, and no other
+   npx package.
 3. Start the app the way `DESIGN.md`'s "Seeing it run" says, bound to 127.0.0.1 (check with `ss -ltn` that what you
    started listens on no other address; if it does, stop it and say so in your findings); heavy builds only through
    `~/.agents/bin/lane-heavy <command>`, waiting outside the slot. Shoot it at the commit:

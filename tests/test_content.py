@@ -1861,6 +1861,9 @@ class ModernWebGuidanceLatestTests(unittest.TestCase):
     def test_the_frontend_brief_says_it(self):
         self.check("brief", flat(FRONTEND_BRIEF))
 
+    def test_the_design_reviewer_says_it(self):
+        self.check("design reviewer", flat(NATIVE / "design-reviewer.md"))
+
     def test_the_skills_table_says_it_next_to_the_pin(self):
         lines = (ROOT / "core" / "design-skills.tsv").read_text().splitlines()
         row = next(i for i, l in enumerate(lines) if l.startswith("modern-web-guidance\t"))
