@@ -24,7 +24,7 @@ desktop built last.
 
 The estate's boxes (251-263) meanwhile: leave them. There are two directions, and only one is safe:
 1. This 250 desktop's CLI reaching a box's 251-263 server is an older client against a newer server. It keeps
-   working and only lacks the new features. (Not run: step 7 below does it.)
+   working and only lacks the new features. (Not run: step 6 below does it.)
 2. A box's 251-263 CLI reaching the 250 desktop's server, which is what a box coordinator does when it starts lanes
    here (`worker-start --on <paired environment>`; `remote.md`, `coordinator.md`), is a *newer* client against an
    *older* server, the direction that fails with the gates below. This is the most plausible origin of the "server
@@ -36,10 +36,15 @@ The estate's boxes (251-263) meanwhile: leave them. There are two directions, an
 "Leave them" still stands as the conclusion: rolling the boxes back would add risk for nothing, and rolling the
 desktop forward untested is the other risk. `--on <paired environment>` is the only way a box coordinator starts a
 lane on the desktop (a 267 agent using `--environment` for it is refused with `agent_server_route_refused`), so when
-`--on` hits a gate the box does not start that lane: it hands the work to a coordinator on the desktop or to the
-owner (`send --to run:<id>`, or the owner's terminal) until the desktop moves. "Poll-only" in `remote.md` is about
-how the report of a lane that did start is noticed (the coordinator runs `check` itself); it is not an alternative
-to `--on`. The mixed-version risk is a reason to finish the canary and then converge, not a reason to roll back.
+`--on` hits a gate the box does not start that lane: it hands the work to the owner, in its own terminal, until the
+desktop moves. There is no Orca route for the handoff from a box to a 250 desktop: `send --to run:<id>` without
+`--on` goes to the box's own Orca, where that Run does not exist; with `--on`, 267's server refuses it ("--on sends
+to one agent or bot on that server: --to term_..., orca_session_id:... or bot:<name>, not run:... Nothing was sent",
+read from `orcad-server.js`; the 263 notes say the same); with `--environment` an agent delivers no mail (263) or is
+refused (267). The only cross-server route is `send --on <desktop> --to term_...` or `orca_session_id:...`, which
+needs peer mail (256+) at both ends, the same gate. "Poll-only" in `remote.md` is about how the report of a lane
+that did start is noticed (the coordinator runs `check` itself); it is not an alternative to `--on`. The
+mixed-version risk is a reason to finish the canary and then converge, not a reason to roll back.
 
 The "server too old" incident that started this is **not explained**, and the recommendation does not depend on it:
 the protocol check cannot have produced it between 250 and 267 (same protocol), and the candidate capability
@@ -235,6 +240,7 @@ or flag lane-control uses has gone.
 | `native-orca/setup.md` (Nesting) | Default depth is 4 after 251, and an existing 1 moves to 4. Either state "set it back to 1 if you want one level" or say reviewers as sub-workers now work out of the box. |
 | `orca-host-install` | **Does not accept the official server tarball** [ran, see below]. Add that (the slot is `orcad/` inside `orca-server-<ver>-<target>/`, named by its `.version`) **and** the tarball's Node at `runtimes/node-<sha>/bin/node` (see below). Add `--bind 127.0.0.1` to any `orca serve` we document. |
 | `native-orca/remote.md` ("server too old" paragraph) | Name the actual gates (below) and say desktop and boxes are upgraded together. |
+| `coordinator.md` (line 75), `design-lead.md`, `machine-coordinator.md`, `debugger.md`, `reviewer.md`, `night-manager.md`: "an agent on another host: find its Run in `run-list` and `send --to run:<id>`" | No route across servers on 256+: refused with `--on` ("--to term_... or orca_session_id:... not run:...") and delivered nowhere without it. It has to be `send --on <server> --to term_...|orca_session_id:...` (256+ at both ends) or the owner. Filed as its own bug; this PR only documents it. |
 | `coordinator.md` (lines 43-44), `design-lead.md` (line 27), `native-orca-lanes/SKILL.md` (line 56): "Orca refuses `new-child` and `current` there" | Stale on 267: with `--on`, `new-child` is accepted when it comes with `--repo`, and falls back to top-level with a warning when the server is too old to nest. `current` is still invalid. |
 | `native-orca/remote.md` line "Orca 1.4.250 has no CLI for it" (the share link) | Same fix as the spec row: `orca pair` from 254. |
 | `native-orca/remote.md` "Reports across hosts" (marked 1.4.250) | 251 (mail after finishing, `worker_done` included, leaves the finished task unchanged) and 258 (#40983, a lost worker is reported to its coordinator) change what it says. |
@@ -329,20 +335,28 @@ never a real worker on an estate box and not the owner's desktop.
 6. Direction 1 (older client, newer server), before the upgrade: a scratch 250 server (the installed package's own
    files, a scratch HOME and data folder, its own port) as the client, paired with `environment add` to a scratch
    267 server from the tarball (127.0.0.1 and a scratch repo). The saved environment lives only in the scratch 250
-   profile. From the 250 CLI: `worker-start --on <scratch 267> --worktree new-top-level --repo <scratch repo>` with
-   the cheapest agent. `send --on` does not exist in 250 (it arrived in 256, #40106), so it is not part of this
-   step. Expect it to work without the new features.
+   profile. `--on` needs a terminal or chat agent on the client's Orca, and `run-create` and `check` outside one
+   fail with `no_active_sender_terminal`, so run from an agent terminal there: `terminal create`, then `run-create
+   --from <handle>`, then, with `--from <handle>`, `worker-start --on <scratch 267> --worktree new-top-level --repo
+   <scratch repo>` with the cheapest agent. `send --on` does not exist in 250 (it arrived in 256, #40106), so it is
+   not part of this step. Expect it to work without the new features. Agent sign-in: a scratch HOME has none, so the
+   owner signs the agent in once there; never copy credentials into a scratch profile.
 7. Direction 2 (newer client, older server), the likely incident: a scratch server and CLI pinned to one version,
    1.4.263 from its tarball (there is no server tarball before 256, and 251-255 lack `send --on`), paired to the
-   scratch 250 server of step 6, with a scratch repo. Run `worker-start --on <scratch 250> --worktree new-top-level
+   scratch 250 server of step 6, with a scratch repo. Run from an agent terminal on the 263 side (`terminal create`,
+   `run-create --from <handle>`, then `--from <handle>`): `worker-start --on <scratch 250> --worktree new-top-level
    --repo <scratch repo>` and the same with `--worktree new-child --repo <scratch repo>` (to see the nesting warning
-   or refusal), and `send --on` to the worker. Note that `server_mail_unsupported` is decided by the Orca running on
-   the box side, so on a 256+ box it cannot appear whatever the 250 server does: check that the mail actually
-   arrives at the 250 agent, not only that no error is printed, and record which message or silence the 250 side
-   produces. Use the scratch 250 server as the server. Using the owner's desktop for this starts an agent on it,
-   after pairing a box to it and adding a repo to it: do that only with the owner present and with a cleanup list
-   (remove the environment on the box, remove the repo and worktrees on the desktop, revoke the share link, close
-   the agent).
+   or refusal). Test mail in two separate ways: `send --to dispatch:<id>` to the worker, without `--on`, and `send
+   --on <scratch 250> --to term_<the agent on the 250 side>`. (`send --on` with a `dispatch:`, `run:` or `task:`
+   target is refused by 267's server, so the first is the Run-level route and the second the cross-server one.)
+   Check that each mail actually arrives, not only that no error is printed. `server_mail_unsupported` is decided by
+   the Orca running on the box side, so on a 256+ box it cannot appear whatever the 250 server does: record what the
+   250 side produces, which may be a refusal or silence. The scratch 250 server must offer pairing and, having no
+   `--bind`, binds every interface: run it in a container or a network namespace, or at least stop it right after
+   pairing and say so. Same agent sign-in rule as step 6. Use the scratch 250 server as the server. Using the
+   owner's desktop for this starts an agent on it, after pairing a box to it and adding a repo to it: do that only
+   with the owner present and with a cleanup list (remove the environment on the box, remove the repo and worktrees
+   on the desktop, revoke the share link, close the agent).
 8. Then upgrade the desktop and all boxes to the same version (after 6 and 7).
 
 ## What was and was not done
