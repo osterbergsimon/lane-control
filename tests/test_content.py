@@ -1879,6 +1879,18 @@ class DesignLeadRetiredTests(unittest.TestCase):
                        "Claude or OpenCode", "`gallery: none`", "file one issue", "`DESIGN.md`"):
             self.assertIn(needle, t, needle)
 
+    def test_a_design_across_lanes_is_one_issue_with_dependencies(self):
+        # review n5: what replaces "lanes branch from the design lead's branch" (design-kit spec, section 2)
+        t = flat(NATIVE / "coordinator.md")
+        self.assertIn("A design that spans lanes is one issue with dependencies (`bd dep add <later> <earlier>`)", t)
+        self.assertIn("no lane branches from another lane's branch", t)
+
+    def test_design_md_stays_the_one_design_memory(self):
+        # review n6: ui-ux-pro-max's --persist writes design-system/ into the project, beside DESIGN.md
+        t = flat(FRONTEND_BRIEF)
+        self.assertIn("never with `--persist`", t)
+        self.assertIn("`DESIGN.md` is the project's one design memory", t)
+
     def test_every_frontend_lane_gets_the_design_reviewer(self):
         t = flat(NATIVE / "coordinator.md")
         for needle in ("Every frontend lane also gets the design reviewer, at any review tier",

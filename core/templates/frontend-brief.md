@@ -3,7 +3,8 @@ F1. Before you plan, read `DESIGN.md` at the repo's root. If it is missing, crea
     `~/.agents/skills/component-gallery/DESIGN.md`, filling what the code shows and nothing you guess. Read the
     `component-gallery` skill and the design skills `frontend-design`, `ui-ux-pro-max` and `modern-web-guidance`.
     Name any you lack in your report; never block on them. Where a skill names
-    `${CLAUDE_PLUGIN_ROOT}/.claude/skills/<skill>/`, use that skill's base directory instead.
+    `${CLAUDE_PLUGIN_ROOT}/.claude/skills/<skill>/`, use that skill's base directory instead. Use `ui-ux-pro-max`
+    to search, never with `--persist`: `DESIGN.md` is the project's one design memory.
 F2. Shoot, before your first edit, the gallery (or the pages the issue touches) at the base with
     `~/.agents/bin/design-shots`, into `$(git rev-parse --git-dir)/design-shots/before` (the skill, section 5; start
     the server bound to 127.0.0.1).

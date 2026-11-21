@@ -161,6 +161,9 @@ A lane is a frontend lane when it changes what a user sees.
   or OpenCode, so a lane on either may take it. A report saying `skills missing` for those two means that harness or
   host lacks them: run the next one elsewhere and tell the owner.
 - A report with `gallery: none`: file one issue for the project's gallery (`bd search` first), never more.
+- A design that spans lanes is one issue with dependencies (`bd dep add <later> <earlier>`): each lane starts from the
+  default branch once the one before it has merged, and reads the `DESIGN.md` it left; no lane branches from another
+  lane's branch.
 
 ## Reviews
 Every lane from review tier B up, and any lane the owner asks for, gets a reviewer before you call it good.
