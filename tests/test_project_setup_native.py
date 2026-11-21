@@ -545,6 +545,7 @@ class DesignSkillsTests(Case):
         (d / path / "scripts" / "search.py").write_text("print(1)\n")
         (d / "screenshots").mkdir()
         (d / "screenshots" / "big.png").write_bytes(b"x" * 1000)
+        (d / "LICENSE").write_text("the upstream licence\n")
         git("init", "-q", "-b", "main", cwd=d)
         git("add", "-A", cwd=d)
         git("commit", "-q", "-m", "v1", cwd=d)
@@ -571,6 +572,7 @@ class DesignSkillsTests(Case):
         self.assertEqual((link / "SKILL.md").read_text().splitlines()[-1], "v1")
         self.assertTrue((link / "scripts" / "search.py").is_file())
         self.assertFalse((src / "screenshots").exists())  # only the skill's own folder is checked out
+        self.assertEqual((src / "LICENSE").read_text(), "the upstream licence\n")  # and the repo's licence (n1)
         self.assertEqual((self.e.home / ".claude" / "skills" / "frontend-design").resolve(), link.resolve())
         self.assertFalse((Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills" / "frontend-design").exists())
         self.assertIn("design-skills: created", r.stdout)

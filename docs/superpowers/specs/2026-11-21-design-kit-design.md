@@ -162,8 +162,8 @@ What project-setup does (native path, here and on a box, every setup and refresh
 `core/design-skills.tsv` (name, upstream git URL, pinned commit, path in the repo, licence, the Claude plugin that
 also carries it):
 - `~/.agents/skills/<name>` already there and not ours (the owner installed it): left alone, reported `exists`.
-- Otherwise a sparse checkout of that path at that commit into `~/.agents/skill-sources/<name>@<commit12>/`, and
-  `~/.agents/skills/<name>` a symlink into it (swapped by rename, older checkouts of ours removed). OpenCode reads it
+- Otherwise a sparse checkout of that path (and the repo's root `LICENSE*` or `COPYING*`) at that commit into
+  `~/.agents/skill-sources/<name>@<commit12>/`, and `~/.agents/skills/<name>` a symlink into it (swapped by rename, older checkouts of ours removed). OpenCode reads it
   there; nothing goes into `~/.config/opencode/skills`.
 - Claude gets a link `~/.claude/skills/<name>` to it only when its own plugin for that skill is not installed (no
   skill twice) and nothing is at that path.

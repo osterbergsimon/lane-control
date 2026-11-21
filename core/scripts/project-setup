@@ -797,7 +797,7 @@ def fetch_skill(url: str, commit: str, path: str, dest: Path) -> "str | None":
     try:
         tmp.mkdir(parents=True)
         for step in (("init", "-q"), ("remote", "add", "origin", url),
-                     ("sparse-checkout", "set", "--no-cone", f"/{path.strip('/')}/"),
+                     ("sparse-checkout", "set", "--no-cone", f"/{path.strip('/')}/", "/LICENSE*", "/COPYING*"),
                      ("fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", commit),
                      ("checkout", "-q", "--detach", "FETCH_HEAD")):
             r = g(*step)
