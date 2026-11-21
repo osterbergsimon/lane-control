@@ -1711,5 +1711,41 @@ class DesignKitTemplateAndGalleryTests(unittest.TestCase):
             self.assertIn(needle, t, needle)
 
 
+FRONTEND_BRIEF = ROOT / "core" / "templates" / "frontend-brief.md"
+DESIGN_SKILLS = ("frontend-design", "ui-ux-pro-max", "modern-web-guidance")
+TEMPLATE_TELLS = ("cream + serif + terracotta", "near-black + acid accent", "identical rounded cards",
+                  "ALL-CAPS eyebrows", "middle-dot meta strings", "an arrow on every link", "fade-up on every section")
+
+
+class FrontendBriefTests(unittest.TestCase):
+    """The frontend brief addition (design-kit spec, section 4): the design lead's method and floor, for any lane."""
+
+    def test_reads_the_design_file_and_the_skills_first(self):
+        t = flat(FRONTEND_BRIEF)
+        for needle in ("`DESIGN.md`", "~/.agents/skills/component-gallery/DESIGN.md", "component-gallery",
+                       *(f"`{s}`" for s in DESIGN_SKILLS), "never block on them",
+                       "`${CLAUDE_PLUGIN_ROOT}/.claude/skills/<skill>/`", "that skill's base directory"):
+            self.assertIn(needle, t, needle)
+
+    def test_keeps_the_method_and_the_floor_in_its_own_words(self):
+        t = flat(FRONTEND_BRIEF)
+        for needle in ("plan before code", "token plan", "ASCII wireframe", "critique", "spend boldness in one place",
+                       "the brief's own words", "390 px", "no horizontal scroll", "1280 px", "visible keyboard focus",
+                       "reduced motion", "4.5:1", "3:1", "light and dark", *TEMPLATE_TELLS):
+            self.assertIn(needle, t, needle)
+
+    def test_shoots_before_and_after_and_keeps_the_gallery_and_design_file(self):
+        t = flat(FRONTEND_BRIEF)
+        for needle in ("before your first edit", "design-shots", "/before", "/after", "design-shots compare",
+                       "gallery: none", "in the same PR", "under Decisions", "127.0.0.1"):
+            self.assertIn(needle, t, needle)
+
+    def test_adds_one_report_line(self):
+        t = flat(FRONTEND_BRIEF)
+        self.assertIn("design: DESIGN.md updated|unchanged · gallery +<n>|none · shots before+after|after|none · "
+                      "skills missing <names>|none", t)
+        self.assertLessEqual(len(FRONTEND_BRIEF.read_text().splitlines()), 40)
+
+
 if __name__ == "__main__":
     unittest.main()
