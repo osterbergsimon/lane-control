@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import unittest
@@ -627,6 +628,33 @@ class DesignSkillsTests(Case):
         self.assertFalse((self.skills() / "frontend-design").exists())
         self.assertEqual(list((self.e.home / ".agents" / "skill-sources").glob("*")), [])
         self.assertTrue((self.repo / ".lane-control" / "coordinator.md").exists())
+
+    def test_an_existing_claude_skill_of_that_name_is_left_alone(self):
+        # review m6
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        self.table(("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        own = self.e.home / ".claude" / "skills" / "modern-web-guidance"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("the owner's\n")
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue((self.skills() / "modern-web-guidance").is_symlink())  # OpenCode's is still installed
+        self.assertFalse(own.is_symlink())
+        self.assertEqual((own / "SKILL.md").read_text(), "the owner's\n")
+
+    def test_a_dangling_link_of_ours_is_fetched_again(self):
+        # review m6: the checkout under skill-sources was removed by hand; the link of ours points at nothing
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        self.table(("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        src = self.e.home / ".agents" / "skill-sources" / f"modern-web-guidance@{sha[:12]}"
+        shutil.rmtree(src)
+        link = self.skills() / "modern-web-guidance"
+        self.assertTrue(link.is_symlink() and not link.exists())
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("modern-web-guidance updated", r.stdout)
+        self.assertEqual((link / "SKILL.md").read_text().splitlines()[-1], "v1")
 
     def test_a_bad_row_is_refused_before_any_git_runs(self):
         # review m2: LANE_DESIGN_SKILLS can replace the table, so the code checks each row, not only the shipped file
