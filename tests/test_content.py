@@ -1824,6 +1824,24 @@ class DesignShotsCallTests(unittest.TestCase):
         self.assertIn("`ss -ltn`", flat(NATIVE / "design-reviewer.md"))
 
 
+class DesignKitOnABoxTests(unittest.TestCase):
+    """Review m4 (JAI-1): a box gets the kit from its own setup run (tests/test_remote_native.py), and the docs say
+    so."""
+
+    def test_remote_md_says_what_a_box_gets_and_needs(self):
+        t = flat(NATIVE_DIR / "remote.md")
+        for needle in ("~/.agents/bin/design-shots", "`component-gallery` skill", "`design-skills missing`",
+                       "git and the network on the box",
+                       "Playwright and a browser on the box, which setup never installs",
+                       "next `project-setup <repo> <host>` or `--refresh`"):
+            self.assertIn(needle, t, needle)
+
+    def test_the_spec_no_longer_says_boxes_have_whatever_their_owner_installed(self):
+        t = flat(ROOT / "docs" / "superpowers" / "specs" / "2026-11-21-design-kit-design.md")
+        self.assertNotIn("Boxes have whatever their owner installed", t)
+        self.assertIn("the box's own setup run installs them there", t)
+
+
 class DesignLeadRetiredTests(unittest.TestCase):
     """The owner, 2026-11-21: the long-lived design lead is retired for the design kit (design-kit spec)."""
 

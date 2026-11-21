@@ -45,6 +45,12 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    and the coordinator in an Orca terminal of the box's own server, which shows in this machine's
    window through the paired environment. With `--no-start` no agent needs to be on the box yet; the run there adds
    `~/bin` and `~/.local/bin` to the end of its PATH, where agents are often installed.
+   The design kit goes on the box the same way (design-kit spec, section 9): `~/.agents/bin/design-shots`, the
+   `component-gallery` skill, the frontend brief and the design reviewer persona, and the design skills fetched
+   there from their pinned upstream commits into the box's `~/.agents/skills`. That needs git and the network on the
+   box; without them it says `design-skills missing`, and a frontend lane there reports `skills missing`, which the
+   coordinator acts on as anywhere. Shots need Playwright and a browser on the box, which setup never installs; a skill that runs Node
+   needs Node there. A box set up before the kit gets it on its next `project-setup <repo> <host>` or `--refresh`.
 4. `core/scripts/machine-setup --host <host>` (skipped with `--no-machine-setup`): the box's own machine coordinator,
    night manager, lane sweep and machine check.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.
