@@ -4,8 +4,10 @@ Date: 2026-11-21. Asked by the owner: "we should prob evaluate newer orca as wel
 1.4.250 (nix-packaged); a downstream estate runs 1.4.251 to 1.4.263 and one of its boxes hit "server too old".
 
 How to read this: **[ran]** means a command was run here and its output seen. **[read]** means taken from release
-notes or from reading the shipped 1.4.267 code, not run. Nothing in this note touched the installed desktop Orca,
-its server, its `~/.config/orca`, or any saved environment; no agent was started, nothing was paired and no
+notes or from reading shipped files (1.4.267's, and 1.4.250's from the installed package), not run. The installed
+1.4.250 package's CLI was run (help, `agent-context --json`, a scratch server on its own port), isolated with a
+scratch HOME and data folder (see Versions), and changed nothing. The running desktop, its server, its
+`~/.config/orca` and any saved environment were not touched; no agent was started, nothing was paired and no
 environment was added.
 
 ## Recommendation
@@ -19,16 +21,23 @@ desktop's newest slot by default, which today is 250's, so it is also pinned unt
 becomes an action when the desktop moves: from then on pass `project-setup --orca-version` (which passes through to
 `orca-host-install --version`) for every box, so a box's server is a decision and not whatever the desktop built last.
 
-The estate's boxes (251-263) meanwhile: leave them. An older client against a newer server keeps working (it only
-lacks the new features), and the doc's own direction analysis below says the failures come from a *newer* client
-reaching an *older* server. Rolling them back would add risk for nothing. What the 250 desktop cannot do against them
-is use anything gated on capabilities it lacks (see the mixed-version section); lane-control uses none of it today.
-The mixed-version risk is a reason to finish the canary and then converge, not a reason to roll back.
+The estate's boxes (251-263) meanwhile: leave them. There are two directions, and only one is safe:
+1. This 250 desktop's CLI reaching a box's 251-263 server is an older client against a newer server. It keeps
+   working and only lacks the new features. lane-control's use stays within what 250 offers.
+2. A box's 251-263 CLI reaching the 250 desktop's server, which is what a box coordinator does when it starts lanes
+   here (`worker-start --on <paired environment>`; `remote.md`, `coordinator.md`), is a *newer* client against an
+   *older* server, the direction that fails with the gates below. This is the most plausible origin of the "server
+   too old" incident. The doc does not know which desktop the estate pairs with; if it is this one, the exposure
+   exists for as long as the desktop stays on 250.
+
+"Leave them" still stands as the conclusion: rolling the boxes back would add risk for nothing, and rolling the
+desktop forward untested is the other risk. A box coordinator that hits a gate should do without `--on` (poll-only
+across hosts, as `remote.md` already says) until the desktop moves. The mixed-version risk is a reason to finish the
+canary and then converge, not a reason to roll back.
 
 The "server too old" incident that started this is **not explained**, and the recommendation does not depend on it:
 the protocol check cannot have produced it between 250 and 267 (same protocol), and the candidate capability
-messages are listed below. The canary should reproduce it: put the 267 desktop beside a box that is still on the
-older server and try `send --on` and `worker-start --on`.
+messages are listed below. The canary should reproduce it in both directions (steps 7 and 8).
 
 Why not upgrade now: the commands lane-control calls did not break (see CLI diff), but the things that decide whether
 lanes work after an upgrade (setup handling, Run retention, nested workers, worker-lost reports) can only be seen
@@ -49,10 +58,10 @@ The canary (needs the owner, about an hour): see "Canary before upgrading" below
 | Runtime protocol | 3 in both, minimum compatible client and server 2 in both | [read] the shipped `protocol-version.js` of each |
 | Bundled Node for orcad | same sha (`e32e2d16...`) in the 250 slot's `.runtime-node` and the 267 tarball's | [read] the two files |
 
-Which 1.4.250 binary ran: there is no 250 server tarball (the first is 256), so the 250 CLI help and the scratch 250
-server below came from the installed nix package's own files (read-only, its store path), run with `env -i`, a
-scratch HOME and a scratch `ORCA_USER_DATA_PATH` on a separate port, never with the desktop's data folder, port or
-saved environments. The running desktop was not asked anything.
+Which 1.4.250 binary ran: there is no 250 server tarball (the first is 256), so the 250 CLI help, its `agent-context
+--json` and the scratch 250 server below (port 6991) came from the installed nix package's own files (read-only, its
+store path), run with `env -i`, a scratch HOME and a scratch `ORCA_USER_DATA_PATH` on a separate port, never with
+the desktop's data folder, port or saved environments. The running desktop was not asked anything.
 
 Where 1.4.267 was kept: a scratch folder only (AppImage extracted with `--appimage-extract`, server tarball
 unpacked). Its CLI was run with a scrubbed environment (`env -i`, a scratch HOME and `ORCA_USER_DATA_PATH`) because
@@ -95,13 +104,15 @@ From the release notes of 1.4.251 to 1.4.267 (all **[read]**; the CLI facts belo
 **Worktree, setup, terminals**
 - 252: worktree setup runs only when the script's content matches an approved script (#37977, #37978); 254 remembers
   approved scripts (up to 20 per repo); 262 makes an earlier approval of a repo's `orca.yaml` count for later
-  versions. `orca.yaml` here has a `scripts.setup` and says agents wait for its last line. **Not verified**, see below.
+  versions. `orca.yaml` here has a `scripts.setup` and says agents wait for its last line. **Not verified**, see
+  below.
 - Setup handling, which is what lanes start with (all **[read]**): 257 #40547 "worker worktrees follow the project's
   setup setting", and with it the `worker-start` note changed from "New worktrees ... default --setup to run" (250) to
   "without --setup, setup runs unless the project turns it off" (267), a change the CLI diff below also covers.
   `worker-start --worktree new-child` is how our coordinator, design-lead and lane skill start lanes. 265 #43978 waits
   for setup before starting the agent when a workspace is created; 262 #38585 includes the setup exit code in the
-  skipped-agent-startup message, i.e. agent startup is skipped when setup fails; 252 #37979 makes automations store
+  skipped-agent-startup message (it implies startup is skipped when setup fails; that behaviour predates 262, this
+  is inferred from the title); 252 #37979 makes automations store
   the approved setup hash and skip setup when a run's branch differs (254 #39354 lets them re-approve); 252 #37931
   asks before running a committed `.orca/issue-command`.
 - 254 added then 257 removed a per-repo "trust this repo for agents?" prompt (#40934). It never shipped as a lasting
@@ -123,7 +134,8 @@ From the release notes of 1.4.251 to 1.4.267 (all **[read]**; the CLI facts belo
 - orcad fixes: 251 only real version slots are evicted from the artifact cache (so the shared Node runtime survives
   upgrades); 252 a supervised server does not start without its terminal daemon and orcad defends its instance lock;
   263 a dead installer's lock is reclaimed in seconds.
-- `serve --bind <ip>` arrived in 252 (#35095). On 1.4.250 `serve` listened on every interface (the scratch run below printed "orcad is
+- `serve --bind <ip>` arrived in 252 (#35095). On 1.4.250 `serve` listened on every interface (the scratch run below
+  printed "orcad is
   bound to 0.0.0.0 and is reachable from the network"); on 1.4.267 `--bind 127.0.0.1` gives "local only".
 
 **Agents and automations**
@@ -132,7 +144,8 @@ From the release notes of 1.4.251 to 1.4.267 (all **[read]**; the CLI facts belo
 - OpenCode 2: 255 starts it with the picked model, 257 accepts its hooks after the OSC report, 258 fixes the first
   prompt on 2.0.13 to 2.0.18, 266 installs Orca's own OpenCode, Cursor and others when a host has none. The agent
   ids `opencode` and `opencode2` still exist in 267's `worker-start` help.
-- Automations: `--precheck`, `--precheck-timeout`, `--workspace`, `--workspace-mode` (`existing` is what machine-setup passes with
+- Automations: `--precheck`, `--precheck-timeout`, `--workspace`, `--workspace-mode` (`existing` is what
+  machine-setup passes with
   `--workspace path:<folder>`, `--extra-agent-args` and `--enabled`; `new-per-run` the other value) and the notes on
   them are unchanged for project automations; `--setup run|skip` and `--extra-agent-args` too, except that
   `--extra-agent-args` now also accepts Antigravity. The new flags (`--bot`, `--on`, `--once`, `--agent`, `--model`,
@@ -159,7 +172,10 @@ list, usage and notes. Root `--help` was also diffed.
 - **`environment add` is unchanged: `--pairing-code <code>` only, no stdin and no file** (usage line, flags and source
   `specs/environment.js` all agree). So `core/scripts/pairing-code-stdin.cjs` is **still needed** on 267.
 - Changed, additive only: `orchestration send` (`--on`, `--chat`, `--item`, `--body-file`, bot recipients; the
-  default recipient is now the coordinator also after finishing), `reply` (`--body-file`), `worker-start` (`--item`; notes: `--terminal` without `--worktree`, setup "runs unless the project turns it off" instead of "default --setup to run", `--on` with `new-child`/`new-top-level`, `--model` per agent), `worker-list` and `request-show` (`--on`), `inbox` (`--run`), `worker-stop` and
+  default recipient is now the coordinator also after finishing), `reply` (`--body-file`), `worker-start` (`--item`;
+  notes: `--terminal` without `--worktree`, setup "runs unless the project turns it off" instead of "default --setup
+  to run", `--on` with `new-child`/`new-top-level`, `--model` per agent), `worker-list` and `request-show` (`--on`),
+  `inbox` (`--run`), `worker-stop` and
   `worker-release` (notes), `ask` (note: "a worker that already finished waits for the answer instead"),
   `worktree create|set` (`--parent-environment`), `worktree rm` (note), `terminal send` (note), `serve` (`--bind`,
   `--allow-public`, `--refuse-public`), `host list` (note), `repo add` (note), `automations create|edit` (bot flags),
@@ -234,15 +250,17 @@ that orcad writes itself (`~/.orca/cli/bin/orca`) keeps the old shape, so the no
 ## Risks of mixed versions
 
 - **No protocol fence between 250 and 267.** Protocol 3, minimum 2 in both, so the generic "The selected Orca server
-  is too old for this client" (`protocol-compat`) cannot be what a 251-263 box showed against a 250-267 desktop. the
-  incident that started this (a box that hit "server too old") is still unexplained; the candidates in the code are the
+  is too old for this client" (`protocol-compat`) cannot be what a 251-263 box showed against a 250-267 desktop. The
+  incident that started this (a box that hit "server too old") is still unexplained; the candidates in the code are
+  the
   capability gates below, and the canary should reproduce it.
 - **Capability gates are the real "too old".** 267's code defines capabilities 250 lacks:
   `orchestration.peer-mail`, `peer-mail-types`, `peer-bot-mail`, `remote-owned-workers`, `worker-stop-helpers`,
   `paired-worker-approvals`, `person-approvals`, `terminal.send-approval-guard`, `terminal.host-pane-respawn`,
   `terminal.persistence`, `agent-session.trust-worktree`, `worktree.create-agent-options`,
   `worktree.create.exact-name`, `worktree.run-approved-setup`, `worktree.set.folder-parent`, `environment.doctor`,
-  `host.recipe-vm-wake` (a static diff of the capability strings in the two builds' `shared/` trees, **[read]**; it is not `status` output). The CLI refuses or degrades when the server it
+  `host.recipe-vm-wake` (a static diff of the capability strings in the two builds' `shared/` trees, **[read]**; it
+  is not `status` output). The CLI refuses or degrades when the server it
   reaches lacks one: `send --on` from a runtime without `peer-mail` fails with `server_mail_unsupported` ("too old
   to carry mail to another server", nothing sent); `worker-start --on` with `new-child` "starts it top-level with a
   warning when that server is too old to nest across machines"; project automations with `--setup` on an old host
@@ -253,7 +271,8 @@ that orcad writes itself (`~/.orca/cli/bin/orca`) keeps the old shape, so the no
   lane-control's `remote.md` already says poll-only across hosts, so nothing we ship needs these today.
 - **A box that follows the desktop's newest slot drifts.** `orca-host-install` installs "the newest slot this
   desktop has built" by default, so a desktop upgrade silently changes what new boxes get, and an old box keeps its
-  old server. After an upgrade, pass `project-setup --orca-version` (or `--orca-from`, `--orca-bundle`; they pass through to
+  old server. After an upgrade, pass `project-setup --orca-version` (or `--orca-from`, `--orca-bundle`; they pass
+  through to
   `orca-host-install --version`, `--from`, `--bundle`) on every box so the version is a decision.
 - **Pairing is single-use from 254.** A link used by one 254+ client is dead for any second one, and codes expire.
   A 250 client (its `environment add` does not exchange the code) paired to a 267 desktop keeps the old-style pairing
@@ -284,8 +303,9 @@ that orcad writes itself (`~/.orca/cli/bin/orca`) keeps the old shape, so the no
 ## Canary before upgrading
 
 On one box (a scratch container or a spare machine, not the owner's desktop) with the pinned server from the tarball
-and a desktop-less coordinator, or on the owner's desktop only after the owner has backed up its Orca profile. Reproduce the "server too old" message
-here too (step 7):
+and a desktop-less coordinator, or on the owner's desktop only after the owner has backed up its Orca profile.
+Steps 7 and 8 reproduce the "server too old" message in both directions; they use a scratch box or container and a
+scratch repo, never a real worker on an estate box.
 
 1. Create a lane with the real `orca.yaml` through `worker-start --worktree new-child`: record the project's setup
    setting (start-immediately or wait-for-setup), whether an approval prompt appeared, whether setup ran and
@@ -297,14 +317,24 @@ here too (step 7):
    lookups by objective listed in the docs table.
 5. Pair a box to the upgraded desktop (`orca pair` or the Settings link) with `project-setup <repo> <box>` and
    confirm `pairing-code-stdin.cjs` still saves the code, once.
-6. Then upgrade the desktop and all boxes to the same version.
-7. Before step 6, with the 267 desktop and a box still on a 251-263 server: `send --on` and `worker-start --on`
-   `new-child`, to see which "too old" message appears and that nothing breaks without them.
+6. Then upgrade the desktop and all boxes to the same version (after 7 and 8).
+7. Direction 1 (older client, newer server), before step 6: a 250 CLI against a scratch server on 267 (the 267
+   tarball on a scratch box, paired to a 250 desktop or run from the tarball's launcher): `send --on` and
+   `worker-start --on <scratch box> --worktree new-top-level --repo <scratch repo>`. Expect it to work without the
+   new features.
+8. Direction 2 (newer client, older server), the likely incident: a 251-263 CLI on a scratch box against a 250
+   server (this desktop, or a scratch 250 server), with `worker-start --on <that server> --worktree new-top-level
+   --repo <scratch repo>` and `send --on`, using a scratch repo so no real lane starts. Record which "too old"
+   message appears (`server_mail_unsupported`, the `new-child` warning, or another).
 
 ## What was and was not done
 
-Verified by running: the version and checksums, the CLI diff, the capability diff, the scratch 267 server and the
-commands listed, `orca-host-install` against the tarball (with a fake `ssh`), the preload starting under 267, the
-suite. Only read: the release notes, the meaning of the capabilities, the "too old" messages in the CLI source, and
-everything under "Risks of 1.4.267 itself". Not done, on the rules: no desktop upgrade, no agent, no pairing, no
-`environment add` with a real code, no install on any box, no 250 versus 267 test of a lane with `orca.yaml` setup.
+Verified by running: the 1.4.267 version and checksums, the CLI diff (both `agent-context --json`, the installed
+1.4.250 package's and 1.4.267's, run isolated), the scratch 267 server on port 6990 and the commands listed, the
+scratch 1.4.250 server on port 6991 (started from the installed package's files, isolated, `repo add` and `worktree
+create` only, then stopped), `orca-host-install` against the tarball (with a fake `ssh`), the pairing preload
+starting under 267, and the suite. Only read: the release notes, the protocol version and Node sha (shipped files),
+the capability diff and what each capability means, the "too old" messages in the CLI source, and everything under
+"Risks of 1.4.267 itself". Not done, on the rules: no desktop upgrade, no agent, no pairing, no `environment add`
+with a real code, no install on any box, no 250 versus 267 test of a lane with `orca.yaml` setup, and no direction-2
+run (a 251-263 CLI against a 250 server).
