@@ -75,6 +75,9 @@ class Env:
         self.env.pop("XDG_CONFIG_HOME", None)  # the store is under the temp HOME
         self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
+        # The design skills table (core/design-skills.tsv) names upstream repos: tests install none unless they ask.
+        (self.home / "design-skills.tsv").write_text("# none\n")
+        self.env["LANE_DESIGN_SKILLS"] = str(self.home / "design-skills.tsv")
 
     def run(self, *args, adapt=False, env_extra=None):
         """adapt False: only today's Orca setup steps; True: the onboarding flow in front of them too."""
@@ -2575,7 +2578,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(tool.read_bytes(), (ROOT / "scripts" / "lane-heavy").read_bytes())
         self.assertTrue(os.access(tool, os.X_OK))
         self.assertEqual(sorted(p.name for p in self._tools().iterdir()),
-                         ["lane-heavy", "lane-limits.sh", "lane-room", "lane-tier"])
+                         ["design-shots", "lane-heavy", "lane-limits.sh", "lane-room", "lane-tier"])
 
     def test_host_mode_copies_and_reexecs(self):
         self._ssh_stub()

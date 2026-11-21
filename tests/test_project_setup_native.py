@@ -198,7 +198,7 @@ class RolePinTests(Case):
 
 # --- Task 3.2 ------------------------------------------------------------------------------------------------------
 
-ROLES = ("coordinator", "design-lead", "reviewer", "debugger")
+ROLES = ("coordinator", "design-lead", "reviewer", "design-reviewer", "debugger")
 
 
 class RenderTests(Case):
@@ -514,6 +514,151 @@ class NativeSkillTests(Case):
         self.assertTrue((self.skill() / "brief.md").exists())
         self.assertNotEqual((self.skill() / "SKILL.md").read_text(), "old\n")
         self.assertIn("skills: updated", r.stdout)
+
+
+class DesignKitInstallTests(Case):
+    """The design kit (docs/superpowers/specs/2026-11-21-design-kit-design.md): the gallery skill with the design
+    file template, the frontend brief next to the lane brief, design-shots with the lane tools, the design reviewer."""
+
+    def test_setup_installs_the_gallery_skill_with_the_design_template(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        skill = self.e.home / ".agents" / "skills" / "component-gallery"
+        self.assertEqual((skill / "SKILL.md").read_text(),
+                         (ROOT / "core" / "skills" / "component-gallery" / "SKILL.md").read_text())
+        self.assertEqual((skill / "DESIGN.md").read_text(), (ROOT / "core" / "templates" / "DESIGN.md").read_text())
+        for agent_dir in (self.e.home / ".claude" / "skills", Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills"):
+            self.assertEqual((agent_dir / "component-gallery").resolve(), skill.resolve())
+        self.assertIn("component-gallery", r.stdout)
+
+    def test_the_frontend_brief_sits_next_to_the_lane_brief(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        lanes = self.e.home / ".agents" / "skills" / "native-orca-lanes"
+        self.assertEqual((lanes / "frontend-brief.md").read_text(),
+                         (ROOT / "core" / "templates" / "frontend-brief.md").read_text())
+
+    def test_design_shots_is_a_lane_tool(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        tool = self.e.home / ".agents" / "bin" / "design-shots"
+        self.assertEqual(tool.read_bytes(), (CORE / "design-shots").read_bytes())
+        self.assertTrue(os.access(tool, os.X_OK))
+
+    def test_the_design_reviewer_is_rendered_pinned_like_the_reviewer_and_kept_out_of_git(self):
+        r = self.e.run(str(self.repo), "--reviewer", "claude/sonnet", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        text = (self.repo / ".lane-control" / "design-reviewer.md").read_text()
+        self.assertIn("name: design-reviewer\n", text)
+        self.assertIn("agent: claude\nmodel: sonnet\n", text)
+        self.assertNotIn("{{", text)
+        self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
+
+
+class DesignSkillsTests(Case):
+    """Setup installs the three design skills for Claude and OpenCode from their upstream repos at pinned commits
+    (design-kit spec, section 9). Local git repos stand in for upstream; everything is under the temp HOME."""
+
+    def upstream(self, name, path, body="---\nname: x\ndescription: y\n---\nv1\n"):
+        d = self.e.home / "upstream" / name
+        (d / path).mkdir(parents=True)
+        (d / path / "SKILL.md").write_text(body)
+        (d / path / "scripts").mkdir()
+        (d / path / "scripts" / "search.py").write_text("print(1)\n")
+        (d / "screenshots").mkdir()
+        (d / "screenshots" / "big.png").write_bytes(b"x" * 1000)
+        git("init", "-q", "-b", "main", cwd=d)
+        git("add", "-A", cwd=d)
+        git("commit", "-q", "-m", "v1", cwd=d)
+        return d, git("rev-parse", "HEAD", cwd=d)
+
+    def table(self, *rows):
+        f = self.e.home / "design-skills.tsv"
+        f.write_text("# name\turl\tcommit\tpath\tlicence\tclaude_plugin\n" +
+                     "".join("\t".join(r) + "\n" for r in rows))
+
+    def skills(self):
+        return self.e.home / ".agents" / "skills"
+
+    def test_installs_a_sparse_pinned_checkout_linked_for_opencode_and_claude(self):
+        d, sha = self.upstream("fd", "plugins/frontend-design/skills/frontend-design")
+        self.table(("frontend-design", f"file://{d}", sha, "plugins/frontend-design/skills/frontend-design",
+                    "Apache-2.0", "frontend-design@claude-plugins-official"))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        link = self.skills() / "frontend-design"
+        src = self.e.home / ".agents" / "skill-sources" / f"frontend-design@{sha[:12]}"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), (src / "plugins/frontend-design/skills/frontend-design").resolve())
+        self.assertEqual((link / "SKILL.md").read_text().splitlines()[-1], "v1")
+        self.assertTrue((link / "scripts" / "search.py").is_file())
+        self.assertFalse((src / "screenshots").exists())  # only the skill's own folder is checked out
+        self.assertEqual((self.e.home / ".claude" / "skills" / "frontend-design").resolve(), link.resolve())
+        self.assertFalse((Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills" / "frontend-design").exists())
+        self.assertIn("design-skills: created", r.stdout)
+        self.assertIn("frontend-design created", r.stdout)
+
+    def test_a_rerun_changes_nothing_and_a_new_pin_updates_it(self):
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        self.table(("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertIn("design-skills: exists", r.stdout)
+        (d / "skills/modern-web-guidance/SKILL.md").write_text("---\nname: x\ndescription: y\n---\nv2\n")
+        git("commit", "-q", "-am", "v2", cwd=d)
+        sha2 = git("rev-parse", "HEAD", cwd=d)
+        self.table(("modern-web-guidance", f"file://{d}", sha2, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("modern-web-guidance updated", r.stdout)
+        self.assertEqual((self.skills() / "modern-web-guidance" / "SKILL.md").read_text().splitlines()[-1], "v2")
+        sources = sorted(p.name for p in (self.e.home / ".agents" / "skill-sources").iterdir())
+        self.assertEqual(sources, [f"modern-web-guidance@{sha2[:12]}"])  # our older checkout is gone
+
+    def test_the_owners_own_install_is_left_alone(self):
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        self.table(("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        own = self.skills() / "modern-web-guidance"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("the owner's\n")
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse(own.is_symlink())
+        self.assertEqual((own / "SKILL.md").read_text(), "the owner's\n")
+        self.assertIn("modern-web-guidance exists (not lane-control's)", r.stdout)
+        self.assertFalse((self.e.home / ".agents" / "skill-sources").exists())
+
+    def test_no_claude_link_when_claude_has_the_plugin(self):
+        d, sha = self.upstream("ux", ".claude/skills/ui-ux-pro-max")
+        self.table(("ui-ux-pro-max", f"file://{d}", sha, ".claude/skills/ui-ux-pro-max", "MIT",
+                    "ui-ux-pro-max@ui-ux-pro-max-skill"))
+        plugins = self.e.home / ".claude" / "plugins"
+        plugins.mkdir(parents=True)
+        (plugins / "installed_plugins.json").write_text(json.dumps(
+            {"version": 2, "plugins": {"ui-ux-pro-max@ui-ux-pro-max-skill": [{"scope": "user"}]}}))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue((self.skills() / "ui-ux-pro-max").is_symlink())  # OpenCode's
+        self.assertFalse((self.e.home / ".claude" / "skills" / "ui-ux-pro-max").exists())  # Claude has its plugin
+
+    def test_a_failed_fetch_is_named_and_setup_goes_on(self):
+        self.table(("frontend-design", f"file://{self.e.home}/nowhere", "0" * 40, "skills/x", "Apache-2.0", "-"))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("design-skills: missing", r.stdout)
+        self.assertIn("frontend-design missing", r.stdout)
+        self.assertFalse((self.skills() / "frontend-design").exists())
+        self.assertEqual(list((self.e.home / ".agents" / "skill-sources").glob("*")), [])
+        self.assertTrue((self.repo / ".lane-control" / "coordinator.md").exists())
+
+    def test_the_real_table_pins_upstream_repos_with_open_licences(self):
+        rows = [l.split("\t") for l in (ROOT / "core" / "design-skills.tsv").read_text().splitlines()
+                if l and not l.startswith("#")]
+        self.assertEqual(sorted(r[0] for r in rows), ["frontend-design", "modern-web-guidance", "ui-ux-pro-max"])
+        for name, url, commit, path, licence, plugin in rows:
+            self.assertTrue(url.startswith("https://github.com/") and url.endswith(".git"), url)
+            self.assertRegex(commit, r"^[0-9a-f]{40}$")
+            self.assertTrue(path.endswith(name), path)
+            self.assertIn(licence, ("Apache-2.0", "MIT"))
+            self.assertTrue(plugin == "-" or plugin.startswith(name + "@"), plugin)
 
 
 class RefreshTests(Case):

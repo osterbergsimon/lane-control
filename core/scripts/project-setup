@@ -118,9 +118,11 @@ ORCHESTRATOR = "orca-cotal"  # this run's, set in main(); the shared steps read 
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
-LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # the library first: a new tool never sees an old one
+LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-shots")  # the library first: a new tool never sees an old one
+OLD_PATH_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # kept as links in scripts/ for machines
 HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "scripts/project-setup",
-              *(f"scripts/{t}" for t in LANE_TOOLS),
+              *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
+              "core/templates/frontend-brief.md", "core/templates/DESIGN.md",
               "core/scripts/project-setup", "core/harnesses", "orchestrators/native-orca",
               "orchestrators/orca-cotal/scripts/project-setup", "orchestrators/orca-cotal/personas",
               "orchestrators/orca-cotal/skills", "orchestrators/orca-cotal/templates",
@@ -696,7 +698,7 @@ def lane_tools(home: Path):
         os.replace(tmp, dst)
         changed = True
     say("lane-tools", "created" if fresh else ("updated" if changed else "exists"),
-        f"lane-heavy, lane-room, lane-tier in {bin_dir}")
+        f"lane-heavy, lane-room, lane-tier, design-shots in {bin_dir}")
 
 
 def skills():
@@ -727,10 +729,114 @@ def native_skills():
     fresh = not (root / "native-orca-lanes").exists()
     changed = install_skill(home, "native-orca-lanes",
                             {"SKILL.md": (NATIVE / "skills" / "native-orca-lanes" / "SKILL.md").read_text(),
-                             "brief.md": (NATIVE / "templates" / "lane-brief.md").read_text()})
+                             "brief.md": (NATIVE / "templates" / "lane-brief.md").read_text(),
+                             "frontend-brief.md": (HERE / "core" / "templates" / "frontend-brief.md").read_text()})
+    changed |= install_skill(home, "component-gallery",
+                             {"SKILL.md": (HERE / "core" / "skills" / "component-gallery" / "SKILL.md").read_text(),
+                              "DESIGN.md": (HERE / "core" / "templates" / "DESIGN.md").read_text()})
     state = "created" if fresh else ("updated" if changed else "exists")
-    say("skills", state, f"native-orca-lanes in {root}")
+    say("skills", state, f"native-orca-lanes, component-gallery in {root}")
+    design_skills(home)
     return state
+
+
+def design_skill_rows() -> list:
+    """core/design-skills.tsv (LANE_DESIGN_SKILLS overrides it): (name, url, commit, path, licence, claude plugin)."""
+    f = Path(os.environ.get("LANE_DESIGN_SKILLS") or HERE / "core" / "design-skills.tsv")
+    rows = []
+    for line in f.read_text().splitlines():
+        parts = line.split("\t")
+        if line.strip() and not line.startswith("#") and len(parts) == 6:
+            rows.append(tuple(parts))
+    return rows
+
+
+def claude_plugins(home: Path) -> set:
+    """The plugins Claude Code has installed (~/.claude/plugins/installed_plugins.json), as `<plugin>@<marketplace>`."""
+    try:
+        data = json.loads((home / ".claude" / "plugins" / "installed_plugins.json").read_text())
+    except (OSError, ValueError):
+        return set()
+    plugins = data.get("plugins", {}) if isinstance(data, dict) else {}
+    return set(plugins) if isinstance(plugins, dict) else set()
+
+
+def fetch_skill(url: str, commit: str, path: str, dest: Path) -> "str | None":
+    """A sparse checkout of `path` at `commit` into dest (made by rename, so never half there). None when done, else
+    why not."""
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    def g(*args):
+        return subprocess.run(["git", "-C", str(tmp), *args], capture_output=True, text=True, timeout=300,
+                              stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    try:
+        tmp.mkdir(parents=True)
+        for step in (("init", "-q"), ("remote", "add", "origin", url),
+                     ("sparse-checkout", "set", "--no-cone", f"/{path.strip('/')}/"),
+                     ("fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", commit),
+                     ("checkout", "-q", "--detach", "FETCH_HEAD")):
+            r = g(*step)
+            if r.returncode != 0:
+                last = (r.stderr or r.stdout).strip().splitlines()
+                return f"git {step[0]} failed: {last[-1] if last else r.returncode}"
+        if g("rev-parse", "HEAD").stdout.strip() != commit:
+            return f"fetched commit is not {commit[:12]}"
+        if not (tmp / path / "SKILL.md").is_file():
+            return f"no SKILL.md at {path}"
+        os.replace(tmp, dest)
+        return None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return str(e)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def design_skills(home: Path) -> None:
+    """The design skills (design-kit spec, section 9) in ~/.agents/skills, where OpenCode v2 reads them: each a link
+    into a sparse checkout of its upstream repo at the pinned commit, under ~/.agents/skill-sources/. Claude gets a
+    link in ~/.claude/skills unless its own plugin carries the skill. One the owner installed is left alone; a fetch
+    that fails is named, never a stop."""
+    rows = design_skill_rows()
+    if not rows:
+        return
+    skills_dir, sources = home / ".agents" / "skills", home / ".agents" / "skill-sources"
+    plugins = claude_plugins(home)
+    done = []
+    for name, url, commit, path, _licence, plugin in rows:
+        link, src = skills_dir / name, sources / f"{name}@{commit[:12]}"
+        target = src / path
+        ours = link.is_symlink() and os.readlink(link).startswith(str(sources) + os.sep)
+        if (link.exists() or link.is_symlink()) and not ours:
+            done.append((name, "exists (not lane-control's)"))
+            continue
+        if ours and os.readlink(link) == str(target) and (target / "SKILL.md").is_file():
+            state = "exists"
+        else:
+            if not (target / "SKILL.md").is_file():
+                sources.mkdir(parents=True, exist_ok=True)
+                shutil.rmtree(src, ignore_errors=True)
+                why = fetch_skill(url, commit, path, src)
+                if why:
+                    done.append((name, f"missing ({why})"))
+                    continue
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            tmp_link = skills_dir / f".{name}.{os.getpid()}.link"
+            tmp_link.unlink(missing_ok=True)
+            tmp_link.symlink_to(target)
+            os.replace(tmp_link, link)
+            state = "updated" if ours else "created"
+        for old in sources.glob(f"{name}@*"):
+            if old != src:
+                shutil.rmtree(old, ignore_errors=True)
+        claude = home / ".claude" / "skills" / name
+        if plugin not in plugins and not claude.exists() and not claude.is_symlink():
+            claude.parent.mkdir(parents=True, exist_ok=True)
+            claude.symlink_to(link)
+        done.append((name, state))
+    states = [s.split(" ")[0] for _, s in done]
+    overall = next((s for s in ("missing", "created", "updated") if s in states), "exists")
+    say("design-skills", overall, ", ".join(f"{n} {s}" for n, s in done) + f" in {skills_dir}")
 
 
 def install_skill(home: Path, name: str, want: dict, also: tuple = ()) -> bool:
@@ -2685,7 +2791,7 @@ def show(repo: Path) -> int:
 
 BINARIES = {"claude": "claude", "opencode": "opencode2"}  # what each harness adapter starts
 NATIVE = HERE / "orchestrators" / "native-orca"
-NATIVE_ROLES = ("coordinator", "design-lead", "reviewer", "debugger")  # rendered into each project's .lane-control/
+NATIVE_ROLES = ("coordinator", "design-lead", "reviewer", "design-reviewer", "debugger")  # rendered into .lane-control/
 ADDITIONS = f"{ADAPTED}/additions"  # the adapted text per role, kept and committed; rendered in on every setup and refresh
 EXCLUDE_BEGIN = "# lane-control: begin (files project-setup writes in this checkout; never committed)"
 EXCLUDE_END = "# lane-control: end"
@@ -2770,10 +2876,10 @@ def refuse_tracked(repo: Path, roles) -> None:
 
 def native_personas(repo: Path, project: str, pins: dict, lead: bool, mode: str, tier_text: str,
                     attached: tuple = ()) -> list:
-    """The four project roles rendered into .lane-control/ (reviewer and debugger lanes pinned like the reviewer);
+    """The project roles rendered into .lane-control/ (reviewer, design reviewer and debugger pinned like the reviewer);
     returns the roles whose persona existed and changed."""
     roles = {"coordinator": pins["coordinator"], **({"design-lead": pins["design-lead"]} if lead else {}),
-             "reviewer": pins["reviewer"], "debugger": pins["reviewer"]}
+             "reviewer": pins["reviewer"], "design-reviewer": pins["reviewer"], "debugger": pins["reviewer"]}
     refuse_tracked(repo, NATIVE_ROLES)
     say("git-exclude", exclude_local(repo), "rendered personas, .claude/settings.local.json and a project-level "
                                             "OpenCode plugin (.git/info/exclude)")
