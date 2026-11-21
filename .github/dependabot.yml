@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Dependabot rewrites the full-SHA pins in .github/workflows and updates the version comment beside each one.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
