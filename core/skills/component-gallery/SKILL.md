@@ -44,13 +44,15 @@ Decisions.
 
 ## 5. Shots
 `design-shots` (in `~/.agents/bin`) runs headless Playwright, a fresh browser per shot, at 390 and 1280 px, light
-and dark. The server runs on 127.0.0.1 only. The shots go under the worktree's git dir; never commit the shots.
+and dark. Start the server bound to 127.0.0.1: `design-shots` only checks that the URL is loopback, and a
+`--host` or `0.0.0.0` default opens the server to the network. The shots go under the worktree's git dir; never
+commit the shots.
 ```
 d="$(git rev-parse --git-dir)/design-shots/"
-design-shots shoot http://127.0.0.1:<port> --pages gallery.pages --out "$d/before" --serve "<start command>"
+~/.agents/bin/design-shots shoot http://127.0.0.1:<port> --pages gallery.pages --out "$d/before" --serve "<start command>"
 # ... your change ...
-design-shots shoot http://127.0.0.1:<port> --pages gallery.pages --out "$d/after" --serve "<start command>"
-design-shots compare "$d/before" "$d/after" --out "$d/compare"
+~/.agents/bin/design-shots shoot http://127.0.0.1:<port> --pages gallery.pages --out "$d/after" --serve "<start command>"
+~/.agents/bin/design-shots compare "$d/before" "$d/after" --out "$d/compare"
 ```
 Take `before` first thing, before your first edit. Open `compare/index.html` and look at every `changed` and
 `added` pair yourself. Exit 3 means no Playwright or browser: it says what to install; say so in your report.

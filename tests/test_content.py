@@ -1805,6 +1805,25 @@ class DesignReviewerTests(unittest.TestCase):
             self.assertIn(needle, self.t, needle)
 
 
+class DesignShotsCallTests(unittest.TestCase):
+    """Review m3 and m8 (JAI-1 round 1): every `design-shots` line runs as written (`~/.agents/bin` is not on PATH, like
+    the other lane tools), and the docs ask for a server bound to 127.0.0.1, which the script cannot enforce."""
+
+    DOCS = [FRONTEND_BRIEF, GALLERY_SKILL, DESIGN_TEMPLATE, NATIVE / "design-reviewer.md"]
+
+    def test_every_design_shots_command_names_its_full_path(self):
+        for path in self.DOCS:
+            for m in re.finditer(r"(?<!~/\.agents/bin/)design-shots (?:shoot|compare)\b", path.read_text()):
+                self.fail(f"{path.relative_to(ROOT)}: bare `{m.group(0)}`")
+
+    def test_the_docs_ask_for_a_server_bound_to_loopback(self):
+        for path in self.DOCS:
+            t = flat(path)
+            self.assertNotIn("127.0.0.1 only", t, path.relative_to(ROOT))
+            self.assertIn("bound to 127.0.0.1", t, path.relative_to(ROOT))
+        self.assertIn("`ss -ltn`", flat(NATIVE / "design-reviewer.md"))
+
+
 class DesignLeadRetiredTests(unittest.TestCase):
     """The owner, 2026-11-21: the long-lived design lead is retired for the design kit (design-kit spec)."""
 

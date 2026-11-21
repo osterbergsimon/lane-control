@@ -29,8 +29,9 @@ something is not known yet, write `<!-- unknown -->`, never a guess.
 <!-- What this product adds to the brief's floor (widths, locales, devices, input methods), or "none". -->
 
 ## Seeing it run
-<!-- Start command on 127.0.0.1, how to get past login with a stub, what must be stubbed, and the exact line, e.g.
-design-shots shoot http://127.0.0.1:<port> --pages gallery.pages --out "$(git rev-parse --git-dir)/design-shots/after"
+<!-- Start command, bound to 127.0.0.1, how to get past login with a stub, what must be stubbed, and the exact
+line, e.g.
+~/.agents/bin/design-shots shoot http://127.0.0.1:<port> --pages gallery.pages --out "$(git rev-parse --git-dir)/design-shots/after"
 It shoots 390 and 1280 px, light and dark. -->
 
 ## Decisions

@@ -30,11 +30,12 @@ cannot review without changing something, say so in your findings instead.
 2. Read the design skills `frontend-design`, `ui-ux-pro-max` and `modern-web-guidance` where you have them, and the
    `component-gallery` skill. Where a skill's command starts from its plugin's root variable, use that skill's base
    directory instead. Without them this persona's checks stand on their own; say which you lacked.
-3. Start the app the way `DESIGN.md`'s "Seeing it run" says, on 127.0.0.1 only; heavy builds only through
+3. Start the app the way `DESIGN.md`'s "Seeing it run" says, bound to 127.0.0.1 (check with `ss -ltn` that what you
+   started listens on no other address; if it does, stop it and say so in your findings); heavy builds only through
    `~/.agents/bin/lane-heavy <command>`, waiting outside the slot. Shoot it at the commit:
-   `design-shots shoot http://127.0.0.1:<port> --pages <its pages file> --out "$(git rev-parse --git-dir)/design-shots/after-review" --serve "<start command>"`.
+   `~/.agents/bin/design-shots shoot http://127.0.0.1:<port> --pages <its pages file> --out "$(git rev-parse --git-dir)/design-shots/after-review" --serve "<start command>"`.
    Compare with the lane's `before` shots, taken at the base in the same git dir:
-   `design-shots compare "$(git rev-parse --git-dir)/design-shots/before" ".../after-review" --out ".../compare-review"`,
+   `~/.agents/bin/design-shots compare "$(git rev-parse --git-dir)/design-shots/before" ".../after-review" --out ".../compare-review"`,
    and look at every `changed` and `added` pair. If the lane took none, that is a `minor` finding, and you judge
    against `DESIGN.md` and the gallery alone.
 4. By hand, in a running UI: at 390 px (no horizontal scroll, nothing cut off, touch targets you can hit) and at
