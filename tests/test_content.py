@@ -1843,6 +1843,35 @@ class DesignKitOnABoxTests(unittest.TestCase):
         self.assertIn("the box's own setup run installs them there", t)
 
 
+class ModernWebGuidanceLatestTests(unittest.TestCase):
+    """Owner decision on review M2, 2026-11-21: allow `@latest`, and say it plainly wherever the skill is set up."""
+
+    STATEMENT = ("`npx -y modern-web-guidance@latest`", "The pin covers the skill's text only",
+                 "downloads and runs the newest `modern-web-guidance` package from npm",
+                 "(Apache-2.0, from GoogleChrome/modern-web-guidance-src)", "needs Node and the network",
+                 "only as the skill says, and no other npx package")
+
+    def check(self, where, t):
+        for needle in self.STATEMENT:
+            self.assertIn(needle, t, f"{where}: {needle}")
+
+    def test_the_spec_says_it(self):
+        self.check("spec", flat(ROOT / "docs" / "superpowers" / "specs" / "2026-11-21-design-kit-design.md"))
+
+    def test_the_frontend_brief_says_it(self):
+        self.check("brief", flat(FRONTEND_BRIEF))
+
+    def test_the_skills_table_says_it_next_to_the_pin(self):
+        lines = (ROOT / "core" / "design-skills.tsv").read_text().splitlines()
+        row = next(i for i, l in enumerate(lines) if l.startswith("modern-web-guidance\t"))
+        above = []
+        for l in reversed(lines[:row]):
+            if not l.startswith("#") or l.startswith("# name\t"):
+                break
+            above.insert(0, l[1:])
+        self.check("table", flat_text(" ".join(above)))
+
+
 class DesignLeadRetiredTests(unittest.TestCase):
     """The owner, 2026-11-21: the long-lived design lead is retired for the design kit (design-kit spec)."""
 

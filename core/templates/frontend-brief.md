@@ -5,6 +5,10 @@ F1. Before you plan, read `DESIGN.md` at the repo's root. If it is missing, crea
     Name any you lack in your report; never block on them. Where a skill names
     `${CLAUDE_PLUGIN_ROOT}/.claude/skills/<skill>/`, use that skill's base directory instead. Use `ui-ux-pro-max`
     to search, never with `--persist`: `DESIGN.md` is the project's one design memory.
+    `modern-web-guidance` runs `npx -y modern-web-guidance@latest`. The pin covers the skill's text only: each use
+    downloads and runs the newest `modern-web-guidance` package from npm (Apache-2.0, from
+    GoogleChrome/modern-web-guidance-src) and needs Node and the network. Run it only as the skill says, and no other
+    npx package.
 F2. Shoot, before your first edit, the gallery (or the pages the issue touches) at the base with
     `~/.agents/bin/design-shots`, into `$(git rev-parse --git-dir)/design-shots/before` (the skill, section 5; start
     the server bound to 127.0.0.1).

@@ -183,7 +183,10 @@ Sources, checked 2026-11-21; nothing of theirs is committed here, only the URL a
 `ui-ux-pro-max` runs its search script as `${CLAUDE_PLUGIN_ROOT}/.claude/skills/ui-ux-pro-max/scripts/...`, which
 is unset outside a Claude plugin. OpenCode prints each skill's base directory when it loads one, so the brief says:
 where a skill names `${CLAUDE_PLUGIN_ROOT}/.claude/skills/<skill>/`, use that skill's base directory.
-`modern-web-guidance` runs `npx modern-web-guidance`, so it needs Node and the network where the lane runs.
+`modern-web-guidance` runs `npx -y modern-web-guidance@latest`, which the owner allowed (review M2, 2026-11-21). The pin
+covers the skill's text only: each use downloads and runs the newest `modern-web-guidance` package from npm (Apache-2.0,
+from GoogleChrome/modern-web-guidance-src) and needs Node and the network where the lane runs. Lanes run it only as the
+skill says, and no other npx package; the brief says so, and the skills table says so next to the pin.
 
 Still, without a skill: the brief and the design reviewer keep the floor and the tells in their own words, and the
 report names what was missing; the coordinator does not give visual-direction work to a lane that lacks
