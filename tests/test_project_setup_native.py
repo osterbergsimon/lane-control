@@ -1012,6 +1012,13 @@ class MinorTests(Case):
         self.assertIn("pending", line)
         self.assertIn("stub: run-create failed", line)
 
+    def test_a_pending_run_hint_is_for_peers_on_this_host_only(self):
+        # lc-dac: a Run found by its objective in run-list is reachable by run: only from the same Orca server.
+        self.e.set_state(run_create_fails=True)
+        r = self.e.run(str(self.repo), "--no-design-lead", env_extra={"LANE_RUN_WAIT": "0"})
+        line = next(l for l in r.stdout.splitlines() if l.startswith("run coordinator:"))
+        self.assertIn("peers on this host find it in `orca-ide orchestration run-list`", line)
+
     def test_stop_finds_a_sessions_own_later_run_by_its_name(self):
         # m1: no Run recorded at the start, but the session made exactly one itself: stop asks it there.
         self.e.set_state(run_create_fails=True)

@@ -2964,7 +2964,7 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
     else:
         why = run_create_error(repo, role)
         why = f" (run-create said: {why})" if why else ""
-        say(f"run {role}", "pending", f"no Run from its terminal after {RUN_WAIT:g}s{why}; peers find it in "
+        say(f"run {role}", "pending", f"no Run from its terminal after {RUN_WAIT:g}s{why}; peers on this host find it in "
             f"`orca-ide orchestration run-list` by the objective {title!r}, and the session makes one itself if it "
             "has none")
     return True

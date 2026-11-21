@@ -149,11 +149,31 @@ Known:
     restart; the restart itself was not tested.
   - an accepted report prints `lifecycle=completed` and settles the task.
 
+Messages to a session on the other host: a `run:` target does not cross hosts. Without `--on` it goes to the local Orca,
+where that Run does not exist; `run:` targets are refused with `--on` ("--on sends to one agent or bot on that server"), on
+any pair of servers; `--environment` from an agent delivers no mail or is refused. The one route is `orca-ide orchestration
+send --on <environment> --to term_<id> --subject "<subject>" --body "<message>"`, and only when both servers are 1.4.256 or
+newer (peer mail). It is read from Orca's source, not yet run across two servers (the canary in
+`docs/research/2026-11-21-orca-newer.md`): a send that raises no error proves nothing, so treat nothing sent this way as
+"delivered" until a reply or the peer's own word says so.
+1. Versions: `runtime.appVersion` in `orca-ide status --json` and in `orca-ide status --environment <environment> --json`
+   (`runtime.capabilities` lists `orchestration.peer-mail`). If either is older, or does not say, the handoff goes
+   through the owner.
+2. The peer's handle: `orca-ide terminal list --environment <environment> --json` returns each terminal's `handle`
+   (`term_...`, which belongs to that server) and `title`; take the one whose title is the peer's session name. Prefer
+   `term_<id>`: a terminal handle survives `/clear`. `orca_session_id:<id>` also works as the `--to`, but it needs
+   `agent list` (not in 1.4.250), a terminal agent has none until it first reports, and it changes after `/clear`. No
+   terminal with that title: the owner.
+3. The reply comes to the sender's own `check`. To answer mail from another server, use plain `orca-ide orchestration
+   reply --id <msg_id>` (`reply --on` is refused). A sender does not poll for it or look up the other side's handle.
+`worker_done` from the other server's lane is not a message of this kind: it is covered below.
+
 Not verified: that a `worker_done` from a lane on the other Orca server (a lane started with `--on <environment>`)
 reaches, or wakes, an agent coordinator on the box. Across hosts, treat a report as poll-only: the coordinator runs
 `orca-ide orchestration check` right after it starts the lane, on each wake, and before it calls a quiet lane lost
 (`orca-ide orchestration worker-show --dispatch <dispatch>` says what Orca knows of the worker). The personas say so
-too. A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
+too. If a cross-host wake is lost, the night manager's idle check or the owner notices it; the coordinator never loops
+on `check`. The night manager's idle check covers coordinators only, so a design lead's lost wake is noticed by the owner. A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
 it is run, nothing here may be read as "delivered".
 
 Canary 2026-11-21 (scratch servers in containers, a plain shell terminal as the coordinator on the side that

@@ -30,8 +30,16 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
 ## Messages
 - A Claude coordinator, and the machine coordinator (session `machine coordinator`): Claude Code's SendMessage,
   addressed by the session name (its terminal title; ListAgents lists them).
-- An OpenCode coordinator, or one SendMessage cannot reach: find its Run in `orca-ide orchestration run-list --json`
-  (the objective is its terminal title), then `orca-ide orchestration send --to run:<id> --subject "night manager"
-  --body "<message>"`.
+- An OpenCode coordinator on this machine: find its Run in `orca-ide orchestration run-list --json` (the objective is
+  its terminal title), then `orca-ide orchestration send --to run:<id> --subject "night manager" --body "<message>"`.
+- A coordinator on another host: a `run:` target does not cross hosts (without `--on` it goes to your own Orca, where
+  that Run does not exist; with `--on` the server refuses it). First check that both servers are 1.4.256 or newer:
+  `runtime.appVersion` in `orca-ide status --json` and in `orca-ide status --environment <environment> --json`. Then
+  take the peer's handle from `orca-ide terminal list --environment <environment> --json` (the terminal whose `title`
+  is its session name) and run `orca-ide orchestration send --on <environment> --to term_<id> --subject "night
+  manager" --body "<message>"`; its reply comes to your own `check`, and you answer mail from another server with
+  plain `orca-ide orchestration reply --id <msg_id>`. If either server is older, or no terminal has that title, send
+  nothing and put a line for the owner in your record (step 6 applies then, though you sent nothing). This route is
+  not yet run across two servers (`remote.md`, Messages to a session on the other host).
 - Never type into another session's terminal. Start every message with `night manager:`. You carry no owner
   decision: never say the owner approved anything.

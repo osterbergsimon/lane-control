@@ -864,7 +864,7 @@ class NativePersonaTests(unittest.TestCase):
         # send --to run:<id> from a terminal in no Run arrives; check in the first terminal returns it.
         for role in LEADS:
             t = flat(NATIVE / f"{role}.md")
-            for needle in ("Claude Code's SendMessage", "ListAgents", "an OpenCode session or an agent on another host",
+            for needle in ("Claude Code's SendMessage", "ListAgents", "An OpenCode session on this machine", "An agent on another host: a `run:` target does not cross hosts",
                            "orca-ide orchestration run-create --objective", "your session name",
                            "orca-ide orchestration run-list", "--to run:<id>", "a send is not a read",
                            "write it in your own terminal for the owner", "Never type into another session's terminal",
@@ -884,7 +884,7 @@ class NativePersonaTests(unittest.TestCase):
             for needle in ("Task and Dispatch IDs", "--type worker_done", "--outcome succeeded|failed",
                            "orca-ide orchestration ask", "a follow-up comes as a new Task",
                            "SendMessage to the session that started you", "End your turn",
-                           "send it to its Run (`--to run:<id>`", "Never type into another session's terminal"):
+                           "send it to its Run on this machine (`--to run:<id>`", "Never type into another session's terminal"):
                 self.assertIn(needle, t, (role, needle))
             for needle in ("then stop and wait", "Answer follow-up questions with `orca-ide orchestration reply`"):
                 self.assertNotIn(needle, t, (role, needle))
@@ -1620,6 +1620,97 @@ class PublicRepoPathTests(unittest.TestCase):
             self.assertTrue(self.PATTERNS[what].search(sample), sample)
         for ok in ("/ho" + "me/u/code/shop.app", "-ho" + "me-u-code-shop-app", "/Us" + "ers/u/code", "/home/ and /Users/"):
             self.assertFalse(any(p.search(ok) for p in self.PATTERNS.values()), ok)
+
+
+# --- cross-host route (lc-dac): Orca has no run: route across servers --------------------------------------------------
+NATIVE_DIR = ROOT / "orchestrators" / "native-orca"
+CROSS_HOST = re.compile(r"another host|other hosts?|across hosts|cross-host|another server|other server|the box|a box", re.I)
+SAME_HOST = re.compile(r"this (?:machine|host|server)|same (?:machine|host|server)|one machine", re.I)
+# The only phrasings that may mention a run: target next to another host: the ones that say it does not work there. A
+# bare "no" or "never" elsewhere in the sentence excuses nothing.
+RUN_TARGET = re.compile(r"(?<![A-Za-z])run:(?:<id>|`)|--to run:")
+RUN_REFUSED = re.compile(
+    r"`run:` targets? (?:does|do) not cross hosts|(?:has|have) no `run:` route|`run:` targets? (?:is|are) refused"
+    r"|\(same host; see remote\.md\)")
+# Files that tell an agent how to reach a peer: each must name the one cross-host route, how to use it and the owner.
+ROUTE_DOCS = [NATIVE_DIR / "personas" / f"{r}.md" for r in NATIVE_ROLES] + [
+    NATIVE_DIR / "night-manager.md", NATIVE_DIR / "setup.md", NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md"]
+
+
+def sentences(text):
+    return [x for x in re.split(r"(?<=[.!?])\s+|\s+-\s+(?=[A-Z`])", flat_text(text)) if x]
+
+
+def doc_files():
+    skip = ROOT / "docs" / "research"
+    for base in (ROOT / "orchestrators", ROOT / "core", ROOT / "docs", ROOT):
+        pattern = "*.md" if base == ROOT else "**/*.md"
+        for f in sorted(base.glob(pattern)):
+            if skip not in f.parents and ".git" not in f.parts:
+                yield f
+    yield ROOT / "core" / "scripts" / "project-setup"
+
+
+class CrossHostRouteTests(unittest.TestCase):
+    """Orca has no run: route across servers on any version (research doc 2026-11-21): without --on it goes to the local
+    Orca, with --on the server refuses it. The only route is send --on <env> --to term_<id> or orca_session_id:<id>,
+    with both servers 1.4.256 or newer; otherwise the handoff goes through the owner."""
+
+    def test_no_doc_sends_a_cross_host_agent_to_a_run_target(self):
+        seen = set()
+        for f in doc_files():
+            if f in seen:
+                continue
+            seen.add(f)
+            for sentence in sentences(f.read_text()):
+                if RUN_TARGET.search(sentence) and CROSS_HOST.search(sentence) and not RUN_REFUSED.search(sentence):
+                    self.fail(f"{f.relative_to(ROOT)} routes a cross-host agent to a run: target: {sentence}")
+
+    def test_a_run_target_is_only_offered_for_this_host(self):
+        for f in ROUTE_DOCS:
+            for sentence in sentences(f.read_text()):
+                if re.search(r"send\b[^.]*run:<id>|run:<id>[^.]*\bsend\b|--to run:", sentence) and not RUN_REFUSED.search(sentence):
+                    self.assertRegex(sentence, SAME_HOST, f"{f.relative_to(ROOT)}: {sentence}")
+
+    def test_every_route_doc_says_how_to_use_the_cross_host_route(self):
+        for f in ROUTE_DOCS:
+            t = flat(f)
+            with self.subTest(doc=f.relative_to(ROOT)):
+                for needle in ("1.4.256 or newer", "`runtime.appVersion` in `orca-ide status --json`",
+                               "`orca-ide status --environment <environment> --json`",
+                               "`orca-ide terminal list --environment <environment> --json`",
+                               "send --on <environment> --to term_<id> --subject", "not yet run across two servers"):
+                    self.assertIn(needle, t)
+                self.assertRegex(t, r"(?i)(?:older|no terminal)[^.]*owner")
+
+    def test_a_mutated_wording_is_caught(self):
+        # the review's mutation: reworded with "no", the old bug must still trip the first check
+        bad = ("An agent on another host that has no SendMessage: find its Run in `orca-ide orchestration run-list` "
+               "and `orca-ide orchestration send --to run:<id>`.")
+        self.assertTrue(RUN_TARGET.search(bad) and CROSS_HOST.search(bad) and not RUN_REFUSED.search(bad))
+        good = "An agent on another host: a `run:` target does not cross hosts (it is refused with `--on`)."
+        self.assertTrue(RUN_REFUSED.search(good))
+
+    def test_remote_md_names_the_route_and_who_notices_a_lost_wake(self):
+        t = flat(NATIVE_DIR / "remote.md")
+        for needle in ("send --on <environment> --to term_<id> --subject", "orca_session_id:<id>", "1.4.256 or newer",
+                       "`run:` targets are refused with `--on`", "orca-ide terminal list --environment <environment> --json",
+                       "`orca-ide orchestration reply --id <msg_id>`", "`reply --on` is refused",
+                       "read from Orca's source, not yet run across two servers",
+                       "If a cross-host wake is lost, the night manager's idle check or the owner notices it",
+                       "a design lead's lost wake is noticed by the owner"):
+            self.assertIn(needle, t)
+
+    def test_lane_starters_say_who_notices_a_lost_cross_host_wake(self):
+        # night-precheck measures idle for coordinators only, so a design lead's lost wake is the owner's to notice
+        self.assertIn("If a cross-host wake is lost, the night manager's idle check or the owner notices it; you "
+                      "never loop on `check`.", flat(NATIVE / "coordinator.md"))
+        self.assertIn("If a cross-host wake is lost, the owner notices it (the night manager's idle check covers "
+                      "coordinators, not design leads); you never loop on `check`.", flat(NATIVE / "design-lead.md"))
+
+    def test_the_design_spec_corrects_its_environment_route(self):
+        t = flat(ROOT / "docs" / "superpowers" / "specs" / "2026-11-19-native-orca-setup-design.md")
+        self.assertIn("Messages to a session on the other host", t)
 
 
 if __name__ == "__main__":
