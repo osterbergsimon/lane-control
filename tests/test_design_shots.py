@@ -119,6 +119,9 @@ class DesignShotsTests(unittest.TestCase):
         self.assertEqual(r.returncode, 3)
         self.assertIn("Playwright", r.stderr)
         self.assertIn("npx playwright install chromium", r.stderr)
+        # review m7: a suggested DESIGN_SHOTS_PLAYWRIGHT must not fetch from npm when Playwright is absent
+        self.assertNotIn("`npx playwright`", r.stderr)
+        self.assertIn("`npx --no-install playwright`", r.stderr)
 
     def test_project_playwright_is_found_in_node_modules(self):
         env = {k: v for k, v in self.env.items() if k != "DESIGN_SHOTS_PLAYWRIGHT"}

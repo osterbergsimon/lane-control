@@ -41,7 +41,8 @@ from pathlib import Path
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 NO_BROWSER = ("Executable doesn't exist", "playwright install", "Looks like Playwright")
 INSTALL_HINT = ("install it in the project (`npm i -D playwright && npx playwright install chromium`), or set "
-                "DESIGN_SHOTS_PLAYWRIGHT to a Playwright command (for example `npx playwright`)")
+                "DESIGN_SHOTS_PLAYWRIGHT to a Playwright command (for example `npx --no-install playwright`, which "
+                "never fetches it)")
 
 
 class Usage(Exception):
