@@ -1671,5 +1671,45 @@ class CrossHostRouteTests(unittest.TestCase):
         self.assertIn("Messages to a session on the other host", t)
 
 
+DESIGN_TEMPLATE = ROOT / "core" / "templates" / "DESIGN.md"
+GALLERY_SKILL = ROOT / "core" / "skills" / "component-gallery" / "SKILL.md"
+
+
+class DesignKitTemplateAndGalleryTests(unittest.TestCase):
+    """The design file template and the component-gallery skill (design-kit spec, sections 3 and 6)."""
+
+    def test_design_file_template_has_its_sections_and_stays_short(self):
+        t = DESIGN_TEMPLATE.read_text()
+        for h in ("Subject", "Where it lives", "Tokens", "Type", "Spacing and layout", "Components", "Principles",
+                  "Quality floor, added", "Seeing it run", "Decisions"):
+            self.assertIn(f"\n## {h}\n", t, h)
+        self.assertLessEqual(len(t.splitlines()), 60)
+        f = " ".join(t.split())
+        for needle in ("every frontend lane reads it first", "in the same PR", "link to token files",
+                       "127.0.0.1", "design-shots", "light and dark", "<!-- unknown -->"):
+            self.assertIn(needle, f, needle)
+
+    def test_gallery_skill_frontmatter(self):
+        keys, body = frontmatter(GALLERY_SKILL)
+        self.assertEqual(keys["name"], "component-gallery")
+        self.assertIn("gallery", keys["description"].lower())
+
+    def test_gallery_skill_framework_native_first_then_a_plain_route(self):
+        t = flat(GALLERY_SKILL)
+        for needle in ("Storybook", "new dependency: only when the issue or the owner says so", "`/gallery`",
+                       "development only", "every component in every state", "light and dark",
+                       "`prefers-color-scheme`", "`?theme=light|dark`", "fixed data", "no motion that runs by itself"):
+            self.assertIn(needle, t, needle)
+        for state in ("default", "hover", "focus", "active", "disabled", "loading", "empty", "error", "long content"):
+            self.assertIn(state, t, state)
+
+    def test_gallery_skill_says_how_lanes_add_entries_and_shoot_them(self):
+        t = flat(GALLERY_SKILL)
+        for needle in ("`gallery.pages`", "design-shots shoot", "--pages gallery.pages", "design-shots compare",
+                       "in the same PR", "`DESIGN.md`", "Components", "$(git rev-parse --git-dir)/design-shots/",
+                       "127.0.0.1", "never commit the shots", "never build a gallery unasked"):
+            self.assertIn(needle, t, needle)
+
+
 if __name__ == "__main__":
     unittest.main()
