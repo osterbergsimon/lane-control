@@ -140,11 +140,19 @@ Known:
     restart; the restart itself was not tested.
   - an accepted report prints `lifecycle=completed` and settles the task.
 
+Messages to a session on the other host: a `run:` target does not cross hosts. Without `--on` it goes to the local Orca,
+where that Run does not exist; `run:` targets are refused with `--on` ("--on sends to one agent or bot on that server"), on
+any pair of servers; `--environment` from an agent delivers no mail or is refused. The one route is `orca-ide orchestration
+send --on <environment> --to term_<id>` (or `orca_session_id:<id>`), and only when both servers are 1.4.256 or newer;
+otherwise the handoff goes through the owner. A `worker_done` from the other server's lane is not a message of this kind:
+it is covered below.
+
 Not verified: that a `worker_done` from a lane on the other Orca server (a lane started with `--on <environment>`)
 reaches, or wakes, an agent coordinator on the box. Across hosts, treat a report as poll-only: the coordinator runs
 `orca-ide orchestration check` right after it starts the lane, on each wake, and before it calls a quiet lane lost
 (`orca-ide orchestration worker-show --dispatch <dispatch>` says what Orca knows of the worker). The personas say so
-too. A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
+too. If a cross-host wake is lost, the night manager's idle check or the owner notices it; the coordinator never loops
+on `check`. A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
 it is run, nothing here may be read as "delivered".
 
 ## A dispatch that can no longer report

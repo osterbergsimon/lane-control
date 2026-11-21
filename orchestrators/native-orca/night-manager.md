@@ -30,8 +30,11 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
 ## Messages
 - A Claude coordinator, and the machine coordinator (session `machine coordinator`): Claude Code's SendMessage,
   addressed by the session name (its terminal title; ListAgents lists them).
-- An OpenCode coordinator, or one SendMessage cannot reach: find its Run in `orca-ide orchestration run-list --json`
-  (the objective is its terminal title), then `orca-ide orchestration send --to run:<id> --subject "night manager"
-  --body "<message>"`.
+- An OpenCode coordinator on this machine: find its Run in `orca-ide orchestration run-list --json` (the objective is
+  its terminal title), then `orca-ide orchestration send --to run:<id> --subject "night manager" --body "<message>"`.
+- A coordinator on another host: a `run:` target does not cross hosts (without `--on` it goes to this machine's Orca,
+  where that Run does not exist; with `--on` the server refuses it). The one route is `orca-ide orchestration send
+  --on <environment> --to term_<id>` (or `orca_session_id:<id>`), and only when both servers are 1.4.256 or newer.
+  Otherwise, and with no route, send nothing and put a line for the owner in your record (step 6 applies then, though you sent nothing).
 - Never type into another session's terminal. Start every message with `night manager:`. You carry no owner
   decision: never say the owner approved anything.
