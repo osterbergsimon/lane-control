@@ -66,8 +66,13 @@ that run has the owner's terminal). The box's coordinator then backs up straight
 on the desktop.
 
 The box signs in to GitHub itself, once, by the owner: a fine-grained token limited to the beads repos
-(Contents: read and write, nothing else), put in place with `gh auth login --with-token` or the box's own credential
-store. Setup says that is needed when `gh` is not signed in there and never reads, prints or copies the token. Beads is
+(Contents: read and write, nothing else). Signing in to `gh` is not enough on its own: `gh repo clone` uses gh's
+login, but `bd bootstrap` (it runs `dolt clone git+https://...`), `bd dolt push` and the coordinator's `git push` use
+git's credentials over https. So after `gh auth login` (which offers it) run `gh auth setup-git`, or give git another
+credential helper. Setup says that is needed when `gh` is not signed in there, and before asking for the owner's yes it
+checks that git can read the beads repo over https without a prompt (`git ls-remote`), naming `gh auth setup-git` when
+it cannot; it never reads, prints or copies the token.
+A restored database makes bd print "beads.role not configured" on a box; it is a warning only (`bd config` sets it). Beads is
 copied over ssh from the desktop on no path: the box's work would then have no off-box copy until copied back. Only one
 machine works on a project's beads at a time: before moving a project, the old machine's last step is the backup
 (`git push`, then `bd dolt push`, in the beads repo).

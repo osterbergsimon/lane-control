@@ -28,7 +28,9 @@ Owner-approved 2026-11-22. Goal: a project moves between machines without losing
 - **Backup.** At every natural stop and every handover the coordinator runs, in the beads repo, `git push`, then
   `bd dolt push` (memories live in the database, so the second is required). The night manager asks for the same
   with its budget handover. A failed backup is reported to the owner, never retried silently. `project-setup` says
-  "beads has no off-machine copy" when a beads repo has no git remote or the database has no Dolt remote.
+  "beads has no off-machine copy" when a beads repo has no git remote or the database has no Dolt remote, and warns when
+  the beads repo has commits not pushed. bd 1.0.4 does not say whether the Dolt database itself is ahead of its remote, so
+  that half of an unpushed backup is not detected: the `bd dolt push` in the handover is what covers it.
 - **Move to the layout.** A project whose `.beads` is a plain folder is offered the move on the owner's yes, in a terminal
   only (without one setup says what it would do): the private repo is created (its own yes), the folder copied in, the
   database checked to open the same from the new place, pushed (git and Dolt), and only then replaced by the link. The

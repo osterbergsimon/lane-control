@@ -1244,7 +1244,9 @@ def setup_steps(repo: Path) -> list:
         steps.insert(0, direnv)
     beads = repo / ".beads"
     if beads.is_symlink():
-        steps.insert(0, f"[ -e .beads ] || ln -s {shlex.quote(os.readlink(beads))} .beads "
+        target, home = os.readlink(beads), str(Path.home())
+        arg = '"$HOME"' + shlex.quote(target[len(home):]) if target.startswith(home + os.sep) else shlex.quote(target)
+        steps.insert(0, f"[ -e .beads ] || ln -s {arg} .beads "
                      '|| echo "setup: the .beads link failed" >&2')
     return steps
 
