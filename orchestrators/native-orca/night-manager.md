@@ -10,8 +10,8 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    check in on; each `OFFLINE <runners> repo=<repo>` line is a runner down; a `BUDGET unknown` line means no
    check-ins tonight: pass that line to the machine coordinator once. Exit 1 means nothing is due now: end.
 2. **Budget gate.** A `BUDGET push-and-handover` line (the no-new-work or push-and-handover step, or the short
-   window at 95 or 98 %) means each check-in asks only to commit and push work in progress and write the handover,
-   and to start nothing new. Run `<lc>/core/scripts/budget-state` once more: if it now shows step 4 stop, or unknown,
+   window at 95 or 98 %) means each check-in asks only to commit and push work in progress, write the handover,
+   back beads up (in the beads repo `git push`, then `bd dolt push`) and start nothing new. Run `<lc>/core/scripts/budget-state` once more: if it now shows step 4 stop, or unknown,
    stand down: send no check-in, but run `--checked <name>` (step 3) for each due coordinator all the same, so it is
    not due again for two hours.
 3. **Check-ins.** For each `DUE` coordinator, find its line in `~/.config/lane-control/machine.conf`

@@ -6,7 +6,7 @@ Pin the Orca version you tested: Orca ships often and its orchestration commands
 ## Install
 - The Orca desktop app on the workstation (on Linux its CLI is `orca-ide`; plain `orca` may be another program).
   Agents run as a normal user, never root.
-- Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, and the agent harnesses you use (Claude Code),
+- Always: beads (`bd`, bd 1.0.4 or newer: `machine-setup` checks it and says how to fix it, never installs it), `gh` (authenticated), `jq`, `git`, bash, and the agent harnesses you use (Claude Code),
   signed in once as the user the agents run as.
 - The machine caps: `~/.agents/bin/lane-heavy` and `lane-room` (copies of `core/scripts/`; `project-setup`
   installs them, or copy them by hand with `lane-limits.sh` and `lane-tier`).
@@ -21,6 +21,13 @@ Pin the Orca version you tested: Orca ships often and its orchestration commands
 (`templates/agents-section.md`) to the project's `AGENTS.lane-control.md`, with one pointer line to it in AGENTS.md:
 how the coordinator works on Orca's orchestration, the heavy-work rule and where the handovers live. The project's own
 facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writes into a project").
+
+## Beads
+Where a project's beads lives, its backup and its restore: `core/issues.md`, "Where beads lives". `project-setup` checks
+the layout, offers the move of a plain `.beads` folder or the restore on a new machine on your yes (a terminal), adds
+`bd prime` as the session hook next to the persona hook, and names a failing committed beads hook without editing it.
+`--beads-repo OWNER/NAME` overrides the beads repo's name and is kept in the settings store. On a box, setup says
+when `gh` needs a sign-in (a fine-grained token limited to the beads repos) and never handles the token.
 
 ## How a coordinator works
 - **Run and tasks:** the coordinator makes a run and its tasks (with dependencies), then starts every ready task

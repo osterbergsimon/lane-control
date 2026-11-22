@@ -1937,5 +1937,34 @@ class DesignLeadRetiredTests(unittest.TestCase):
         self.assertIn("design reviewer", t)
 
 
+class BeadsBackupContentTests(unittest.TestCase):
+    """lc-5c1: the handover includes the beads backup, and the doctrine describes the layout and the restore."""
+
+    def test_coordinators_back_up_beads(self):
+        for path in (NATIVE / "coordinator.md", PERSONAS / "coordinator.md"):
+            t = flat(path)
+            self.assertRegex(t, r"in the beads repo \(the folder `\.beads` links to\): `git push`, then `bd dolt push`", path.name)
+            self.assertIn("a failed backup is reported to the owner", t.lower(), path)
+            self.assertIn("never retried silently", t, path)
+
+    def test_the_night_manager_asks_for_the_backup_with_the_handover(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "night-manager.md")
+        self.assertIn("back beads up", t)
+        self.assertIn("`bd dolt push`", t)
+
+    def test_issues_md_layout(self):
+        t = flat(ROOT / "core" / "issues.md")
+        for needle in ("<owner>/<project>-beads`", "git-ignored symlink", "`bd dolt push`", "`bd bootstrap --yes`",
+                       "One machine at a time", "memories", "never a `core.hooksPath` into beads",
+                       "`.beads/hooks`", "never creates"):
+            self.assertIn(needle, t, needle)
+
+    def test_setup_md_names_the_bd_floor_and_the_hook(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "setup.md")
+        self.assertIn("bd 1.0.4 or newer", t)
+        self.assertIn("`bd prime`", t)
+        self.assertIn("--beads-repo OWNER/NAME", t)
+
+
 if __name__ == "__main__":
     unittest.main()
