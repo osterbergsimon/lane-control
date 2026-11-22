@@ -1216,6 +1216,35 @@ class MachineSetupTests(BudgetTest):
         self.assertEqual(machineconf.coordinators(conf), [])
         self.assertEqual((conf["IDLE_MIN"], conf["warnings"]), (45, []))
 
+    def bd_stub(self, version: str):
+        write_exec(self.bin / "bd", f"#!/bin/sh\n[ \"$1\" = version ] && echo 'bd version {version} (ce242a8: HEAD@ce242a8)'\n")
+
+    def path_without_bd(self):
+        dirs = [d for d in os.environ["PATH"].split(os.pathsep) if d and not (Path(d) / "bd").exists()]
+        return os.pathsep.join([str(self.bin), *dirs])
+
+    def test_bd_missing_says_install(self):
+        r = self.run_script("machine-setup", "--folder", self.folder, "--trust-folder", "--no-start",
+                            env={"PATH": self.path_without_bd()})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("bd: missing", r.stdout)
+        self.assertIn("1.0.4", r.stdout)
+        self.assertIn("install", r.stdout)
+
+    def test_bd_too_old(self):
+        self.bd_stub("1.0.3")
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("bd: too old", r.stdout)
+        self.assertIn("1.0.4", r.stdout)
+        self.assertIn("1.0.3", r.stdout)
+
+    def test_bd_ok(self):
+        self.bd_stub("1.0.4")
+        self.assertIn("bd: exists", self.setup_machine("--no-start").stdout)
+        self.bd_stub("1.2.0")
+        self.assertIn("bd: exists", self.setup_machine("--no-start").stdout)
+
     def test_usage_feed_check(self):
         self.assertIn("usage feed: ok", self.setup_machine("--no-start").stdout)
         age(self.feed, 90)

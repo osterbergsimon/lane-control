@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 STEP = "beads"
+BD_FLOOR = (1, 0, 4)  # the bd in use when this was written; raise it only with a reason
 PROBLEMS = frozenset({"missing", "warning", "broken"})
 _GITHUB = re.compile(r"(?:https?://(?:[^/@]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)"
                      r"(?P<owner>[A-Za-z0-9][A-Za-z0-9-]*)/(?P<name>[A-Za-z0-9._-]+?)(?:\.git)?/?$")
@@ -35,6 +36,16 @@ def _run(cmd, cwd=None, timeout=60) -> subprocess.CompletedProcess:
 def _git_out(cwd: Path, *args: str) -> str | None:
     p = _run(["git", *args], cwd=cwd)
     return p.stdout.strip() or None if p.returncode == 0 else None
+
+
+def bd_version() -> tuple[int, ...] | None:
+    """The installed bd's version from `bd version` (`bd version 1.0.4 (ce242a879: HEAD@...)` -> (1, 0, 4)); None when
+    bd is missing or its output cannot be read."""
+    if not shutil.which("bd"):
+        return None
+    p = _run(["bd", "version"], timeout=30)
+    m = re.search(r"\bversion\s+(\d+)\.(\d+)\.(\d+)", p.stdout) if p.returncode == 0 else None
+    return tuple(int(x) for x in m.groups()) if m else None
 
 
 def beads_repo_slug(repo: Path, override: str | None) -> tuple[str, str]:

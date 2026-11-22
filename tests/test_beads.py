@@ -186,5 +186,21 @@ class CheckTests(BeadsCase):
         self.assertTrue(self.problems(beads.check(self.repo, state)))
 
 
+class VersionTests(BeadsCase):
+    def test_parses_bd_version_output(self):
+        self.assertEqual(beads.bd_version(), (1, 0, 4))
+        os.environ["BD_VERSION"] = "1.12.30"
+        self.assertEqual(beads.bd_version(), (1, 12, 30))
+
+    def test_none_when_bd_missing_or_unreadable(self):
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            self.assertIsNone(beads.bd_version())
+        write_exec(self.bin / "bd", "#!/bin/sh\necho gibberish\n")
+        self.assertIsNone(beads.bd_version())
+
+    def test_floor_is_1_0_4(self):
+        self.assertEqual(beads.BD_FLOOR, (1, 0, 4))
+
+
 if __name__ == "__main__":
     unittest.main()

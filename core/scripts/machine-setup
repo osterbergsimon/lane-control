@@ -54,6 +54,7 @@ ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT / "core"))
 import harnesses  # noqa: E402
 import machineconf  # noqa: E402
+import beads  # noqa: E402
 
 ROLE = "machine-coordinator"
 TITLE = "machine coordinator"
@@ -149,6 +150,20 @@ def usage_feed():
     if mins > FEED_MAX_AGE_MIN:
         return say("usage feed", "stale", f"{f} was last written {mins} min ago: {how}")
     say("usage feed", "ok", f"{f} ({mins} min old)")
+
+
+def bd_version_step():
+    """bd on PATH and at the floor. Says how to install; never installs it."""
+    floor = ".".join(map(str, beads.BD_FLOOR))
+    have = beads.bd_version()
+    if have is None:
+        return say("bd", "missing", f"(`bd` is not on PATH, or its version could not be read; lane-control needs bd {floor} "
+                                    "or newer for issues, handovers and memories. Install it from the beads project's "
+                                    "releases or your package manager, then re-run. Nothing was installed)")
+    if have < beads.BD_FLOOR:
+        return say("bd", "too old", f"(bd {'.'.join(map(str, have))} is older than the {floor} lane-control needs; "
+                                    "update it the way you installed it. Nothing was changed)")
+    say("bd", "exists", f"({'.'.join(map(str, have))}, floor {floor})")
 
 
 def folder_step(folder: Path):
@@ -385,6 +400,7 @@ def main(argv) -> int:
     try:
         machine_conf()
         usage_feed()
+        bd_version_step()
         folder_step(folder)
         persona = persona_step(harness, model, folder)
         if a.no_start:
