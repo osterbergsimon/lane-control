@@ -148,3 +148,13 @@ coordinator is told before and after.
 - Whether the beads repo keeps bd's git hooks (see Layout).
 - Where the checks live between machine-setup and project-setup, beyond the split above.
 - Wording of the plain-language lines, in the style of the existing project-setup messages.
+
+## Builder answers (Task 0, bd 1.0.4, scratch run with a local Dolt remote)
+
+- **Restore that brings back issues and memories:** clone the beads repo (its committed `.beads/config.yaml` carries
+  `sync.remote`, the Dolt remote; the database folder is git-ignored), then run `bd bootstrap --yes` in a directory
+  whose `.beads` resolves to it. Fallback when there is no config: `bd init -p <prefix> --remote <url>`. Both are pinned
+  by `tests/test_beads_roundtrip.py` (opt-in: `LANE_TEST_REAL_BD=1`).
+- **Dolt remote setup:** `bd dolt remote add origin <url>`, then `bd dolt push`.
+- **Side effect to remember:** `bd init` also installs Claude Code integration (`.claude/settings.json` with bd hooks)
+  in the directory it runs in; lane-control's own hook step must not be fooled by, or double up with, that file.
