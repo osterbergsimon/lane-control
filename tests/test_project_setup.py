@@ -2312,7 +2312,9 @@ class RunTests(unittest.TestCase):
         (repo / ".beads").mkdir()
         r = self.e.run(str(repo), "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("beads", r.stderr)
+        self.assertIn("plain folder", r.stderr)  # a plain folder is not the standard layout (lc-5c1)
+        self.assertIn("no off-machine copy", r.stderr)
+        self.assertTrue((repo / ".beads").is_dir() and not (repo / ".beads").is_symlink())
 
     def test_preflight_fails_when_harness_missing(self):
         repo = self.e.repo()

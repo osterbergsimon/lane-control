@@ -122,7 +122,7 @@ ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop sh
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-shots")  # the library first: a new tool never sees an old one
 OLD_PATH_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # kept as links in scripts/ for machines
-HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "scripts/project-setup",
+HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "scripts/project-setup",
               *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
               "core/templates/frontend-brief.md", "core/templates/DESIGN.md",
               "core/scripts/project-setup", "core/harnesses", "orchestrators/native-orca",
@@ -627,15 +627,23 @@ def bd_workspace(repo):
         return False
 
 
-def beads_note(repo):
-    """Says plainly when bd is not set up for this project. Creates nothing: where beads lives is the owner's call."""
-    if not shutil.which("bd"):
-        print("project-setup: note: `bd` is not on PATH; the coordinator and lanes use beads for issues "
-              "(see issues.md). Install it if this project should use beads.", file=sys.stderr)
-    elif not bd_workspace(repo):
-        print(f"project-setup: note: {repo} has no beads workspace (`bd where` fails); agents will find no issue tracker. "
-              "Where beads lives is your choice (a symlink to a separate repo, or `bd init`); nothing was created.",
-              file=sys.stderr)
+def load_beads():
+    """core/beads.py: where beads lives, its checks, the layout move and the restore."""
+    core = str(HERE / "core")
+    if core not in sys.path:
+        sys.path.insert(0, core)
+    import beads
+    return beads
+
+
+def beads_report(repo):
+    """Says plainly how this project's beads stands (core/beads.py check). Creates nothing."""
+    b = load_beads()
+    for step, what, detail in b.check(repo, b.inspect(repo)):
+        if what in b.PROBLEMS:
+            print(f"project-setup: note: {detail}", file=sys.stderr)
+        else:
+            say(step, what, detail)
 
 
 def host_hygiene():
@@ -3297,7 +3305,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             print(f"project-setup: warning: {why}", file=sys.stderr)
         elif why:
             raise Fail(f"{why}. Nothing was changed")
-        beads_note(repo)
+        beads_report(repo)
         validate_settings(repo, settings(repo))
         drop_design_lead_settings(repo)
         if a.desktop_environment:  # this box is paired with that machine (direction 2); the coordinator reads it
@@ -4112,7 +4120,7 @@ def main(argv=None) -> int:
             print(f"project-setup: warning: {why}", file=sys.stderr)
         elif why:  # anything that may commit does not
             raise Fail(f"{why}. Nothing was changed")
-        beads_note(repo)
+        beads_report(repo)
         migrate(repo)
         validate_settings(repo, settings(repo))
         drop_design_lead_settings(repo)
