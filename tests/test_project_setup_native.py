@@ -315,6 +315,32 @@ class RenderTests(Case):
         cfg2 = json.loads((self.repo / ".claude" / "settings.local.json").read_text())
         self.assertEqual(cfg2, cfg)
 
+    def test_a_plain_beads_folder_without_a_terminal_is_only_described(self):
+        (self.repo / ".beads").mkdir()
+        (self.repo / ".beads" / "config.yaml").write_text("x: 1\n")
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/app.git"], cwd=self.repo,
+                       capture_output=True)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("beads: would", r.stdout)
+        self.assertIn("private GitHub repo", r.stdout)
+        self.assertTrue((self.repo / ".beads").is_dir() and not (self.repo / ".beads").is_symlink())
+
+    def test_beads_repo_flag_is_kept_in_the_settings_store(self):
+        (self.repo / ".beads").mkdir()
+        r = self.e.run(str(self.repo), "--no-start", "--beads-repo", "acme/widget-priv-beads")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("acme/widget-priv-beads", r.stdout)
+        st = json.loads((self.e.store(self.repo) / "settings.json").read_text())
+        self.assertEqual(st["beads_repo"], "acme/widget-priv-beads")
+        r = self.e.run(str(self.repo), "--no-start")  # remembered
+        self.assertIn("acme/widget-priv-beads", r.stdout)
+
+    def test_a_bad_beads_repo_is_refused_before_anything_changes(self):
+        r = self.e.run(str(self.repo), "--no-start", "--beads-repo", "nonsense")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("OWNER/NAME", r.stderr)
+
     def test_a_broken_committed_beads_hook_is_named(self):
         bd = self.e.bin / "bd"
         bd.write_text('#!/bin/sh\n[ "$1" = prime ] && case "$*" in *--hook-json*) exit 1;; esac\n[ "$1" = prime ] && exit 0\nexit 1\n')

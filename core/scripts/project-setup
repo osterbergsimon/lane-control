@@ -203,7 +203,7 @@ def free_port(start: int) -> int:
 
 SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "own_models", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
-                "paired_environment")  # all that is ever written: names and choices, never a secret
+                "paired_environment", "beads_repo")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -636,10 +636,39 @@ def load_beads():
     return beads
 
 
-def beads_report(repo):
-    """Says plainly how this project's beads stands (core/beads.py check). Creates nothing."""
+def beads_report(repo, override=None):
+    """Says plainly how this project's beads stands (core/beads.py) and, for a plain `.beads` folder, offers the move to
+    the standard layout on the owner's yes (only in a terminal; without one it says what it would do). `override` is
+    --beads-repo OWNER/NAME; the settings store keeps it for later runs."""
     b = load_beads()
-    for step, what, detail in b.check(repo, b.inspect(repo)):
+    if override:
+        try:
+            b.beads_repo_slug(repo, override)
+        except ValueError as e:
+            raise Fail(str(e))
+        if settings(repo).get("beads_repo") != override:
+            settings(repo, beads_repo=override)
+    try:
+        slug = b.beads_repo_slug(repo, override or settings(repo).get("beads_repo"))
+    except ValueError as e:
+        slug = None
+        slug_problem = str(e)
+    state = b.inspect(repo)
+    if state.kind in ("folder", "link"):
+        if slug is None:
+            print(f"project-setup: note: beads: {slug_problem}", file=sys.stderr)
+        else:
+            yes = (lambda q: owner_says_yes(q, "beads")) if has_terminal() else None
+            for step, what, detail in b.adopt_layout(repo, state, slug, yes):
+                if what in b.PROBLEMS:
+                    print(f"project-setup: note: {detail}", file=sys.stderr)
+                else:
+                    say(step, what, detail)
+            state = b.inspect(repo)
+        lines = [ln for ln in b.check(repo, state) if ln[1] in b.PROBLEMS]
+    else:
+        lines = b.check(repo, state)
+    for step, what, detail in lines:
         if what in b.PROBLEMS:
             print(f"project-setup: note: {detail}", file=sys.stderr)
         else:
@@ -2577,7 +2606,7 @@ def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int, "orchestrator": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
+            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
@@ -3328,7 +3357,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             print(f"project-setup: warning: {why}", file=sys.stderr)
         elif why:
             raise Fail(f"{why}. Nothing was changed")
-        beads_report(repo)
+        beads_report(repo, a.beads_repo)
         validate_settings(repo, settings(repo))
         drop_design_lead_settings(repo)
         if a.desktop_environment:  # this box is paired with that machine (direction 2); the coordinator reads it
@@ -3926,6 +3955,9 @@ def main(argv=None) -> int:
     ap.add_argument("--own-model", action="append", default=[], metavar="PROVIDER/MODEL",
                     help="declare a model as your own or on a gateway you run (repeatable). Needed before --coordinator "
                          "or --reviewer may pin opencode/<provider>/<model>")
+    ap.add_argument("--beads-repo", metavar="OWNER/NAME",
+                    help="the private GitHub repo that holds this project's beads (default: the project's origin owner "
+                         "and `<repo name>-beads`). Kept in the settings store")
     ap.add_argument("--no-start", action="store_true")
     ap.add_argument("--with", action="append", default=[], dest="with_repos", metavar="DIR|GIT-URL",
                     help="attach a second repo to the project (repeatable): lanes from this project's coordinator, no "
@@ -4144,7 +4176,7 @@ def main(argv=None) -> int:
             print(f"project-setup: warning: {why}", file=sys.stderr)
         elif why:  # anything that may commit does not
             raise Fail(f"{why}. Nothing was changed")
-        beads_report(repo)
+        beads_report(repo, a.beads_repo)
         migrate(repo)
         validate_settings(repo, settings(repo))
         drop_design_lead_settings(repo)
