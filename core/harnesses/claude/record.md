@@ -9,6 +9,12 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
   uncommitted `.claude/settings.local.json` runs `../persona-hook.sh`, which prints `$LANE_PERSONA`. Workers
   started in the same checkout do not have the markers, so they get nothing (core/reliability.md 11). The hook is its
   own entry; other entries and hooks, under the same matcher too, are left as they are.
+- Beads session hook: `install_beads_hook` adds `bd prime` as its own `SessionStart` entry (same matchers) to the same
+  uncommitted file, once; `bd prime --hook-json` does not exist in bd 1.0.4, and `--memories-only` is for hooks that
+  fire at compaction only, so the plain command is used. Not added when bd is missing or `bd prime` fails, nor when
+  the committed `.claude/settings.json` already has a working `bd prime` hook (two would run it twice). A committed
+  `bd` hook that fails is named with the fix and never edited (`core/beads.py` `hook_notes`). Note that `bd init`
+  itself writes a `bd prime` hook into the `.claude/settings.json` of the folder it runs in.
 - Size: Claude keeps at most 10,000 characters of a hook's output (over that it shows a 2,000-character preview and
   does not ask the session to read the rest). A persona over about 9,800 bytes is printed as a first line telling
   the session to read the whole file now, by path, then as much of it as fits, cut at a line end.

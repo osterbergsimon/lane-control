@@ -9,7 +9,9 @@ bd, gh and git are only ever run as subprocesses. Every function that reports re
 Nothing here creates, moves or pushes anything unless a function says so and is handed the owner's yes.
 """
 import os
+import json
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -152,4 +154,87 @@ def check(repo: Path, state: BeadsState) -> list[tuple[str, str, str]]:
                                      "commit of this project; unset it (`git config --unset core.hooksPath`)."))
     if not out:
         out.append((STEP, "exists", f"{repo}/.beads -> {state.beads_repo}/.beads, with git and Dolt remotes"))
+    return out
+
+
+# --- the session hook -------------------------------------------------------------------------------------------------
+
+PRIME_CANDIDATES = ("bd prime",)  # `bd prime --hook-json` (calvin's) does not exist in bd 1.0.4; --memories-only is for
+# compact-only hooks, and ours also fires at start, so the plain command is the one
+
+
+def bd_prime_command(cwd: Path | None = None) -> str | None:
+    """The command for the beads SessionStart hook: the first candidate that runs once with exit 0 here, else None
+    (bd missing, or too old to have `bd prime`)."""
+    if not shutil.which("bd"):
+        return None
+    for cand in PRIME_CANDIDATES:
+        if _run(shlex.split(cand), cwd=cwd, timeout=30).returncode == 0:
+            return cand
+    return None
+
+
+def _hook_commands(settings: Path) -> list[str]:
+    try:
+        data = json.loads(settings.read_text())
+    except (OSError, ValueError):
+        return []
+    out: list[str] = []
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    for entries in (hooks.values() if isinstance(hooks, dict) else ()):
+        for e in entries if isinstance(entries, list) else ():
+            for h in (e.get("hooks") if isinstance(e, dict) and isinstance(e.get("hooks"), list) else ()):
+                if isinstance(h, dict) and isinstance(h.get("command"), str):
+                    out.append(h["command"])
+    return out
+
+
+def _bd_words(command: str) -> list[str] | None:
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    return words if len(words) >= 2 and words[0] == "bd" else None
+
+
+def committed_bd_hooks(repo: Path) -> list[tuple[str, bool]]:
+    """Each `bd ...` command in the project's committed `.claude/settings.json` hooks, and whether bd accepts it. Only
+    `bd prime` is run, with its own flags and no shell; any other bd command is probed with `bd <subcommand> --help`
+    (never the command itself). Nothing in the file is changed."""
+    out = []
+    for command in _hook_commands(repo / ".claude" / "settings.json"):
+        words = _bd_words(command)
+        if not words:
+            continue
+        if words[1] == "prime":
+            probe = words
+        elif re.fullmatch(r"[a-z][a-z-]*", words[1]):
+            probe = ["bd", words[1], "--help"]
+        else:
+            continue
+        out.append((command, _run(probe, cwd=repo, timeout=30).returncode == 0))
+    return out
+
+
+def hook_notes(repo: Path) -> list[tuple[str, str, str]]:
+    """What the committed and local Claude settings say about the beads hook, as `say` triples: a committed hook bd
+    rejects (named, with the fix; it is the project's file, so it is never edited), a working one (lane-control adds
+    none of its own), and a duplicate (a committed working one plus one in the uncommitted settings)."""
+    step = "beads-hook"
+    out: list[tuple[str, str, str]] = []
+    committed = committed_bd_hooks(repo)
+    for command, runs in committed:
+        if not runs:
+            out.append((step, "broken", f"{repo}/.claude/settings.json (committed) runs `{command}`, which this bd "
+                                        "rejects, so every session start shows an error. It is the project's committed "
+                                        "file, so setup does not edit it: change the command to `bd prime` in a lane."))
+    working = [c for c, ok in committed if ok and (_bd_words(c) or [""] * 2)[1] == "prime"]
+    if working:
+        out.append((step, "exists", f"committed settings.json already runs `{working[0]}` at session start; "
+                                    "lane-control adds no second one"))
+        mine = [c for c in _hook_commands(repo / ".claude" / "settings.local.json") if _bd_words(c)
+                and _bd_words(c)[1] == "prime"]
+        if mine:
+            out.append((step, "warning", f"`{mine[0]}` is also in {repo}/.claude/settings.local.json, so bd prime runs "
+                                         "twice at session start; remove the local one."))
     return out

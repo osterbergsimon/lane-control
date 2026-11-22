@@ -219,6 +219,108 @@ class LoaderTests(HomeTest):
                 self.assertTrue(callable(getattr(mod, fn)), (name, fn))
 
 
+BD_STUB = """#!/bin/sh
+[ "$1" = prime ] && case "$*" in *--hook-json*) exit 1 ;; esac
+exit 0
+"""
+
+
+class ClaudeBeadsHookTests(HomeTest):
+    """lane-control owns the beads session hook: `bd prime` on SessionStart in the uncommitted settings."""
+
+    def setUp(self):
+        super().setUp()
+        import stat
+        from unittest import mock
+        self.a = self.pkg.load_harness("claude")
+        self.settings = self.checkout / ".claude" / "settings.local.json"
+        self.bin = self.t / "bdbin"
+        self.bin.mkdir()
+        (self.bin / "bd").write_text(BD_STUB)
+        (self.bin / "bd").chmod(0o755 | stat.S_IXUSR)
+        patcher = mock.patch.dict(os.environ, {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def starts(self):
+        import json
+        return json.loads(self.settings.read_text())["hooks"]["SessionStart"]
+
+    def commands(self):
+        return [h["command"] for e in self.starts() for h in e["hooks"]]
+
+    def test_claude_beads_hook_added_once(self):
+        self.a.install_persona_hook(self.checkout)
+        changes = self.a.install_beads_hook(self.checkout)
+        self.assertEqual(len(changes), 1)
+        self.assertIn("bd prime", changes[0])
+        self.assertIn("bd prime", self.commands())
+        self.assertIn(str(self.pkg.PERSONA_HOOK), " ".join(self.commands()))  # next to the persona hook
+        mine = [e for e in self.starts() if any(h["command"] == "bd prime" for h in e["hooks"])]
+        self.assertEqual([e["matcher"] for e in mine], ["startup|resume|clear|compact"])
+        before = self.settings.read_bytes()
+        self.assertEqual(self.a.install_beads_hook(self.checkout), [])  # project-setup says "exists"
+        self.assertEqual(self.settings.read_bytes(), before)
+        self.assertEqual(self.a.install_persona_hook(self.checkout), [])  # the persona hook is not disturbed
+
+    def test_other_settings_kept(self):
+        import json
+        self.settings.parent.mkdir()
+        self.settings.write_text(json.dumps({"model": "opus", "hooks": {"Stop": [{"hooks": []}]}}))
+        self.a.install_beads_hook(self.checkout)
+        data = json.loads(self.settings.read_text())
+        self.assertEqual(data["model"], "opus")
+        self.assertEqual(data["hooks"]["Stop"], [{"hooks": []}])
+
+    def test_a_committed_working_hook_means_no_second_one(self):
+        import json
+        c = self.checkout / ".claude" / "settings.json"
+        c.parent.mkdir()
+        c.write_text(json.dumps({"hooks": {"SessionStart": [{"matcher": "", "hooks": [
+            {"type": "command", "command": "bd prime"}]}]}}))
+        self.assertEqual(self.a.install_beads_hook(self.checkout), [])
+        self.assertFalse(self.settings.exists())
+
+    def test_a_committed_broken_hook_is_left_and_ours_is_added(self):
+        import json
+        c = self.checkout / ".claude" / "settings.json"
+        c.parent.mkdir()
+        c.write_text(json.dumps({"hooks": {"SessionStart": [{"matcher": "", "hooks": [
+            {"type": "command", "command": "bd prime --hook-json"}]}]}}))
+        before = c.read_bytes()
+        self.assertEqual(len(self.a.install_beads_hook(self.checkout)), 1)
+        self.assertEqual(c.read_bytes(), before)
+        self.assertIn("bd prime", self.commands())
+
+    def test_nothing_added_when_bd_is_missing_or_prime_fails(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            self.assertEqual(self.a.install_beads_hook(self.checkout), [])
+        self.assertFalse(self.settings.exists())
+
+    def test_invalid_settings_json_is_refused_and_left(self):
+        self.settings.parent.mkdir()
+        self.settings.write_text("{nope")
+        with self.assertRaises(ValueError):
+            self.a.install_beads_hook(self.checkout)
+        self.assertEqual(self.settings.read_text(), "{nope")
+
+
+class BeadsHookRecordTests(unittest.TestCase):
+    """Harnesses with no beads session hook say so in their record (OpenCode, Codex, pi)."""
+
+    def test_records_say_what_is_covered(self):
+        for h in ("opencode", "codex", "pi"):
+            text = (HARNESSES / h / "record.md").read_text().lower()
+            self.assertIn("beads session hook: not covered", text, h)
+        self.assertIn("beads session hook", (HARNESSES / "claude" / "record.md").read_text().lower())
+
+    def test_opencode_has_no_install_beads_hook(self):
+        sys.path.insert(0, str(ROOT / "core"))
+        import harnesses
+        self.assertFalse(hasattr(harnesses.load_harness("opencode"), "install_beads_hook"))
+
+
 class ClaudeAdapterTests(HomeTest):
     def setUp(self):
         super().setUp()

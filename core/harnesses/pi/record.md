@@ -12,6 +12,8 @@ No adapter yet, not installed. What Orca 1.4.250 says (read from its code, not t
 - Unconfirmed: that omp is a separate program built on pi (the shared folders and aliases suggest it; nothing in
   Orca says so). Which of the two to trial, and how it is installed, is the trial's first step.
 
+- Beads session hook: not covered (no adapter, not installed). Revisit with the first trial.
+
 ## Retest when
 - The owner asks for a trial lane: run the harness points of `orchestrators/checklist.md` and record them here.
 

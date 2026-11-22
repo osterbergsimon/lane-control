@@ -300,6 +300,34 @@ class RenderTests(Case):
         self.assertEqual(starts[0]["matcher"], "startup|resume|clear|compact")
         self.assertIn("persona-hook.sh", starts[0]["hooks"][0]["command"])
 
+    def test_the_beads_session_hook_is_installed_once_next_to_the_persona_hook(self):
+        bd = self.e.bin / "bd"
+        bd.write_text(bd.read_text().replace('[ "$1" = recall ] || exit 1', '[ "$1" = prime ] && exit 0\n[ "$1" = recall ] || exit 1'))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("beads-hook claude: updated", r.stdout)
+        cfg = json.loads((self.repo / ".claude" / "settings.local.json").read_text())
+        cmds = [h["command"] for e in cfg["hooks"]["SessionStart"] for h in e["hooks"]]
+        self.assertEqual(len(cmds), 2)
+        self.assertIn("bd prime", cmds)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertIn("beads-hook claude: exists", r.stdout)
+        cfg2 = json.loads((self.repo / ".claude" / "settings.local.json").read_text())
+        self.assertEqual(cfg2, cfg)
+
+    def test_a_broken_committed_beads_hook_is_named(self):
+        bd = self.e.bin / "bd"
+        bd.write_text('#!/bin/sh\n[ "$1" = prime ] && case "$*" in *--hook-json*) exit 1;; esac\n[ "$1" = prime ] && exit 0\nexit 1\n')
+        f = self.repo / ".claude" / "settings.json"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "bd prime --hook-json"}]}]}}))
+        before = f.read_bytes()
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("bd prime --hook-json", r.stderr)
+        self.assertIn("`bd prime`", r.stderr)
+        self.assertEqual(f.read_bytes(), before)
+
     def test_opencode_plugin_is_installed_for_an_opencode_standing_role(self):
         plugin = Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "lane-persona.js"
         self.e.run(str(self.repo), "--no-start")

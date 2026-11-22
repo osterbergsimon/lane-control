@@ -27,6 +27,7 @@ case "$1" in
   version) echo "bd version ${BD_VERSION:-1.0.4} (abcdef0: HEAD@abcdef0)"; exit 0 ;;
 esac
 [ "$BD_FAIL" = "$1" ] && { echo "bd: $1 failed" >&2; exit 1; }
+[ "$1" = prime ] && case "$*" in *--hook-json*) echo "Error: unknown flag: --hook-json" >&2; exit 1 ;; esac
 case "$1 $2 $3" in
   "dolt remote list") [ -n "$BD_DOLT_REMOTE" ] && echo "origin               $BD_DOLT_REMOTE"; exit 0 ;;
 esac
@@ -200,6 +201,60 @@ class VersionTests(BeadsCase):
 
     def test_floor_is_1_0_4(self):
         self.assertEqual(beads.BD_FLOOR, (1, 0, 4))
+
+
+class HookTests(BeadsCase):
+    def committed(self, command: str):
+        import json
+        f = self.repo / ".claude" / "settings.json"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text(json.dumps({"hooks": {"SessionStart": [{"matcher": "", "hooks": [
+            {"type": "command", "command": command}, {"type": "command", "command": "echo unrelated"}]}]}}))
+        return f
+
+    def test_bd_prime_command(self):
+        self.assertEqual(beads.bd_prime_command(self.repo), "bd prime")
+        os.environ["BD_FAIL"] = "prime"
+        self.assertIsNone(beads.bd_prime_command(self.repo))
+        os.environ.pop("BD_FAIL")
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            self.assertIsNone(beads.bd_prime_command(self.repo))
+
+    def test_committed_hooks_listed_with_whether_they_run(self):
+        self.committed("bd prime --hook-json")
+        self.assertEqual(beads.committed_bd_hooks(self.repo), [("bd prime --hook-json", False)])
+        self.committed("bd prime")
+        self.assertEqual(beads.committed_bd_hooks(self.repo), [("bd prime", True)])
+        self.assertEqual(beads.committed_bd_hooks(self.tmp), [])  # no settings file: nothing
+
+    def test_committed_broken_hook_named_and_file_untouched(self):
+        f = self.committed("bd prime --hook-json")
+        before = f.read_bytes()
+        lines = beads.hook_notes(self.repo)
+        self.assertEqual([w for _, w, _ in lines], ["broken"])
+        self.assertIn("bd prime --hook-json", lines[0][2])
+        self.assertIn("`bd prime`", lines[0][2])
+        self.assertEqual(f.read_bytes(), before)
+
+    def test_committed_working_hook_says_no_second_one_is_added(self):
+        self.committed("bd prime")
+        lines = beads.hook_notes(self.repo)
+        self.assertEqual([w for _, w, _ in lines], ["exists"])
+        self.assertIn("runs `bd prime`", lines[0][2])
+
+    def test_duplicate_with_a_local_hook_is_reported(self):
+        import json
+        self.committed("bd prime")
+        loc = self.repo / ".claude" / "settings.local.json"
+        loc.write_text(json.dumps({"hooks": {"SessionStart": [{"matcher": "startup", "hooks": [
+            {"type": "command", "command": "bd prime"}]}]}}))
+        self.assertIn("warning", [w for _, w, _ in beads.hook_notes(self.repo)])
+
+    def test_only_bd_prime_is_ever_run_from_a_committed_file(self):
+        self.committed("bd create evil")
+        self.assertEqual([c.split()[0:2] for c in self.bd_calls()], [])
+        beads.committed_bd_hooks(self.repo)
+        self.assertEqual(self.bd_calls(), ["create --help"])  # a --help probe, never the command itself
 
 
 if __name__ == "__main__":

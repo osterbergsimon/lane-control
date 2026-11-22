@@ -2965,6 +2965,28 @@ def persona_hooks(checkout: Path, harnesses_used) -> None:
 
 
 
+def beads_hooks(checkout: Path, harnesses_used) -> None:
+    """lane-control owns the beads session hook (bd prime) the way it owns the persona hook. A harness with no such hook
+    says so; a committed hook that fails, or runs twice, is named, never edited."""
+    for h in sorted(harnesses_used):
+        adapter = load_harness(h)
+        if not hasattr(adapter, "install_beads_hook"):
+            say(f"beads-hook {h}", "skipped", f"(bd offers no session hook for {h}: not covered, see "
+                                              f"core/harnesses/{h}/record.md)")
+            continue
+        try:
+            lines = adapter.install_beads_hook(checkout)
+        except (OSError, ValueError) as e:
+            raise Fail(f"beads hook for {h}: {e}")
+        say(f"beads-hook {h}", "updated" if lines else "exists", "; ".join(lines) or str(checkout))
+    b = load_beads()
+    for step, what, detail in b.hook_notes(checkout):
+        if what in b.PROBLEMS:
+            print(f"project-setup: note: {detail}", file=sys.stderr)
+        else:
+            say(step, what, detail)
+
+
 def load_harness(name: str):
     """A harness adapter from core/harnesses/ (claude, opencode)."""
     core = str(HERE / "core")
@@ -3215,6 +3237,7 @@ def native_refresh(repo: Path, a, tiers: Path) -> int:
     changed = native_personas(repo, p["project"], pins, p["mode"], tier_text, p["attached"])
     standing = {pins["coordinator"][0]}
     persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
+    beads_hooks(repo, {pins["coordinator"][0]} & {"claude", "opencode"})
     native_skills()
     place = Place()
     retire_design_lead(repo, p["project"], place)
@@ -3359,6 +3382,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         changed = native_personas(repo, project, pins, cfg["mode"], tier_text, tuple(str(d) for d in attached))
         retire_design_lead(repo, project, place)
         persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
+        beads_hooks(repo, {pins["coordinator"][0]} & {"claude", "opencode"})
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
             if changed:
