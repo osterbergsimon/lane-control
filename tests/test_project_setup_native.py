@@ -333,6 +333,10 @@ class RenderTests(Case):
     def test_a_project_without_beads_gets_the_restore_described_without_a_terminal(self):
         self.origin()
         (self.e.bin / "gh").write_text("#!/bin/sh\nexit 0\n")
+        remotes = self.e.home / "remotes"  # git reaches "GitHub" here, never the network
+        subprocess.run(["git", "init", "-q", "--bare", str(remotes / "app-beads.git")], check=True)
+        self.e.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=f"url.file://{remotes}/.insteadOf",
+                          GIT_CONFIG_VALUE_0="https://github.com/acme/")
         r = self.e.run(str(self.repo), "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("beads: would clone the private GitHub repo acme/app-beads", r.stdout)
