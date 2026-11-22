@@ -36,7 +36,20 @@ case "$1 $2 $3" in
     [ -n "$BD_DOLT_REMOTE" ] && echo "origin               $BD_DOLT_REMOTE"
     [ -f "$state" ] && echo "origin               $(cat "$state")"
     exit 0 ;;
-  "dolt remote add") echo "$5" > "$state"; [ -f .beads/config.yaml ] && echo "sync.remote: \"$5\"" >> .beads/config.yaml; exit 0 ;;
+  "dolt remote add")
+    echo "$5" > "$state"
+    [ -f .beads/config.yaml ] && echo "sync.remote: \"$5\"" >> .beads/config.yaml
+    git add .beads >/dev/null 2>&1; git -c user.name=bd -c user.email=bd@example.invalid commit -qm "bd: update sync.remote" >/dev/null 2>&1
+    exit 0 ;;
+  "dolt push"*)
+    # real bd refuses an empty git remote; a write during the push is simulated through $BD_DURING_PUSH
+    [ -n "$BD_DURING_PUSH" ] && echo "written during push" >> "$BD_DURING_PUSH"
+    git ls-remote --heads origin 2>/dev/null | grep -q . || { echo "git remote has no branches: initialize the repository first" >&2; exit 1; }
+    exit 0 ;;
+esac
+case "$1" in
+  where) echo "$PWD/.beads"; echo "  database: $PWD/.beads/embeddeddolt"; exit 0 ;;
+  memories|list) cat "$PWD/.beads/stub-db" 2>/dev/null; exit 0 ;;
 esac
 exit 0
 """
@@ -113,6 +126,12 @@ class BeadsCase(unittest.TestCase):
         git(b, "init", "-q", "-b", "main", ".")
         if remote:
             git(b, "remote", "add", "origin", "https://github.com/acme/widget-beads.git")
+            (b / ".beads" / "config.yaml").write_text("prefix: w\n")
+            git(b, "add", ".beads")
+            git(b, "commit", "-qm", "beads")
+            git(b, "update-ref", "refs/remotes/origin/main", "HEAD")  # as if pushed
+            git(b, "config", "branch.main.remote", "origin")
+            git(b, "config", "branch.main.merge", "refs/heads/main")
         return b
 
     def link(self, beads_repo: Path, ignored: bool = True):
@@ -185,7 +204,8 @@ class CheckTests(BeadsCase):
         state = beads.inspect(self.repo)
         self.assertFalse(state.ignored)
         text = " ".join(self.problems(beads.check(self.repo, state)))
-        self.assertIn(".gitignore", text)
+        self.assertIn("info/exclude", text)  # the uncommitted file, like the move uses (a link is not matched by `.beads/`)
+        self.assertNotIn("No link was drafted", text)
         self.assertEqual((self.repo / ".beads").resolve(), (b / ".beads").resolve())  # untouched
 
     def test_remote_missing_reports_only(self):
@@ -207,6 +227,28 @@ class CheckTests(BeadsCase):
         text = " ".join(self.problems(self.lines()))
         self.assertIn("no off-machine copy", text)
         self.assertIn("Dolt", text)
+
+    def test_unpushed_beads_repo_commits_are_reported(self):
+        b = self.make_beads_repo()
+        self.link(b)
+        os.environ["BD_DOLT_REMOTE"] = "git+https://github.com/acme/widget-beads.git"
+        (b / ".beads" / "more").write_text("x")
+        git(b, "add", ".beads")
+        git(b, "commit", "-qm", "later")
+        state = beads.inspect(self.repo)
+        self.assertEqual(state.unpushed, 1)
+        text = " ".join(self.problems(beads.check(self.repo, state)))
+        self.assertIn("1 commit(s) not pushed", text)
+        self.assertIn("bd dolt push", text)
+
+    def test_a_beads_repo_never_pushed_is_reported(self):
+        b = self.make_beads_repo()
+        git(b, "config", "--unset", "branch.main.remote")
+        git(b, "config", "--unset", "branch.main.merge")
+        self.link(b)
+        os.environ["BD_DOLT_REMOTE"] = "git+https://github.com/acme/widget-beads.git"
+        text = " ".join(self.problems(beads.check(self.repo, beads.inspect(self.repo))))
+        self.assertIn("never been pushed", text)
 
     def test_hooks_path_into_beads_reported(self):
         b = self.make_beads_repo()
@@ -287,6 +329,11 @@ class HookTests(BeadsCase):
             {"type": "command", "command": "bd prime"}]}]}}))
         self.assertIn("warning", [w for _, w, _ in beads.hook_notes(self.repo)])
 
+    def test_a_hook_that_is_a_shell_line_is_not_probed_or_judged(self):
+        self.committed("bd prime --hook-json || true")
+        self.assertEqual(beads.committed_bd_hooks(self.repo), [])
+        self.assertEqual(self.bd_calls(), [])
+
     def test_only_bd_prime_is_ever_run_from_a_committed_file(self):
         self.committed("bd create evil")
         self.assertEqual([c.split()[0:2] for c in self.bd_calls()], [])
@@ -302,6 +349,7 @@ class AdoptLayoutTests(BeadsCase):
         self.old = self.repo / ".beads"
         self.old.mkdir()
         (self.old / "config.yaml").write_text("prefix: w\n")
+        (self.old / "stub-db").write_text("issue 1\nmemory k\n")
         (self.old / "embeddeddolt").mkdir()
         (self.old / "embeddeddolt" / "data").write_text("db\n")
         (self.repo / ".gitignore").write_text(".beads/\n")  # the folder pattern does not ignore a link
@@ -386,16 +434,65 @@ class AdoptLayoutTests(BeadsCase):
         self.assertEqual(subprocess.run(["git", "config", "core.hooksPath"], cwd=self.repo, capture_output=True,
                                         text=True).stdout.strip(), "")
 
-    def test_a_server_mode_database_is_stopped_before_it_is_copied(self):
+    def test_a_server_mode_database_is_refused_before_anything_is_created(self):
         (self.old / "metadata.json").write_text('{"dolt_mode": "server"}')
-        self.adopt()
-        calls = self.bd_calls()
-        self.assertIn("dolt stop", calls)
-        self.assertLess(calls.index("dolt stop"), calls.index("dolt push"))
+        before = self.snapshot()
+        lines = self.adopt()
+        self.assertIn("server mode", " ".join(d for _, _, d in lines))
+        self.assertEqual(self.snapshot(), before)
+        self.assertNotIn("repo create", " ".join(self.gh_calls()))
+        self.assertFalse(self.dest.exists())
+        self.assertNotIn("dolt stop", self.bd_calls())
+
+    def test_tracked_beads_files_stop_the_move_and_name_the_fix(self):
+        git(self.repo, "add", "-f", ".beads/config.yaml")
+        git(self.repo, "commit", "-qm", "oops tracked")
+        before = self.snapshot()
+        lines = self.adopt()
+        text = " ".join(d for _, _, d in lines)
+        self.assertIn(".beads/config.yaml", text)
+        self.assertIn("git rm -r --cached .beads", text)
+        self.assertEqual(self.snapshot(), before)
+        self.assertNotIn("repo create", " ".join(self.gh_calls()))
+
+    def test_a_write_during_the_move_stops_the_switch(self):
+        os.environ["BD_DURING_PUSH"] = str(self.old / "stub-db")  # the stub's `dolt push` writes to the original
+        before_db = None
+        lines = self.adopt()
+        os.environ.pop("BD_DURING_PUSH")
+        self.assertTrue(self.old.is_dir() and not self.old.is_symlink())  # nothing was switched
+        self.assertIn("changed", " ".join(d for _, _, d in lines))
+        self.assertIn("written during push", (self.old / "stub-db").read_text())  # the write is where agents see it
+        self.assertFalse(list((self.home / "code").glob("widget.beads-original*")))
+
+    def test_a_failure_after_the_repo_is_made_says_how_to_try_again(self):
+        os.environ["BD_FAIL"] = "dolt"
+        lines = self.adopt()
+        text = " ".join(d for _, _, d in lines)
+        self.assertIn("delete the GitHub repo acme/widget-beads", text)
+        self.assertIn(str(self.dest), text)
+
+    def test_a_leftover_destination_is_not_called_a_restore_source(self):
+        self.dest.mkdir()
+        text = " ".join(d for _, _, d in self.adopt())
+        self.assertIn("delete it", text)
+        self.assertNotIn("restore from it", text)
+
+    def test_the_switch_failing_names_the_stale_github_copy(self):
+        real = beads._run
+        def fail_where_through_the_link(cmd, cwd=None, timeout=60):
+            if cmd[:2] == ["bd", "where"] and cwd == self.repo and (self.repo / ".beads").is_symlink():
+                return subprocess.CompletedProcess(cmd, 1, "", "no db")
+            return real(cmd, cwd, timeout)
+        with mock.patch.object(beads, "_run", fail_where_through_the_link):
+            lines = self.adopt()
+        text = " ".join(d for _, _, d in lines)
+        self.assertIn("GitHub holds a copy", text)
+        self.assertTrue(self.old.is_dir() and not self.old.is_symlink())
 
     def test_failed_open_keeps_original(self):
-        os.environ["BD_FAIL"] = "where"
-        os.environ["BD_FAIL_IN"] = "widget-beads"  # opens from the old place, not from the new one
+        os.environ["BD_FAIL"] = "memories"
+        os.environ["BD_FAIL_IN"] = "widget-beads"  # reads from the old place, not from the new one
         before = self.snapshot()
         lines = self.adopt()
         self.assertEqual(self.snapshot(), before)
@@ -548,12 +645,44 @@ class RestoreTests(BeadsCase):
         self.assertNotIn("bootstrap", " ".join(self.bd_calls()))
         self.assertFalse((self.repo2 / ".beads").is_symlink())
 
-    def test_a_failed_bootstrap_removes_the_link_keeps_the_clone(self):
+    def test_a_failed_bootstrap_removes_the_link_and_the_clone_it_made(self):
         os.environ["BD_FAIL"] = "bootstrap"
         lines = self.restore()
-        self.assertIn("bootstrap", self.problems(lines))
+        text = self.problems(lines)
+        self.assertIn("bootstrap", text)
+        self.assertIn("was removed", text)
+        self.assertNotIn("Nothing was created", text)
         self.assertFalse((self.repo2 / ".beads").is_symlink())
+        self.assertFalse(self.dest2.exists())  # a leftover clone's issues.jsonl could seed an issues-only database
+
+    def test_a_failed_bootstrap_keeps_a_clone_it_did_not_make(self):
+        subprocess.run(["git", "clone", "-q", str(self.remotes / "widget-beads.git"), str(self.dest2)], check=True,
+                       capture_output=True)
+        git(self.dest2, "remote", "set-url", "origin", "https://github.com/acme/widget-beads.git")
+        os.environ["BD_FAIL"] = "bootstrap"
+        self.assertIn("was kept", self.problems(self.restore()))
         self.assertTrue(self.dest2.is_dir())
+
+    def test_git_that_cannot_read_the_repo_over_https_names_setup_git(self):
+        shutil.rmtree(self.remotes / "widget-beads.git")  # gh says the repo exists; git cannot read it
+        text = self.problems(self.restore())
+        self.assertIn("gh auth setup-git", text)
+        self.assertNotIn("repo clone", " ".join(self.gh_calls()))
+        self.assertEqual(self.asked, [])
+
+    def test_the_sign_in_advice_names_setup_git(self):
+        os.environ["GH_NOT_SIGNED_IN"] = "1"
+        self.assertIn("gh auth setup-git", self.problems(self.restore()))
+
+    def test_the_clone_is_private_to_the_owner(self):
+        self.restore()
+        self.assertEqual(oct((self.dest2 / ".beads").stat().st_mode & 0o777), "0o700")
+
+    def test_an_existing_checkout_of_another_repo_is_not_reused(self):
+        subprocess.run(["git", "clone", "-q", str(self.remotes / "widget-beads.git"), str(self.dest2)], check=True,
+                       capture_output=True)
+        git(self.dest2, "remote", "set-url", "origin", "https://github.com/other/thing.git")
+        self.assertIn("not a checkout of acme/widget-beads", self.problems(self.restore()))
 
     def test_a_folder_in_the_way_is_never_touched(self):
         self.dest2.mkdir()
@@ -570,6 +699,7 @@ class RestoreTests(BeadsCase):
     def test_an_existing_clone_is_reused_not_cloned_again(self):
         subprocess.run(["git", "clone", "-q", str(self.remotes / "widget-beads.git"), str(self.dest2)], check=True,
                        capture_output=True)
+        git(self.dest2, "remote", "set-url", "origin", "https://github.com/acme/widget-beads.git")
         lines = self.restore()
         self.assertEqual(self.problems(lines), "")
         self.assertNotIn("repo clone", " ".join(self.gh_calls()))
