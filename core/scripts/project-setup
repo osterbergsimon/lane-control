@@ -666,8 +666,19 @@ def beads_report(repo, override=None):
                     say(step, what, detail)
             state = b.inspect(repo)
         lines = [ln for ln in b.check(repo, state) if ln[1] in b.PROBLEMS]
+    elif state.kind == "none" and slug is not None and shutil.which("bd"):
+        yes = (lambda q: owner_says_yes(q, "beads")) if has_terminal() else None
+        for step, what, detail in b.restore(repo, slug, yes):
+            if what in b.PROBLEMS:
+                print(f"project-setup: note: {detail}", file=sys.stderr)
+            else:
+                say(step, what, detail)
+        state = b.inspect(repo)
+        lines = [ln for ln in b.check(repo, state) if ln[1] in b.PROBLEMS and state.kind != "none"]
     else:
         lines = b.check(repo, state)
+        if state.kind == "none" and slug is None:
+            print(f"project-setup: note: beads: {slug_problem}", file=sys.stderr)
     for step, what, detail in lines:
         if what in b.PROBLEMS:
             print(f"project-setup: note: {detail}", file=sys.stderr)

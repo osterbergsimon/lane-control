@@ -56,6 +56,22 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    night manager, lane sweep and machine check.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.
 
+### Beads on a box (lc-5c1)
+What reaches a box today: nothing of beads. The project's `.beads` is a git-ignored link, so a clone of the project has
+none, and setup copies lane-control and the project, not the owner's beads. The box's own `project-setup` run (step 3)
+therefore does the same restore as on any new machine: with no beads there and the private beads repo
+`<owner>/<project>-beads` on GitHub, it clones that repo to `~/code/<project>-beads` on the box, links `.beads` to it
+and restores the database, issues and memories, with `bd bootstrap --yes` (on the owner's yes, which is asked because
+that run has the owner's terminal). The box's coordinator then backs up straight to GitHub at each handover, exactly as
+on the desktop.
+
+The box signs in to GitHub itself, once, by the owner: a fine-grained token limited to the beads repos
+(Contents: read and write, nothing else), put in place with `gh auth login --with-token` or the box's own credential
+store. Setup says that is needed when `gh` is not signed in there and never reads, prints or copies the token. Beads is
+copied over ssh from the desktop on no path: the box's work would then have no off-box copy until copied back. Only one
+machine works on a project's beads at a time: before moving a project, the old machine's last step is the backup
+(`git push`, then `bd dolt push`, in the beads repo).
+
 Agents on the box sign in there once, by the owner; setup never copies a credential. Setup refuses to run as root,
 there as here.
 

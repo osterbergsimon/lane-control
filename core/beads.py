@@ -274,12 +274,28 @@ def _exclude_file(repo: Path) -> Path | None:
     return (repo / p.stdout.strip()) if p.returncode == 0 and p.stdout.strip() else None
 
 
+def _ensure_ignored(repo: Path) -> list[tuple[str, str, str]]:
+    """`.beads` git-ignored in the project: when it is not, a `/.beads` line in the uncommitted .git/info/exclude (nothing
+    about beads enters the project's tracked files; a `.beads/` line in .gitignore does not match a link)."""
+    if _run(["git", "check-ignore", "-q", ".beads"], cwd=repo).returncode == 0:
+        return []
+    ex = _exclude_file(repo)
+    if ex is None:
+        return [_line("warning", f"{repo}/.beads is not git-ignored and the exclude file could not be found: add the line "
+                                 "`.beads` to .gitignore by hand")]
+    ex.parent.mkdir(parents=True, exist_ok=True)
+    with ex.open("a") as f:
+        f.write("\n# lane-control: the beads link (never committed)\n/.beads\n")
+    return [_line("created", f"/.beads line in {ex} (uncommitted: nothing about beads enters the project's files)")]
+
+
 def adopt_layout(repo: Path, state: BeadsState, slug: tuple[str, str], yes) -> list[tuple[str, str, str]]:
     """Move a plain `.beads` folder to the layout, on the owner's yes. `yes` is `question -> bool`, or None when there
     is no terminal (then only the plan is said and nothing is touched). Two yeses: the move, and the GitHub repo.
 
     Order: private GitHub repo -> beads repo at ~/code/<name> (git init, origin) -> COPY the folder in -> the database
-    must open from the new place with the same issues and memories -> commit, push, Dolt remote, `bd dolt push` -> the
+    must open from the new place with the same issues and memories -> Dolt remote, `bd dolt push`, then commit and
+    git push (the config now records the Dolt remote) -> the
     original is renamed aside (kept, never deleted) and the symlink put in its place -> ignore line (the uncommitted
     .git/info/exclude: nothing about beads enters the project's tracked files) -> unset a core.hooksPath into beads.
     On any failure it stops with the original `.beads` exactly where it was."""
@@ -338,17 +354,17 @@ def adopt_layout(repo: Path, state: BeadsState, slug: tuple[str, str], yes) -> l
             if _outputs(repo, *sub) != _outputs(dest, *sub) or _outputs(dest, *sub).startswith("1\n"):
                 raise RuntimeError(f"the database does not open the same from {dest} (`bd {' '.join(sub)}` differs or fails).")
         out.append(_line("exists", "the database opens from the new place with the same issues and memories"))
-        steps = (["git", "add", ".beads"], ["git", "commit", "-q", "-m", "Beads: initial copy of the project's beads"])
-        for cmd in steps:
+        for cmd in (["bd", "dolt", "remote", "add", "origin", f"git+https://github.com/{full}.git"], ["bd", "dolt", "push"]):
+            p = _run(cmd, cwd=dest, timeout=300)
+            if p.returncode != 0:
+                raise RuntimeError(f"`{' '.join(cmd[:4])}` failed: {(p.stderr.strip() or p.stdout.strip())[-200:]}.")
+        # after the Dolt remote: it is recorded in .beads/config.yaml (sync.remote), which a restore reads from git
+        for cmd in (["git", "add", ".beads"], ["git", "commit", "-q", "-m", "Beads: initial copy of the project's beads"]):
             if _run(cmd, cwd=dest).returncode != 0:
                 raise RuntimeError(f"`{' '.join(cmd[:2])}` failed in {dest}.")
         p = _run(["git", "push", "-q", "-u", "origin", "main"], cwd=dest, timeout=180)
         if p.returncode != 0:
             raise RuntimeError(f"`git push` to {full} failed: {p.stderr.strip()[-200:]}.")
-        for cmd in (["bd", "dolt", "remote", "add", "origin", f"git+https://github.com/{full}.git"], ["bd", "dolt", "push"]):
-            p = _run(cmd, cwd=dest, timeout=300)
-            if p.returncode != 0:
-                raise RuntimeError(f"`{' '.join(cmd[:4])}` failed: {(p.stderr.strip() or p.stdout.strip())[-200:]}.")
         out.append(_line("created", f"pushed {full}: git history and the Dolt database (issues and memories)"))
     except (RuntimeError, OSError, shutil.Error) as e:
         # the GitHub repo and the copy stay (named); the project's folder was never touched
@@ -375,16 +391,88 @@ def adopt_layout(repo: Path, state: BeadsState, slug: tuple[str, str], yes) -> l
         old.unlink()
         shutil.move(str(aside), str(old))
         return out + stop("bd does not find the database through the link; put the folder back as it was.")
-    if _run(["git", "check-ignore", "-q", ".beads"], cwd=repo).returncode != 0:
-        ex = _exclude_file(repo)
-        if ex is not None:
-            ex.parent.mkdir(parents=True, exist_ok=True)
-            with ex.open("a") as f:
-                f.write("\n# lane-control: the beads link (never committed)\n/.beads\n")
-            out.append(_line("created", f"/.beads line in {ex} (uncommitted, so nothing about beads enters the project's "
-                                        "files; a `.beads/` line in .gitignore does not match a link)"))
+    out += _ensure_ignored(repo)
     if _run(["git", "config", "--local", "--get", "core.hooksPath"], cwd=repo).stdout.strip() and \
             inspect(repo).hooks_path_into_beads:
         _run(["git", "config", "--local", "--unset", "core.hooksPath"], cwd=repo)
         out.append(_line("moved", "core.hooksPath no longer points into beads"))
     return out
+
+
+# --- restore on a new machine or a host -------------------------------------------------------------------------------
+
+SIGN_IN = ("gh is not signed in here: run `gh auth login` yourself. On a box use a fine-grained token limited to the "
+           "beads repos (Contents: read and write on `<project>-beads` only); put it in place yourself, setup never "
+           "reads or copies a token.")
+
+
+def _config_has_dolt_remote(beads_dir: Path) -> bool:
+    try:
+        return re.search(r"^\s*sync\.remote\s*:\s*\S", (beads_dir / "config.yaml").read_text(), re.M) is not None
+    except OSError:
+        return False
+
+
+def restore(repo: Path, slug: tuple[str, str], yes) -> list[tuple[str, str, str]]:
+    """The project has no beads here, and its beads repo exists on GitHub: clone it to ~/code/<name> (or use the clone
+    already there), link `.beads` to it, and bring the database back with `bd bootstrap --yes`, which reads the Dolt remote
+    from the repo's `.beads/config.yaml` and restores issues and memories (tests/test_beads_roundtrip.py). `yes` is
+    `question -> bool`, or None without a terminal (then the read-only checks and the plan are said, and nothing is
+    changed: a box without a terminal still learns it needs a GitHub sign-in). Never creates a GitHub repo or a fresh
+    database: a repo that is not found, or a config with no Dolt remote, stops it with the reason."""
+    old = repo / ".beads"
+    if old.exists() or old.is_symlink():
+        return []
+    owner, name = slug
+    full = f"{owner}/{name}"
+    dest = Path.home() / "code" / name
+    plan = (f"clone the private GitHub repo {full} to {dest}, link {repo}/.beads to it and restore the database (issues and "
+            "memories) from its Dolt remote")
+
+    def stop(why: str):
+        return [_line("broken", f"{why} Nothing was created.")]
+
+    missing = [t for t in ("bd", "gh", "git") if not shutil.which(t)]
+    if missing:
+        return stop(f"cannot restore beads: {', '.join(missing)} is not on PATH.")
+    if _run(["gh", "auth", "status"], timeout=30).returncode != 0:
+        return stop(f"cannot restore beads from {full}. {SIGN_IN}")
+    if _run(["gh", "repo", "view", full], timeout=30).returncode != 0:
+        return stop(f"the beads repo {full} was not found on GitHub for this sign-in (or GitHub could not be reached). It "
+                    "is never created empty here, since one was expected: check the name (--beads-repo OWNER/NAME) and, on a "
+                    "box, that the token can read it. A new project with no beads yet can start one with `bd init`.")
+    reuse = dest.is_dir() and (dest / ".git").exists() and (dest / ".beads").is_dir()
+    if (dest.exists() or dest.is_symlink()) and not reuse:
+        return stop(f"{dest} already exists and is not a checkout of the beads repo, so it was not touched; move it away.")
+    if yes is None:  # no terminal: the read-only checks above have said what is in the way; nothing is changed
+        return [_line("would", f"{plan}. Run project-setup in a terminal to do it on your yes; nothing was changed.")]
+    if not yes(f"Restore beads: {plan}? [y/N] "):
+        return [_line("skipped", "not restored at your answer; nothing was changed")]
+    out: list[tuple[str, str, str]] = []
+    if reuse:
+        out.append(_line("exists", f"beads repo checkout {dest}"))
+    else:
+        p = _run(["gh", "repo", "clone", full, str(dest)], timeout=300)
+        if p.returncode != 0:
+            return stop(f"`gh repo clone {full}` failed: {(p.stderr.strip() or p.stdout.strip())[-200:]}.")
+        out.append(_line("created", f"{dest} (clone of {full})"))
+    if not (dest / ".beads").is_dir():
+        return out + stop(f"{dest} has no .beads folder, so there is nothing to link or restore.")
+    if not _config_has_dolt_remote(dest / ".beads"):
+        return out + stop(f"{dest}/.beads/config.yaml names no Dolt remote (sync.remote), so the database would come back "
+                          "empty; it was not bootstrapped. Set the remote in the beads repo (`bd dolt remote add origin "
+                          f"git+https://github.com/{full}.git`, push), then re-run.")
+    try:
+        old.symlink_to(dest / ".beads")
+    except OSError as e:
+        return out + stop(f"could not link {old}: {e}.")
+    p = _run(["bd", "bootstrap", "--yes"], cwd=dest, timeout=600)
+    ok = p.returncode == 0 and all(_run(["bd", *sub], cwd=repo, timeout=60).returncode == 0
+                                   for sub in (["where"], ["memories"], ["list", "--all"]))
+    if not ok:
+        old.unlink()
+        return out + stop(f"`bd bootstrap --yes` did not restore the database: {(p.stderr.strip() or p.stdout.strip())[-200:] or 'it does not open afterwards'}. "
+                          f"The link was removed; the clone {dest} was kept.")
+    out.append(_line("created", f"{repo}/.beads links to {dest}/.beads; the database (issues and memories) restored from the "
+                                "Dolt remote"))
+    return out + _ensure_ignored(repo)

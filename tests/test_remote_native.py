@@ -425,6 +425,19 @@ class DirectionOneTests(Case):
         self.assertTrue(any("repo add" in l for l in self.e.lines("", self.e.box)))
         self.assertFalse((self.e.home / ".config" / "lane-control" / "projects").exists())  # nothing set up here
 
+    def test_the_host_run_does_the_beads_restore_check_and_names_the_sign_in_it_needs(self):
+        # lc-5c1: the restore runs where the project is, on the box, with the box's own GitHub sign-in
+        git("remote", "add", "origin", "https://github.com/acme/shop.git", cwd=self.repo)
+        for tool, body in (("bd", "#!/bin/sh\nexit 0\n"), ("gh", "#!/bin/sh\nexit 1\n")):  # gh: not signed in
+            (self.e.bin / tool).write_text(body)
+            (self.e.bin / tool).chmod(0o755)
+        self.e.saved("box")
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("fine-grained token", r.stderr + r.stdout)
+        self.assertIn("never", r.stderr + r.stdout)  # setup never reads or copies the token
+        self.assertFalse((self.repo / ".beads").exists() or (self.repo / ".beads").is_symlink())
+
     def test_a_box_gets_the_design_kit_and_the_design_skills(self):
         # review m4 (JAI-1): the box's own setup run installs the kit and the skills in the box's HOME, not here
         up = self.e.home / "upstream" / "mwg"

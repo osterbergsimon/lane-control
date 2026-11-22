@@ -36,13 +36,13 @@ case "$1 $2 $3" in
     [ -n "$BD_DOLT_REMOTE" ] && echo "origin               $BD_DOLT_REMOTE"
     [ -f "$state" ] && echo "origin               $(cat "$state")"
     exit 0 ;;
-  "dolt remote add") echo "$5" > "$state"; exit 0 ;;
+  "dolt remote add") echo "$5" > "$state"; [ -f .beads/config.yaml ] && echo "sync.remote: \"$5\"" >> .beads/config.yaml; exit 0 ;;
 esac
 exit 0
 """
 
 # gh stand-in: logs calls to $GH_LOG. `auth status` succeeds unless $GH_NOT_SIGNED_IN; `repo view` fails (not found)
-# unless $GH_EXISTS; `repo create <o>/<n> --private` makes a bare repo $GH_REMOTES/<n>.git (git is told to send
+# unless $GH_EXISTS; `repo clone <o>/<n> <dir>` clones $GH_REMOTES/<n>.git; `repo create <o>/<n> --private` makes a bare repo $GH_REMOTES/<n>.git (git is told to send
 # https://github.com/<o>/ there) unless $GH_FAIL names the subcommand.
 GH_STUB = """
 #!/bin/sh
@@ -53,6 +53,7 @@ case "$1 $2" in
   "repo create")
     [ "$GH_FAIL" = create ] && { echo "gh: create failed" >&2; exit 1; }
     n="${3#*/}"; git init -q --bare -b main "$GH_REMOTES/$n.git"; exit 0 ;;
+  "repo clone") git clone -q "$GH_REMOTES/${3#*/}.git" "$4"; exit $? ;;
 esac
 exit 0
 """
@@ -367,6 +368,9 @@ class AdoptLayoutTests(BeadsCase):
         self.assertEqual((self.dest / ".beads" / "embeddeddolt" / "data").read_text(), "db\n")
         # committed and pushed to the (local stand-in) GitHub repo
         self.assertIn(".beads/config.yaml", git(self.dest, "ls-tree", "-r", "--name-only", "HEAD"))
+        # the committed config carries the Dolt remote: a restore reads it from there (bd bootstrap)
+        self.assertIn("sync.remote", git(self.dest, "show", "HEAD:.beads/config.yaml"))
+        self.assertEqual(git(self.dest, "status", "--porcelain").strip(), "")
         self.assertTrue(git(self.remotes / "widget-beads.git", "log", "--oneline", "main").strip())
         # the original is kept next to the repos, never deleted
         kept = [p for p in (self.home / "code").iterdir() if p.name.startswith("widget.beads-original")]
@@ -444,6 +448,132 @@ class AdoptLayoutTests(BeadsCase):
         self.assertEqual(self.snapshot(), calls_before[2])
         writes = [c for c in self.bd_calls()[len(calls_before[0]):] if not c.startswith(("dolt remote list", "where"))]
         self.assertEqual(writes, [])
+
+
+class RestoreTests(BeadsCase):
+    """Task 5: a new machine (or box) gets beads back from the private repo: clone, link, bootstrap the database."""
+
+    def setUp(self):
+        super().setUp()
+        self.slug = ("acme", "widget-beads")
+        # the first machine moves its beads to the layout, which fills the stand-in GitHub repo
+        old = self.repo / ".beads"
+        old.mkdir()
+        (old / "config.yaml").write_text("prefix: w\n")
+        lines = beads.adopt_layout(self.repo, beads.inspect(self.repo), self.slug, lambda q: True)
+        self.assertFalse([d for _, w, d in lines if w in beads.PROBLEMS], lines)
+        # the second machine: its own HOME, a checkout with the same origin, no beads
+        self.home2 = self.tmp / "home2"
+        (self.home2 / "code").mkdir(parents=True)
+        self.repo2 = self.home2 / "code" / "widget"
+        self.repo2.mkdir()
+        git(self.repo2, "init", "-q", "-b", "main", ".")
+        git(self.repo2, "remote", "add", "origin", "https://github.com/acme/widget.git")
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home2), "GH_EXISTS": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.dest2 = self.home2 / "code" / "widget-beads"
+        self.gh_log.write_text("")
+        self.bd_log.write_text("")
+        self.asked = []
+
+    def restore(self, yes="default"):
+        def ask(q):
+            self.asked.append(q)
+            return True
+        return beads.restore(self.repo2, self.slug, ask if yes == "default" else yes)
+
+    def problems(self, lines):
+        return " ".join(d for _, w, d in lines if w in beads.PROBLEMS)
+
+    def test_restore_clones_links_bootstraps(self):
+        lines = self.restore()
+        self.assertEqual(self.problems(lines), "")
+        self.assertEqual(self.gh_calls()[-1], f"repo clone acme/widget-beads {self.dest2}")
+        state = beads.inspect(self.repo2)
+        self.assertEqual((state.kind, state.ignored), ("link", True))
+        self.assertEqual(state.beads_repo, self.dest2.resolve())
+        self.assertIn(f"{self.dest2.resolve()} :: bootstrap --yes", self.bd_log.read_text().replace("//", "/"))
+        self.assertNotIn("repo create", " ".join(self.gh_calls()))
+        self.assertNotIn(" init", " ".join(self.bd_calls()))  # never a fresh database
+
+    def test_restore_repo_missing_stops(self):
+        os.environ.pop("GH_EXISTS")
+        lines = self.restore()
+        self.assertIn("not found", self.problems(lines))
+        self.assertNotIn("repo create", " ".join(self.gh_calls()))
+        self.assertNotIn("repo clone", " ".join(self.gh_calls()))
+        self.assertFalse(self.dest2.exists() or (self.repo2 / ".beads").is_symlink())
+
+    def test_restore_gh_not_signed_in_stops(self):
+        os.environ["GH_NOT_SIGNED_IN"] = "1"
+        lines = self.restore()
+        text = self.problems(lines)
+        self.assertIn("gh auth login", text)
+        self.assertIn("fine-grained token", text)
+        self.assertNotIn("repo create", " ".join(self.gh_calls()))
+        self.assertEqual(self.asked, [])
+
+    def test_restore_no_terminal_only_describes(self):
+        lines = self.restore(yes=None)
+        self.assertEqual(self.gh_calls(), ["auth status", "repo view acme/widget-beads"])  # read-only
+        self.assertFalse(self.dest2.exists() or (self.repo2 / ".beads").is_symlink())
+        self.assertIn("acme/widget-beads", " ".join(d for _, _, d in lines))
+        self.assertEqual(self.problems(lines), "")
+
+    def test_restore_no_terminal_and_not_signed_in_says_what_sign_in_is_needed(self):
+        os.environ["GH_NOT_SIGNED_IN"] = "1"
+        lines = self.restore(yes=None)
+        text = self.problems(lines)
+        self.assertIn("fine-grained token", text)
+        self.assertIn("never", text)
+        self.assertFalse(self.dest2.exists())
+
+    def test_restore_declined_changes_nothing(self):
+        lines = self.restore(yes=lambda q: False)
+        self.assertNotIn("repo clone", " ".join(self.gh_calls()))
+        self.assertFalse(self.dest2.exists())
+        self.assertEqual(lines[-1][1], "skipped")
+
+    def test_restore_without_a_recorded_dolt_remote_stops_before_bootstrap(self):
+        # a clone whose config does not name the Dolt remote would bootstrap an EMPTY database: refused
+        bare = self.remotes / "widget-beads.git"
+        work = self.tmp / "work"
+        subprocess.run(["git", "clone", "-q", str(bare), str(work)], check=True, capture_output=True)
+        (work / ".beads" / "config.yaml").write_text("prefix: w\n")
+        git(work, "commit", "-qam", "drop the remote")
+        git(work, "push", "-q", "origin", "main")
+        lines = self.restore()
+        self.assertIn("Dolt remote", self.problems(lines))
+        self.assertNotIn("bootstrap", " ".join(self.bd_calls()))
+        self.assertFalse((self.repo2 / ".beads").is_symlink())
+
+    def test_a_failed_bootstrap_removes_the_link_keeps_the_clone(self):
+        os.environ["BD_FAIL"] = "bootstrap"
+        lines = self.restore()
+        self.assertIn("bootstrap", self.problems(lines))
+        self.assertFalse((self.repo2 / ".beads").is_symlink())
+        self.assertTrue(self.dest2.is_dir())
+
+    def test_a_folder_in_the_way_is_never_touched(self):
+        self.dest2.mkdir()
+        (self.dest2 / "mine").write_text("x")
+        lines = self.restore()
+        self.assertEqual((self.dest2 / "mine").read_text(), "x")
+        self.assertIn("already exists", self.problems(lines))
+
+    def test_a_beads_workspace_already_there_means_nothing_to_restore(self):
+        (self.repo2 / ".beads").mkdir()
+        self.assertEqual(self.restore(), [])
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_an_existing_clone_is_reused_not_cloned_again(self):
+        subprocess.run(["git", "clone", "-q", str(self.remotes / "widget-beads.git"), str(self.dest2)], check=True,
+                       capture_output=True)
+        lines = self.restore()
+        self.assertEqual(self.problems(lines), "")
+        self.assertNotIn("repo clone", " ".join(self.gh_calls()))
+        self.assertEqual(beads.inspect(self.repo2).kind, "link")
 
 
 if __name__ == "__main__":

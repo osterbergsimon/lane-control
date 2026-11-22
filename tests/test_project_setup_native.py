@@ -326,6 +326,25 @@ class RenderTests(Case):
         self.assertIn("private GitHub repo", r.stdout)
         self.assertTrue((self.repo / ".beads").is_dir() and not (self.repo / ".beads").is_symlink())
 
+    def origin(self):
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/app.git"], cwd=self.repo,
+                       capture_output=True)
+
+    def test_a_project_without_beads_gets_the_restore_described_without_a_terminal(self):
+        self.origin()
+        (self.e.bin / "gh").write_text("#!/bin/sh\nexit 0\n")
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("beads: would clone the private GitHub repo acme/app-beads", r.stdout)
+        self.assertFalse((self.repo / ".beads").exists() or (self.repo / ".beads").is_symlink())
+
+    def test_a_project_without_beads_on_a_box_not_signed_in_to_github_says_what_is_needed(self):
+        self.origin()  # the stub gh exits 1: not signed in
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("fine-grained token", r.stderr)
+        self.assertFalse((self.repo / ".beads").exists())
+
     def test_beads_repo_flag_is_kept_in_the_settings_store(self):
         (self.repo / ".beads").mkdir()
         r = self.e.run(str(self.repo), "--no-start", "--beads-repo", "acme/widget-priv-beads")
