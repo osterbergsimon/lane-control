@@ -9,13 +9,12 @@ Every lane-control project uses beads (bd) for issues, handovers and memories: t
 the records all assume it. But project-setup only prints a note when bd or a beads workspace is missing and creates
 nothing. So each project's beads is whatever was set up by hand at the time, and it drifts:
 
-- calvin's beads lives only on this machine: a real, git-ignored `.beads/` folder in a public repo, with no remote.
+- Beads lives only on this machine: a real, git-ignored `.beads/` folder in a public repo, with no remote.
   Its issues and memories would be lost with the disk or in a move.
-- calvin's SessionStart hook runs `bd prime --hook-json`, a flag the installed bd 1.0.4 does not have (calvin-w7bt).
-- calvin's git `core.hooksPath` points at `.beads/hooks`, so bd's git hooks run on every calvin commit.
-- lane-control, pasteur and vellum each use a private `<project>-beads` GitHub repo linked from `.beads`, pushed
-  both by git and by `bd dolt push` (the same GitHub repo is the Dolt remote). Only pasteur has a `bd prime`
-  session hook of its own.
+- The SessionStart hook runs `bd prime --hook-json`, a flag the installed bd 1.0.4 does not have.
+- Git `core.hooksPath` points at `.beads/hooks`, so bd's git hooks run on every commit.
+- lane-control uses a private `<project>-beads` GitHub repo linked from `.beads`, pushed
+  both by git and by `bd dolt push` (the same GitHub repo is the Dolt remote).
 
 The owner's goal: **move a project between machines (a migration, or onto a box) without losing beads**: issues
 and memories both. Only one machine works on a project at a time.
@@ -38,7 +37,7 @@ and memories both. Only one machine works on a project at a time.
 
 ## Anti-goals (a failure even if it works)
 
-- Beads data, or a path to it, ending up in a public project repo (calvin and lane-control are public).
+- Beads data, or a path to it, ending up in a public project repo (lane-control is public).
 - lane-control creating a GitHub repo, a link or a workspace without the owner's yes.
 - A setup re-run that silently moves, overwrites or deletes an existing beads folder.
 - A restore that brings back issues but not memories.
@@ -49,7 +48,7 @@ and memories both. Only one machine works on a project at a time.
   git-ignored symlink to `<beads-repo>/.beads`. The beads repo's git history carries config and committed files; the
   same GitHub repo is the Dolt remote, so `bd dolt push` carries the whole database, memories included. Restore =
   clone the beads repo, link it, pull the database. Already used by three of four projects.
-- B. Dolt remote only, plain `.beads` folder in the project (calvin's shape plus a remote). One mechanism, but config
+- B. Dolt remote only, plain `.beads` folder in the project. One mechanism, but config
   and hooks are saved nowhere, and three projects would change layout. Not chosen.
 - C. Commit exported issues (JSONL). Loses memories. Dropped.
 
@@ -62,7 +61,7 @@ and memories both. Only one machine works on a project at a time.
 - The project's `.beads` is a symlink to `<beads-repo>/.beads` and is git-ignored in the project repo (lc-2rx: a
   setup that drafts the link must check the ignore first, or lanes cannot be removed).
 - The project repo gets no bd git hooks and no `core.hooksPath` pointing into beads. Whether the beads repo itself
-  keeps bd's git hooks (vellum-beads commits `.beads/hooks/`) is for the builder to settle from bd's docs: keep them
+  keeps bd's git hooks is for the builder to settle from bd's docs: keep them
   only if they matter for the symlink layout, and set them up the same way in every beads repo.
 
 ### Setup and check (project-setup and machine-setup)
@@ -75,11 +74,11 @@ and memories both. Only one machine works on a project at a time.
      (for example by running it once); `--memories-only` or similar only if bd's docs say it fits a compact hook.
    - OpenCode: the equivalent through lane-control's OpenCode plugin, if bd offers one; otherwise documented as not
      covered.
-   - A beads hook already in a committed `.claude/settings.json` (calvin's `bd prime --hook-json`): setup checks it
+   - A beads hook already in a committed `.claude/settings.json` (`bd prime --hook-json`): setup checks it
      the same way and, when it fails, names it and the fix (it is the project's committed file: setup does not edit
      it; the coordinator runs a lane). Duplicate hooks (lane-control's plus a committed one) are reported, not run
      twice silently.
-3. **Layout.** When the project has no beads workspace, or has one in a plain folder (calvin), setup offers the move to
+3. **Layout.** When the project has no beads workspace, or has one in a plain folder, setup offers the move to
    the layout above **on the owner's yes** (in a terminal only, like the other yes/no steps; without a terminal it
    only says what it would do):
    - create the private GitHub repo with `gh repo create --private` (outward-facing: its own yes);
@@ -111,12 +110,6 @@ and memories both. Only one machine works on a project at a time.
 - Before a migration, the old machine's last step is a backup (above). Two machines writing at once stays a non-goal;
   docs say so.
 
-### Calvin
-
-calvin moves to this layout as the first real use, on the owner's yes, after the code lands: a private
-`calvin-beads` repo, its `.beads` folder moved in, `core.hooksPath` removed, and calvin-w7bt's hook fix. The calvin
-coordinator is told before and after.
-
 ## Calls made after the builder check (coordinator's calls; the owner can overturn any)
 
 - **Which GitHub repo.** The beads repo is `<project-remote-owner>/<project-repo-name>-beads`, taken from the
@@ -131,7 +124,7 @@ coordinator is told before and after.
 - **Existing code.** The new flow replaces `beads_note`; the lane-worktree `.beads` link step stays as it is. Hooks
   cover Claude and OpenCode; Codex and Pi get the hook where their harness supports a session-start hook, otherwise
   their record.md says it is not covered.
-- **calvin-w7bt** stays calvin's own lane, already queued. This build only detects a broken committed hook and names
+- This build only detects a broken committed hook and names
   it.
 - **Tests** follow the existing opt-in convention in tests/ for anything needing real bd or GitHub.
 

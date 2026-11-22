@@ -24,7 +24,7 @@
 
 ## Review Focus
 
-1. `.beads` is a plain folder holding a live database (calvin's shape): the move must check the database opens from the new place before the old folder is replaced, and leave the old folder untouched on any failure.
+1. `.beads` is a plain folder holding a live database: the move must check the database opens from the new place before the old folder is replaced, and leave the old folder untouched on any failure.
 2. `.beads` is not git-ignored in the project repo: no link is drafted, the fix is named (lc-2rx).
 3. The beads repo exists locally but has no remote or no Dolt remote: reported as "no off-machine copy", not repaired.
 4. Restore when the GitHub beads repo is not found or `gh` is not signed in: stops with the reason; never creates an empty repo.
@@ -120,4 +120,4 @@ Order for a plain folder: `gh repo create <owner>/<name> --private` (own yes) �
 
 **Files:** Modify `orchestrators/native-orca/personas/coordinator.md`, `orchestrators/orca-cotal/personas/coordinator.md`, the night-manager persona, `core/issues.md`, `orchestrators/native-orca/setup.md`; Test `tests/test_content.py`
 - [ ] **Step 1: Tests:** `test_coordinators_back_up_beads`: each coordinator persona's session-end steps contain `git push` in the beads repo then `bd dolt push`, and say a failed backup is reported to the owner. `test_issues_md_layout`: core/issues.md describes the layout, restore and the one-machine-at-a-time rule.
-- [ ] **Steps 2–5:** fail, write, pass, commit. Then push and open a DRAFT PR saying what is tested (stubs, opt-in real bd) and what is not (a real GitHub repo create, a real host restore, calvin's move).
+- [ ] **Steps 2–5:** fail, write, pass, commit. Then push and open a DRAFT PR saying what is tested (stubs, opt-in real bd) and what is not (a real GitHub repo create, a real host restore).
