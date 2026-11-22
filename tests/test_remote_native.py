@@ -425,6 +425,30 @@ class DirectionOneTests(Case):
         self.assertTrue(any("repo add" in l for l in self.e.lines("", self.e.box)))
         self.assertFalse((self.e.home / ".config" / "lane-control" / "projects").exists())  # nothing set up here
 
+    def test_a_box_gets_the_design_kit_and_the_design_skills(self):
+        # review m4 (JAI-1): the box's own setup run installs the kit and the skills in the box's HOME, not here
+        up = self.e.home / "upstream" / "mwg"
+        (up / "skills" / "modern-web-guidance").mkdir(parents=True)
+        (up / "skills" / "modern-web-guidance" / "SKILL.md").write_text("---\nname: x\ndescription: y\n---\nv1\n")
+        git("init", "-q", "-b", "main", cwd=up)
+        git("add", "-A", cwd=up)
+        git("commit", "-q", "-m", "v1", cwd=up)
+        sha = git("rev-parse", "HEAD", cwd=up)
+        (self.e.home / "design-skills.tsv").write_text(
+            f"modern-web-guidance\tfile://{up}\t{sha}\tskills/modern-web-guidance\tApache-2.0\t-\n")
+        self.e.saved("box")
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        box = self.e.box
+        self.assertTrue(os.access(box / ".agents" / "bin" / "design-shots", os.X_OK))
+        for f in ("component-gallery/SKILL.md", "component-gallery/DESIGN.md", "native-orca-lanes/frontend-brief.md",
+                  "modern-web-guidance/SKILL.md"):
+            self.assertTrue((box / ".agents" / "skills" / f).is_file(), f)
+        self.assertTrue((self.repo / ".lane-control" / "design-reviewer.md").is_file())
+        self.assertIn("modern-web-guidance created", r.stdout)
+        for here in ("bin/design-shots", "skills/component-gallery", "skill-sources"):  # nothing set up on this side
+            self.assertFalse((self.e.home / ".agents" / here).exists(), here)
+
     def test_the_host_starts_the_coordinator_and_this_machine_sees_it(self):
         self.e.saved("box")
         cfg = self.e.box / ".claude.json"

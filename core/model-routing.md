@@ -25,7 +25,7 @@ Priority order of projects: <A> first, then <B>, then <C>
 Caps per project (workers in flight):
   <A>: up to <n> standard + <n> deep
   <B>: up to <n> standard + <n> deep
-  <C>: at most <n> standard; deep only for its coordinator and design lead
+  <C>: at most <n> standard; deep only for its coordinator
 Limits to watch: <window and weekly limits, dollar caps, where usage is visible>
 ```
 Do not over-optimize on token cost: correctness and coordinator attention are the binding constraints; a failed cheap lane costs rounds and trust. The machine coordinator may hold lanes back for memory.

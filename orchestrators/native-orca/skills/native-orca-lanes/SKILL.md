@@ -1,6 +1,6 @@
 ---
 name: native-orca-lanes
-description: Gate, open, brief, watch, review and close worker lanes on native Orca (orca-ide orchestration), and the report shape a lane sends back. Use when you are a project coordinator or design lead on native Orca and need to start work in a new lane, talk to it, take its report or close it. Read it before your first lane; use Orca's orchestration guide only as the command reference.
+description: Gate, open, brief, watch, review and close worker lanes on native Orca (orca-ide orchestration), and the report shape a lane sends back. Use when you are a project coordinator on native Orca and need to start work in a new lane, talk to it, take its report or close it. Read it before your first lane; use Orca's orchestration guide only as the command reference.
 ---
 
 # Lanes on native Orca
@@ -31,15 +31,16 @@ Do these in order; any that fails holds the lane, and you tell the owner what it
    that tier, go one up. Exit 4: refused, never start it and never edit the table; tell the owner.
 4. Budget: your persona's budget step allows new work (ceiling-7 and past: no new lanes).
 5. Room: run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner instead of starting it.
-6. Checkout (a coordinator; a design lead skips this, its lanes branch from its own branch): `git fetch origin`,
-   `git status -sb`, `git rev-list --count HEAD..origin/<default>`. Detached, on another branch or behind: hold the
-   lane and tell the owner (behind only and clean: `git merge --ff-only origin/<default>` is fine).
+6. Checkout: `git fetch origin`, `git status -sb`, `git rev-list --count HEAD..origin/<default>`. Detached, on
+   another branch or behind: hold the lane and tell the owner (behind only and clean: `git merge --ff-only
+   origin/<default>` is fine).
 
 ## 2. Brief and open the lane
 Write the brief from `brief.md` next to this skill (the project's copy of lane-control's native lane brief): fill in
 every `<...>`, add what the lane needs from AGENTS.md and `.lane-control/project.md`, and save it outside the repo
 (your scratch folder). A lane on a failing test, a CI run or a bug report starts its brief with the debugger persona
-(`.lane-control/debugger.md`).
+(`.lane-control/debugger.md`). A lane that changes what a user sees gets `frontend-brief.md` next to this skill
+appended to its brief, and the design reviewer beside its code reviewer (your persona, Frontend lanes).
 
 Your own Run is your lanes' Run and your Orca address: if `orca-ide orchestration run-current` shows none, create it
 from your own terminal with `orca-ide orchestration run-create --objective "<your session name>"`.
@@ -52,7 +53,6 @@ orca-ide orchestration worker-start --spec-file <brief> --worktree new-child --a
 
 - `<id>` is `claude` for Claude and `opencode2` for OpenCode (v2); `--effort` only for Claude.
 - OpenCode needs its worktree first: `orca-ide worktree create`, then `--worktree path:<that worktree>`.
-- A design lead runs it from its own worktree, so the lane branches from the design lead's branch.
 - Another host (`--on <environment>`): `--worktree new-top-level --repo <exact selector>` (Orca refuses `new-child`
   and `current` there). Run `orca-ide orchestration check` right after, and on each wake: the wake may not reach you.
 - A paired box (`paired_environment` in the project's settings store): only for what this machine lacks (graphics,
@@ -66,7 +66,7 @@ Then mirror it on the lane's worktree card, so the owner sees it at a glance:
   on what it shows.
 - Answer a lane's question with `orca-ide orchestration reply`; send it anything else with
   `orca-ide orchestration send --to dispatch:<id>`. If a reply seems lost, send again and ask the lane to run `check`.
-- Claude to Claude on this machine (the design lead, the machine coordinator, another coordinator): SendMessage,
+- Claude to Claude on this machine (the machine coordinator, another coordinator): SendMessage,
   addressed by session name (ListAgents lists them). An OpenCode session on this machine: its Run from `orca-ide
   orchestration run-list` (the objective is its session name), then `send --to run:<id>`. An agent on another host has
   no `run:` route (without `--on` it goes to your own Orca; with `--on` the server refuses it). First check that both

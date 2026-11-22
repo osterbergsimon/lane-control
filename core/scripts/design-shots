@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""design-shots: headless screenshots of a project's pages at phone and desktop width in both themes, and a
+before/after comparison (docs/superpowers/specs/2026-11-21-design-kit-design.md, section 7).
+
+  design-shots shoot <base-url> --out <dir> [--page <path>]... [--pages <file>] [--widths 390,1280]
+                     [--themes light,dark] [--wait-for <selector>] [--serve "<command>" [--timeout <s>]]
+  design-shots compare <before-dir> <after-dir> --out <dir>
+
+shoot   one Playwright `screenshot` run per page, width and theme: headless, a fresh browser and context each time (an
+        isolated profile, nothing of the user's), full page, the theme by `--color-scheme`. Files are
+        <name>--<width>--<theme>.png, listed in shots.tsv (name, url, width, theme, file, sha256). No --page or
+        --pages: the base URL itself, named "index". A pages file has one `[name] <path>` per line; # comments.
+        The base URL must be http(s) on 127.0.0.1, localhost or [::1].
+        --serve starts the project's server (sh -c, its own process group), waits up to --timeout seconds (60) for
+        the base URL to answer, and stops the whole group afterwards whatever happens (also on TERM or HUP, and
+        when the command put the server in the background).
+compare pairs <before> and <after> PNGs by name: `same|changed|added|removed <name>` on stdout (byte equality), and
+        <out>/index.html showing each pair side by side.
+
+Playwright comes from DESIGN_SHOTS_PLAYWRIGHT (a command), else ./node_modules/.bin/playwright, else `playwright` on
+PATH. It never downloads Playwright or a browser.
+Exit: 0 done; 1 a shot failed (the others are still taken); 2 usage; 3 no Playwright or no browser; 4 the server
+never answered.
+"""
+import argparse
+import hashlib
+import html
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+NO_BROWSER = ("Executable doesn't exist", "playwright install", "Looks like Playwright")
+INSTALL_HINT = ("install it in the project (`npm i -D playwright && npx playwright install chromium`), or set "
+                "DESIGN_SHOTS_PLAYWRIGHT to a Playwright command (for example `npx --no-install playwright`, which "
+                "never fetches it)")
+
+
+class Usage(Exception):
+    pass
+
+
+def height(width: int) -> int:
+    return 844 if width < 600 else 800
+
+
+def slug(path: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", path.lower()).strip("-")
+    return s or "index"
+
+
+def loopback_url(url: str) -> str:
+    p = urllib.parse.urlsplit(url)
+    if p.scheme not in ("http", "https") or p.hostname not in LOOPBACK:
+        raise Usage(f"{url}: the base URL must be http(s) on 127.0.0.1, localhost or [::1]")
+    return url.rstrip("/")
+
+
+def read_pages(args) -> list:
+    pages = [(slug(p), p) for p in args.page or []]
+    if args.pages:
+        try:
+            lines = Path(args.pages).read_text().splitlines()
+        except OSError as e:
+            raise Usage(f"cannot read {args.pages}: {e}")
+        for line in lines:
+            parts = line.split("#", 1)[0].split() if not line.lstrip().startswith("#") else []
+            if len(parts) == 1:
+                pages.append((slug(parts[0]), parts[0]))
+            elif len(parts) >= 2:
+                pages.append((slug(parts[0]), parts[1]))
+    return pages or [("index", "/")]
+
+
+def playwright() -> list:
+    cmd = os.environ.get("DESIGN_SHOTS_PLAYWRIGHT")
+    if cmd:
+        return shlex.split(cmd)
+    local = Path.cwd() / "node_modules" / ".bin" / "playwright"
+    if local.is_file() and os.access(local, os.X_OK):
+        return [str(local)]
+    found = shutil.which("playwright")
+    if found:
+        return [found]
+    return []
+
+
+def answers(url: str) -> bool:
+    try:
+        urllib.request.urlopen(url, timeout=2).close()
+        return True
+    except urllib.error.HTTPError:
+        return True  # any HTTP answer means the server is up
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def stop(proc) -> None:
+    """Stop the server's whole process group, even when its `sh` has already exited (`--serve "cmd &"`)."""
+    if proc is None:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            proc.poll()  # reap the sh, so an exited leader does not keep the group alive
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                proc.poll()
+                return
+            time.sleep(0.1)
+    proc.poll()
+
+
+class Stopped(SystemExit):
+    pass
+
+
+def on_signal(signum, _frame):
+    raise Stopped(128 + signum)  # runs shoot()'s finally, so the server is stopped
+
+
+def shoot(args) -> int:
+    base = loopback_url(args.base_url)
+    pages = read_pages(args)
+    try:
+        widths = [int(w) for w in args.widths.split(",") if w.strip()]
+    except ValueError:
+        raise Usage(f"--widths {args.widths}: comma-separated numbers")
+    themes = [t.strip() for t in args.themes.split(",") if t.strip()]
+    if not widths or not themes or any(t not in ("light", "dark") for t in themes):
+        raise Usage("--widths needs numbers and --themes light and/or dark")
+    pw = playwright()
+    if not pw:
+        print(f"design-shots: no Playwright found: {INSTALL_HINT}", file=sys.stderr)
+        return 3
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    server = None
+    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        if args.serve:
+            server = subprocess.Popen(["sh", "-c", args.serve], start_new_session=True,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.monotonic() + args.timeout
+            while not answers(base + "/"):
+                # an sh that exits 0 may have put the server in the background (`cmd &`): keep waiting for it
+                if time.monotonic() > deadline or server.poll() not in (None, 0):
+                    print(f"design-shots: {base} never answered (--serve, {args.timeout:g}s)", file=sys.stderr)
+                    return 4
+                time.sleep(0.3)
+        rows, failed = [], []
+        for name, path in pages:
+            url = base + (path if path.startswith(("/", "?", "#")) else "/" + path)
+            for w in widths:
+                for theme in themes:
+                    stem = f"{name}--{w}--{theme}"
+                    f = out / f"{stem}.png"
+                    cmd = [*pw, "screenshot", "--browser", "chromium", "--viewport-size", f"{w},{height(w)}",
+                           "--color-scheme", theme, "--full-page"]
+                    if args.wait_for:
+                        cmd += ["--wait-for-selector", args.wait_for]
+                    try:
+                        r = subprocess.run([*cmd, url, str(f)], capture_output=True, text=True, timeout=180)
+                    except (OSError, subprocess.TimeoutExpired) as e:
+                        failed.append(f"{stem}: {e}")
+                        continue
+                    if r.returncode != 0 or not f.is_file():
+                        if any(s in (r.stderr + r.stdout) for s in NO_BROWSER):
+                            print(f"design-shots: Playwright has no browser: {INSTALL_HINT}", file=sys.stderr)
+                            return 3
+                        failed.append(f"{stem}: {(r.stderr or r.stdout).strip().splitlines()[-1:] or 'failed'}")
+                        continue
+                    rows.append((name, url, str(w), theme, f.name, hashlib.sha256(f.read_bytes()).hexdigest()))
+        (out / "shots.tsv").write_text("".join("\t".join(r) + "\n" for r in
+                                               [("name", "url", "width", "theme", "file", "sha256"), *rows]))
+        print(f"design-shots: {len(rows)} shots in {out}")
+        for line in failed:
+            print(f"design-shots: failed {line}", file=sys.stderr)
+        return 1 if failed else 0
+    finally:
+        for s in previous:
+            signal.signal(s, signal.SIG_IGN)  # a second signal must not cut the stop short
+        try:
+            stop(server)
+        finally:
+            for s, h in previous.items():
+                signal.signal(s, h)
+
+
+def compare(args) -> int:
+    before, after, out = Path(args.before), Path(args.after), Path(args.out)
+    for d in (before, after):
+        if not d.is_dir():
+            raise Usage(f"{d}: not a directory")
+    b = {p.stem: p for p in before.glob("*.png")}
+    a = {p.stem: p for p in after.glob("*.png")}
+    out.mkdir(parents=True, exist_ok=True)
+    cells = []
+    for name in sorted(set(a) | set(b)):
+        if name in a and name in b:
+            state = "same" if a[name].read_bytes() == b[name].read_bytes() else "changed"
+        else:
+            state = "added" if name in a else "removed"
+        print(f"{state} {name}")
+
+        def img(p):
+            return (f'<img src="{html.escape(os.path.relpath(p, out))}" alt="">' if p else "<p>none</p>")
+        cells.append(f'<section class="{state}"><h2>{html.escape(name)}: {state}</h2><div>'
+                     f"<figure>{img(b.get(name))}<figcaption>before</figcaption></figure>"
+                     f"<figure>{img(a.get(name))}<figcaption>after</figcaption></figure></div></section>")
+    (out / "index.html").write_text(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+        "<meta name=color-scheme content='light dark'><title>design-shots compare</title>"
+        "<style>body{font:14px system-ui;margin:1rem}div{display:flex;gap:1rem;flex-wrap:wrap}"
+        "figure{margin:0;flex:1 1 20rem}img{max-width:100%;border:1px solid #888}.same{opacity:.6}</style>"
+        + "".join(cells))
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="design-shots", add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    s = sub.add_parser("shoot", add_help=False)
+    s.add_argument("base_url")
+    s.add_argument("--out", required=True)
+    s.add_argument("--page", action="append")
+    s.add_argument("--pages")
+    s.add_argument("--widths", default="390,1280")
+    s.add_argument("--themes", default="light,dark")
+    s.add_argument("--wait-for")
+    s.add_argument("--serve")
+    s.add_argument("--timeout", type=float, default=60)
+    c = sub.add_parser("compare", add_help=False)
+    c.add_argument("before")
+    c.add_argument("after")
+    c.add_argument("--out", required=True)
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit:
+        return 2
+    if args.help:
+        print(__doc__.strip())
+        return 0
+    try:
+        if args.cmd == "shoot":
+            return shoot(args)
+        if args.cmd == "compare":
+            return compare(args)
+        print(__doc__.strip().splitlines()[2], file=sys.stderr)
+        return 2
+    except Usage as e:
+        print(f"design-shots: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

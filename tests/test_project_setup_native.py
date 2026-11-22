@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import unittest
@@ -154,7 +155,7 @@ class OrchestratorChoiceTests(Case):
 
 class RolePinTests(Case):
     def test_hosted_opencode_role_is_refused_naming_the_rule(self):
-        for flag in ("--coordinator", "--design-lead", "--reviewer"):
+        for flag in ("--coordinator", "--reviewer"):
             for model in ("opencode/opencode-go/deepseek-v4.1-flash", "opencode/opencode/big-pickle"):
                 r = self.e.run(str(self.repo), flag, model, "--no-start")
                 self.assertEqual(r.returncode, 2, (flag, model, r.stderr))
@@ -163,11 +164,11 @@ class RolePinTests(Case):
         self.assertEqual(self.e.calls(), [])  # refused before anything ran
 
     def test_an_own_opencode_model_is_taken_for_every_role(self):
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--design-lead", "opencode/gw/m1",
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1",
                        "--reviewer", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(self.e.settings(self.repo)["models"],
-                         {"coordinator": "opencode/gw/m1", "design-lead": "opencode/gw/m1", "reviewer": "opencode/gw/m1"})
+                         {"coordinator": "opencode/gw/m1", "reviewer": "opencode/gw/m1"})
 
     def test_an_opencode_model_not_declared_own_is_refused(self):
         r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--no-start")
@@ -175,13 +176,12 @@ class RolePinTests(Case):
         self.assertIn("--own-model", r.stderr)
 
     def test_opencode_role_refuses_claude_only_permission_modes(self):
-        for flag in ("--coordinator", "--design-lead"):
-            for mode in ("acceptEdits", "plan", "dontAsk"):
-                r = self.e.run(str(self.repo), flag, "opencode/gw/m1", "--own-model", "gw/m1",
-                               "--permission-mode", mode)
-                self.assertEqual(r.returncode, 2, (flag, mode, r.stderr))
-                self.assertIn("OpenCode", r.stderr)
-                self.assertIn(mode, r.stderr)
+        for mode in ("acceptEdits", "plan", "dontAsk"):
+            r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1",
+                           "--permission-mode", mode)
+            self.assertEqual(r.returncode, 2, (mode, r.stderr))
+            self.assertIn("OpenCode", r.stderr)
+            self.assertIn(mode, r.stderr)
         self.assertEqual(self.e.creates(), [])
 
     def test_claude_roles_take_every_claude_mode(self):
@@ -198,7 +198,7 @@ class RolePinTests(Case):
 
 # --- Task 3.2 ------------------------------------------------------------------------------------------------------
 
-ROLES = ("coordinator", "design-lead", "reviewer", "debugger")
+ROLES = ("coordinator", "reviewer", "design-reviewer", "debugger")
 
 
 class RenderTests(Case):
@@ -244,15 +244,13 @@ class RenderTests(Case):
             self.assertIn(f"agent: {h}\nmodel: {m}\n", coordinator)
             self.assertIn(f"`{self.e.store(self.repo) / 'lanes.tsv'}`", coordinator)
             self.assertIn(str(self.repo / ".lane-control" / "reviewer.md"), coordinator)
-            self.assertIn("role `design-lead`", " ".join(coordinator.split()))
+            self.assertNotIn("design lead", " ".join(coordinator.split()).lower())
 
     def test_no_design_lead_renders_no_design_lead_persona(self):
-        self.e.run(str(self.repo), "--no-start")
-        self.assertTrue(self.lane("design-lead").exists())
-        r = self.e.run(str(self.repo), "--no-design-lead", "--no-start")
+        r = self.e.run(str(self.repo), "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertFalse(self.lane("design-lead").exists())
-        self.assertIn("This project has no design lead", " ".join(self.lane("coordinator").read_text().split()))
+        self.assertNotIn("design lead", " ".join(self.lane("coordinator").read_text().split()).lower())
 
     def test_additions_are_appended_after_the_persona(self):
         add = self.repo / ".lane-control" / "additions"
@@ -306,7 +304,7 @@ class RenderTests(Case):
         plugin = Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "lane-persona.js"
         self.e.run(str(self.repo), "--no-start")
         self.assertFalse(plugin.exists())  # no OpenCode role: nothing of OpenCode's is touched
-        r = self.e.run(str(self.repo), "--design-lead", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(plugin.read_bytes(), (ROOT / "core" / "harnesses" / "opencode" / "lane-persona.js").read_bytes())
 
@@ -381,7 +379,7 @@ class StartTests(Case):
         self.assertEqual(sorted((self.e.store(self.repo) / "launch").iterdir()), [])
         objectives = {x["runId"]: x["objective"] for x in json.loads(self.e.state.read_text())["runs"]}
         self.assertEqual(objectives[runs["coordinator"]], "app coordinator")
-        self.assertEqual(objectives[runs["design-lead"]], "app design lead")
+        self.assertEqual(list(runs), ["coordinator"])
 
     def test_opencode_coordinator_starts_with_opencode2_and_its_prompt(self):
         r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-design-lead")
@@ -392,41 +390,23 @@ class StartTests(Case):
         self.assertIn(str(self.repo / ".lane-control" / "coordinator.md"), opt(s["argv"], "--prompt"))
         self.assertNotIn("--name", s["argv"])
 
-    def test_design_lead_starts_in_its_own_worktree(self):
-        r = self.e.run(str(self.repo))
-        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        c = self.create("app design lead")
-        wt = Path(opt(c, "--worktree").split(":", 1)[1])
-        self.assertNotEqual(wt, self.repo)
-        self.assertTrue(any(f"--name design-lead --parent-worktree path:{self.repo}" in x for x in self.e.calls()))
-        s = self.session("design-lead")
-        self.assertEqual((s["persona"], s["cwd"]), (str(self.repo / ".lane-control" / "design-lead.md"), str(wt)))
-        self.assertEqual(opt(s["argv"], "--name"), "app design lead")
-        hook = json.loads((wt / ".claude" / "settings.local.json").read_text())
-        self.assertEqual(len(hook["hooks"]["SessionStart"]), 1)
-
-    def test_an_opencode_design_lead_gets_the_project_level_plugin_in_its_own_worktree(self):
-        # UP-6 review M2: the design lead runs in its own worktree, and the plugin file is not committed, so a
-        # project-level install has to be made there too (as Claude's hook is).
-        r = self.e.run(str(self.repo), "--design-lead", "opencode/gw/m1", "--own-model", "gw/m1",
+    def test_an_opencode_coordinator_gets_the_project_level_plugin_in_its_checkout(self):
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1",
                        env_extra={"LANE_OPENCODE_PLUGIN": "project"})
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        wt = Path(opt(self.create("app design lead"), "--worktree").split(":", 1)[1])
         plugin = Path(".opencode") / "plugins" / "lane-persona.js"
         self.assertTrue((self.repo / plugin).is_file())
-        self.assertTrue((wt / plugin).is_file(), "the design lead's worktree has no plugin")
         self.assertFalse((self.e.home / ".config" / "opencode" / "plugins").exists())  # user folder untouched
         self.assertIn("/.opencode/plugins/lane-persona.js", (self.repo / ".git" / "info" / "exclude").read_text())
 
-    def test_a_user_level_opencode_design_lead_needs_nothing_in_its_worktree(self):
-        r = self.e.run(str(self.repo), "--design-lead", "opencode/gw/m1", "--own-model", "gw/m1")
+    def test_a_user_level_opencode_coordinator_needs_nothing_in_its_checkout(self):
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        wt = Path(opt(self.create("app design lead"), "--worktree").split(":", 1)[1])
-        self.assertFalse((wt / ".opencode").exists())
+        self.assertFalse((self.repo / ".opencode").exists())
         self.assertTrue((self.e.home / ".config" / "opencode" / "plugins" / "lane-persona.js").is_file())
 
-    def test_no_design_lead_starts_only_the_coordinator(self):
-        self.e.run(str(self.repo), "--no-design-lead")
+    def test_only_the_coordinator_starts_and_no_worktree_is_made(self):
+        self.e.run(str(self.repo))
         self.assertEqual([opt(c, "--title") for c in self.e.creates()], ["app coordinator"])
         self.assertFalse([c for c in self.e.calls() if c.startswith("orca worktree create")])
 
@@ -516,6 +496,379 @@ class NativeSkillTests(Case):
         self.assertIn("skills: updated", r.stdout)
 
 
+class DesignKitInstallTests(Case):
+    """The design kit (docs/superpowers/specs/2026-11-21-design-kit-design.md): the gallery skill with the design
+    file template, the frontend brief next to the lane brief, design-shots with the lane tools, the design reviewer."""
+
+    def test_setup_installs_the_gallery_skill_with_the_design_template(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        skill = self.e.home / ".agents" / "skills" / "component-gallery"
+        self.assertEqual((skill / "SKILL.md").read_text(),
+                         (ROOT / "core" / "skills" / "component-gallery" / "SKILL.md").read_text())
+        self.assertEqual((skill / "DESIGN.md").read_text(), (ROOT / "core" / "templates" / "DESIGN.md").read_text())
+        for agent_dir in (self.e.home / ".claude" / "skills", Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills"):
+            self.assertEqual((agent_dir / "component-gallery").resolve(), skill.resolve())
+        self.assertIn("component-gallery", r.stdout)
+
+    def test_the_frontend_brief_sits_next_to_the_lane_brief(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        lanes = self.e.home / ".agents" / "skills" / "native-orca-lanes"
+        self.assertEqual((lanes / "frontend-brief.md").read_text(),
+                         (ROOT / "core" / "templates" / "frontend-brief.md").read_text())
+
+    def test_design_shots_is_a_lane_tool(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        tool = self.e.home / ".agents" / "bin" / "design-shots"
+        self.assertEqual(tool.read_bytes(), (CORE / "design-shots").read_bytes())
+        self.assertTrue(os.access(tool, os.X_OK))
+
+    def test_the_design_reviewer_is_rendered_pinned_like_the_reviewer_and_kept_out_of_git(self):
+        r = self.e.run(str(self.repo), "--reviewer", "claude/sonnet", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        text = (self.repo / ".lane-control" / "design-reviewer.md").read_text()
+        self.assertIn("name: design-reviewer\n", text)
+        self.assertIn("agent: claude\nmodel: sonnet\n", text)
+        self.assertNotIn("{{", text)
+        self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
+
+
+class DesignSkillsTests(Case):
+    """Setup installs the three design skills for Claude and OpenCode from their upstream repos at pinned commits
+    (design-kit spec, section 9). Local git repos stand in for upstream; everything is under the temp HOME."""
+
+    def upstream(self, name, path, body="---\nname: x\ndescription: y\n---\nv1\n"):
+        d = self.e.home / "upstream" / name
+        (d / path).mkdir(parents=True)
+        (d / path / "SKILL.md").write_text(body)
+        (d / path / "scripts").mkdir()
+        (d / path / "scripts" / "search.py").write_text("print(1)\n")
+        (d / "screenshots").mkdir()
+        (d / "screenshots" / "big.png").write_bytes(b"x" * 1000)
+        (d / "LICENSE").write_text("the upstream licence\n")
+        git("init", "-q", "-b", "main", cwd=d)
+        git("add", "-A", cwd=d)
+        git("commit", "-q", "-m", "v1", cwd=d)
+        return d, git("rev-parse", "HEAD", cwd=d)
+
+    def table(self, *rows):
+        f = self.e.home / "design-skills.tsv"
+        f.write_text("# name\turl\tcommit\tpath\tlicence\tclaude_plugin\n" +
+                     "".join("\t".join(r) + "\n" for r in rows))
+
+    def skills(self):
+        return self.e.home / ".agents" / "skills"
+
+    def test_installs_a_sparse_pinned_checkout_linked_for_opencode_and_claude(self):
+        d, sha = self.upstream("fd", "plugins/frontend-design/skills/frontend-design")
+        self.table(("frontend-design", f"file://{d}", sha, "plugins/frontend-design/skills/frontend-design",
+                    "Apache-2.0", "frontend-design@claude-plugins-official"))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        link = self.skills() / "frontend-design"
+        src = self.e.home / ".agents" / "skill-sources" / f"frontend-design@{sha[:12]}"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), (src / "plugins/frontend-design/skills/frontend-design").resolve())
+        self.assertEqual((link / "SKILL.md").read_text().splitlines()[-1], "v1")
+        self.assertTrue((link / "scripts" / "search.py").is_file())
+        self.assertFalse((src / "screenshots").exists())  # only the skill's own folder is checked out
+        self.assertEqual((src / "LICENSE").read_text(), "the upstream licence\n")  # and the repo's licence (n1)
+        self.assertEqual((self.e.home / ".claude" / "skills" / "frontend-design").resolve(), link.resolve())
+        self.assertFalse((Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills" / "frontend-design").exists())
+        self.assertIn("design-skills: created", r.stdout)
+        self.assertIn("frontend-design created", r.stdout)
+
+    def test_a_rerun_changes_nothing_and_a_new_pin_updates_it(self):
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        self.table(("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertIn("design-skills: exists", r.stdout)
+        (d / "skills/modern-web-guidance/SKILL.md").write_text("---\nname: x\ndescription: y\n---\nv2\n")
+        git("commit", "-q", "-am", "v2", cwd=d)
+        sha2 = git("rev-parse", "HEAD", cwd=d)
+        self.table(("modern-web-guidance", f"file://{d}", sha2, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("modern-web-guidance updated", r.stdout)
+        self.assertEqual((self.skills() / "modern-web-guidance" / "SKILL.md").read_text().splitlines()[-1], "v2")
+        sources = sorted(p.name for p in (self.e.home / ".agents" / "skill-sources").iterdir())
+        self.assertEqual(sources, [f"modern-web-guidance@{sha2[:12]}"])  # our older checkout is gone
+
+    def test_the_owners_own_install_is_left_alone(self):
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        self.table(("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        own = self.skills() / "modern-web-guidance"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("the owner's\n")
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse(own.is_symlink())
+        self.assertEqual((own / "SKILL.md").read_text(), "the owner's\n")
+        self.assertIn("modern-web-guidance exists (not lane-control's)", r.stdout)
+        self.assertFalse((self.e.home / ".agents" / "skill-sources").exists())
+
+    def test_no_claude_link_when_claude_has_the_plugin(self):
+        d, sha = self.upstream("ux", ".claude/skills/ui-ux-pro-max")
+        self.table(("ui-ux-pro-max", f"file://{d}", sha, ".claude/skills/ui-ux-pro-max", "MIT",
+                    "ui-ux-pro-max@ui-ux-pro-max-skill"))
+        plugins = self.e.home / ".claude" / "plugins"
+        plugins.mkdir(parents=True)
+        (plugins / "installed_plugins.json").write_text(json.dumps(
+            {"version": 2, "plugins": {"ui-ux-pro-max@ui-ux-pro-max-skill": [{"scope": "user"}]}}))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue((self.skills() / "ui-ux-pro-max").is_symlink())  # OpenCode's
+        self.assertFalse((self.e.home / ".claude" / "skills" / "ui-ux-pro-max").exists())  # Claude has its plugin
+
+    def test_a_failed_fetch_is_named_and_setup_goes_on(self):
+        self.table(("frontend-design", f"file://{self.e.home}/nowhere", "0" * 40, "skills/x", "Apache-2.0", "-"))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("design-skills: missing", r.stdout)
+        self.assertIn("frontend-design missing", r.stdout)
+        self.assertFalse((self.skills() / "frontend-design").exists())
+        self.assertEqual(list((self.e.home / ".agents" / "skill-sources").glob("*")), [])
+        self.assertTrue((self.repo / ".lane-control" / "coordinator.md").exists())
+
+    def test_an_existing_claude_skill_of_that_name_is_left_alone(self):
+        # review m6
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        self.table(("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        own = self.e.home / ".claude" / "skills" / "modern-web-guidance"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("the owner's\n")
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue((self.skills() / "modern-web-guidance").is_symlink())  # OpenCode's is still installed
+        self.assertFalse(own.is_symlink())
+        self.assertEqual((own / "SKILL.md").read_text(), "the owner's\n")
+
+    def test_a_dangling_link_of_ours_is_fetched_again(self):
+        # review m6: the checkout under skill-sources was removed by hand; the link of ours points at nothing
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        self.table(("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-"))
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        src = self.e.home / ".agents" / "skill-sources" / f"modern-web-guidance@{sha[:12]}"
+        shutil.rmtree(src)
+        link = self.skills() / "modern-web-guidance"
+        self.assertTrue(link.is_symlink() and not link.exists())
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("modern-web-guidance updated", r.stdout)
+        self.assertEqual((link / "SKILL.md").read_text().splitlines()[-1], "v1")
+
+    def test_a_bad_row_is_refused_before_any_git_runs(self):
+        # review m2: LANE_DESIGN_SKILLS can replace the table, so the code checks each row, not only the shipped file
+        d, sha = self.upstream("mwg", "skills/modern-web-guidance")
+        good = ("modern-web-guidance", f"file://{d}", sha, "skills/modern-web-guidance", "Apache-2.0", "-")
+        bad = {"a/b": ("a/b",) + good[1:], "star": ("*",) + good[1:], "dots": ("..",) + good[1:],
+               "branch": ("bad-commit-branch", good[1], "main") + good[3:],
+               "short": ("bad-commit-short", good[1], sha[:12]) + good[3:],
+               "up": ("bad-path-up", good[1], sha, "skills/../../x") + good[4:],
+               "abs": ("bad-path-abs", good[1], sha, "/etc") + good[4:],
+               "ext": ("bad-url-ext", "ext::sh -c 'touch pwned'", sha) + good[3:],
+               "http": ("bad-url-http", "http://example.com/x.git", sha) + good[3:],
+               "dash": ("bad-url-dash", "-uhttps://x", sha) + good[3:]}
+        self.table(*bad.values(), good)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("modern-web-guidance created", r.stdout)
+        self.assertEqual(r.stdout.count("refused:"), len(bad), r.stdout)
+        sources = sorted(p.name for p in (self.e.home / ".agents" / "skill-sources").iterdir())
+        self.assertEqual(sources, [f"modern-web-guidance@{sha[:12]}"])
+        self.assertEqual(sorted(p.name for p in self.skills().iterdir() if not p.name.startswith(".")),
+                         sorted(["modern-web-guidance", "native-orca-lanes", "component-gallery"]))
+        self.assertEqual(list(self.e.home.rglob("pwned")), [])
+
+    def test_the_shipped_table_needs_https(self):
+        m = load()
+        row = ("frontend-design", "file:///tmp/x", "0" * 40, "skills/frontend-design", "Apache-2.0", "-")
+        self.assertIn("https", m.bad_skill_row(row, override=False))
+        self.assertIsNone(m.bad_skill_row(row, override=True))  # a test's local stand-in for upstream
+        self.assertIsNone(m.bad_skill_row(("x", "https://github.com/a/b.git", "0" * 40, "s/x", "MIT", "-"), False))
+
+    def test_the_real_table_pins_upstream_repos_with_open_licences(self):
+        rows = [l.split("\t") for l in (ROOT / "core" / "design-skills.tsv").read_text().splitlines()
+                if l and not l.startswith("#")]
+        self.assertEqual(sorted(r[0] for r in rows), ["frontend-design", "modern-web-guidance", "ui-ux-pro-max"])
+        for name, url, commit, path, licence, plugin in rows:
+            self.assertTrue(url.startswith("https://github.com/") and url.endswith(".git"), url)
+            self.assertRegex(commit, r"^[0-9a-f]{40}$")
+            self.assertTrue(path.endswith(name), path)
+            self.assertIn(licence, ("Apache-2.0", "MIT"))
+            self.assertTrue(plugin == "-" or plugin.startswith(name + "@"), plugin)
+
+
+class RetireDesignLeadTests(Case):
+    """A project set up with a design lead: re-running setup retires it without deleting anything silently (design-kit
+    spec, section 8). The additions move into DESIGN.md only on the owner's yes; a running session is never stopped."""
+
+    ADD = ".lane-control/additions/design-lead.md"
+    BODY = "## Subject\nShoppers on phones.\n\n## Seeing it run\nnpm run dev, port 5173.\n"
+
+    def with_old_design_lead(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        f = self.repo / self.ADD
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("---\nlane_control_template: 1\n---\n" + self.BODY)
+        git("add", self.ADD, cwd=self.repo)
+        git("commit", "-q", "-m", "design lead additions", cwd=self.repo)
+        st = self.e.settings(self.repo)
+        st["design_lead"] = True
+        st["models"]["design-lead"] = "claude/opus"
+        (self.e.store(self.repo) / "settings.json").write_text(json.dumps(st))
+        (self.repo / ".lane-control" / "design-lead.md").write_text("rendered design lead persona\n")
+
+    def in_terminal(self, answer, *args):
+        m = load()
+        out = Tty()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", return_value=answer), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            status = m.main([str(self.repo), "--skip-adapt", "--no-start", *args])
+        return status, out.getvalue() + err.getvalue()
+
+    def leftover_session(self):
+        wt = self.e.home / "orca" / "workspaces" / "design-lead"
+        git("worktree", "add", "-q", "-b", "design-lead", str(wt), cwd=self.repo)
+        (wt / "draft.css").write_text("body{}\n")
+        s = self.e.stub_state()
+        rid = next(r["id"] for r in s["repos"] if Path(r["path"]) == self.repo)
+        s["worktrees"].append({"repo": rid, "name": "design-lead", "path": str(wt), "parent": f"{rid}::{self.repo}"})
+        s["terminals"].append({"handle": "term_dl", "title": "app design lead", "worktreePath": str(wt),
+                               "agentIdentity": "claude"})
+        self.e.state.write_text(json.dumps(s))
+        return wt
+
+    def test_without_a_terminal_nothing_moves_and_it_says_what_it_would_do(self):
+        self.with_old_design_lead()
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("design-lead: retired", r.stdout)
+        self.assertIn(f"{self.ADD} would move into DESIGN.md", r.stdout)
+        self.assertTrue((self.repo / self.ADD).exists())
+        self.assertFalse((self.repo / "DESIGN.md").exists())
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+
+    def test_the_settings_store_drops_the_design_lead(self):
+        self.with_old_design_lead()
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        st = self.e.settings(self.repo)
+        self.assertNotIn("design_lead", st)
+        self.assertNotIn("design-lead", st["models"])
+        self.assertIn("dropped from the settings store", r.stdout)
+        self.assertIn("design-lead=claude/opus", r.stdout)  # review m5: the dropped pin stays in the output
+
+    def test_on_yes_the_additions_move_into_design_md_in_one_commit(self):
+        self.with_old_design_lead()
+        status, out = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        design = (self.repo / "DESIGN.md").read_text()
+        self.assertTrue(design.startswith((ROOT / "core" / "templates" / "DESIGN.md").read_text()))
+        self.assertIn("## From the design lead's additions", design)
+        self.assertIn("Shoppers on phones.", design)
+        self.assertNotIn("lane_control_template", design)
+        self.assertFalse((self.repo / self.ADD).exists())
+        self.assertEqual(git("status", "--porcelain", cwd=self.repo), "")
+        files = git("show", "--name-status", "--format=%s", "HEAD", cwd=self.repo).splitlines()
+        self.assertIn("design lead", files[0].lower())
+        self.assertEqual(sorted(files[2:]), sorted([f"D\t{self.ADD}", "A\tDESIGN.md"]))
+        self.assertNotIn("not pushed", out)  # no origin: lanes start from this branch, which has the commit
+
+    def test_on_yes_with_an_origin_it_says_lanes_lack_the_commit_until_pushed(self):
+        # review m5: Orca starts lanes from origin's default branch, so a local commit is not there yet
+        self.with_old_design_lead()
+        bare = self.e.home / "origin.git"
+        git("init", "-q", "--bare", "-b", "main", str(bare), cwd=self.e.home)
+        git("remote", "add", "origin", str(bare), cwd=self.repo)
+        git("push", "-q", "origin", "main", cwd=self.repo)
+        git("remote", "set-head", "origin", "main", cwd=self.repo)
+        status, out = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        self.assertIn("DESIGN.md committed, not pushed: lanes start from origin/main", out)
+        self.assertNotEqual(git("rev-parse", "HEAD", cwd=self.repo), git("rev-parse", "origin/main", cwd=self.repo))
+
+    def test_an_existing_design_md_gets_the_additions_at_its_end(self):
+        self.with_old_design_lead()
+        (self.repo / "DESIGN.md").write_text("# Design\nOur own.\n")
+        git("add", "DESIGN.md", cwd=self.repo)
+        git("commit", "-q", "-m", "design", cwd=self.repo)
+        status, out = self.in_terminal("y")
+        self.assertEqual(status, 0, out)
+        design = (self.repo / "DESIGN.md").read_text()
+        self.assertTrue(design.startswith("# Design\nOur own.\n"))
+        self.assertIn("Shoppers on phones.", design)
+
+    def test_on_no_nothing_moves(self):
+        self.with_old_design_lead()
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        status, out = self.in_terminal("n")
+        self.assertEqual(status, 0, out)
+        self.assertTrue((self.repo / self.ADD).exists())
+        self.assertFalse((self.repo / "DESIGN.md").exists())
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.repo), head)
+        self.assertEqual(git("status", "--porcelain", cwd=self.repo), "")
+
+    def test_a_running_design_lead_is_named_never_stopped_and_keeps_its_persona(self):
+        self.with_old_design_lead()
+        wt = self.leftover_session()
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("app design lead", r.stdout)
+        self.assertIn(str(wt), r.stdout)
+        self.assertIn("1 uncommitted", r.stdout)
+        self.assertIn("handover-design-lead", r.stdout)
+        self.assertTrue(wt.is_dir())
+        self.assertTrue((wt / "draft.css").exists())
+        self.assertIn("app design lead", [x["title"] for x in self.e.stub_state()["terminals"]])
+        self.assertFalse([c for c in self.e.calls() if c.startswith(("orca terminal close", "orca worktree rm"))])
+        self.assertTrue((self.repo / ".lane-control" / "design-lead.md").exists())  # its compaction hook reads it
+
+    def test_with_no_design_lead_running_its_rendered_persona_goes(self):
+        self.with_old_design_lead()
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse((self.repo / ".lane-control" / "design-lead.md").exists())
+        self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
+
+    def test_refresh_retires_it_too(self):
+        self.with_old_design_lead()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("design-lead: retired", r.stdout)
+        self.assertNotIn("design_lead", self.e.settings(self.repo))
+
+    def test_design_lead_flag_is_refused_and_no_design_lead_is_accepted(self):
+        r = self.e.run(str(self.repo), "--design-lead", "claude/opus", "--no-start")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("design lead is retired", r.stderr)
+        self.assertIn("2026-11-21-design-kit-design.md", r.stderr)
+        r = self.e.run(str(self.repo), "--no-design-lead", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+    def test_a_new_project_gets_no_design_lead(self):
+        r = self.e.run(str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse((self.repo / ".lane-control" / "design-lead.md").exists())
+        self.assertEqual([x["role"] for x in self.e.sessions()], ["coordinator"])
+        self.assertFalse([w for w in self.e.stub_state()["worktrees"] if w["name"] == "design-lead"])
+        self.assertNotIn("design_lead", self.e.settings(self.repo))
+        self.assertNotIn("design lead", r.stdout)
+
+    def test_pause_names_a_leftover_design_lead_and_leaves_it_alone(self):
+        self.with_old_design_lead()
+        self.e.run(str(self.repo), "--no-start")
+        self.leftover_session()
+        r = self.e.pause("rest", str(self.repo))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("design-lead", r.stderr)
+        self.assertIn("retired design lead", r.stderr)
+        self.assertIn("app design lead", [x["title"] for x in self.e.stub_state()["terminals"]])
+
+
 class RefreshTests(Case):
     def test_refresh_rerenders_with_the_stored_pins_and_hooks(self):
         r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
@@ -534,6 +887,20 @@ class RefreshTests(Case):
         self.assertTrue(plugin.is_file())
         self.assertEqual(self.e.creates(), [])  # a refresh starts nothing
         self.assertFalse([c for c in self.e.calls() if c.startswith("cotal")])
+
+    def test_refresh_installs_the_lane_tools_design_shots_among_them(self):
+        # review round 2, r2-m1: a box set up before the kit gets design-shots from a --refresh too
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        tool = self.e.home / ".agents" / "bin" / "design-shots"
+        tool.unlink()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue(tool.exists(), r.stdout)
+
+    def test_refresh_says_it_installs_the_lane_tools(self):
+        doc = " ".join(load().native_refresh.__doc__.split())
+        self.assertIn("install the skills and the lane tools (design-shots among them", doc)
+        self.assertNotIn("not refreshed", doc)
 
     def test_refresh_names_running_sessions_to_restart(self):
         self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
@@ -583,19 +950,17 @@ class PauseTests(Case):
 
     def test_stop_asks_for_a_handover_through_the_run_then_closes(self):
         (self.e.home / "handover-latest").write_text("old handover")
-        self.e.set_state(handover_on_send={"handover-latest": "new", "handover-design-lead": "new"})
+        self.e.set_state(handover_on_send={"handover-latest": "new"})
         runs = self.e.settings(self.repo)["runs"]
         start = len(self.e.calls())  # setup closed Orca's startup shell itself; only stop's calls count here
         r = self.e.pause("stop", str(self.repo), "--wait", "5")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         sent = json.loads(self.e.state.read_text())["sent"]
-        self.assertEqual(sorted(x["to"] for x in sent), sorted(f"run:{runs[k]}" for k in ("coordinator", "design-lead")))
+        self.assertEqual(sorted(x["to"] for x in sent), [f"run:{runs['coordinator']}"])
         self.assertIn("handover", sent[0]["subject"].lower())
         bodies = {x["to"]: x["body"] for x in sent}
         self.assertIn("handover-latest", bodies[f"run:{runs['coordinator']}"])
-        self.assertIn("handover-design-lead", bodies[f"run:{runs['design-lead']}"])
         self.assertNotIn("app coordinator", self.titles())
-        self.assertNotIn("app design lead", self.titles())
         self.assertTrue(self.e.settings(self.repo)["paused"])
         calls = self.e.calls()[start:]
         last_send = max(i for i, c in enumerate(calls) if c.startswith("orca orchestration send"))
@@ -632,11 +997,9 @@ class PauseTests(Case):
         self.assertEqual(len(coord), 2)
         self.assertEqual(opt(coord[-1]["argv"], "--resume"), "abc-123")
         self.assertIn("You are back after a pause", coord[-1]["argv"][-1])
-        lead = [x for x in self.e.sessions() if x["role"] == "design-lead"]
-        self.assertNotIn("--resume", lead[-1]["argv"])  # none recorded: a fresh session
-        self.assertIn("handover-design-lead", lead[-1]["argv"][-1])  # its own handover memory (project-pause stop)
+        self.assertFalse([x for x in self.e.sessions() if x["role"] == "design-lead"])
         self.assertFalse(self.e.settings(self.repo)["paused"])
-        self.assertEqual(len([c for c in self.e.calls() if c.startswith("orca worktree create")]), 1)
+        self.assertEqual([c for c in self.e.calls() if c.startswith("orca worktree create")], [])
 
     def test_start_resumes_an_opencode_session(self):
         r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
@@ -662,7 +1025,7 @@ class PauseTests(Case):
     def test_start_when_running_starts_nothing(self):
         r = self.e.pause("start", str(self.repo))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(len(self.e.sessions()), 2)
+        self.assertEqual(len(self.e.sessions()), 1)
 
     def test_status(self):
         r = self.e.pause("status", str(self.repo))
@@ -702,14 +1065,11 @@ class RerunTests(Case):
         self.assertNotIn("<!-- orchestrator: native-orca -->", agents)
         self.assertEqual(generated.count("<!-- lane-control:begin -->"), 1)
         self.assertEqual(generated.count("<!-- orchestrator: native-orca -->"), 1)
-        lead_wt = Path(opt(next(c for c in self.e.creates() if opt(c, "--title") == "app design lead"),
-                           "--worktree").split(":", 1)[1])
-        for checkout in (self.repo, lead_wt):
-            cfg = json.loads((checkout / ".claude" / "settings.local.json").read_text())
-            self.assertEqual(len(cfg["hooks"]["SessionStart"]), 1, checkout)
+        cfg = json.loads((self.repo / ".claude" / "settings.local.json").read_text())
+        self.assertEqual(len(cfg["hooks"]["SessionStart"]), 1)
         titles = [opt(c, "--title") for c in self.e.creates() if opt(c, "--title")]
-        self.assertEqual(sorted(titles), ["app coordinator", "app design lead"])
-        self.assertEqual(len(started), 2)
+        self.assertEqual(sorted(titles), ["app coordinator"])
+        self.assertEqual(len(started), 1)
         self.assertIn("session coordinator: exists app coordinator", out)
         self.assertEqual((self.repo / ".git" / "info" / "exclude").read_text().count("lane-control: begin"), 1)
         self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
@@ -748,9 +1108,9 @@ class ReviewFixTests(Case):
         return sorted(t.get("title") for t in json.loads(self.e.state.read_text())["terminals"])
 
     def test_stop_waits_for_every_roles_own_handover(self):
-        # Important 1: the design lead writing first must not close the coordinator before its handover.
+        # Important 1: a handover written under another name must not close the coordinator before its own.
         self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
-        self.e.set_state(handover_on_send={"handover-design-lead": "lead's handover"})
+        self.e.set_state(handover_on_send={"handover-design-lead": "someone else's handover"})
         start = len(self.e.calls())
         r = self.e.pause("stop", str(self.repo), "--wait", "1")
         self.assertEqual(r.returncode, 1, r.stdout)
@@ -775,15 +1135,15 @@ class ReviewFixTests(Case):
         self.assertEqual(self.e.run(str(self.repo)).returncode, 0)
         st_file = self.e.store(self.repo) / "settings.json"
         st = json.loads(st_file.read_text())
-        del st["runs"]["design-lead"]
+        del st["runs"]["coordinator"]
         st_file.write_text(json.dumps(st))
         state = json.loads(self.e.state.read_text())  # and no Run of its name to find either
-        state["runs"] = [x for x in state["runs"] if x["objective"] != "app design lead"]
+        state["runs"] = [x for x in state["runs"] if x["objective"] != "app coordinator"]
         self.e.state.write_text(json.dumps(state))
         r = self.e.pause("stop", str(self.repo), "--wait", "1")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("app design lead", r.stderr)
-        self.assertNotIn("sent", json.loads(self.e.state.read_text()))  # the coordinator was not told to stop either
+        self.assertIn("app coordinator", r.stderr)
+        self.assertNotIn("sent", json.loads(self.e.state.read_text()))  # nobody was told to stop
 
     def test_a_session_whose_terminal_was_retitled_is_still_found(self):
         # Important 3: the shell (fish) or OpenCode retitles the terminal; the stored handle still finds it.
@@ -839,7 +1199,7 @@ class PinCheckTests(Case):
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
         before = store_bytes(self.e, self.repo)
         for args in (["--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--permission-mode", "plan"],
-                     ["--design-lead", "opencode/gw/m1", "--own-model", "gw/m1", "--permission-mode", "dontAsk"]):
+                     ["--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--permission-mode", "dontAsk"]):
             r = self.e.run(str(self.repo), *args, "--no-start")
             self.assertEqual(r.returncode, 2, (args, r.stderr))
             self.assertEqual(store_bytes(self.e, self.repo), before, args)
@@ -948,7 +1308,7 @@ class HostTests(Case):
     def test_the_orca_md_commands_copy_and_reexec_as_before(self):
         self.ssh()
         shapes = (["https://example.com/acme/shop.git", "--host", "user@host", "--name", "Shop", "--coordinator",
-                   "claude/opus", "--design-lead", "claude/opus", "--permission-mode", "bypassPermissions",
+                   "claude/opus", "--permission-mode", "bypassPermissions",
                    "--reviewer", "claude/opus", "--trust-folder", "--orchestrator", "orca-cotal"],
                   ["~/code/shop", "user@host", "--no-design-lead", "--no-start", "--orchestrator", "orca-cotal"])
         for args in shapes:

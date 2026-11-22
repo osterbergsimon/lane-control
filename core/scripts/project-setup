@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Set up an Orca project with a coordinator and a frontend design lead: on native Orca (the default), or run by Cotal
+"""Set up an Orca project with a coordinator: on native Orca (the default), or run by Cotal
 agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
 
   project-setup <git-url|dir> [<host>] [--orchestrator native-orca|orca-cotal] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
-                [--design-lead HARNESS/MODEL] [--permission-mode auto|bypassPermissions|default]
+                [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE] [--own-model M]... [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
@@ -15,13 +15,15 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
 Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
 adapting agent and a reviewer, committed only on the owner's yes; the role files go to .lane-control/additions/ and
 AGENTS.lane-control.md gets the lane-control and native-orca sections, AGENTS.md one pointer line to it), then the
-personas of the coordinator, design lead, reviewer and debugger rendered into .lane-control/<role>.md with the
-project's additions at the end (kept out of git by .git/info/exclude), the persona hook of each standing role's
-harness (core/harnesses/), and the coordinator and design lead each started in its own Orca terminal titled
-"<project> coordinator" / "<project> design lead", which makes the session's own Orca Run before the agent starts (its
-id goes in the settings store). Claude and OpenCode (v2, opencode2) both take every role; nothing is ever typed into a
-terminal. A project keeps the orchestrator it was set up with (the store, or a .cotal/ folder) unless --orchestrator
-names another.
+personas of the coordinator, reviewer, design reviewer and debugger rendered into .lane-control/<role>.md with the
+project's additions at the end (kept out of git by .git/info/exclude), the persona hook of the coordinator's harness
+(core/harnesses/), the design kit (the component-gallery skill, the frontend brief, design-shots and the design
+skills from core/design-skills.tsv, for Claude and OpenCode), and the coordinator started in its own Orca terminal
+titled "<project> coordinator", which makes the session's own Orca Run before the agent starts (its id goes in the
+settings store). The design lead is retired (docs/superpowers/specs/2026-11-21-design-kit-design.md): what is left of
+one is moved or named, never deleted silently; --design-lead is refused and --no-design-lead does nothing. Claude and
+OpenCode (v2, opencode2) both take every role; nothing is ever typed into a terminal. A project keeps the
+orchestrator it was set up with (the store, or a .cotal/ folder) unless --orchestrator names another.
 
 With a host (`<host>` after the repo, or --host; the repo is then a URL or a path on the host), native Orca runs it
 there and drives it from here (orchestrators/native-orca/remote.md): Orca's server on the host, paired here
@@ -50,7 +52,7 @@ and the agents still start. Nothing else is ever committed or pushed.
 coordinator, rooted at the first repo; the attached one gets lanes from that coordinator and nothing else of its own. It
 gets the per-repo work the first one gets (Orca registration, the stale-checkout refusal, the private-file deny, the
 adapted files and generated sections with AGENTS.md's pointer line, orca.yaml, the same commit rules) but no space,
-manager, coordinator or design lead. --private globs apply to every repo of the project, each relative to its own root. The attached repos are kept in the project's settings store and covered by later runs, --refresh and --show.
+manager or coordinator. --private globs apply to every repo of the project, each relative to its own root. The attached repos are kept in the project's settings store and covered by later runs, --refresh and --show.
 A repo that is its own project, or attached to another, is refused. Lanes branch from each repo's own default branch.
 
 --refresh is for a project set up earlier, after lane-control's personas or skill changed: it re-renders the personas
@@ -62,7 +64,7 @@ The tier table is decided once per project: a full --tiers, else the defaults (o
 project's table unless --tiers gives another.
 
 Per-project settings live outside the repo and outside .cotal/ (which Cotal owns), in
-~/.config/lane-control/projects/<folder name>-<short hash of its path>/: settings.json (models per role, design lead on or off, permission mode,
+~/.config/lane-control/projects/<folder name>-<short hash of its path>/: settings.json (models per role, permission mode,
 --private globs, own models, broker port) and lanes.tsv (the tier table). Flags update
 the store and a run without them reuses it; --show prints it. A project set up before the store existed is moved there
 once, automatically, and the run says what moved. Only the rendered personas stay in .cotal/agents/. No secret goes in.
@@ -118,9 +120,11 @@ ORCHESTRATOR = "orca-cotal"  # this run's, set in main(); the shared steps read 
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
-LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # the library first: a new tool never sees an old one
+LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-shots")  # the library first: a new tool never sees an old one
+OLD_PATH_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # kept as links in scripts/ for machines
 HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "scripts/project-setup",
-              *(f"scripts/{t}" for t in LANE_TOOLS),
+              *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
+              "core/templates/frontend-brief.md", "core/templates/DESIGN.md",
               "core/scripts/project-setup", "core/harnesses", "orchestrators/native-orca",
               "orchestrators/orca-cotal/scripts/project-setup", "orchestrators/orca-cotal/personas",
               "orchestrators/orca-cotal/skills", "orchestrators/orca-cotal/templates",
@@ -152,10 +156,9 @@ def harness_model(spec: str) -> tuple:
     return harness, model
 
 
-DESIGN_ROUTE = ("The project's design lead (`design-lead`, role `design`) owns frontend and visual quality; route\n"
-                "UI work and UI reviews through it.")
-NO_DESIGN_ROUTE = "This project has no design lead: you route any UI work yourself, and it gets the code reviewer only."
-DESIGN_REVIEW = "Frontend\nlanes also get the design lead's review of how it looks and works. "
+DESIGN_KIT = "docs/superpowers/specs/2026-11-21-design-kit-design.md"  # the design lead's retirement (owner, 2026-11-21)
+RETIRED = ("the design lead is retired (owner, 2026-11-21): frontend work runs as ordinary lanes with the design kit, "
+           f"and every frontend lane gets the design reviewer ({DESIGN_KIT})")
 
 
 ATTACHED_RULE = ("- This project also has attached repos, which you open lanes in (the skill's section \"A lane in an "
@@ -163,16 +166,14 @@ ATTACHED_RULE = ("- This project also has attached repos, which you open lanes i
 
 
 def render_persona(text: str, harness: str, model: str, mode: str, project: str, tiers: str = "",
-                   reviewer: str = "", design_lead: bool = True, attached: tuple = ()) -> str:
+                   reviewer: str = "", attached: tuple = ()) -> str:
     # allow-dangerously-skip-permissions puts bypass in Claude's Shift+Tab mode cycle, without starting in it.
     launch = ("events: false" if harness == "opencode" else
               f'launchOptions: {{ "permission-mode": "{mode}", "allow-dangerously-skip-permissions": "" }}')
     rule = ATTACHED_RULE.format(paths=", ".join(f"`{a}`" for a in attached)) if attached else ""
     return (text.replace("{{ATTACHED}}\n", rule).replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
             .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
-            .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(HERE))
-            .replace("{{DESIGN_ROUTE}}", DESIGN_ROUTE if design_lead else NO_DESIGN_ROUTE)
-            .replace("{{DESIGN_REVIEW}}", DESIGN_REVIEW if design_lead else ""))
+            .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(HERE)))
 
 
 def orca_cli() -> str:
@@ -200,10 +201,10 @@ def free_port(start: int) -> int:
     raise Fail("no free broker port in 14200-14999")
 
 
-SETTING_KEYS = ("root", "name", "models", "design_lead", "permission_mode", "private", "own_models", "port",
+SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "own_models", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
                 "paired_environment")  # all that is ever written: names and choices, never a secret
-DEFAULT_PINS = {"coordinator": "claude/opus", "design-lead": "claude/opus", "reviewer": "claude/opus"}
+DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
 
 
 def config_home() -> Path:
@@ -239,8 +240,9 @@ def write_atomic(path: Path, data: bytes, mode: int = 0o644) -> None:
     os.replace(tmp, path)
 
 
-def settings(repo: Path, **kw) -> dict:
-    """The project's settings.json (and, with keywords, updated). Only the names in SETTING_KEYS are written."""
+def settings(repo: Path, drop: tuple = (), **kw) -> dict:
+    """The project's settings.json (and, with keywords, updated; `drop` names keys to take out). Only the names in
+    SETTING_KEYS are written."""
     f = store_dir(repo) / "settings.json"
     try:
         data = json.loads(f.read_text()) if f.exists() else {}
@@ -252,8 +254,11 @@ def settings(repo: Path, **kw) -> dict:
         bad = sorted(set(kw) - set(SETTING_KEYS))
         if bad:
             raise Fail(f"settings key {bad[0]!r} is not one project-setup keeps (no secrets go in the store)")
-        if any(data.get(k) != v for k, v in kw.items()):
+    if kw or drop:
+        if any(data.get(k) != v for k, v in kw.items()) or any(k in data for k in drop):
             data.update(kw)
+            for k in drop:
+                data.pop(k, None)
             store_dir(repo).mkdir(parents=True, exist_ok=True)
             store_dir(repo).chmod(0o700)
             write_atomic(f, (json.dumps(data, indent=2) + "\n").encode(), 0o600)
@@ -267,10 +272,10 @@ def persona_mode(text: str):
 
 
 def persona_pins(agents: Path) -> tuple:
-    """(models, mode, design_lead, mixed) the rendered personas in `agents` carry: {role: "harness/model"}, their mode (None
-    when none records one or they differ), and whether they differ."""
+    """(models, mode, mixed) the rendered personas in `agents` carry: {role: "harness/model"}, their mode (None when none
+    records one or they differ), and whether they differ. A retired design lead's persona is not read."""
     models, modes, texts = {}, set(), {}
-    for n in ("coordinator", "design-lead", "reviewer"):
+    for n in ("coordinator", "reviewer"):
         try:
             texts[n] = (agents / f"{n}.md").read_text()
         except (OSError, UnicodeDecodeError):
@@ -280,14 +285,14 @@ def persona_pins(agents: Path) -> tuple:
             models[n] = f"{h.group(1)}/{m.group(1)}"
         if persona_mode(texts[n]):
             modes.add(persona_mode(texts[n]))
-    return models, (next(iter(modes)) if len(modes) == 1 else None), "design-lead" in texts, len(modes) > 1
+    return models, (next(iter(modes)) if len(modes) == 1 else None), len(modes) > 1
 
 
 def migrate(repo: Path) -> None:
     """Moves a project set up before the store existed: .cotal/lane-control.json into settings.json and .cotal/lanes.tsv
     into lanes.tsv. Once, automatically, and it says what moved. An edited table is copied byte for byte; a file the
     store already has wins and the old one stays where it is, named. Pins the personas carry fill in what the old record
-    never held (models, mode, design lead), so a re-run without flags keeps them."""
+    never held (models, mode), so a re-run without flags keeps them."""
     cotal, said = repo / ".cotal", []
     if not store_dir(repo).exists():
         parent, seen = store_dir(repo).parent, {}
@@ -343,10 +348,10 @@ def migrate(repo: Path) -> None:
         else:
             print(f"warning: {old_tab} differs from {new_tab}; the store's table is the one used, and this old one was "
                   "left where it is", file=sys.stderr, flush=True)
-    models, mode, lead, mixed = persona_pins(cotal / "agents")
+    models, mode, mixed = persona_pins(cotal / "agents")
     fill = {}
     if "coordinator" in models and "models" not in st:
-        fill.update(models=models, design_lead=lead)
+        fill.update(models=models)
         try:
             named = re.search(r"^description: (.+?) coordinator;", (cotal / "agents" / "coordinator.md").read_text(), re.M)
         except (OSError, UnicodeDecodeError):
@@ -358,7 +363,7 @@ def migrate(repo: Path) -> None:
         if mixed:  # storing one of them could widen another's mode
             say("permission-mode", "mixed", "the personas carry different modes, so none is stored and each keeps its own; "
                 "set permission_mode in settings.json to make them one")
-        said.append("models, design lead and permission mode read from the personas in .cotal/agents/")
+        said.append("models and permission mode read from the personas in .cotal/agents/")
     if said or fill:
         settings(repo, root=str(repo), **fill)
     if said:
@@ -696,7 +701,7 @@ def lane_tools(home: Path):
         os.replace(tmp, dst)
         changed = True
     say("lane-tools", "created" if fresh else ("updated" if changed else "exists"),
-        f"lane-heavy, lane-room, lane-tier in {bin_dir}")
+        f"lane-heavy, lane-room, lane-tier, design-shots in {bin_dir}")
 
 
 def skills():
@@ -727,10 +732,141 @@ def native_skills():
     fresh = not (root / "native-orca-lanes").exists()
     changed = install_skill(home, "native-orca-lanes",
                             {"SKILL.md": (NATIVE / "skills" / "native-orca-lanes" / "SKILL.md").read_text(),
-                             "brief.md": (NATIVE / "templates" / "lane-brief.md").read_text()})
+                             "brief.md": (NATIVE / "templates" / "lane-brief.md").read_text(),
+                             "frontend-brief.md": (HERE / "core" / "templates" / "frontend-brief.md").read_text()})
+    changed |= install_skill(home, "component-gallery",
+                             {"SKILL.md": (HERE / "core" / "skills" / "component-gallery" / "SKILL.md").read_text(),
+                              "DESIGN.md": (HERE / "core" / "templates" / "DESIGN.md").read_text()})
     state = "created" if fresh else ("updated" if changed else "exists")
-    say("skills", state, f"native-orca-lanes in {root}")
+    say("skills", state, f"native-orca-lanes, component-gallery in {root}")
+    design_skills(home)
     return state
+
+
+def design_skill_rows() -> list:
+    """core/design-skills.tsv (LANE_DESIGN_SKILLS overrides it): (name, url, commit, path, licence, claude plugin)."""
+    f = Path(os.environ.get("LANE_DESIGN_SKILLS") or HERE / "core" / "design-skills.tsv")
+    rows = []
+    for line in f.read_text().splitlines():
+        parts = line.split("\t")
+        if line.strip() and not line.startswith("#") and len(parts) == 6:
+            rows.append(tuple(parts))
+    return rows
+
+
+SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+SKILL_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def bad_skill_row(row: tuple, override: bool) -> "str | None":
+    """Why a design-skills row is refused, or None. The name and path become paths under ~/.agents and the commit is
+    compared as given, so all are checked here, not only in the shipped file's test. The shipped table fetches over
+    https only; a LANE_DESIGN_SKILLS table (tests' local stand-ins for upstream) may also use file://."""
+    name, url, commit, path = row[:4]
+    if not SKILL_NAME.fullmatch(name):
+        return "the name is not lowercase letters, digits and dashes"
+    if not SKILL_COMMIT.fullmatch(commit):
+        return "the commit is not a full 40-hex commit"
+    if any(part in ("", ".", "..") for part in path.split("/")):  # also refuses "" and a leading or double "/"
+        return "the path is not a plain relative path"
+    schemes = ("https://", "file://") if override else ("https://",)
+    if not url.startswith(schemes):
+        return f"the URL is not {' or '.join(s[:-3] for s in schemes)}"
+    return None
+
+
+def claude_plugins(home: Path) -> set:
+    """The plugins Claude Code has installed (~/.claude/plugins/installed_plugins.json), as `<plugin>@<marketplace>`."""
+    try:
+        data = json.loads((home / ".claude" / "plugins" / "installed_plugins.json").read_text())
+    except (OSError, ValueError):
+        return set()
+    plugins = data.get("plugins", {}) if isinstance(data, dict) else {}
+    return set(plugins) if isinstance(plugins, dict) else set()
+
+
+def fetch_skill(url: str, commit: str, path: str, dest: Path) -> "str | None":
+    """A sparse checkout of `path` at `commit` into dest (made by rename, so never half there). None when done, else
+    why not."""
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    def g(*args):
+        return subprocess.run(["git", "-C", str(tmp), *args], capture_output=True, text=True, timeout=300,
+                              stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    try:
+        tmp.mkdir(parents=True)
+        for step in (("init", "-q"), ("remote", "add", "origin", url),
+                     ("sparse-checkout", "set", "--no-cone", f"/{path.strip('/')}/", "/LICENSE*", "/COPYING*"),
+                     ("fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", commit),
+                     ("checkout", "-q", "--detach", "FETCH_HEAD")):
+            r = g(*step)
+            if r.returncode != 0:
+                last = (r.stderr or r.stdout).strip().splitlines()
+                return f"git {step[0]} failed: {last[-1] if last else r.returncode}"
+        if g("rev-parse", "HEAD").stdout.strip() != commit:
+            return f"fetched commit is not {commit[:12]}"
+        if not (tmp / path / "SKILL.md").is_file():
+            return f"no SKILL.md at {path}"
+        os.replace(tmp, dest)
+        return None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return str(e)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def design_skills(home: Path) -> None:
+    """The design skills (design-kit spec, section 9) in ~/.agents/skills, where OpenCode v2 reads them: each a link
+    into a sparse checkout of its upstream repo at the pinned commit, under ~/.agents/skill-sources/. Claude gets a
+    link in ~/.claude/skills unless its own plugin carries the skill. One the owner installed is left alone; a fetch
+    that fails is named, never a stop."""
+    rows = design_skill_rows()
+    if not rows:
+        return
+    skills_dir, sources = home / ".agents" / "skills", home / ".agents" / "skill-sources"
+    plugins = claude_plugins(home)
+    done = []
+    override = bool(os.environ.get("LANE_DESIGN_SKILLS"))
+    for row in rows:
+        name, url, commit, path, _licence, plugin = row
+        why = bad_skill_row(row, override)
+        if why:
+            done.append((name, f"missing (refused: {why})"))
+            continue
+        link, src = skills_dir / name, sources / f"{name}@{commit[:12]}"
+        target = src / path
+        ours = link.is_symlink() and os.readlink(link).startswith(str(sources) + os.sep)
+        if (link.exists() or link.is_symlink()) and not ours:
+            done.append((name, "exists (not lane-control's)"))
+            continue
+        if ours and os.readlink(link) == str(target) and (target / "SKILL.md").is_file():
+            state = "exists"
+        else:
+            if not (target / "SKILL.md").is_file():
+                sources.mkdir(parents=True, exist_ok=True)
+                shutil.rmtree(src, ignore_errors=True)
+                why = fetch_skill(url, commit, path, src)
+                if why:
+                    done.append((name, f"missing ({why})"))
+                    continue
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            tmp_link = skills_dir / f".{name}.{os.getpid()}.link"
+            tmp_link.unlink(missing_ok=True)
+            tmp_link.symlink_to(target)
+            os.replace(tmp_link, link)
+            state = "updated" if ours else "created"
+        for old in sources.glob(f"{name}@*"):
+            if old != src:
+                shutil.rmtree(old, ignore_errors=True)
+        claude = home / ".claude" / "skills" / name
+        if plugin not in plugins and not claude.exists() and not claude.is_symlink():
+            claude.parent.mkdir(parents=True, exist_ok=True)
+            claude.symlink_to(link)
+        done.append((name, state))
+    states = [s.split(" ")[0] for _, s in done]
+    overall = next((s for s in ("missing", "created", "updated") if s in states), "exists")
+    say("design-skills", overall, ", ".join(f"{n} {s}" for n, s in done) + f" in {skills_dir}")
 
 
 def install_skill(home: Path, name: str, want: dict, also: tuple = ()) -> bool:
@@ -830,11 +966,11 @@ def lane_tier_refusal(model: str):
     raise Fail(f"lane-tier --model {model} failed: {r.stderr.strip() or r.returncode}")
 
 
-def native_pin_refusal(pins: dict, lead: bool, mode: str, own: set):
+def native_pin_refusal(pins: dict, mode: str, own: set):
     """None, or why the native path will not run these pins: a model lane-tier refuses (any role, any harness), an
     OpenCode model nobody declared --own-model, or a standing OpenCode role with a Claude-only permission mode."""
     oc = load_harness("opencode")
-    for role in ("coordinator",) + (("design-lead",) if lead else ()) + ("reviewer",):
+    for role in ("coordinator", "reviewer"):
         h, m = pins[role]
         why = lane_tier_refusal(m)
         if why:
@@ -891,17 +1027,17 @@ def choose_tiers(repo: Path, a, default_table: Path) -> str:
         raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
 
 
-def personas_and_tiers(repo: Path, project: str, coord, lead, reviewer, mode: str, tier_text: str,
+def personas_and_tiers(repo: Path, project: str, coord, reviewer, mode: str, tier_text: str,
                        attached: tuple = ()) -> list:
-    """lead None: the project has no design lead. tier_text: the project's table, from choose_tiers."""
+    """tier_text: the project's table, from choose_tiers."""
     table = str(store_table(repo))
     review_persona = str(repo / ".cotal" / "agents" / "reviewer.md")
-    roles = [("coordinator", coord)] + ([("design-lead", lead)] if lead else []) + [("reviewer", reviewer)]
+    roles = [("coordinator", coord), ("reviewer", reviewer)]
     changed = []  # personas that existed and now read differently: a running agent keeps the old text
     for name, (h, m) in roles:
         text = render_persona((OC / "personas" / f"{name}.md").read_text(), h, m,
                               mode.get(name, "default") if isinstance(mode, dict) else mode, project, table,
-                              review_persona, design_lead=lead is not None, attached=attached)
+                              review_persona, attached=attached)
         state = write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text)
         say(f"persona {name}", state, f"{h}/{m}")
         if state == "updated" and not (h == "opencode" and m.startswith(HOSTED_OPENCODE)):
@@ -939,7 +1075,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     if not (agents / "coordinator.md").is_file():
         raise Fail(f"{repo} has no .cotal/agents/coordinator.md: it was not set up; run project-setup without --refresh")
     try:
-        old = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "design-lead", "reviewer")
+        old = {n: (agents / f"{n}.md").read_text() for n in ("coordinator", "reviewer")
                if (agents / f"{n}.md").is_file()}
     except (OSError, UnicodeDecodeError) as e:
         raise Fail(f"cannot read a persona in {agents}: {getattr(e, 'filename', None) or e}")
@@ -954,10 +1090,9 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         say("permission-mode", "unknown", f"no persona records it, so they are rendered with `{mode}`; if the project "
             f"ran another, correct it in {agents}")
     table = store_table(repo)
-    design_lead = stored.get("design_lead", "design-lead" in old)
     texts = {}
     no_restart = set()
-    for name in ["coordinator"] + (["design-lead"] if design_lead else []) + ["reviewer"]:
+    for name in ("coordinator", "reviewer"):
         if name in old:
             h = re.search(r"^agent: (\S+)$", old[name], re.M)
             m = re.search(r"^model: (\S+)$", old[name], re.M)
@@ -973,7 +1108,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             harness, model = harness_model(pin) if isinstance(pin, str) and name != "reviewer" else reviewer
         texts[name] = (harness, model, render_persona((OC / "personas" / f"{name}.md").read_text(), harness, model,
                                                       modes.get(name) or others, project, str(table),
-                                                      str(agents / "reviewer.md"), design_lead=design_lead,
+                                                      str(agents / "reviewer.md"),
                                                       attached=tuple(attached_of(stored))))
     try:
         check_tier_table(tiers.read_text())
@@ -998,7 +1133,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         except Fail as e:
             print(f"warning: {e}: lane-tier refuses every tier until it is fixed", file=sys.stderr, flush=True)
     changed = []
-    kept = {"root": str(repo), "design_lead": design_lead,
+    kept = {"root": str(repo),
             "models": {**{n: f"{h}/{m}" for n, (h, m, _) in texts.items()}, **(stored.get("models") or {})}}
     if len({v for v in modes.values() if v}) == 1 and not forced:
         kept["permission_mode"] = others
@@ -1008,11 +1143,11 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         say(f"persona {name}", state, f"{harness}/{model}")
         if state != "exists":
             changed.append(name)
+    retire_design_lead(repo, project, None)
     skill = skills()
     needs = {n: "persona changed" for n in changed}
     if skill != "exists":
-        for n in ("coordinator", "design-lead"):
-            needs.setdefault(n, "skill changed")
+        needs.setdefault("coordinator", "skill changed")
     needs = {n: why for n, why in needs.items() if n not in no_restart}
     if not needs:
         say("restart", "none", "nothing changed")
@@ -1132,40 +1267,6 @@ def setup_script(repo: Path, write: bool):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(text)
         say("setup-script", "proposed", f"{f} (review it and commit it as orca.yaml)")
-
-
-def git_dir(wt: Path):
-    g = wt / ".git"
-    if g.is_dir():
-        return g
-    if g.is_file():
-        line = g.read_text().strip()
-        if line.startswith("gitdir:"):
-            p = Path(line.split(":", 1)[1].strip())
-            return p if p.is_absolute() else (wt / p).resolve()
-    return None
-
-
-def wait_for_setup(wt: Path, label: str, timeout: float = 600, step: float = 5):
-    """Wait until a new worktree's setup script wrote its marker, so the agent never runs checks on missing
-    dependencies. Only for a setup script that writes the marker; never fatal. True once the marker exists, False on
-    a timeout, None when there is no marker to wait for."""
-    timeout = float(os.environ.get("LANE_SETUP_TIMEOUT") or timeout)  # tests shorten it
-    step = min(step, timeout)
-    yaml = wt / "orca.yaml"
-    if not (yaml.is_file() and SETUP_MARKER in yaml.read_text()):
-        return None
-    gd = git_dir(wt)
-    if gd is None:
-        return None
-    end = time.time() + timeout
-    while time.time() < end:
-        if (gd / SETUP_MARKER).exists():
-            say(f"setup {label}", "done", str(wt))
-            return True
-        time.sleep(step)
-    say(f"setup {label}", "timeout", f"no {SETUP_MARKER} after {int(timeout)}s; see the worktree's Setup tab")
-    return False
 
 
 def services(repo: Path, space: str):
@@ -1295,67 +1396,10 @@ def ensure_claude_trust(repo: Path, record: bool = False):
     say("claude-trust", "created", str(repo))
 
 
-def design_worktree(repo: Path, repo_id: str, place: Place = LOCAL):
-    """The design lead's child worktree, and whether this run created it."""
-    for w in place.jrun("worktree", "list")["result"]["worktrees"]:
-        if w["id"].startswith(repo_id + "::") and w.get("displayName") == "design-lead":
-            say("worktree design-lead", "exists", w["path"])
-            return Path(w["path"]), False
-    res = place.jrun("worktree", "create", "--repo", f"id:{repo_id}", "--name", "design-lead",
-                     "--parent-worktree", f"path:{repo}", "--setup", "inherit")["result"]
-    path = Path(res["worktree"]["path"])
-    say("worktree design-lead", "created", str(path))
-    return path, True
-
-
-def is_setup_tab(t: dict) -> bool:
-    """The title is not reliable: the Setup tab's paneTitle is "Setup", or (before that is set) its title or preview
-    names setup-runner.sh."""
-    return (t.get("paneTitle") == "Setup" or "setup-runner.sh" in (t.get("title") or "")
-            or "setup-runner.sh" in (t.get("preview") or ""))
-
-
-def worktree_terminals(wt: Path, place: Place = LOCAL) -> list:
-    rows = place.jrun("terminal", "list")["result"]["terminals"]
-    return [t for t in rows if Path(t.get("worktreePath") or "/") == wt]
-
-
-def fresh_shell(t: dict) -> bool:
-    """A shell nobody has used: no agent in it and a preview of exactly one line, the prompt, whatever it looks like.
-    Output or a run command shows more lines; if the preview cannot prove it (empty or missing), leave the tab open."""
-    return not t.get("agentIdentity") and len([l for l in (t.get("preview") or "").splitlines() if l.strip()]) == 1
-
-
-def close_startup_tabs(wt: Path, before: set, setup_done: bool, place: Place = LOCAL):
-    """After the agent started: close the plain shell Orca opened and, if the setup script finished, its Setup tab.
-    Only terminals listed in `before` (taken before the spawn) are considered, so the agent's own tab can never match.
-    Never an agent's tab (`agentIdentity`, `cotal-` title), a Setup tab that has not finished, or a shell in use."""
-    for t in worktree_terminals(wt, place):
-        if t["handle"] not in before or t.get("agentIdentity") or (t.get("title") or "").startswith("cotal-"):
-            continue
-        if is_setup_tab(t) and not setup_done:
-            continue
-        if is_setup_tab(t) or fresh_shell(t):
-            place.jrun("terminal", "close", "--terminal", t["handle"], "--tab")
-
-
-def verify(repo: Path, space: str, wt):
-    """wt None: no design lead to check."""
-    agents = live_agents(repo, space)
-    if wt is None:
-        if "coordinator" not in agents:
-            raise Fail("verify: not live: coordinator")
-        say("verify", "ok", "coordinator live (no design lead)")
-        return
-    missing = [n for n in ("coordinator", "design-lead") if n not in agents]
-    rows = LOCAL.jrun("worktree", "list")["result"]["worktrees"]
-    lead = [w for w in rows if Path(w["path"]) == wt]
-    parent_ok = bool(lead) and (lead[0].get("parentWorktreeId") or "").endswith("::" + str(repo))
-    if missing or not parent_ok:
-        raise Fail("verify: " + ", ".join(
-            ([f"not live: {' '.join(missing)}"] if missing else []) +
-            ([] if parent_ok else ["design-lead worktree is not a child of the main checkout"])))
-    say("verify", "ok", "coordinator and design-lead live; design-lead nested under the main checkout")
+def verify(repo: Path, space: str):
+    if "coordinator" not in live_agents(repo, space):
+        raise Fail("verify: not live: coordinator")
+    say("verify", "ok", "coordinator live")
 
 
 # --- onboarding: adapted files, reviewed, committed only on the owner's yes ----------------------------------------
@@ -1802,21 +1846,20 @@ def rendered_aside(repo: Path):
         RENDERED.clear()
 
 
-def fill(name: str, project: str, design_lead: bool, findings: str = "", visibility: str = "unknown",
-         earlier: str = "") -> str:
+def fill(name: str, project: str, findings: str = "", visibility: str = "unknown", earlier: str = "") -> str:
     """A prompt template with its machine values, so its wording can change without touching this script."""
     text = (TEMPLATES / name).read_text()
     inlined = "\n\n".join(f"--- {t.name} ---\n{t.read_text().rstrip()}" for t in sorted(TEMPLATES.glob("*.md"))
                           if t.name not in PROMPTS)
     if findings and "{{REVIEW_FINDINGS}}" not in text:
         text += "\n{{REVIEW_FINDINGS}}\n"
-    return (text.replace("{{PROJECT}}", project).replace("{{DESIGN_LEAD}}", "yes" if design_lead else "no")
+    return (text.replace("{{PROJECT}}", project)
             .replace("{{TEMPLATES}}", inlined).replace("{{VISIBILITY}}", visibility)
             .replace("{{SUGGESTIONS_SO_FAR}}", earlier.strip() or "(none)")
             .replace("{{REVIEW_FINDINGS}}", findings).rstrip() + "\n")
 
 
-def review_prompt(repo: Path, project: str, design_lead: bool, earlier: str = "", visibility: str = "unknown") -> str:
+def review_prompt(repo: Path, project: str, earlier: str = "", visibility: str = "unknown") -> str:
     """Built from git and the project alone, so the reviewer never reads the adapting agent's account of its work.
     The first review is the full audit; with `earlier` (the findings the last fix answered) it only checks those."""
     changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
@@ -1824,8 +1867,8 @@ def review_prompt(repo: Path, project: str, design_lead: bool, earlier: str = ""
     tracked = [p for p, m in changes if m != "added"]
     diff = run(["git", "diff", "HEAD", "--", *tracked], cwd=repo, check=False).stdout if tracked else ""
     diff = clip(diff, DIFF_LIMIT)
-    head = (fill("check-prompt.md", project, design_lead, clip(earlier, FINDINGS_LIMIT), visibility) if earlier
-            else fill("review-prompt.md", project, design_lead, visibility=visibility))
+    head = (fill("check-prompt.md", project, clip(earlier, FINDINGS_LIMIT), visibility) if earlier
+            else fill("review-prompt.md", project, visibility=visibility))
     return (head + f"\nUncommitted files to review:\n{files}\n"
             + (f"\nDiff of the files already tracked:\n{diff}" if diff else "") + (CHECK_RULES if earlier else REVIEW_RULES))
 
@@ -1846,7 +1889,7 @@ def has_safety(findings: str) -> bool:
     return bool(SAFETY_FINDING.search(findings))
 
 
-def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple, before: dict, design_lead: bool,
+def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple, before: dict,
                       visibility: str = "unknown"):
     """The first review is the full audit; every later one only checks the earlier findings. At most MAX_FIX_ROUNDS
     fix rounds, and the findings of the last review always get theirs. Returns (stop, notes): stop is None unless a
@@ -1857,7 +1900,7 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
     def review(earlier: str = "") -> str:
         say("review", "running", "/".join(reviewer) + (" (checks the fixes only)" if earlier else ""))
         try:
-            out = run_agent(repo, reviewer, review_prompt(repo, project, design_lead, earlier, visibility), write=False)
+            out = run_agent(repo, reviewer, review_prompt(repo, project, earlier, visibility), write=False)
         except Fail as e:
             if not earlier or isinstance(e, TimeLimit):  # a first review that crashes, or the time limit, stops the run
                 raise
@@ -1886,7 +1929,7 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
         say("adapt", "fixing", f"round {fixes} of {MAX_FIX_ROUNDS}")
         found = f"A reviewer found these problems in {ADAPTED}/. Fix them there:\n{clip(findings, FINDINGS_LIMIT)}"
         kept = kept_suggestions(repo)
-        adapt(repo, adapter, fill("prompt.md", project, design_lead, found, visibility,
+        adapt(repo, adapter, fill("prompt.md", project, found, visibility,
                                   clip(kept.read_text(errors="replace"), FINDINGS_LIMIT) if kept.is_file() else "") + ADAPT_RULES, before)
         if fixes == MAX_FIX_ROUNDS:
             break
@@ -2287,7 +2330,7 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
         return []
     was = lane_files(repo)
     say("adapt", "running", "/".join(adapter) + " (applies your answers)")
-    text = (fill("answers-prompt.md", project, False)
+    text = (fill("answers-prompt.md", project)
             .replace("{{QUESTIONS}}", clip("\n".join(f"{n}. {q}" for n, q, _ in given), FINDINGS_LIMIT))
             .replace("{{ANSWERS}}", clip("\n".join(f"{n}. {a}" for n, _, a in given), FINDINGS_LIMIT)))
     if ORCHESTRATOR == "native-orca":
@@ -2354,7 +2397,7 @@ def stale_checkout(repo: Path, quick: bool = False):
     return None
 
 
-def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
+def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool) -> bool:
     """The steps in front of the Orca setup; True when that setup may run. A re-run is safe: committed files are left
     alone unless `again`, and uncommitted ones (an earlier run, a hand edit) go back to review instead of being
     rewritten."""
@@ -2383,7 +2426,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
                 "the adapter runs again over it")
         say("adapt", "running", "/".join(adapter))
         kept_suggestions(repo).unlink(missing_ok=True)
-        adapt(repo, adapter, fill("prompt.md", project, design_lead, visibility=visibility) + ADAPT_RULES, before)
+        adapt(repo, adapter, fill("prompt.md", project, visibility=visibility) + ADAPT_RULES, before)
     if not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
         show_suggestions(repo)
         kept_suggestions(repo).unlink(missing_ok=True)
@@ -2392,7 +2435,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
             return refresh_section(repo)
         raise Fail(f"the adapting agent wrote nothing under {ADAPTED}/ (is it gitignored?)")
     write_section(repo)
-    unresolved, notes = review_with_fixes(repo, project, adapter, reviewer, before, design_lead, visibility)
+    unresolved, notes = review_with_fixes(repo, project, adapter, reviewer, before, visibility)
     if unresolved is not None:
         print(f"\n{unresolved}\n")
         say("adapt", "stopped", f"nothing committed, no Orca setup. Owner: fix {ADAPTED}/ and run again, or remove it")
@@ -2503,12 +2546,12 @@ def prepare_attached(repo: Path, stored: list, targets: list, dest: Path, quick:
     return found
 
 
-def onboard_attached(d: Path, project: str, adapter: tuple, reviewer: tuple, again: bool, design_lead: bool) -> bool:
+def onboard_attached(d: Path, project: str, adapter: tuple, reviewer: tuple, again: bool) -> bool:
     """The first repo's onboarding for an attached one. Its open questions are added to the coordinator's kickoff."""
     global LEFTOVER
     before, LEFTOVER = LEFTOVER, ""
     try:
-        ok = onboard(d, project, adapter, reviewer, again, design_lead)
+        ok = onboard(d, project, adapter, reviewer, again)
         mine = LEFTOVER
     finally:
         LEFTOVER = before
@@ -2581,12 +2624,12 @@ def own_check(flag_pins: list, own: set):
 
 def resolve_settings(repo: Path, a) -> dict:
     """What this run uses, flag over the store over the default, and the store updated with it: models per role, whether
-    the project has a design lead, the permission mode and the --private globs (which add to the stored ones, so no run
+    the permission mode and the --private globs (which add to the stored ones, so no run
     drops a private path by leaving a flag out)."""
     st = settings(repo)
     stored = st.get("models") if isinstance(st.get("models"), dict) else {}
     pins = {}
-    for role, flag in (("coordinator", a.coordinator), ("design-lead", a.design_lead), ("reviewer", a.reviewer)):
+    for role, flag in (("coordinator", a.coordinator), ("reviewer", a.reviewer)):
         spec = flag or stored.get(role) or DEFAULT_PINS[role]
         try:
             pins[role] = harness_model(spec)
@@ -2595,13 +2638,12 @@ def resolve_settings(repo: Path, a) -> dict:
         if not flag and pins[role][0] == "opencode" and pins[role][1].startswith(HOSTED_OPENCODE):
             raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is a hosted OpenCode model, and "
                        "project-setup starts no project agent on one")
-    lead_on = False if a.no_design_lead else bool(a.design_lead) or st.get("design_lead", True) is not False
     mode = a.permission_mode or st.get("permission_mode")
     persona_modes = {}
     if not mode:  # nothing says it: the personas already rendered do, and when they differ each keeps its own
-        _, mode, _, mixed = persona_pins(repo / ".cotal" / "agents")
+        _, mode, mixed = persona_pins(repo / ".cotal" / "agents")
         if mixed:
-            for n in ("coordinator", "design-lead", "reviewer"):
+            for n in ("coordinator", "reviewer"):
                 try:
                     persona_modes[n] = persona_mode((repo / ".cotal" / "agents" / f"{n}.md").read_text()) or "default"
                 except (OSError, UnicodeDecodeError):
@@ -2615,7 +2657,7 @@ def resolve_settings(repo: Path, a) -> dict:
     for g in private:
         if bad_glob(g):
             raise Fail(f"{store_dir(repo) / 'settings.json'}: private glob {g!r} is not a glob relative to the repo root")
-    changes = {"root": str(repo), "models": {r: f"{h}/{m}" for r, (h, m) in pins.items()}, "design_lead": lead_on,
+    changes = {"root": str(repo), "models": {r: f"{h}/{m}" for r, (h, m) in pins.items()},
                "private": private, "orchestrator": ORCHESTRATOR}
     if not persona_modes:
         changes["permission_mode"] = mode
@@ -2623,11 +2665,11 @@ def resolve_settings(repo: Path, a) -> dict:
         changes["name"] = a.name
     if ORCHESTRATOR == "native-orca":  # before anything is written: a refused run leaves the store as it was
         own = {x for x in st.get("own_models") or [] if isinstance(x, str)} | set(getattr(a, "own_model", []) or [])
-        why = native_pin_refusal(pins, lead_on, mode, own)
+        why = native_pin_refusal(pins, mode, own)
         if why:
             raise Refused(why)
     settings(repo, **changes)
-    return {"pins": pins, "lead": lead_on, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
+    return {"pins": pins, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
 
 
 def which_orchestrator(flag, repo, default: str = None) -> str:
@@ -2685,17 +2727,18 @@ def show(repo: Path) -> int:
 
 BINARIES = {"claude": "claude", "opencode": "opencode2"}  # what each harness adapter starts
 NATIVE = HERE / "orchestrators" / "native-orca"
-NATIVE_ROLES = ("coordinator", "design-lead", "reviewer", "debugger")  # rendered into each project's .lane-control/
+NATIVE_ROLES = ("coordinator", "reviewer", "design-reviewer", "debugger")  # rendered into each project's .lane-control/
 ADDITIONS = f"{ADAPTED}/additions"  # the adapted text per role, kept and committed; rendered in on every setup and refresh
 EXCLUDE_BEGIN = "# lane-control: begin (files project-setup writes in this checkout; never committed)"
 EXCLUDE_END = "# lane-control: end"
 LOCAL_FILES = ("/.claude/settings.local.json", "/.opencode/plugins/lane-persona.js",  # the second: LANE_OPENCODE_PLUGIN=project
-               *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES))
+               *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES),
+               f"/{ADAPTED}/design-lead.md")  # the retired design lead's rendered persona, removed once it stops
 NATIVE_REVIEW_NOTE = f"""
-Native Orca: the coordinator, design-lead and reviewer files are in {ADDITIONS}/ (appended to the rendered personas);
+Native Orca: the coordinator and reviewer files are in {ADDITIONS}/ (appended to the rendered personas);
 {ADAPTED}/<role>.md are rendered personas, not adapted files: never ask for them there."""
 NATIVE_PLACEMENT = f"""
-- Native Orca: write the coordinator, design-lead and reviewer templates to {ADDITIONS}/<its name> (they are appended
+- Native Orca: write the coordinator and reviewer templates to {ADDITIONS}/<its name> (they are appended
   to the rendered personas there, which are {ADAPTED}/<role>.md and not yours to write); the other templates go to
   {ADAPTED}/<its name>."""
 
@@ -2727,14 +2770,13 @@ def additions(repo: Path, role: str) -> str:
             f"that file, not this one -->\n\n{body}\n")
 
 
-def native_persona(repo: Path, role: str, harness: str, model: str, mode: str, project: str, design_lead: bool,
+def native_persona(repo: Path, role: str, harness: str, model: str, mode: str, project: str,
                    attached: tuple = ()) -> str:
     """One role's persona for this project: the native values first (render.prepare), then render_persona's, then
     the project's additions at the end."""
-    text = native_module("render").prepare((NATIVE / "personas" / f"{role}.md").read_text(), design_lead=design_lead,
-                                           attached=attached)
+    text = native_module("render").prepare((NATIVE / "personas" / f"{role}.md").read_text(), attached=attached)
     text = render_persona(text, harness, model, mode, project, str(store_table(repo)),
-                          str(repo / ADAPTED / "reviewer.md"), design_lead=design_lead, attached=attached)
+                          str(repo / ADAPTED / "reviewer.md"), attached=attached)
     return text.rstrip("\n") + "\n" + additions(repo, role)
 
 
@@ -2768,32 +2810,138 @@ def refuse_tracked(repo: Path, roles) -> None:
                    "commit, and run again. Nothing was rendered")
 
 
-def native_personas(repo: Path, project: str, pins: dict, lead: bool, mode: str, tier_text: str,
+def native_personas(repo: Path, project: str, pins: dict, mode: str, tier_text: str,
                     attached: tuple = ()) -> list:
-    """The four project roles rendered into .lane-control/ (reviewer and debugger lanes pinned like the reviewer);
+    """The project roles rendered into .lane-control/ (reviewer, design reviewer and debugger pinned like the reviewer);
     returns the roles whose persona existed and changed."""
-    roles = {"coordinator": pins["coordinator"], **({"design-lead": pins["design-lead"]} if lead else {}),
-             "reviewer": pins["reviewer"], "debugger": pins["reviewer"]}
+    roles = {"coordinator": pins["coordinator"],
+             "reviewer": pins["reviewer"], "design-reviewer": pins["reviewer"], "debugger": pins["reviewer"]}
     refuse_tracked(repo, NATIVE_ROLES)
     say("git-exclude", exclude_local(repo), "rendered personas, .claude/settings.local.json and a project-level "
                                             "OpenCode plugin (.git/info/exclude)")
     changed = []
     for role, (h, m) in roles.items():
         f = repo / ADAPTED / f"{role}.md"
-        state = write_if_changed(f, native_persona(repo, role, h, m, mode, project, lead, attached))
+        state = write_if_changed(f, native_persona(repo, role, h, m, mode, project, attached))
         say(f"persona {role}", state, f"{h}/{m}")
         if state == "updated":
             changed.append(role)
-    gone = repo / ADAPTED / "design-lead.md"
-    if not lead and gone.is_file():
-        gone.unlink()
-        say("persona design-lead", "removed", "the project has no design lead")
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
     return changed
 
 
+DESIGN_LEAD_FILES = (f"{ADDITIONS}/design-lead.md", f"{ADAPTED}/design-lead.md")  # committed: native, Orca + Cotal
+DESIGN_LEAD_HEAD = "## From the design lead's additions"
+
+
+def drop_design_lead_settings(repo: Path) -> None:
+    """The retired design lead's setting and pin leave the settings store (said, never silently)."""
+    st = settings(repo)
+    models = st.get("models")
+    pin = isinstance(models, dict) and "design-lead" in models
+    if "design_lead" not in st and not pin:
+        return
+    settings(repo, drop=("design_lead",),
+             **({"models": {k: v for k, v in models.items() if k != "design-lead"}} if pin else {}))
+    was = f" (it was design-lead={models['design-lead']})" if pin else ""
+    say("design-lead", "retired", f"its on/off setting and model pin are dropped from the settings store{was}")
+
+
+def design_lead_body(text: str) -> str:
+    if text.startswith("---\n") and "\n---\n" in text[4:]:
+        text = text[4:].split("\n---\n", 1)[1]
+    return text.strip()
+
+
+def move_design_lead_files(repo: Path, rels: list) -> None:
+    """A committed design-lead additions file goes into DESIGN.md (created from the template when missing), in one
+    commit, only on the owner's yes in a terminal; otherwise nothing is written."""
+    design = repo / "DESIGN.md"
+    if design.exists() and read_raw(design) != head_text(repo, "DESIGN.md"):
+        say("design-lead", "retired", f"{', '.join(rels)} not moved: DESIGN.md has uncommitted changes; commit them "
+            "and run again")
+        return
+    if not has_terminal():
+        say("design-lead", "retired", f"{', '.join(rels)} would move into DESIGN.md; run again in a terminal to do it")
+        return
+    print(f"\nThe design lead is retired ({DESIGN_KIT}). Its additions move into DESIGN.md, the project's design file,"
+          f" under \"{DESIGN_LEAD_HEAD[3:]}\" for the next frontend lane to fold in:")
+    print(f"  {'M' if design.exists() else 'A'}: DESIGN.md")
+    for rel in rels:
+        print(f"  D: {rel}")
+    if not owner_says_yes("Move them and commit? [y/N] ", step="design-lead"):
+        say("design-lead", "retired", f"{', '.join(rels)} left as it is; run again in a terminal to move it")
+        return
+    base = design.read_text() if design.exists() else (HERE / "core" / "templates" / "DESIGN.md").read_text()
+    parts = [base.rstrip("\n"), "", DESIGN_LEAD_HEAD,
+             f"<!-- moved from {', '.join(rels)} by project-setup when the design lead was retired: fold it into the "
+             "sections above, then delete this section -->"]
+    for rel in rels:
+        parts += ["", design_lead_body((repo / rel).read_text())]
+    write_raw(design, "\n".join(parts) + "\n")
+    for rel in rels:
+        (repo / rel).unlink()
+    commit_adapted(repo, ["DESIGN.md", *rels], "Move the retired design lead's additions into DESIGN.md")
+    if run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode == 0:
+        branch = run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo, check=False).stdout.strip()
+        lanes = default_branch(repo, branch)
+        if lanes and ahead_of_lanes_base(repo, lanes, ["DESIGN.md"]):
+            say("design-lead", "moved", f"DESIGN.md committed, not pushed: lanes start from origin/{lanes}, so push "
+                "it before the next frontend lane starts, or that lane makes its own DESIGN.md")
+
+
+def leftover_worktree_state(wt: Path) -> str:
+    dirty = run(["git", "status", "--porcelain"], cwd=wt, check=False).stdout.splitlines()
+    ahead = run(["git", "rev-list", "--count", "HEAD", "--not", "--remotes"], cwd=wt, check=False).stdout.strip()
+    return f"{len(dirty)} uncommitted, {ahead or '?'} unpushed"
+
+
+def retire_design_lead(repo: Path, project: str, place: "Place | None") -> None:
+    """What is left of a design lead (design-kit spec, section 8). Its committed additions move into DESIGN.md on the
+    owner's yes. A session or worktree of it is named, never stopped or removed. On native Orca (`place`), its rendered
+    persona is removed only when no design-lead session runs: that session's compaction hook reads it."""
+    rels = [r for r in DESIGN_LEAD_FILES if (repo / r).is_file() and tracked(repo, repo / r)]
+    if rels:
+        move_design_lead_files(repo, rels)
+    title = f"{project} design lead"
+    ask = ("ask it for its handover (`bd remember handover-design-lead`), then close its terminal and worktree "
+           "yourself; setup never stops or removes it")
+    running = False
+    if place is None:  # Orca + Cotal: the agent named design-lead in the project's space
+        try:
+            running = "design-lead" in live_agents(repo, slug(project))
+        except Fail:
+            running = False
+        if running:
+            say("design-lead", "running", f"the retired design lead still runs in {slug(project)}: {ask}")
+        return
+    try:
+        rid = next((r["id"] for r in place.jrun("repo", "list")["result"]["repos"] if Path(r["path"]) == repo), None)
+        rows = [w for w in place.jrun("worktree", "list")["result"]["worktrees"]
+                if rid and w["id"].startswith(rid + "::") and w.get("displayName") == "design-lead"]
+        term = session_terminal(place, title, stored_handle(repo, "design-lead"), "design-lead")
+    except Fail as e:
+        say("design-lead", "unknown", f"no Orca worktree or terminal list ({e}); its rendered persona is kept")
+        return
+    running = term is not None
+    for w in rows:
+        wt = Path(w["path"])
+        state = leftover_worktree_state(wt) if wt.is_dir() else "not on this machine"
+        say("design-lead", "running" if running else "left",
+            f"session `{title}`{' runs' if running else ' is not running'}; worktree {wt}: {state}. {ask[0].upper()}{ask[1:]}")
+    if running and not rows:
+        say("design-lead", "running", f"session `{title}` runs: {ask}")
+    rendered = repo / ADAPTED / "design-lead.md"
+    if rendered.is_file() and not tracked(repo, rendered):
+        if running:
+            say("persona design-lead", "kept", "the running design lead rereads it at its next compaction")
+        else:
+            rendered.unlink()
+            say("persona design-lead", "removed", "the design lead is retired and no session of it runs")
+
+
 def wt_hook(harness: str) -> bool:
-    """Does the design lead's own worktree need the harness's persona hook? Claude's hook is a file in the
+    """Does a standing session's own worktree need the harness's persona hook? Claude's hook is a file in the
     checkout (uncommitted, so a new worktree lacks it); OpenCode's plugin is in the user's folder unless
     LANE_OPENCODE_PLUGIN=project puts it in the project, uncommitted too."""
     return harness == "claude" or (harness == "opencode" and os.environ.get("LANE_OPENCODE_PLUGIN") == "project")
@@ -2818,19 +2966,17 @@ def load_harness(name: str):
     return harnesses.load_harness(name)
 
 
-TITLES = {"coordinator": "{project} coordinator", "design-lead": "{project} design lead"}  # peers find them by these
+TITLES = {"coordinator": "{project} coordinator"}  # peers find them by these
 STANDING = tuple(TITLES)
 RUN_WAIT = float(os.environ.get("LANE_RUN_WAIT") or 20)  # seconds a start waits for the session's Run (slow hosts: more)
 NATIVE_KICKOFF = {
     "coordinator": ("Read your persona, {persona}, then AGENTS.md and AGENTS.lane-control.md and `bd recall "
                     "handover-latest`; then tell the owner in one line that you are ready, and wait for them."),
-    "design-lead": ("Read your persona, {persona}, then AGENTS.md and AGENTS.lane-control.md; then tell the "
-                    "coordinator in one line that you are ready (the Messages part of your persona), and wait."),
 }
 NATIVE_RESUME = ("You are back after a pause. Reread your persona, {persona}; then resume from `bd recall "
                  "{handover}`, `orca-ide orchestration run-current` and `orca-ide worktree list`, and tell the "
                  "owner in one line that you are back.")
-HANDOVERS = {"coordinator": "handover-latest", "design-lead": "handover-design-lead"}  # project-pause stop asks for these
+HANDOVERS = {"coordinator": "handover-latest"}  # project-pause stop asks for these
 
 
 
@@ -2983,38 +3129,25 @@ def recorded_session(checkout: Path, role: str, harness: str):
         return None
 
 
-def start_standing(place: Place, repo: Path, project: str, pins: dict, lead: bool, mode: str, repo_id: str,
+def start_standing(place: Place, repo: Path, project: str, pins: dict, mode: str, repo_id: str,
                    kickoffs: dict, resume: bool = False) -> bool:
-    """The coordinator, and the design lead in its own child worktree. True when the coordinator was started now.
-    resume: each continues its recorded session, when there is one."""
+    """The coordinator. True when it was started now. resume: it continues its recorded session, when there is one."""
     def sid(checkout, role):
         return recorded_session(checkout, role, pins[role][0]) if resume else None
     started = start_session(place, repo, "coordinator", pins["coordinator"], mode, repo, project,
                             kickoffs["coordinator"], sid(repo, "coordinator"))
-    if lead:
-        wt, created = design_worktree(repo, repo_id, place)
-        if created:
-            setup_done = wait_for_setup(wt, "design-lead")
-            before = {t["handle"] for t in worktree_terminals(wt, place)}
-        if wt_hook(pins["design-lead"][0]):
-            persona_hooks(wt, {pins["design-lead"][0]})
-        start_session(place, repo, "design-lead", pins["design-lead"], mode, wt, project, kickoffs["design-lead"],
-                      sid(wt, "design-lead"))
-        if created:
-            close_startup_tabs(wt, before, setup_done, place)
-            place.jrun("terminal", "create", "--worktree", f"path:{wt}")  # the owner's shell
     return started
 
 
 def native_project(repo: Path, name: str = "") -> dict:
-    """A native project's stored choices, for refresh, pause and wake: pins, design lead, mode, project name."""
+    """A native project's stored choices, for refresh, pause and wake: pins, mode, project name."""
     st = settings(repo)
     validate_settings(repo, st)
     if "models" not in st:
         raise Fail(f"{repo} is not set up on native Orca yet (its settings store has no models): run project-setup "
                    "on it first")
     pins = {}
-    for role in ("coordinator", "design-lead", "reviewer"):
+    for role in ("coordinator", "reviewer"):
         spec = st["models"].get(role) or DEFAULT_PINS[role]
         try:
             pins[role] = harness_model(spec)
@@ -3023,32 +3156,31 @@ def native_project(repo: Path, name: str = "") -> dict:
     mode = st.get("permission_mode") or "auto"
     if mode not in NATIVE_MODES:
         raise Fail(f"{store_dir(repo) / 'settings.json'}: permission_mode {mode!r} must be one of {', '.join(NATIVE_MODES)}")
-    lead = st.get("design_lead", True) is not False
-    why = native_pin_refusal(pins, lead, mode, {x for x in st.get("own_models") or [] if isinstance(x, str)})
+    why = native_pin_refusal(pins, mode, {x for x in st.get("own_models") or [] if isinstance(x, str)})
     if why:  # a hand-edited store never starts what setup would refuse
         raise Fail(f"{store_dir(repo) / 'settings.json'}: {why.rstrip('.')}. Nothing was started or rendered")
-    return {"pins": pins, "lead": lead, "mode": mode,
+    return {"pins": pins, "mode": mode,
             "project": name or st.get("name") or repo.name, "attached": tuple(attached_of(st)), "st": st}
 
 
 def running_lanes(place: Place, repo: Path) -> list:
-    """Names of the project's lanes whose agent runs now: worktrees of the repo other than the main checkout and the
-    design lead's, with a terminal Orca marks as an agent's."""
+    """Names of the project's lanes whose agent runs now: worktrees of the repo other than the main checkout (a retired
+    design lead's among them), with a terminal Orca marks as an agent's."""
     rid = next((r["id"] for r in place.jrun("repo", "list")["result"]["repos"] if Path(r["path"]) == repo), None)
     if rid is None:
         return []
     lanes = {Path(w["path"]): w.get("displayName") or Path(w["path"]).name
              for w in place.jrun("worktree", "list")["result"]["worktrees"]
-             if w["id"].startswith(rid + "::") and Path(w["path"]) != repo and w.get("displayName") != "design-lead"}
+             if w["id"].startswith(rid + "::") and Path(w["path"]) != repo}
     rows = place.jrun("terminal", "list")["result"]["terminals"]
     return sorted({lanes[Path(t["worktreePath"])] for t in rows
                    if t.get("agentIdentity") and Path(t.get("worktreePath") or "/") in lanes})
 
 
-def running_sessions(place: Place, repo: Path, project: str, lead: bool) -> dict:
+def running_sessions(place: Place, repo: Path, project: str) -> dict:
     """{role: terminal} of the standing sessions that run now."""
     out = {}
-    for role in STANDING if lead else ("coordinator",):
+    for role in STANDING:
         t = session_terminal(place, session_title(role, project), stored_handle(repo, role), role)
         if t:
             out[role] = t
@@ -3056,11 +3188,14 @@ def running_sessions(place: Place, repo: Path, project: str, lead: bool) -> dict
 
 
 def native_refresh(repo: Path, a, tiers: Path) -> int:
-    """Re-render the personas (stored pins, current additions) and the hooks. Nothing is adapted, started or
-    committed; a running session rereads its persona at its next compaction, or on a restart."""
+    """Re-render the personas (stored pins, current additions) and the hooks, and install the skills and the lane
+    tools (design-shots among them; the design skills are fetched from upstream). Nothing is adapted or started; the
+    only commit is a retired design lead's additions moving into DESIGN.md, on the owner's yes. A running session
+    rereads its persona at its next compaction, or on a restart."""
     root = attached_to(repo)
     if root is not None:
         raise Fail(f"{repo} is attached to the project at {root}, not a project of its own: run --refresh on {root}")
+    drop_design_lead_settings(repo)
     p = native_project(repo, a.name or "")
     table = store_table(repo)
     try:
@@ -3069,17 +3204,14 @@ def native_refresh(repo: Path, a, tiers: Path) -> int:
     except (OSError, UnicodeDecodeError) as e:
         raise Fail(f"cannot read a tier table: {getattr(e, 'filename', None) or e}")
     pins = p["pins"]
-    changed = native_personas(repo, p["project"], pins, p["lead"], p["mode"], tier_text, p["attached"])
-    standing = {pins["coordinator"][0]} | ({pins["design-lead"][0]} if p["lead"] else set())
+    changed = native_personas(repo, p["project"], pins, p["mode"], tier_text, p["attached"])
+    standing = {pins["coordinator"][0]}
     persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
     native_skills()
     place = Place()
+    retire_design_lead(repo, p["project"], place)
     try:
-        if p["lead"] and wt_hook(pins["design-lead"][0]):
-            for w in place.jrun("worktree", "list")["result"]["worktrees"]:
-                if w.get("displayName") == "design-lead" and (w.get("parentWorktreeId") or "").endswith("::" + str(repo)):
-                    persona_hooks(Path(w["path"]), {pins["design-lead"][0]})
-        live = running_sessions(place, repo, p["project"], p["lead"])
+        live = running_sessions(place, repo, p["project"])
     except Fail as e:
         say("restart", "unknown", f"no Orca terminal list ({e}); restart these if running: {', '.join(changed) or 'none'}")
         return 0
@@ -3105,10 +3237,10 @@ def resume_standing(repo: Path) -> int:
     if not (repo / ADAPTED / "coordinator.md").is_file():
         raise Fail(f"{repo} has no rendered persona in {ADAPTED}/: run project-setup on it first")
     pins = p["pins"]
-    native_preflight({pins["coordinator"][0]} | ({pins["design-lead"][0]} if p["lead"] else set()), LOCAL)
+    native_preflight({pins["coordinator"][0]}, LOCAL)
     kickoffs = {r: NATIVE_RESUME.format(persona=repo / ADAPTED / f"{r}.md", handover=HANDOVERS[r]) for r in STANDING}
     place = Place()
-    start_standing(place, repo, p["project"], pins, p["lead"], p["mode"], orca_repo(repo, place), kickoffs, resume=True)
+    start_standing(place, repo, p["project"], pins, p["mode"], orca_repo(repo, place), kickoffs, resume=True)
     settings(repo, paused=False)
     return 0
 
@@ -3167,6 +3299,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             raise Fail(f"{why}. Nothing was changed")
         beads_note(repo)
         validate_settings(repo, settings(repo))
+        drop_design_lead_settings(repo)
         if a.desktop_environment:  # this box is paired with that machine (direction 2); the coordinator reads it
             settings(repo, paired_environment=a.desktop_environment)
             say("paired environment", "recorded", f"{a.desktop_environment} (lanes there: --on {a.desktop_environment})")
@@ -3184,9 +3317,8 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         if attached:
             settings(repo, attached=list(dict.fromkeys([*stored_attached, *(str(d) for d in attached)])))
         pins = cfg["pins"]
-        lead = pins["design-lead"] if cfg["lead"] else None
         PRIVATE_GLOBS[:] = cfg["private"]
-        standing = {pins["coordinator"][0]} | ({lead[0]} if lead else set())
+        standing = {pins["coordinator"][0]}
         native_preflight(set() if a.no_start else standing, place)  # a box may get its agents signed in later
         tier_text = choose_tiers(repo, a, tiers)
         if "claude" in standing and not a.no_start:
@@ -3201,12 +3333,12 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         if not a.skip_adapt:
             refuse_tracked(repo, NATIVE_ROLES)
             with rendered_aside(repo):
-                if not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+                if not onboard(repo, project, adapter, adapt_reviewer, a.readapt):
                     return STOPPED
             publish_onboarding(repo)
         for d in attached:
             if not a.skip_adapt:
-                if not onboard_attached(d, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+                if not onboard_attached(d, project, adapter, adapt_reviewer, a.readapt):
                     return STOPPED
                 publish_onboarding(d)
         repo_id = orca_repo(repo, place)
@@ -3216,8 +3348,8 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         native_skills()
         if own_models:
             settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
-        changed = native_personas(repo, project, pins, lead is not None, cfg["mode"], tier_text,
-                                  tuple(str(d) for d in attached))
+        changed = native_personas(repo, project, pins, cfg["mode"], tier_text, tuple(str(d) for d in attached))
+        retire_design_lead(repo, project, place)
         persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
@@ -3229,12 +3361,10 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         global COORDINATOR_KICKOFF, LEFTOVER_DELIVERED
         persona = {r: repo / ADAPTED / f"{r}.md" for r in STANDING}
         COORDINATOR_KICKOFF = NATIVE_KICKOFF["coordinator"].format(persona=persona["coordinator"])
-        kickoffs = {"coordinator": coordinator_kickoff(),
-                    "design-lead": NATIVE_KICKOFF["design-lead"].format(persona=persona["design-lead"])}
-        LEFTOVER_DELIVERED = start_standing(place, repo, project, pins, lead is not None, cfg["mode"], repo_id,
-                                            kickoffs)
+        kickoffs = {"coordinator": coordinator_kickoff()}
+        LEFTOVER_DELIVERED = start_standing(place, repo, project, pins, cfg["mode"], repo_id, kickoffs)
         print(f"summary: {project} · native Orca · orca repo {repo_id} · sessions "
-              + ", ".join(session_title(r, project) for r in STANDING if r == "coordinator" or lead))
+              + ", ".join(session_title(r, project) for r in STANDING))
         return 0
     except Fail as e:
         print(f"project-setup: {e}", file=sys.stderr)
@@ -3744,12 +3874,12 @@ def main(argv=None) -> int:
     ap.add_argument("--name")
     ap.add_argument("--dest", default=str(Path.home() / "code"))
     ap.add_argument("--coordinator", help="harness/model (default claude/opus); kept in the project's settings store")
-    ap.add_argument("--design-lead", help="harness/model (default claude/opus); also turns the design lead on again")
+    ap.add_argument("--design-lead", help="refused: the design lead is retired (the design kit replaces it)")
     ap.add_argument("--trust-folder", action="store_true",
                     help="answer Claude Code's 'Do you trust this folder?' with yes for the repo, without asking "
                          "(for unattended runs)")
     ap.add_argument("--no-design-lead", action="store_true",
-                    help="no design lead (projects without a frontend): only the coordinator is started")
+                    help="accepted and does nothing: the design lead is retired, so no project has one")
     ap.add_argument("--write-orca-yaml", action="store_true",
                     help="when orca.yaml is not committed, leave the drafted setup script as orca.yaml in the repo (uncommitted) "
                          "instead of .cotal/orca.yaml.proposed; never commits by itself")
@@ -3762,8 +3892,8 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int)
     ap.add_argument("--tiers", help="a full tier table to use as it is")
     ap.add_argument("--own-model", action="append", default=[], metavar="PROVIDER/MODEL",
-                    help="declare a model as your own or on a gateway you run (repeatable). Needed before --coordinator, "
-                         "--design-lead or --reviewer may pin opencode/<provider>/<model>")
+                    help="declare a model as your own or on a gateway you run (repeatable). Needed before --coordinator "
+                         "or --reviewer may pin opencode/<provider>/<model>")
     ap.add_argument("--no-start", action="store_true")
     ap.add_argument("--with", action="append", default=[], dest="with_repos", metavar="DIR|GIT-URL",
                     help="attach a second repo to the project (repeatable): lanes from this project's coordinator, no "
@@ -3849,8 +3979,10 @@ def main(argv=None) -> int:
     if a.permission_mode is not None and a.permission_mode not in modes:
         print(f"project-setup: --permission-mode must be one of {', '.join(modes)}", file=sys.stderr)
         return 2
-    flag_pins = [(f, harness_model(v)) for f, v in (("--coordinator", a.coordinator), ("--design-lead", a.design_lead),
-                                                    ("--reviewer", a.reviewer)) if v]
+    if a.design_lead:
+        print(f"project-setup: --design-lead: {RETIRED}. Nothing was changed", file=sys.stderr)
+        return 2
+    flag_pins = [(f, harness_model(v)) for f, v in (("--coordinator", a.coordinator), ("--reviewer", a.reviewer)) if v]
     adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
     bad_own = [m for m in a.own_model if not usable_own_model(m)]
     if bad_own:
@@ -3892,7 +4024,7 @@ def main(argv=None) -> int:
               "already attached; run without them to attach another)", file=sys.stderr)
         return 2
     if a.refresh:
-        ignored = [f for f in ("--coordinator", "--design-lead", "--no-design-lead", "--permission-mode", "--own-model")
+        ignored = [f for f in ("--coordinator", "--permission-mode", "--own-model")
                    if any(x == f or x.startswith(f + "=") for x in argv)]
         if ignored:
             print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
@@ -3983,6 +4115,7 @@ def main(argv=None) -> int:
         beads_note(repo)
         migrate(repo)
         validate_settings(repo, settings(repo))
+        drop_design_lead_settings(repo)
         root = attached_to(repo)
         if root is not None:  # before a project of its own is made out of it
             raise Fail(f"{repo} is attached to the project at {root}, so it is not a project of its own: it gets its "
@@ -3994,11 +4127,10 @@ def main(argv=None) -> int:
             # a stored repo that is gone stays listed: only the owner takes it out
             settings(repo, attached=list(dict.fromkeys([*stored_attached, *(str(d) for d in attached)])))
         coord, reviewer = cfg["pins"]["coordinator"], cfg["pins"]["reviewer"]
-        lead = cfg["pins"]["design-lead"] if cfg["lead"] else None
         PRIVATE_GLOBS[:] = cfg["private"]
         mode = cfg["mode"]
-        modes = {r: cfg["modes"].get(r, mode) for r in ("coordinator", "design-lead", "reviewer")}
-        late = {coord[0]} | ({lead[0]} if lead else set())
+        modes = {r: cfg["modes"].get(r, mode) for r in ("coordinator", "reviewer")}
+        late = {coord[0]}
         for h in sorted(late):
             if not shutil.which(h):
                 raise Fail(f"{h} not on PATH, but this project launches {h} agents")
@@ -4014,13 +4146,13 @@ def main(argv=None) -> int:
         if "claude" in needed and not a.no_start:
             ensure_claude_trust(repo, record=a.trust_folder)
         project = cfg["name"] or repo.name
-        if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+        if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt):
             return STOPPED
         if not a.skip_adapt:  # also on a re-run: a declined or failed push is offered again
             publish_onboarding(repo)
         for d in attached:  # the same per-repo work; no space, personas or agents of their own
             if not a.skip_adapt:
-                if not onboard_attached(d, project, adapter, adapt_reviewer, a.readapt, lead is not None):
+                if not onboard_attached(d, project, adapter, adapt_reviewer, a.readapt):
                     return STOPPED
                 publish_onboarding(d)
         space = slug(project)
@@ -4034,11 +4166,11 @@ def main(argv=None) -> int:
             claude_wiring(repo, space)
         if own_models:
             settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
-        changed = personas_and_tiers(repo, project, coord, lead, reviewer, modes, tier_text, tuple(str(d) for d in attached))
+        changed = personas_and_tiers(repo, project, coord, reviewer, modes, tier_text, tuple(str(d) for d in attached))
+        retire_design_lead(repo, project, None)
         needs = {n: "persona changed" for n in changed}
         if skill == "updated":
-            for n in ("coordinator", "design-lead") if lead else ("coordinator",):
-                needs.setdefault(n, "skill changed")
+            needs.setdefault("coordinator", "skill changed")
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
             if needs:
@@ -4052,24 +4184,9 @@ def main(argv=None) -> int:
         LEFTOVER_DELIVERED = spawn(repo, space, "coordinator", *coord, modes["coordinator"], repo, coordinator_kickoff())
         if LEFTOVER_DELIVERED:  # a coordinator that was just started is awake: the guard sends it orders again
             guard_marker(space).unlink(missing_ok=True)
-        wt = None
-        if lead:
-            wt, created = design_worktree(repo, repo_id)
-            if created:
-                setup_done = wait_for_setup(wt, "design-lead")
-                before = {t["handle"] for t in worktree_terminals(wt)}
-            spawn(repo, space, "design-lead", *lead, modes["design-lead"], wt,
-                  "Read AGENTS.md and AGENTS.lane-control.md and the orca-cotal-lanes skill, then cotal_dm "
-                  "coordinator one line: ready.")
-            if created:
-                # Only now, so the worktree is never empty when the agent starts: an empty worktree may refuse the
-                # spawn and strand the name. A Setup tab that never finished stays, to read.
-                close_startup_tabs(wt, before, setup_done)
-                LOCAL.jrun("terminal", "create", "--worktree", f"path:{wt}")  # the owner's shell
-        verify(repo, space, wt)
+        verify(repo, space)
         print(f"summary: {project} · space {space} · broker 127.0.0.1:{settings(repo).get('port')} · orca repo {repo_id}")
-        print(f"  open Orca: the project {repo.name}, its main checkout (coordinator)"
-              + (" and child task design-lead" if lead else ""))
+        print(f"  open Orca: the project {repo.name}, its main checkout (coordinator)")
         return 0
     except Fail as e:
         print(f"project-setup: {e}", file=sys.stderr)

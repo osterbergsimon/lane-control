@@ -44,7 +44,7 @@ class PauseTest(unittest.TestCase):
         r = self.pause("rest", str(self.repo), env_extra=inside)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.marker().exists())
-        self.assertEqual(self.agents(), ["coordinator", "design-lead"])
+        self.assertEqual(self.agents(), ["coordinator"])
         self.assertIn("resting", self.pause("status", str(self.repo)).stdout)
         r = self.pause("wake", str(self.repo), env_extra=inside)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -95,7 +95,7 @@ class PauseTest(unittest.TestCase):
         self.assertFalse(self.marker().exists())
 
     def test_status_running_then_paused(self):
-        self.assertIn("running (coordinator, design-lead)", self.pause("status", str(self.repo)).stdout)
+        self.assertIn("running (coordinator)", self.pause("status", str(self.repo)).stdout)
         self.assertEqual(self.pause("stop", str(self.repo)).returncode, 0)
         self.assertIn("shop: paused", self.pause("status", str(self.repo)).stdout)
 
@@ -115,7 +115,7 @@ class PauseTest(unittest.TestCase):
         r = self.pause("stop", str(self.repo))
         self.assertEqual(r.returncode, 1)
         self.assertIn("lane-1", r.stderr)
-        self.assertEqual(self.agents(), ["coordinator", "design-lead", "lane-1"])
+        self.assertEqual(self.agents(), ["coordinator", "lane-1"])
         self.assertNotIn("cotal stop", "\n".join(self.e.calls()))
 
     def test_start_restarts_only_missing_agents_with_the_resume_kickoff(self):
@@ -123,14 +123,23 @@ class PauseTest(unittest.TestCase):
         self.e.log.write_text("")
         r = self.pause("start", str(self.repo))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.agents(), ["coordinator", "design-lead"])
+        self.assertEqual(self.agents(), ["coordinator"])
         spawns = [c for c in self.e.calls() if c.startswith("cotal spawn")]
-        self.assertEqual(len(spawns), 2)
+        self.assertEqual(len(spawns), 1)
         self.assertIn("bd recall handover-latest", spawns[0])
         self.assertFalse(any(c.startswith(("cotal stop", "cotal down")) for c in self.e.calls()))
         self.e.log.write_text("")
         self.assertEqual(self.pause("start", str(self.repo)).returncode, 0)  # all running: nothing spawned
         self.assertFalse([c for c in self.e.calls() if c.startswith("cotal spawn")])
+
+    def test_a_running_design_lead_counts_as_a_lane_and_is_named(self):
+        self.e.set_state(agents=[*json.loads(self.e.state.read_text())["agents"], {"name": "design-lead", "cwd": "/x"}])
+        for cmd in ("rest", "stop"):
+            r = self.pause(cmd, str(self.repo))
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("design-lead", r.stderr)
+            self.assertIn("retired", r.stderr)
+        self.assertFalse(self.marker().exists())
 
     def test_start_brings_back_just_the_one_that_is_missing(self):
         self.pause("stop", str(self.repo))

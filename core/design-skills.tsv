@@ -1,0 +1,9 @@
+# The design skills project-setup installs for Claude and OpenCode (docs/superpowers/specs/2026-11-21-design-kit-design.md, section 9).
+# Only where they come from is kept here, never their content. Licences checked 2026-11-21. Tab-separated:
+# name	url	commit	path	licence	claude_plugin
+frontend-design	https://github.com/anthropics/claude-plugins-official.git	73c8cf3ea7e296057b467990f2f5d61b4c922260	plugins/frontend-design/skills/frontend-design	Apache-2.0	frontend-design@claude-plugins-official
+ui-ux-pro-max	https://github.com/nextlevelbuilder/ui-ux-pro-max-skill.git	2de1134dc4d1cfe112934611ae5803ae17a1bd7e	.claude/skills/ui-ux-pro-max	MIT	ui-ux-pro-max@ui-ux-pro-max-skill
+# The pin covers the skill's text only: each use of `npx -y modern-web-guidance@latest` downloads and runs the newest
+# `modern-web-guidance` package from npm (Apache-2.0, from GoogleChrome/modern-web-guidance-src) and needs Node and the
+# network. Lanes run it only as the skill says, and no other npx package (owner decision, 2026-11-21).
+modern-web-guidance	https://github.com/GoogleChrome/modern-web-guidance.git	64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65	skills/modern-web-guidance	Apache-2.0	-
