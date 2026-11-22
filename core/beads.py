@@ -159,7 +159,7 @@ def check(repo: Path, state: BeadsState) -> list[tuple[str, str, str]]:
 
 # --- the session hook -------------------------------------------------------------------------------------------------
 
-PRIME_CANDIDATES = ("bd prime",)  # `bd prime --hook-json` (calvin's) does not exist in bd 1.0.4; --memories-only is for
+PRIME_CANDIDATES = ("bd prime",)  # `bd prime --hook-json` does not exist in bd 1.0.4; --memories-only is for
 # compact-only hooks, and ours also fires at start, so the plain command is the one
 
 
