@@ -122,7 +122,7 @@ ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop sh
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-shots")  # the library first: a new tool never sees an old one
 OLD_PATH_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # kept as links in scripts/ for machines
-HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "scripts/project-setup",
+HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "scripts/project-setup",
               *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
               "core/templates/frontend-brief.md", "core/templates/DESIGN.md",
               "core/scripts/project-setup", "core/harnesses", "orchestrators/native-orca",
@@ -203,7 +203,7 @@ def free_port(start: int) -> int:
 
 SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "own_models", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
-                "paired_environment")  # all that is ever written: names and choices, never a secret
+                "paired_environment", "beads_repo")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -627,15 +627,63 @@ def bd_workspace(repo):
         return False
 
 
-def beads_note(repo):
-    """Says plainly when bd is not set up for this project. Creates nothing: where beads lives is the owner's call."""
-    if not shutil.which("bd"):
-        print("project-setup: note: `bd` is not on PATH; the coordinator and lanes use beads for issues "
-              "(see issues.md). Install it if this project should use beads.", file=sys.stderr)
-    elif not bd_workspace(repo):
-        print(f"project-setup: note: {repo} has no beads workspace (`bd where` fails); agents will find no issue tracker. "
-              "Where beads lives is your choice (a symlink to a separate repo, or `bd init`); nothing was created.",
-              file=sys.stderr)
+def load_beads():
+    """core/beads.py: where beads lives, its checks, the layout move and the restore."""
+    core = str(HERE / "core")
+    if core not in sys.path:
+        sys.path.insert(0, core)
+    import beads
+    return beads
+
+
+def beads_report(repo, override=None):
+    """Says plainly how this project's beads stands (core/beads.py) and, for a plain `.beads` folder, offers the move to
+    the standard layout on the owner's yes (only in a terminal; without one it says what it would do). `override` is
+    --beads-repo OWNER/NAME; the settings store keeps it for later runs."""
+    b = load_beads()
+    if override:
+        try:
+            b.beads_repo_slug(repo, override)
+        except ValueError as e:
+            raise Fail(str(e))
+        if settings(repo).get("beads_repo") != override:
+            settings(repo, beads_repo=override)
+    try:
+        slug = b.beads_repo_slug(repo, override or settings(repo).get("beads_repo"))
+    except ValueError as e:
+        slug = None
+        slug_problem = str(e)
+    state = b.inspect(repo)
+    if state.kind in ("folder", "link"):
+        if slug is None:
+            print(f"project-setup: note: beads: {slug_problem}", file=sys.stderr)
+        else:
+            yes = (lambda q: owner_says_yes(q, "beads")) if has_terminal() else None
+            for step, what, detail in b.adopt_layout(repo, state, slug, yes):
+                if what in b.PROBLEMS:
+                    print(f"project-setup: note: {detail}", file=sys.stderr)
+                else:
+                    say(step, what, detail)
+            state = b.inspect(repo)
+        lines = [ln for ln in b.check(repo, state) if ln[1] in b.PROBLEMS]
+    elif state.kind == "none" and slug is not None and shutil.which("bd"):
+        yes = (lambda q: owner_says_yes(q, "beads")) if has_terminal() else None
+        for step, what, detail in b.restore(repo, slug, yes):
+            if what in b.PROBLEMS:
+                print(f"project-setup: note: {detail}", file=sys.stderr)
+            else:
+                say(step, what, detail)
+        state = b.inspect(repo)
+        lines = [ln for ln in b.check(repo, state) if ln[1] in b.PROBLEMS and state.kind != "none"]
+    else:
+        lines = b.check(repo, state)
+        if state.kind == "none" and slug is None:
+            print(f"project-setup: note: beads: {slug_problem}", file=sys.stderr)
+    for step, what, detail in lines:
+        if what in b.PROBLEMS:
+            print(f"project-setup: note: {detail}", file=sys.stderr)
+        else:
+            say(step, what, detail)
 
 
 def host_hygiene():
@@ -1196,7 +1244,9 @@ def setup_steps(repo: Path) -> list:
         steps.insert(0, direnv)
     beads = repo / ".beads"
     if beads.is_symlink():
-        steps.insert(0, f"[ -e .beads ] || ln -s {shlex.quote(os.readlink(beads))} .beads "
+        target, home = os.readlink(beads), str(Path.home())
+        arg = '"$HOME"' + shlex.quote(target[len(home):]) if target.startswith(home + os.sep) else shlex.quote(target)
+        steps.insert(0, f"[ -e .beads ] || ln -s {arg} .beads "
                      '|| echo "setup: the .beads link failed" >&2')
     return steps
 
@@ -2569,7 +2619,7 @@ def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int, "orchestrator": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
+            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
@@ -2957,6 +3007,28 @@ def persona_hooks(checkout: Path, harnesses_used) -> None:
 
 
 
+def beads_hooks(checkout: Path, harnesses_used) -> None:
+    """lane-control owns the beads session hook (bd prime) the way it owns the persona hook. A harness with no such hook
+    says so; a committed hook that fails, or runs twice, is named, never edited."""
+    for h in sorted(harnesses_used):
+        adapter = load_harness(h)
+        if not hasattr(adapter, "install_beads_hook"):
+            say(f"beads-hook {h}", "skipped", f"(bd offers no session hook for {h}: not covered, see "
+                                              f"core/harnesses/{h}/record.md)")
+            continue
+        try:
+            lines = adapter.install_beads_hook(checkout)
+        except (OSError, ValueError) as e:
+            raise Fail(f"beads hook for {h}: {e}")
+        say(f"beads-hook {h}", "updated" if lines else "exists", "; ".join(lines) or str(checkout))
+    b = load_beads()
+    for step, what, detail in b.hook_notes(checkout):
+        if what in b.PROBLEMS:
+            print(f"project-setup: note: {detail}", file=sys.stderr)
+        else:
+            say(step, what, detail)
+
+
 def load_harness(name: str):
     """A harness adapter from core/harnesses/ (claude, opencode)."""
     core = str(HERE / "core")
@@ -3207,6 +3279,7 @@ def native_refresh(repo: Path, a, tiers: Path) -> int:
     changed = native_personas(repo, p["project"], pins, p["mode"], tier_text, p["attached"])
     standing = {pins["coordinator"][0]}
     persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
+    beads_hooks(repo, {pins["coordinator"][0]} & {"claude", "opencode"})
     native_skills()
     place = Place()
     retire_design_lead(repo, p["project"], place)
@@ -3297,7 +3370,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             print(f"project-setup: warning: {why}", file=sys.stderr)
         elif why:
             raise Fail(f"{why}. Nothing was changed")
-        beads_note(repo)
+        beads_report(repo, a.beads_repo)
         validate_settings(repo, settings(repo))
         drop_design_lead_settings(repo)
         if a.desktop_environment:  # this box is paired with that machine (direction 2); the coordinator reads it
@@ -3351,6 +3424,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         changed = native_personas(repo, project, pins, cfg["mode"], tier_text, tuple(str(d) for d in attached))
         retire_design_lead(repo, project, place)
         persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
+        beads_hooks(repo, {pins["coordinator"][0]} & {"claude", "opencode"})
         setup_script(repo, a.write_orca_yaml)
         if a.no_start:
             if changed:
@@ -3894,6 +3968,9 @@ def main(argv=None) -> int:
     ap.add_argument("--own-model", action="append", default=[], metavar="PROVIDER/MODEL",
                     help="declare a model as your own or on a gateway you run (repeatable). Needed before --coordinator "
                          "or --reviewer may pin opencode/<provider>/<model>")
+    ap.add_argument("--beads-repo", metavar="OWNER/NAME",
+                    help="the private GitHub repo that holds this project's beads (default: the project's origin owner "
+                         "and `<repo name>-beads`). Kept in the settings store")
     ap.add_argument("--no-start", action="store_true")
     ap.add_argument("--with", action="append", default=[], dest="with_repos", metavar="DIR|GIT-URL",
                     help="attach a second repo to the project (repeatable): lanes from this project's coordinator, no "
@@ -4112,7 +4189,7 @@ def main(argv=None) -> int:
             print(f"project-setup: warning: {why}", file=sys.stderr)
         elif why:  # anything that may commit does not
             raise Fail(f"{why}. Nothing was changed")
-        beads_note(repo)
+        beads_report(repo, a.beads_repo)
         migrate(repo)
         validate_settings(repo, settings(repo))
         drop_design_lead_settings(repo)

@@ -114,3 +114,7 @@ you.
 Keep a `handover-latest` beads memory (`bd remember`) at every natural stop: lanes in flight (key, worktree, agent,
 tier), what each waits on, open owner questions. A fresh session resumes from it and from `cotal who` and
 `orca worktree list`.
+
+Back beads up at the same stop, in the beads repo (the folder `.beads` links to): `git push`, then `bd dolt push`;
+the second carries the database, memories included. A failed backup is reported to the owner in your next message,
+with the error, and never retried silently.

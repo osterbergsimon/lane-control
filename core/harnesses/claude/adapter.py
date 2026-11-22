@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+import beads  # noqa: E402
 import harnesses  # noqa: E402
 
 NAME = "claude"
@@ -44,12 +45,9 @@ def _ours(hook) -> bool:
     return len(words) == 1 and Path(words[0]).parts[-3:] == HOOK_TAIL
 
 
-def install_persona_hook(checkout: Path) -> list:
-    """Add the persona hook to <checkout>/.claude/settings.local.json once, as its own SessionStart entry; every other
-    setting, entry and hook is kept as it is. Our hook found anywhere else (a moved lane-control, an entry shared
-    with someone else's hook, a duplicate) is taken out of that place only, so the file ends with exactly one entry
-    of ours. Returns change lines."""
-    path = Path(checkout) / ".claude" / "settings.local.json"
+def _read_settings(path: Path):
+    """(data, SessionStart list) of an uncommitted settings file; ValueError (file left as it is) when it is not JSON or
+    not shaped as expected."""
     data = {}
     if path.exists():
         try:
@@ -60,6 +58,17 @@ def install_persona_hook(checkout: Path) -> list:
     starts = hooks.get("SessionStart", []) if isinstance(hooks, dict) else None
     if not isinstance(starts, list):
         raise ValueError(f"{path}: not an object with hooks.SessionStart a list; fix it by hand, it was left as it is")
+    return data, starts
+
+
+def install_persona_hook(checkout: Path) -> list:
+    """Add the persona hook to <checkout>/.claude/settings.local.json once, as its own SessionStart entry; every other
+    setting, entry and hook is kept as it is. Our hook found anywhere else (a moved lane-control, an entry shared
+    with someone else's hook, a duplicate) is taken out of that place only, so the file ends with exactly one entry
+    of ours. Returns change lines."""
+    path = Path(checkout) / ".claude" / "settings.local.json"
+    data, starts = _read_settings(path)
+    hooks = data.get("hooks", {})
     want = {"matcher": MATCHER, "hooks": [{"type": "command", "command": shlex.quote(str(harnesses.PERSONA_HOOK))}]}
 
     def holds_ours(e):
@@ -78,6 +87,31 @@ def install_persona_hook(checkout: Path) -> list:
     _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     what = "updated" if any(holds_ours(e) for e in starts) else "added"
     return [f"{path}: {what} the SessionStart persona hook ({MATCHER})"]
+
+
+def install_beads_hook(checkout: Path) -> list:
+    """Add `bd prime` as a SessionStart hook (same matchers as the persona hook) to <checkout>/.claude/settings.local.json
+    once, as its own entry; nothing else in the file changes. Nothing is added when bd is missing or has no working
+    `bd prime`, or when the committed .claude/settings.json already has a working `bd prime` hook (two would run it
+    twice: core/beads.py hook_notes says so). The committed file is never touched. Returns change lines."""
+    checkout = Path(checkout)
+    if any(runs and (command.split() + [""])[1] == "prime" for command, runs in beads.committed_bd_hooks(checkout)):
+        return []
+    command = beads.bd_prime_command(checkout)
+    if command is None:
+        return []
+    path = checkout / ".claude" / "settings.local.json"
+    data, starts = _read_settings(path)
+
+    def holds_bd(e):
+        return (isinstance(e, dict) and e.get("matcher") == MATCHER and isinstance(e.get("hooks"), list)
+                and any(isinstance(h, dict) and h.get("command") == command for h in e["hooks"]))
+    if any(holds_bd(e) for e in starts):
+        return []
+    want = {"matcher": MATCHER, "hooks": [{"type": "command", "command": command}]}
+    data["hooks"] = {**data.get("hooks", {}), "SessionStart": starts + [want]}
+    _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return [f"{path}: added the SessionStart beads hook `{command}` ({MATCHER})"]
 
 
 def _write_atomic(path: Path, text: str):

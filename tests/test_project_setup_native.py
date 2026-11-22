@@ -300,6 +300,83 @@ class RenderTests(Case):
         self.assertEqual(starts[0]["matcher"], "startup|resume|clear|compact")
         self.assertIn("persona-hook.sh", starts[0]["hooks"][0]["command"])
 
+    def test_the_beads_session_hook_is_installed_once_next_to_the_persona_hook(self):
+        bd = self.e.bin / "bd"
+        bd.write_text(bd.read_text().replace('[ "$1" = recall ] || exit 1', '[ "$1" = prime ] && exit 0\n[ "$1" = recall ] || exit 1'))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("beads-hook claude: updated", r.stdout)
+        cfg = json.loads((self.repo / ".claude" / "settings.local.json").read_text())
+        cmds = [h["command"] for e in cfg["hooks"]["SessionStart"] for h in e["hooks"]]
+        self.assertEqual(len(cmds), 2)
+        self.assertIn("bd prime", cmds)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertIn("beads-hook claude: exists", r.stdout)
+        cfg2 = json.loads((self.repo / ".claude" / "settings.local.json").read_text())
+        self.assertEqual(cfg2, cfg)
+
+    def test_a_plain_beads_folder_without_a_terminal_is_only_described(self):
+        (self.repo / ".beads").mkdir()
+        (self.repo / ".beads" / "config.yaml").write_text("x: 1\n")
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/app.git"], cwd=self.repo,
+                       capture_output=True)
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("beads: would", r.stdout)
+        self.assertIn("private GitHub repo", r.stdout)
+        self.assertTrue((self.repo / ".beads").is_dir() and not (self.repo / ".beads").is_symlink())
+
+    def origin(self):
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/app.git"], cwd=self.repo,
+                       capture_output=True)
+
+    def test_a_project_without_beads_gets_the_restore_described_without_a_terminal(self):
+        self.origin()
+        (self.e.bin / "gh").write_text("#!/bin/sh\nexit 0\n")
+        remotes = self.e.home / "remotes"  # git reaches "GitHub" here, never the network
+        subprocess.run(["git", "init", "-q", "--bare", str(remotes / "app-beads.git")], check=True)
+        self.e.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=f"url.file://{remotes}/.insteadOf",
+                          GIT_CONFIG_VALUE_0="https://github.com/acme/")
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("beads: would clone the private GitHub repo acme/app-beads", r.stdout)
+        self.assertFalse((self.repo / ".beads").exists() or (self.repo / ".beads").is_symlink())
+
+    def test_a_project_without_beads_on_a_box_not_signed_in_to_github_says_what_is_needed(self):
+        self.origin()  # the stub gh exits 1: not signed in
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("fine-grained token", r.stderr)
+        self.assertFalse((self.repo / ".beads").exists())
+
+    def test_beads_repo_flag_is_kept_in_the_settings_store(self):
+        (self.repo / ".beads").mkdir()
+        r = self.e.run(str(self.repo), "--no-start", "--beads-repo", "acme/widget-priv-beads")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("acme/widget-priv-beads", r.stdout)
+        st = json.loads((self.e.store(self.repo) / "settings.json").read_text())
+        self.assertEqual(st["beads_repo"], "acme/widget-priv-beads")
+        r = self.e.run(str(self.repo), "--no-start")  # remembered
+        self.assertIn("acme/widget-priv-beads", r.stdout)
+
+    def test_a_bad_beads_repo_is_refused_before_anything_changes(self):
+        r = self.e.run(str(self.repo), "--no-start", "--beads-repo", "nonsense")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("OWNER/NAME", r.stderr)
+
+    def test_a_broken_committed_beads_hook_is_named(self):
+        bd = self.e.bin / "bd"
+        bd.write_text('#!/bin/sh\n[ "$1" = prime ] && case "$*" in *--hook-json*) exit 1;; esac\n[ "$1" = prime ] && exit 0\nexit 1\n')
+        f = self.repo / ".claude" / "settings.json"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "bd prime --hook-json"}]}]}}))
+        before = f.read_bytes()
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("bd prime --hook-json", r.stderr)
+        self.assertIn("`bd prime`", r.stderr)
+        self.assertEqual(f.read_bytes(), before)
+
     def test_opencode_plugin_is_installed_for_an_opencode_standing_role(self):
         plugin = Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "lane-persona.js"
         self.e.run(str(self.repo), "--no-start")

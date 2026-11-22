@@ -2251,6 +2251,13 @@ class DirenvLineTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((work / ".git" / "orca-setup-done").exists())
 
+    def test_the_beads_link_line_names_home_not_this_machines_path(self):
+        # the drafted orca.yaml is committed to a public repo and runs on other machines: no username, no private path
+        (self.repo / ".beads").symlink_to(self.e.home / "code" / "x-beads" / ".beads")
+        text, _ = self.draft()
+        self.assertIn('ln -s "$HOME"/code/x-beads/.beads .beads', text)
+        self.assertNotIn(str(self.e.home), text)
+
     def test_an_envrc_not_approved_here_gets_no_line_and_the_output_says_so(self):
         text, out = self.draft("notallowed")
         self.assertNotIn("direnv", text)
@@ -2312,7 +2319,9 @@ class RunTests(unittest.TestCase):
         (repo / ".beads").mkdir()
         r = self.e.run(str(repo), "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("beads", r.stderr)
+        self.assertIn("plain folder", r.stderr)  # a plain folder is not the standard layout (lc-5c1)
+        self.assertIn("no off-machine copy", r.stderr)
+        self.assertTrue((repo / ".beads").is_dir() and not (repo / ".beads").is_symlink())
 
     def test_preflight_fails_when_harness_missing(self):
         repo = self.e.repo()
