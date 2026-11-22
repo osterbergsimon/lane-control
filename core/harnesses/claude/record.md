@@ -12,8 +12,11 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
 - Beads session hook: `install_beads_hook` adds `bd prime` as its own `SessionStart` entry (same matchers) to the same
   uncommitted file, once; `bd prime --hook-json` does not exist in bd 1.0.4, and `--memories-only` is for hooks that
   fire at compaction only, so the plain command is used. Not added when bd is missing or `bd prime` fails, nor when
-  the committed `.claude/settings.json` already has a working `bd prime` hook (two would run it twice). A committed
-  `bd` hook that fails is named with the fix and never edited (`core/beads.py` `hook_notes`). Note that `bd init`
+  any settings layer already runs `bd prime` (`core/beads.py` `prime_hooks`: the user's `settings.json`, where `bd setup
+  claude --global` puts it, the committed `.claude/settings.json` and the uncommitted `settings.local.json`; any event,
+  any matcher, a plain command or a shell line such as `bd prime 2>/dev/null || true`): two would run it twice. The
+  same event running it from two places is reported as a duplicate, naming both. A `bd prime` hook that fails is
+  named with the fix and never edited, and no settings file but the uncommitted one is ever written (`hook_notes`). Note that `bd init`
   itself writes a `bd prime` hook into the `.claude/settings.json` of the folder it runs in.
 - Size: Claude keeps at most 10,000 characters of a hook's output (over that it shows a 2,000-character preview and
   does not ask the session to read the rest). A persona over about 9,800 bytes is printed as a first line telling

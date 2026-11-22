@@ -25,8 +25,9 @@ and memories both. Only one machine works on a project at a time.
 2. Moving a project to another machine restores its beads as part of setup, with no hand steps beyond the owner's
    yes and their GitHub sign-in.
 3. One layout, one hook setup and one version floor for every project, set up and checked by lane-control.
-4. Problems are said plainly at setup time (missing bd, too-old bd, no remote, a broken hook, an unpushed database),
-   not found later.
+4. Problems are said plainly at setup time (missing bd, too-old bd, no remote, a broken hook, unpushed beads-repo git
+   commits), not found later. Not the Dolt half: bd 1.0.4 cannot detect an unpushed Dolt database (see the builder
+   answers), so only unpushed beads-repo git commits are checked.
 
 ## Non-goals
 
@@ -149,5 +150,11 @@ and memories both. Only one machine works on a project at a time.
   whose `.beads` resolves to it. Fallback when there is no config: `bd init -p <prefix> --remote <url>`. Both are pinned
   by `tests/test_beads_roundtrip.py` (opt-in: `LANE_TEST_REAL_BD=1`).
 - **Dolt remote setup:** `bd dolt remote add origin <url>`, then `bd dolt push`.
+- **Unpushed database (a call the owner can accept or overturn):** goal 4 first listed "an unpushed database". bd 1.0.4
+  cannot detect an unpushed Dolt database: in embedded mode `bd sql` is refused, `bd vc status` shows only branch and
+  commit, `bd dolt status` and `bd dolt show` give no ahead/behind count, and no push-state file appears after a `bd dolt
+  push`. So only unpushed beads-repo git commits (`git rev-list --count @{u}..HEAD`, or "never pushed" with no upstream)
+  are checked and warned about; the Dolt half is covered by the `bd dolt push` in every handover, which is why that step
+  is required. Revisit when a bd release can report it.
 - **Side effect to remember:** `bd init` also installs Claude Code integration (`.claude/settings.json` with bd hooks)
   in the directory it runs in; lane-control's own hook step must not be fooled by, or double up with, that file.

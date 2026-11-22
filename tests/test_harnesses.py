@@ -292,6 +292,42 @@ class ClaudeBeadsHookTests(HomeTest):
         self.assertEqual(c.read_bytes(), before)
         self.assertIn("bd prime", self.commands())
 
+    def prime_at(self, path, event="SessionStart", command="bd prime", matcher=""):
+        import json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hooks": {event: [{"matcher": matcher, "hooks": [
+            {"type": "command", "command": command}]}]}}))
+        return path
+
+    def test_a_prime_hook_in_the_user_settings_means_no_second_one(self):
+        u = self.prime_at(self.home / ".claude" / "settings.json")
+        before = u.read_bytes()
+        self.assertEqual(self.a.install_beads_hook(self.checkout), [])
+        self.assertFalse(self.settings.exists())
+        self.assertEqual(u.read_bytes(), before)
+
+    def test_a_committed_shell_line_that_runs_bd_prime_means_no_second_one(self):
+        c = self.prime_at(self.checkout / ".claude" / "settings.json", command="bd prime 2>/dev/null || true")
+        before = c.read_bytes()
+        self.assertEqual(self.a.install_beads_hook(self.checkout), [])
+        self.assertFalse(self.settings.exists())
+        self.assertEqual(c.read_bytes(), before)
+
+    def test_a_prime_hook_on_another_event_means_no_second_one(self):
+        self.prime_at(self.checkout / ".claude" / "settings.json", event="PreCompact")
+        self.assertEqual(self.a.install_beads_hook(self.checkout), [])
+        self.assertFalse(self.settings.exists())
+
+    def test_a_local_prime_hook_under_another_matcher_means_no_second_one(self):
+        self.prime_at(self.settings, matcher="startup")
+        before = self.settings.read_bytes()
+        self.assertEqual(self.a.install_beads_hook(self.checkout), [])
+        self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_a_user_hook_that_bd_rejects_does_not_stop_ours(self):
+        self.prime_at(self.home / ".claude" / "settings.json", command="bd prime --hook-json")
+        self.assertEqual(len(self.a.install_beads_hook(self.checkout)), 1)
+
     def test_nothing_added_when_bd_is_missing_or_prime_fails(self):
         from unittest import mock
         with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):

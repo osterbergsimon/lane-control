@@ -107,7 +107,8 @@ class BeadsCase(unittest.TestCase):
                                              "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"})
         patcher.start()
         self.addCleanup(patcher.stop)
-        for k in ("BD_FAIL", "BD_FAIL_IN", "BD_DOLT_REMOTE", "BD_VERSION", "GH_NOT_SIGNED_IN", "GH_EXISTS", "GH_FAIL"):
+        for k in ("BD_FAIL", "BD_FAIL_IN", "BD_DOLT_REMOTE", "BD_VERSION", "GH_NOT_SIGNED_IN", "GH_EXISTS", "GH_FAIL",
+                  "CLAUDE_CONFIG_DIR"):
             os.environ.pop(k, None)
         self.repo = self.home / "code" / "widget"
         self.repo.mkdir()
@@ -282,6 +283,28 @@ class VersionTests(BeadsCase):
         self.assertEqual(beads.BD_FLOOR, (1, 0, 4))
 
 
+class SpecAgreementTests(unittest.TestCase):
+    """lc-ug6 r2-n1: goal 4 promised an unpushed-database check that bd 1.0.4 cannot support; the spec and
+    core/issues.md must both say so, in the same words, so the owner sees it as a call."""
+    PHRASE = "cannot detect an unpushed Dolt database"
+
+    def test_spec_and_issues_md_agree_that_only_the_git_half_is_checked(self):
+        spec = (ROOT / "docs/superpowers/specs/2026-11-22-beads-handling-design.md").read_text()
+        issues = (ROOT / "core/issues.md").read_text()
+        flat = lambda t: " ".join(t.split())
+        for name, text in (("spec", flat(spec)), ("issues.md", flat(issues))):
+            with self.subTest(doc=name):
+                self.assertIn(self.PHRASE, text)
+                self.assertIn("bd 1.0.4", text)
+                self.assertIn("beads-repo git commits", text)
+
+    def test_goal_4_no_longer_promises_an_unpushed_database_check(self):
+        spec = (ROOT / "docs/superpowers/specs/2026-11-22-beads-handling-design.md").read_text()
+        goal4 = spec[spec.index("4. Problems are said plainly"):spec.index("## Non-goals")]
+        self.assertNotIn("an unpushed database", goal4)
+        self.assertIn("unpushed beads-repo git commits", " ".join(goal4.split()))
+
+
 class HookTests(BeadsCase):
     def committed(self, command: str):
         import json
@@ -339,6 +362,97 @@ class HookTests(BeadsCase):
         self.assertEqual([c.split()[0:2] for c in self.bd_calls()], [])
         beads.committed_bd_hooks(self.repo)
         self.assertEqual(self.bd_calls(), ["create --help"])  # a --help probe, never the command itself
+
+    # --- every settings layer that applies (lc-ug6: m8, r2-m1) ---
+
+    def settings_at(self, path: Path, event: str, command: str, matcher: str = ""):
+        import json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hooks": {event: [{"matcher": matcher, "hooks": [
+            {"type": "command", "command": command}]}]}}))
+        return path
+
+    def user_settings(self):
+        return self.home / ".claude" / "settings.json"
+
+    def local_settings(self):
+        return self.repo / ".claude" / "settings.local.json"
+
+    def details(self, lines):
+        return " ".join(d for _, _, d in lines)
+
+    def test_a_prime_hook_in_the_user_settings_is_found_and_named(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime")
+        lines = beads.hook_notes(self.repo)
+        self.assertEqual([w for _, w, _ in lines], ["exists"])
+        self.assertIn(str(self.user_settings()), self.details(lines))
+        self.assertEqual([(h.layer, h.event, h.runs) for h in beads.prime_hooks(self.repo)],
+                         [("user", "SessionStart", True)])
+
+    def test_the_user_settings_folder_follows_claude_config_dir(self):
+        other = self.tmp / "profile"
+        self.settings_at(other / "settings.json", "SessionStart", "bd prime")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(other)}):
+            self.assertEqual([h.layer for h in beads.prime_hooks(self.repo)], ["user"])
+        self.assertEqual(beads.prime_hooks(self.repo), [])  # without it, ~/.claude is read, and holds nothing
+
+    def test_a_shell_line_that_runs_bd_prime_counts_and_is_never_run(self):
+        self.committed("bd prime 2>/dev/null || true")
+        hooks = beads.prime_hooks(self.repo)
+        self.assertEqual([(h.layer, h.runs) for h in hooks], [("committed", None)])  # present; not probed, not judged
+        self.assertEqual(self.bd_calls(), [])
+        lines = beads.hook_notes(self.repo)
+        self.assertEqual([w for _, w, _ in lines], ["exists"])
+        self.assertIn("bd prime 2>/dev/null || true", self.details(lines))
+
+    def test_a_command_that_only_mentions_bd_prime_does_not_count(self):
+        self.committed('echo "run bd prime by hand"')
+        self.assertEqual(beads.prime_hooks(self.repo), [])
+        self.assertEqual(beads.hook_notes(self.repo), [])
+
+    def test_a_prime_hook_on_any_event_counts(self):
+        self.settings_at(self.repo / ".claude" / "settings.json", "PreCompact", "bd prime")
+        self.assertEqual([h.event for h in beads.prime_hooks(self.repo)], ["PreCompact"])
+        self.assertEqual([w for _, w, _ in beads.hook_notes(self.repo)], ["exists"])
+
+    def test_a_local_prime_hook_under_another_matcher_is_found(self):
+        self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher="startup")
+        self.assertEqual([(h.layer, h.event) for h in beads.prime_hooks(self.repo)], [("local", "SessionStart")])
+
+    def test_the_same_event_in_two_layers_is_reported_as_a_duplicate_naming_both(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime")
+        self.committed("bd prime 2>/dev/null || true")
+        lines = beads.hook_notes(self.repo)
+        warn = [d for _, w, d in lines if w == "warning"]
+        self.assertEqual(len(warn), 1)
+        self.assertIn(str(self.user_settings()), warn[0])
+        self.assertIn(".claude/settings.json", warn[0])
+        self.assertIn("SessionStart", warn[0])
+
+    def test_different_events_are_not_a_duplicate(self):
+        import json
+        f = self.user_settings()
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps({"hooks": {
+            "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "bd prime"}]}],
+            "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "bd prime"}]}]}}))
+        self.assertNotIn("warning", [w for _, w, _ in beads.hook_notes(self.repo)])
+
+    def test_no_settings_file_is_ever_edited(self):
+        files = [self.settings_at(self.user_settings(), "SessionStart", "bd prime"), self.committed("bd prime || true"),
+                 self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher="startup")]
+        before = [f.read_bytes() for f in files]
+        beads.hook_notes(self.repo)
+        self.assertEqual([f.read_bytes() for f in files], before)
+
+    def test_a_user_hook_that_bd_rejects_is_named_not_counted_and_not_edited(self):
+        f = self.settings_at(self.user_settings(), "SessionStart", "bd prime --hook-json")
+        before = f.read_bytes()
+        self.assertEqual([h.runs for h in beads.prime_hooks(self.repo)], [False])
+        lines = beads.hook_notes(self.repo)
+        self.assertEqual([w for _, w, _ in lines], ["broken"])
+        self.assertIn(str(f), self.details(lines))
+        self.assertEqual(f.read_bytes(), before)
 
 
 class AdoptLayoutTests(BeadsCase):
@@ -519,6 +633,21 @@ class AdoptLayoutTests(BeadsCase):
         self.assertNotIn("repo create", " ".join(self.gh_calls()))
         self.assertIn("broken", [w for _, w, _ in lines])
 
+    def test_the_leftover_folder_stop_does_not_call_the_github_repo_empty(self):
+        self.dest.mkdir()
+        text = " ".join(d for _, _, d in self.adopt())
+        self.assertNotIn("empty", text)
+        self.assertIn("already exists", text)
+        self.assertIn("last commit", text)  # what to look at: the earlier move may already have pushed its git copy
+        self.assertIn("acme/widget-beads", text)
+        self.assertIn(str(self.dest), text)
+
+    def test_the_repo_exists_stop_does_not_call_it_empty_either(self):
+        os.environ["GH_EXISTS"] = "1"
+        text = " ".join(d for _, _, d in self.adopt())
+        self.assertNotIn("empty", text)
+        self.assertIn("last commit", text)
+
     def test_a_github_repo_that_already_exists_stops_the_move(self):
         os.environ["GH_EXISTS"] = "1"
         lines = self.adopt()
@@ -683,6 +812,31 @@ class RestoreTests(BeadsCase):
                        capture_output=True)
         git(self.dest2, "remote", "set-url", "origin", "https://github.com/other/thing.git")
         self.assertIn("not a checkout of acme/widget-beads", self.problems(self.restore()))
+
+    def reuse_with_origin(self, url: str):
+        subprocess.run(["git", "clone", "-q", str(self.remotes / "widget-beads.git"), str(self.dest2)], check=True,
+                       capture_output=True)
+        git(self.dest2, "remote", "set-url", "origin", url)
+        lines = self.restore()
+        return lines
+
+    def test_an_existing_clone_over_ssh_is_reused(self):
+        for url in ("git@github.com:acme/widget-beads.git", "git@github.com:acme/widget-beads",
+                    "ssh://git@github.com/acme/widget-beads.git", "https://github.com/acme/widget-beads",
+                    "https://github.com/Acme/Widget-Beads.git"):
+            with self.subTest(url=url):
+                shutil.rmtree(self.dest2, ignore_errors=True)
+                lines = self.reuse_with_origin(url)
+                self.assertEqual(self.problems(lines), "")
+                self.assertNotIn("repo clone", " ".join(self.gh_calls()))
+                if (self.repo2 / ".beads").is_symlink():
+                    (self.repo2 / ".beads").unlink()
+
+    def test_an_existing_ssh_clone_of_another_repo_is_not_reused(self):
+        for url in ("git@github.com:other/widget-beads.git", "git@github.com:acme/thing-beads.git"):
+            with self.subTest(url=url):
+                shutil.rmtree(self.dest2, ignore_errors=True)
+                self.assertIn("not a checkout of acme/widget-beads", self.problems(self.reuse_with_origin(url)))
 
     def test_a_folder_in_the_way_is_never_touched(self):
         self.dest2.mkdir()
