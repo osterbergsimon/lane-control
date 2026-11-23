@@ -329,14 +329,14 @@ def install_denies(cos: list, integrations: dict) -> "tuple[list, list]":
     for c in cos:
         try:
             mod = harnesses.load_harness(c.harness)
-            changes = mod.install_away_denies(c.checkout, integrations[c.name])
+            changes = mod.install_away_denies(c.checkout, integrations[c.name], c.name)
         except (ValueError, OSError) as e:
             warns.append(f"lane-away: {c.name}: deny rules NOT installed ({e}); away-merge is the only guard on its merge route")
             continue
         if changes:
             notes.append(f"  deny rules: {c.name}: gh pr merge and pushes to {integrations[c.name]} are denied to its coordinator")
         elif c.harness != "claude":
-            notes.append(f"  deny rules: {c.name}: none for {c.harness}; away-merge alone guards its merge route")
+            notes.append(f"  deny rules: {c.name}: its {c.harness} guard plugin refuses a PR merge and a push to {integrations[c.name]}")
     return notes, warns
 
 

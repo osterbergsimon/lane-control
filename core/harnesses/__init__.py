@@ -76,13 +76,14 @@ def session_record(checkout: Path, role: str, harness: str) -> Path:
     return state / "lane-control" / "sessions" / key / f"{role}.{harness}"
 
 
-def away_denies_record(checkout: Path) -> Path:
-    """Where an adapter notes which deny rules it added for away-improve mode (and which parts of the settings file it
-    created), so turning the mode off takes out only those: $XDG_STATE_HOME/lane-control/away-denies/<encoded checkout>.json."""
+def away_denies_record(checkout: Path, harness: str = "") -> Path:
+    """Where an adapter notes what it did for away-improve mode, so turning the mode off takes out only that:
+    $XDG_STATE_HOME/lane-control/away-denies/<encoded checkout>[.<harness>].json. Claude's is the deny rules it added;
+    OpenCode's (`.opencode`) is the project and integration branch its guard plugin reads."""
     v = os.environ.get("XDG_STATE_HOME")
     state = Path(v) if v and os.path.isabs(v) else Path.home() / ".local" / "state"
     key = re.sub(rb"[^A-Za-z0-9]", b"-", os.fsencode(Path(checkout).resolve())).decode()
-    return state / "lane-control" / "away-denies" / f"{key}.json"
+    return state / "lane-control" / "away-denies" / (f"{key}.{harness}.json" if harness else f"{key}.json")
 
 
 def read_session(checkout: Path, role: str, harness: str) -> "str | None":

@@ -13,6 +13,7 @@ Idle: the newest write of a session for the checkout in OpenCode's v2 store
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -189,13 +190,51 @@ def idle_minutes(checkout: Path, now: float, role: str = "coordinator") -> "int 
     return max(0, int((now - newest / 1000) // 60))
 
 
-def install_away_denies(checkout: Path, integration: str) -> list:
-    """Away-improve mode's deny rules: none for OpenCode. It has no uncommitted per-checkout permission file that this
-    repo has checked (a project's opencode.json is usually committed, and is never edited), so away-merge alone is the
-    guard here, as record.md says. Nothing is written; no change lines."""
-    return []
+GUARD = Path(__file__).resolve().parent / "lane-away-guard.js"
+BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+
+
+def guard_path(checkout: "Path | None" = None) -> Path:
+    return plugin_path(checkout).with_name(GUARD.name)
+
+
+def install_away_guard(checkout: Path) -> list:
+    """Copy lane-away-guard.js beside lane-persona.js (the same user or project folder, LANE_OPENCODE_PLUGIN). It does
+    nothing until `lane-away on --improve` records this checkout (install_away_denies) and only in a session started
+    with LANE_ROLE=coordinator; once loaded it follows improve.json live. A coordinator already running when it is
+    first installed needs one restart to load it. Returns change lines; empty when it was in place."""
+    what = _write(guard_path(checkout), GUARD.read_bytes())
+    if not what:
+        return []
+    return [f"{guard_path(checkout)}: {what} the lane-away-guard plugin (away-improve mode's deny rules for OpenCode; "
+            "a running coordinator needs one restart to load it)"]
+
+
+def install_away_denies(checkout: Path, integration: str, project: "str | None" = None) -> list:
+    """Away-improve mode's deny rules, for OpenCode: record this checkout's project and integration branch for the
+    lane-away-guard plugin, which refuses `gh pr merge` and pushes to that branch in the coordinator's shell while
+    improve mode is on (live, no restart). Nothing is written in the checkout. Returns change lines (none when the
+    record was already right)."""
+    if not BRANCH.fullmatch(integration or ""):
+        raise ValueError(f"not a branch name: {integration!r}")
+    rec = harnesses.away_denies_record(checkout, "opencode")
+    want = json.dumps({"integration": integration, "project": project}, sort_keys=True) + "\n"
+    try:
+        if rec.read_text() == want:
+            return []
+    except OSError:
+        pass
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    tmp = rec.with_name(rec.name + ".tmp")
+    tmp.write_text(want)
+    tmp.replace(rec)
+    return [f"{rec}: recorded for the lane-away-guard plugin (project {project or '?'}, integration branch {integration})"]
 
 
 def remove_away_denies(checkout: Path) -> list:
-    """The counterpart of install_away_denies: nothing was added, so nothing is removed."""
-    return []
+    """Take the record out: the guard plugin has nothing to act on for this checkout any more. Returns change lines."""
+    rec = harnesses.away_denies_record(checkout, "opencode")
+    if not rec.exists():
+        return []
+    rec.unlink()
+    return [f"{rec}: removed; the lane-away-guard plugin no longer guards this checkout"]

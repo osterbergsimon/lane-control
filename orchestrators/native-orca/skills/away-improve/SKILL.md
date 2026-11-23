@@ -56,7 +56,7 @@ stop (section 3).
    checkout your persona names). It checks improve is on for you (or draining, section 3), the PR's base is exactly
    your away branch, the review comment, CI green, a secret and private-data scan, and the deny paths from the diff; then it merges with a merge commit titled `away: <item>`
    (never squashed), pinned to the head it checked, and prints the commit. When CI itself is failing or unavailable for reasons outside the change,
-   run the full suite through a lane and `lane-heavy`, pass `--local-suite-ok <the run>` and have the log say so. A refusal is a finding: fix what it names, never around it. Never use `gh pr merge`, a merge by hand or a push to the integration branch (your session has deny rules for the first and last: a backstop, not a wall. `git -C <repo> push ...`, `feature:main`
+   run the full suite through a lane and `lane-heavy`, pass `--local-suite-ok <the run>` and have the log say so. A refusal is a finding: fix what it names, never around it. Never use `gh pr merge`, a merge by hand or a push to the integration branch (your session has deny rules, or on OpenCode a guard plugin, for the first and last: a backstop, not a wall. `git -C <repo> push ...`, `feature:main`
    refspecs, `gh api` and a lane's own shell go past them, and a lane's worktree has no rules at all. The real
    guards are `away-merge`, your persona's rule and branch protection where the repo has it.)
 7. **Next cycle at once.** Close the lane (its worktree is clean and merged), then start the next cycle from the

@@ -1407,14 +1407,15 @@ class AwayDenyTests(HomeTest):
             self.assertFalse(self.blocked(rules, gap), gap)
         self.assertTrue(self.blocked(rules, "cd ../proj-beads && git push origin main"))
 
-    def test_opencode_or_recorded_gap(self):
+    def test_opencode_has_a_guard_not_a_gap(self):
+        # OpenCode's counterpart is the lane-away-guard plugin (tests/test_opencode_guard.py): the adapter records the
+        # project and its integration branch for it, and writes nothing in the checkout
         oc = self.pkg.load_harness("opencode")
-        self.assertEqual(oc.install_away_denies(self.checkout, "main"), [])
+        self.assertTrue(oc.install_away_denies(self.checkout, "main", "shop"))
+        self.assertEqual(oc.install_away_denies(self.checkout, "main", "shop"), [])
+        self.assertTrue(oc.remove_away_denies(self.checkout))
         self.assertEqual(oc.remove_away_denies(self.checkout), [])
-        self.assertEqual(list(self.checkout.iterdir()), [])  # it wrote nothing into the checkout
-        record = " ".join((HARNESSES / "opencode" / "record.md").read_text().split())
-        self.assertIn("away-improve", record)
-        self.assertIn("away-merge alone", record)
+        self.assertEqual(list(self.checkout.iterdir()), [])
         self.assertIn("away-improve", " ".join((HARNESSES / "claude" / "record.md").read_text().split()))
 
     def test_every_adapter_has_the_deny_functions(self):

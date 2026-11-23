@@ -146,7 +146,7 @@ def _read_denies(path: Path):
     return data, perms, deny
 
 
-def install_away_denies(checkout: Path, integration: str) -> list:
+def install_away_denies(checkout: Path, integration: str, project: "str | None" = None) -> list:
     """Add the away-improve deny rules (away_deny_rules) to permissions.deny of <checkout>/.claude/settings.local.json,
     skipping any already there. What was added, and which parts of the file did not exist before, is noted in
     harnesses.away_denies_record, so remove_away_denies takes out only ours. Returns change lines (none when nothing
