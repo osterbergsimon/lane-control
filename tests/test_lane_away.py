@@ -310,6 +310,7 @@ class ImproveOnTests(ImproveTest):
         r = self.run_script("lane-improve", "on")
         self.assertEqual(r.returncode, 2)
         self.assertIn("--yes", r.stderr)
+        self.assertIn("the owner adds it", r.stderr)  # an agent is not told to add it; it needs the owner's word
         self.assertIn("`!` prefix", r.stderr)  # lc-7xh: Claude Code's ! prefix has no terminal either; the fix is --yes
         self.assertFalse(self.improve_file().exists())
         self.assertFalse(self.away().exists())

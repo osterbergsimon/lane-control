@@ -23,7 +23,8 @@ merging nothing, with one line per failed check, unless all of these hold:
              otherwise a built-in scan of the added lines for keys, tokens, home paths and private addresses
   caps       the project has not wrapped up at a cap (`lane-improve drained` while the mode is on: nothing more merges), --max-items
              is not yet reached (the Nth merge is the last), and the period's record (improve-period.json) can be read (a lost
-             or unreadable one refuses every merge: `lane-improve on --continue` makes it again)
+             or unreadable one refuses every merge: `lane-improve on --continue` makes it again; while draining,
+             `lane-improve drained`, then `on --continue`)
   deny       the PR touches none of improve.json's deny_paths: every old and new path in the `diff --git` headers of
              the PR's diff is checked (gh's file list stops at 100 files and drops a rename's old name); a diff it
              cannot read paths from is a refusal
@@ -290,12 +291,27 @@ def run(a) -> int:
         if state is None:
             print(f"away-merge: refused (improve): {mode}", file=sys.stderr)
             return 1
+        sha = None
         try:
             gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--match-head-commit", head], checkout)
-            sha = gh(["pr", "view", str(a.pr), "--json", "mergeCommit", "-q", ".mergeCommit.oid"], checkout).strip()
         except Refuse as e:
-            print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
-            return 1
+            # gh can fail after GitHub merged (a timeout, a 5xx): look once, and count the merge when it happened
+            try:
+                seen = json.loads(gh(["pr", "view", str(a.pr), "--json", "state,mergeCommit"], checkout))
+                merged = str(seen.get("state", "")).upper() == "MERGED"
+                sha = ((seen.get("mergeCommit") or {}).get("oid") or "") if merged else None
+            except (Refuse, ValueError, AttributeError):
+                sha = None
+            if sha is None:
+                print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
+                return 1
+            print(f"away-merge: gh reported a failure ({e}) but PR {a.pr} is merged on GitHub; counting it", file=sys.stderr)
+        if sha is None:
+            try:
+                sha = gh(["pr", "view", str(a.pr), "--json", "mergeCommit", "-q", ".mergeCommit.oid"], checkout).strip()
+            except Refuse as e:  # merged, so it is counted; only its commit is unknown
+                sha = ""
+                print(f"away-merge: the merge commit could not be read ({e}); recording the merge without it", file=sys.stderr)
         print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}")
         if why:
             print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "

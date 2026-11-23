@@ -71,11 +71,12 @@ reached, and a re-run that does not name the project leaves it wrapped up and sa
 
 The period record (`improve-period.json`, with a lock file beside it) is written under a lock, so coordinators merging at the
 same moment are all counted. `away-merge` holds that lock from the `--max-items` check through the merge and its record, and
-checks the cap again once it has it, so two merges at once cannot both take the last slot (the second is refused). If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
+checks the cap again once it has it, so two merges at once cannot both take the last slot (the second is refused). A merge that GitHub made but whose reply gh failed (a timeout, a 5xx) is still counted: `away-merge` looks the PR up once and records it. If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
 every merge, nothing is nudged and `status` says why, instead of the counts starting again from 0. `lane-improve on
 --continue` starts the record again from nothing and puts the deny rules back on every project the period covers. While the
 period is draining (after `off`), `on --continue` is refused; there the refusal says to wrap up with `lane-improve drained
-<project>` (or `--all`) and then start a new period with `lane-improve on`.
+<project>` (or `--all`) and then run `lane-improve on --continue`, which starts a new period on the same away branch (a plain
+`on` is refused while the project has its branch); the last PR can merge there.
 
 ### One branch per project
 

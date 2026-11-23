@@ -337,7 +337,7 @@ FIX_PERIOD = ("`lane-improve on --continue` starts the record again from nothing
 
 
 FIX_DRAINING_PERIOD = ("wrap it up with `lane-improve drained <project>` (the owner can run `lane-improve drained --all`), then "
-                       "`lane-improve on` starts a new period; the last PR waits for the owner or the new period")
+                       "`lane-improve on --continue` starts a new period on the same away branch (its last PR can merge there)")
 
 
 class PeriodError(OSError):
@@ -412,8 +412,8 @@ def hard_stop(state: dict, project: str, draining: bool = False) -> "str | None"
     stop (the lane that is running when it is reached still lands): the budget's own steps are its backstop."""
     why = period_problem(state)
     if why and draining:  # a drain refuses `on --continue` (the period is not wrapped up yet): name what does work
-        return (f"{why}, so merges and caps cannot be trusted; the period is draining, so nothing more merges for it "
-                f"until it is wrapped up: {FIX_DRAINING_PERIOD}")
+        return (f"{why}, so merges and caps cannot be trusted; the period is draining, so nothing more merges in it: "
+                f"{FIX_DRAINING_PERIOD}")
     if why:
         return f"{why}, so merges and caps cannot be trusted; merges are refused until it is made again: {FIX_PERIOD}"
     if is_wrapped(state, project):
@@ -973,7 +973,8 @@ def cmd_on(a) -> int:
         return 2
     if not a.yes and not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("lane-improve: improve mode spends tokens until it is switched off; there is no terminal here (Claude Code's "
-              "`!` prefix has none either), so it needs --yes: add it when you run this yourself, or on your own explicit word", file=sys.stderr)
+              "`!` prefix has none either), so it needs --yes: the owner adds it under `!` (`! lane-improve on --yes ...`); "
+              "an agent adds it only on the owner's own explicit word", file=sys.stderr)
         return 2
     prev = load()
     if prev:
@@ -1298,12 +1299,15 @@ def cmd_status(a) -> int:
         when = dt.datetime.fromisoformat(d["ended"]).strftime("%a %d %b %H:%M")
         print(f"improve: draining (ended {when}); no new cycle starts, the running lanes' PRs can still merge")
         print("  to wrap up: " + ", ".join(d["pending"]))
+        lost = period_problem(d)
+        if lost:  # away-merge and `lane-improve pr` are refused: only the wrap-up and a new period remain
+            print(f"  period record: {lost}; nothing more merges in this period. {FIX_DRAINING_PERIOD}")
         waited = (now() - dt.datetime.fromisoformat(d["ended"]).astimezone()).total_seconds() / 3600
         if waited >= DRAIN_NOTICE_HOURS:
             print(f"  it has waited {int(waited)} h: nobody has run `lane-improve drained` for it; ask the coordinator, or run "
                   "`lane-improve drained --all` yourself once its last PR is dealt with")
         for p in d["pending"]:
-            if p in d["branches"]:
+            if p in d["branches"] and not lost:
                 print(f"  {p}: away-merge the last PR into {d['branches'][p]}, run `lane-improve pr {p}` (the draft PR into "
                       f"{d['integration'].get(p, '?')} gets the final summary) and point the owner at it, then run "
                       f"`lane-improve drained {p}`")
