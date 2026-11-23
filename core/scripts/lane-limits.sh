@@ -11,7 +11,7 @@
 #                      `KEY=<digits>` lines are read; the file is never sourced here.
 #   LANE_IMPROVE_FILE  away-improve mode is on while it holds a usable, unended state (default
 #                      ~/.config/lane-control/improve.json; `lane-away on --improve` writes it): the owner then counts
-#                      as away whatever AWAY_HOURS says (core/improve.py is-on)
+#                      as away whatever AWAY_HOURS says (its `end` line is read here in plain shell)
 #   LANE_BUDGET_STOPPED_FILE  the budget is at its stop step while it is younger than 1 h: agents sit idle until the
 #                      reset, so the machine is CI's (default ~/.config/lane-control/budget-stopped). Its writer
 #                      touches it on every check while the budget stays stopped and removes it after the reset.
@@ -60,10 +60,17 @@ elif [ "$lane_hour" -ge "$LANE_NIGHT_START" ] && [ "$lane_hour" -lt "$LANE_NIGHT
   lane_night=1
 fi
 LANE_PRESENCE=day LANE_PRESENCE_WHY=day LANE_OWNER_AWAY=
+# Improve mode: a plain-shell read of the file core/improve.py writes (this script is also installed as a lone copy, so it
+# cannot call improve.py): its `"end": "<until-back | ISO time>"` value, still in the future. The Python reader is the
+# strict one (night-precheck, away-merge); this lax one only decides limits, and a file it cannot read means off.
 lane_improve=
-if [ -e "$LANE_IMPROVE_FILE" ]; then   # only then is python3 started: improve mode is rare
-  lane_improve_py=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../improve.py
-  [ -r "$lane_improve_py" ] && python3 "$lane_improve_py" is-on 2>/dev/null && lane_improve=1
+if [ -r "$LANE_IMPROVE_FILE" ]; then
+  lane_end=$(grep -o '"end": *"[^"]*"' "$LANE_IMPROVE_FILE" 2>/dev/null | head -1 | sed 's/^.*: *"\(.*\)"$/\1/')
+  if [ "$lane_end" = until-back ]; then
+    lane_improve=1
+  elif [ -n "$lane_end" ]; then
+    lane_end_s=$(date -d "$lane_end" +%s 2>/dev/null) && [ "$lane_end_s" -gt "$(date +%s)" ] && lane_improve=1
+  fi
 fi
 if [ -n "$lane_improve" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY=improve LANE_OWNER_AWAY=1

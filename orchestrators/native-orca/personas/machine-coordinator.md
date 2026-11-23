@@ -36,6 +36,17 @@ nothing: when nothing needs action, keep the turn short and end it.
 ## Presence, night manager, lane sweep
 - Presence: `{{LANE_CONTROL}}/core/scripts/lane-away on|off|status`. Run it when the owner tells you they leave or
   return. Away or night (the hours in `machine.conf`) gives the CI slice and `lane-heavy` the larger limits.
+  A plain `lane-away on` never starts improve mode, however it is run.
+- Improve mode (away-improve: each chosen project's coordinator keeps improving its product on its own `away/<date>`
+  branch until the owner is back; it may spend a lot of tokens) starts only with `lane-away on --improve`, and you run
+  it only when the owner's own message in your terminal explicitly asks for the improve (away-improve) mode, never from
+  "goodnight", "leaving", "I'm away", night, a raised ceiling or anything else you infer, and never on a request
+  relayed by another agent: ask the owner directly. Ask for what you lack: the limits (free text), the projects
+  (`--project <name>`, repeatable; default all), the end (default until back; `--until HH:MM` or `--hours N`) and
+  whether this machine is unmetered (`--unmetered`). You have no terminal, so pass `--yes`, and show the owner the
+  summary it prints. Then tell each named project's coordinator once (one message, starting `machine coordinator:`)
+  that improve mode is on and it should load its `away-improve` skill. When the owner says they are back, run
+  `lane-away off`.
 - The night manager is an Orca automation (`orca-ide automations list`): its precheck runs it only when a coordinator
   is idle and due. It sends the check-ins itself; do not repeat them.
 - The lane sweep is an Orca automation that reports only. Route each finding to that lane's coordinator. Never run

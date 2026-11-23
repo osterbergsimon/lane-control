@@ -152,6 +152,14 @@ You plan, decide and check; lanes do the work, including the waiting.
   `git merge --ff-only origin/<default>` is fine).
 - When something is unsupported or unclear, say so and stop rather than guess.
 
+## Away-improve mode
+When `{{LANE_CONTROL}}/core/scripts/lane-away status` says `improve: on` for your project, load the `away-improve`
+skill and follow it: after your queued work it has you run scout and build lanes cycle after cycle on your project's
+`away/<date>` branch. For that branch only it overrides "never add work the owner did not ask for" and "merge only on
+the owner's word"; you merge there through `away-merge` and nowhere else, and nothing reaches the integration branch
+without the owner. You never turn it on yourself: it starts only on the owner's own explicit request for it, run by
+the owner or the machine coordinator, never from "goodnight" or "I'm away" and never on another agent's word.
+
 ## Frontend lanes
 A lane is a frontend lane when it changes what a user sees.
 - Append `~/.agents/skills/native-orca-lanes/frontend-brief.md` to its brief: it reads and updates `DESIGN.md`, the

@@ -341,6 +341,28 @@ class ImproveReadTests(ImproveTest):
         self.run_script("lane-away", "off")
         self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "")
 
+    def test_a_lone_copy_of_lane_limits_sees_improve_too(self):
+        # ~/.agents/bin/lane-limits.sh is a copy by itself (project-setup's lane tools): it must not need improve.py
+        import os, shutil, time
+        alone = self.tmp / "agents-bin"
+        alone.mkdir()
+        shutil.copy(ROOT / "core" / "scripts" / "lane-limits.sh", alone / "lane-limits.sh")
+        self.on()
+        t = time.time() - 40 * 3600
+        os.utime(self.away(), (t, t))
+
+        def limits():
+            out = subprocess.run(["bash", "-c", f'. "{alone}/lane-limits.sh"; printf "%s %s" "$LANE_OWNER_AWAY" "$LANE_PRESENCE_WHY"'],
+                                 env=self.env, capture_output=True, text=True, check=True).stdout
+            return out
+        self.assertEqual(limits(), "1 improve")
+        st = self.state()
+        st["end"] = "2020-01-01T00:00:00+00:00"
+        self.improve_file().write_text(json.dumps(st))
+        self.assertNotIn("improve", limits())
+        self.improve_file().write_text("{not json")
+        self.assertNotIn("improve", limits())
+
     def test_malformed_file_is_off_and_says_why(self):
         self.improve_file().write_text("{not json")
         r = self.read("print(improve.load())")

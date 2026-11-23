@@ -83,3 +83,11 @@ every step says `exists` on a re-run):
 The owner says they leave or return with `core/scripts/lane-away on|off|status` (or asks the machine coordinator).
 A coordinator gets night check-ins only when it was started with `LANE_ROLE`/`LANE_PERSONA` (project-setup does
 this); one started by hand is named on the precheck's stderr instead.
+
+Away-improve mode (optional, off by default) is the owner's switch: `core/scripts/lane-away on --improve [--until HH:MM
+| --hours N | --until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered]
+[--continue [away/<name>]]` cuts an `away/<date>` branch per project and has each coordinator keep improving its
+product there until `lane-away off`; the coordinator's `away-improve` skill (installed with the other lane skills)
+runs it, and `core/scripts/away-merge` is its only merge route. Plain `on`, night and the budget never start it
+(`docs/superpowers/specs/2026-11-23-away-improve-design.md`). `IMPROVE_IDLE_MIN` in `machine.conf` (default 30) is the
+idle time after which the night manager nudges a coordinator that improve mode covers.

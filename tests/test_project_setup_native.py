@@ -562,6 +562,20 @@ class NativeSkillTests(Case):
         self.assertIn("skills: created", r.stdout)
         self.assertFalse((self.e.home / ".agents" / "skills" / "orca-cotal-lanes").exists())
 
+    def test_setup_installs_the_away_improve_skill_with_its_templates_for_claude_and_opencode(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        skill = self.e.home / ".agents" / "skills" / "away-improve"
+        src = ROOT / "orchestrators" / "native-orca" / "skills" / "away-improve" / "SKILL.md"
+        self.assertEqual((skill / "SKILL.md").read_text(), src.read_text())
+        for name in ("away-innovation.md", "away-scout-brief.md", "away-build-brief.md", "AWAY-LOG.md"):
+            self.assertEqual((skill / name).read_text(), (ROOT / "core" / "templates" / name).read_text(), name)
+        for agent_dir in (self.e.home / ".claude" / "skills", Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills"):
+            link = agent_dir / "away-improve"
+            self.assertTrue(link.is_symlink(), link)
+            self.assertEqual(link.resolve(), skill.resolve())
+        self.assertIn("away-improve", r.stdout)
+
     def test_refresh_puts_back_a_changed_or_missing_skill_file(self):
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
         (self.skill() / "brief.md").unlink()
@@ -755,7 +769,7 @@ class DesignSkillsTests(Case):
         sources = sorted(p.name for p in (self.e.home / ".agents" / "skill-sources").iterdir())
         self.assertEqual(sources, [f"modern-web-guidance@{sha[:12]}"])
         self.assertEqual(sorted(p.name for p in self.skills().iterdir() if not p.name.startswith(".")),
-                         sorted(["modern-web-guidance", "native-orca-lanes", "component-gallery"]))
+                         sorted(["modern-web-guidance", "native-orca-lanes", "component-gallery", "away-improve"]))
         self.assertEqual(list(self.e.home.rglob("pwned")), [])
 
     def test_the_shipped_table_needs_https(self):
