@@ -133,6 +133,19 @@ class ImprovePrecheckTests(MachineTest):
         self.playbook(86, 10, ceiling=f"file:{ceil}")  # no-new-work at 93, plain at 99
         self.assertEqual(self.pre().stdout, "DUE proj improve idle=40min\n")
 
+    def test_a_truncated_improve_file_gives_no_daytime_check_in(self):
+        # review M5: lane-limits.sh and improve.py used to disagree on a truncated file, which brought a plain check-in
+        # at noon (owner "away" for the limits, "off" for the nudge)
+        self.conf(("proj", 50))
+        self.improve_on()
+        text = (self.conf_dir / "improve.json").read_text()
+        (self.conf_dir / "improve.json").write_text(text[: text.index('"limits"')])
+        r = self.pre()
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("not valid JSON", r.stderr)
+        (self.conf_dir / "improve.json").write_text('{"end": "until-back"}')
+        self.assertEqual((self.pre().returncode, self.pre().stdout), (1, ""))
+
     def test_malformed_improve_file_is_off_and_says_why(self):
         self.conf(("proj", 40))
         (self.conf_dir / "improve.json").write_text("{nope")

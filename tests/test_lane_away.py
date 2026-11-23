@@ -330,15 +330,23 @@ class ImproveDenyTests(ImproveTest):
         self.assertTrue(self.improve_file().exists())
         self.assertEqual(self.settings(self.shop).read_text(), "{not json")
 
-    def test_an_opencode_coordinator_is_told_away_merge_alone_guards_it(self):
+    def test_an_opencode_coordinator_gets_the_guard_plugin_record_and_is_told_so(self):
         self.machine_conf('COORDINATORS="\nshop %s claude shop coordinator\nblog %s opencode blog coordinator\n"\n'
                           % (self.shop, self.blog))
         r = self.on()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("blog", r.stdout)
-        self.assertIn("away-merge alone", r.stdout)
-        self.assertEqual(self.denies(self.blog), [])
+        self.assertIn("guard plugin", r.stdout)
+        self.assertEqual(self.denies(self.blog), [])  # nothing in its checkout
+        import re
+        key = re.sub(r"[^A-Za-z0-9]", "-", str(self.blog.resolve()))  # the record's name, in this test's HOME
+        rec = self.home / ".local" / "state" / "lane-control" / "away-denies" / f"{key}.opencode.json"
+        self.assertEqual(json.loads(rec.read_text()), {"integration": "main", "project": "blog"})
         self.assertTrue(self.denies(self.shop))
+        self.run_script("lane-away", "off")
+        self.assertTrue(rec.exists())  # still draining
+        self.run_script("lane-away", "drained", "--all")
+        self.assertFalse(rec.exists())
 
 
 class ImproveDrainTests(ImproveTest):
