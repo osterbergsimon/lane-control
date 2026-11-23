@@ -40,6 +40,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -450,24 +451,89 @@ def _already_merged(repo: Path, branch: str, integration: str) -> bool:
                 f"refs/remotes/origin/{integration}").returncode == 0
 
 
+START_PREFIX = "away: start "  # the subject of the one commit `on` adds to a new away branch (the start log)
+
+
+def _unworked(repo: Path, branch: str, integration: str) -> bool:
+    """Whether the branch holds at most the start log commit `on` made: no item was ever merged into it."""
+    r = _git(repo, "log", "--format=%s", f"refs/remotes/origin/{integration}..refs/remotes/origin/{branch}")
+    return r.returncode == 0 and all(l.startswith(START_PREFIX) for l in r.stdout.splitlines())
+
+
 def _has_one_already(repo: Path, have: list, integration: str) -> str:
     b = have[0]
     merged = (f" It is already merged into {integration} (or was never given any work): deleting it is the usual step, "
               "since continuing it builds on the old base."
-              if _already_merged(repo, b, integration) else "")
+              if _already_merged(repo, b, integration) or _unworked(repo, b, integration) else "")
     return (f"it already has its away branch {b}: a project has at most one, ever. Continue it (`--continue`), or adopt it "
             f"(merge it to {integration}) or drop it (delete it) first.{merged}")
 
 
-def cut_branch(repo: Path, integration: str, today: dt.date) -> str:
-    """Push a new away/<today> on origin from origin/<integration>'s head; the checkout and its branches are not touched.
-    A project has at most one away branch, ever: ValueError when it has one (or when this very name is taken). Returns the
-    name."""
+def _projects_text(projects) -> str:
+    """Which projects the period covers, as the start log says it: never the other projects' names (the branch may be public)."""
+    if projects == "all":
+        return "all set-up projects"
+    n = len(projects) if isinstance(projects, list) else 1
+    return "this project only" if n <= 1 else f"this project and {n - 1} other{'s' if n > 2 else ''}"
+
+
+def start_log(project: str, branch: str, integration: str, limits: str = "", projects="all") -> str:
+    """The first AWAY-LOG.md of a branch, from core/templates/AWAY-LOG.md: its header, the owner's limits and the projects
+    filled in, an empty summary, and no items yet (the template's example entry is left out)."""
+    text = (HERE / "templates" / LOG_FILE).read_text()
+    head = text[:text.index("### 1.")] if "### 1." in text else text
+    date = branch.split("/", 1)[-1]
+    head = (head.replace("<project>", project).replace("<away branch>", branch).replace("<date>", date)
+            .replace("<integration branch>", integration)
+            .replace('<limits, or "none given">', limits.strip() or "none given"))
+    head = re.sub(r"^(- (?:Done|Worth looking at first|Drop if unsure|Skipped): ).*$", r"\1nothing yet", head, flags=re.M)
+    head = head.replace("\n## Summary", f"\nProjects in this period: {_projects_text(projects)}.\n\n## Summary", 1)
+    return head.rstrip() + "\n\n(none yet: each merged item adds an entry here)\n"
+
+
+def _seed_commit(repo: Path, integration: str, text: str, today: dt.date) -> str:
+    """A commit on top of origin/<integration> that adds AWAY-LOG.md, built with plumbing in a throwaway index: the checkout,
+    its index and its branches are not touched. Authored as the repo's configured git identity, no attribution line.
+    RuntimeError says why not."""
+    base = f"refs/remotes/origin/{integration}"
+    if _git(repo, "cat-file", "-e", f"{base}:{LOG_FILE}").returncode == 0:
+        raise RuntimeError(f"{integration} already has an {LOG_FILE} (a log left behind by an adopted branch?): remove it "
+                           "there first")
+    with tempfile.TemporaryDirectory(prefix="away-seed-") as d:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(d) / "index")}
+
+        def g(*args: str, inp: "str | None" = None) -> str:
+            r = subprocess.run(["git", "-C", str(repo), *args], env=env, input=inp, capture_output=True, text=True, timeout=120)
+            if r.returncode:
+                raise RuntimeError((r.stderr.strip() or "no output").splitlines()[-1])
+            return r.stdout.strip()
+
+        g("read-tree", base)
+        blob = g("hash-object", "-w", "--stdin", inp=text)
+        g("update-index", "--add", "--cacheinfo", f"100644,{blob},{LOG_FILE}")
+        return g("commit-tree", g("write-tree"), "-p", base, "-m", f"{START_PREFIX}{today.isoformat()}")
+
+
+def cut_branch(repo: Path, integration: str, today: dt.date, project: str = "", limits: str = "",
+               projects="all", warns: "list | None" = None) -> str:
+    """Push a new away/<today> on origin: origin/<integration>'s head plus one commit, `away: start <today>`, that adds the
+    first AWAY-LOG.md (so the summary PR has something to show from the start); the checkout and its branches are not
+    touched. When that commit cannot be made (no git identity, a log already on the integration branch) the branch is cut
+    from the head alone and a warning goes into `warns`. A project has at most one away branch, ever: ValueError when it
+    has one (or when this very name is taken). Returns the name."""
     have = _away_branches(repo)
     if have:
         raise ValueError(_has_one_already(repo, have, integration) if len(have) == 1 else _several(have))
     name = f"away/{today.isoformat()}"
-    _git_ok(repo, "push", "-q", "origin", f"refs/remotes/origin/{integration}:refs/heads/{name}")
+    tip = f"refs/remotes/origin/{integration}"
+    try:
+        tip = _seed_commit(repo, integration, start_log(project or repo.name, name, integration, limits, projects), today)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        if warns is not None:
+            warns.append(f"lane-improve: {project or repo.name}: the start log ({LOG_FILE}) was not committed ({e}); "
+                         f"the branch is cut from {integration}'s head alone and the first lane starts the log. A git "
+                         "identity for the checkout (user.name, user.email) is what a start commit needs")
+    _git_ok(repo, "push", "-q", "origin", f"{tip}:refs/heads/{name}")
     return name
 
 
@@ -487,7 +553,8 @@ def continue_branch(repo: Path) -> str:
     return have[0]
 
 
-def resolve_branches(cos: list, cont: bool, today: dt.date) -> "tuple[dict, dict, dict]":
+def resolve_branches(cos: list, cont: bool, today: dt.date, limits: str = "", projects="all",
+                     warns: "list | None" = None) -> "tuple[dict, dict, dict]":
     """({project: branch}, {project: integration branch}, {project: "continued" | "cut now"}) for these coordinators.
     Without `cont` every project must have no away branch and gets a newly cut away/<today>. With `cont` a project that
     has its one away branch carries on with it, and one that has none gets one cut (so a new project can join a period
@@ -512,7 +579,7 @@ def resolve_branches(cos: list, cont: bool, today: dt.date) -> "tuple[dict, dict
             raise ValueError(f"{c.name}: {e}") from None
     for c, integ in plan:
         try:
-            out[c.name], how[c.name] = cut_branch(c.checkout, integ, today), "cut now"
+            out[c.name], how[c.name] = cut_branch(c.checkout, integ, today, c.name, limits, projects, warns), "cut now"
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             raise ValueError(f"{c.name}: {e}") from None
     return out, integs, how
@@ -782,13 +849,16 @@ def cmd_on(a) -> int:
     else:
         projects = list(dict.fromkeys(a.project)) if a.project else "all"
         chosen = cos if projects == "all" else [c for c in cos if c.name in projects]
+    cut_warns: list = []
     if isinstance(stop_at, (int, float)):
         why = stop_at_refusal(stop_at, projects, prev, cos)
         if why:
             print(f"lane-improve: improve not switched on: {why}", file=sys.stderr)
             return 1
     try:
-        branches, integs, how = resolve_branches(chosen, a.cont, now().date())
+        limits_now = a.limits if a.limits is not None else (prev["limits"] if prev else "")
+        branches, integs, how = resolve_branches(
+            chosen, a.cont, now().date(), limits_now, projects, cut_warns)
     except ValueError as e:
         print(f"lane-improve: improve not switched on: {e}", file=sys.stderr)
         return 1
@@ -829,7 +899,7 @@ def cmd_on(a) -> int:
     notes, warns = install_denies(chosen, integs)
     print("lane-improve: improve mode on")
     print("\n".join(describe(state, how) + notes))
-    for w in [*warns, *pr_warns]:
+    for w in [*warns, *cut_warns, *pr_warns]:
         print(w, file=sys.stderr)
     return 0
 

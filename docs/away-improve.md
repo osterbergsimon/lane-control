@@ -11,8 +11,8 @@ you run and what to expect; the design and its reasons are in
 - After its queued work is done, a coordinator keeps starting lanes: a scout lane proposes ideas (fixes, research, new
   features, anything it judges better for the product), a build lane builds one, a reviewer on a different model
   reviews it, and the coordinator merges it into the project's away branch with `away-merge`.
-- Everything lands on `away/<YYYY-MM-DD>`, cut from the project's integration branch (main or develop). Nothing
-  reaches the integration branch without your word.
+- Everything lands on `away/<YYYY-MM-DD>`, cut from the project's integration branch (main or develop) plus one start
+  commit, `away: start <date>`, that adds the first `AWAY-LOG.md`. Nothing reaches the integration branch without your word.
 - A project has **one away branch, ever**. A second period continues the same branch; there is never a pile of
   unrelated ones.
 - The coordinator keeps `AWAY-LOG.md` on the branch: each item, why it was picked, what it checked already existed, how
@@ -104,9 +104,16 @@ summary at the top of `AWAY-LOG.md`; `away-merge` brings it up to date after eve
 not open), so nobody has to remember to. It stays a draft: **no agent merges it, marks it ready or closes it**; you
 merge it (to adopt the whole branch) or name the items to drop. A PR you closed is left alone.
 
-GitHub opens no PR for a branch that has nothing on it yet, and a fresh away branch is the integration branch's own head.
-So at `on` the PR is usually not opened yet: `on` says so in a warning and `away-merge` opens it after the first merged
-item (`lane-improve pr <project>` does it by hand). A continued branch that already has work gets its PR at once.
+GitHub opens no PR for a branch with nothing beyond its base, so `on` gives each new branch one start commit, `away: start
+<date>`, that adds the first `AWAY-LOG.md` from the template: the header (project, branch, integration branch), your
+limits verbatim, which projects the period covers (never another project's name: the branch may be public) and an empty
+summary. The PR therefore opens at `on` with that summary as its body. The branch is the integration head plus that one
+commit, authored as the checkout's configured git identity, with nothing else on it. `--continue` adds no new seed to a
+branch that has one (a project added with `--continue` gets its own, as it gets its own branch). When the commit cannot be
+made (the checkout has no git identity, or the integration branch already has an `AWAY-LOG.md`) the branch is cut from the
+head alone, `on` warns, and `away-merge` opens the PR after the first merged item (`lane-improve pr <project>` does it by
+hand). The start commit is not an item: it is the log's first version, and a branch with only it counts as never given any
+work when you decide to adopt or drop it.
 
 ## What keeps it inside its limits
 
@@ -168,7 +175,7 @@ real `opencode2` serving a fake model on localhost, but that test is opt-in
 (`LANE_LIVE_OPENCODE=1 python3 -m unittest tests.test_opencode_guard.GuardLiveTests`) and is not run by the
 suite. The summary PR, the caps and the protection report are covered the same way, with a stub `gh` that models
 `pr list --head`, `pr create --draft`, `pr edit` and the protection answers (everyone, partly, none, ruleset, 403, an
-unreadable one); none of them has run against the real GitHub, so the first real `on` is where the PR calls and the
+unreadable one), and the start commit is checked against real temporary git repositories; none of the `gh` calls has run against the real GitHub, so the first real `on` is where the PR calls and the
 protection wording get their test. A real away period (scout and build lanes, reviews, `away-merge` against GitHub, the draft
 PR on return) has not been run end to end; the first one is the real test. Watch `lane-improve status` and the log, and expect to
 adjust the skill from what you see.

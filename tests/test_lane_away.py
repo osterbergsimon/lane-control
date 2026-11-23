@@ -146,7 +146,9 @@ class ImproveTest(MachineTest):
         self.blog = make_repo(self.tmp, "blog")
         write_exec(self.bin / "gh", GH_BASES_STUB)
         self.env.update(GH_LOG=str(self.tmp / "gh.log"), GH_BASES=str(self.tmp / "gh-bases.json"),
-                        GH_SUMMARY=str(self.tmp / "gh-summary.json"))
+                        GH_SUMMARY=str(self.tmp / "gh-summary.json"),
+                        GIT_AUTHOR_NAME="Away Tester", GIT_AUTHOR_EMAIL="away@example.invalid",
+                        GIT_COMMITTER_NAME="Away Tester", GIT_COMMITTER_EMAIL="away@example.invalid")
         self.set_bases(["main", "main"])
         self.machine_conf('COORDINATORS="\nshop %s/shop claude shop coordinator\nblog %s/blog claude blog coordinator\n"\n'
                           % (self.tmp, self.tmp))
@@ -203,6 +205,15 @@ class ImproveTest(MachineTest):
         git(work, "add", "AWAY-LOG.md")
         git(work, "commit", "-qm", "log")
         git(work, "push", "-q", "origin", branch)
+
+    def assert_cut_from(self, repo: Path, branch: str, integration: str = "main", date: str = ""):
+        """The branch is the integration head plus ONE commit, `away: start <date>`, that adds AWAY-LOG.md and nothing else."""
+        git(repo, "fetch", "-q", "origin")
+        b, i = f"origin/{branch}", f"origin/{integration}"
+        self.assertEqual(git(repo, "rev-list", f"{i}..{b}").split(), [git(repo, "rev-parse", b).strip()])
+        self.assertEqual(git(repo, "rev-parse", f"{b}^").strip(), git(repo, "rev-parse", i).strip())
+        self.assertEqual(git(repo, "diff", "--name-status", i, b).split(), ["A", "AWAY-LOG.md"])
+        self.assertEqual(git(repo, "log", "-1", "--format=%s", b).strip(), f"away: start {date or branch.split('/')[1]}")
 
     def summary_prs(self, repo: Path) -> dict:
         return {n: p for n, p in self.db().items() if p["cwd"] == str(repo)}
@@ -359,9 +370,8 @@ class ImproveBranchTests(ImproveTest):
         r = self.read(f"print(improve.cut_branch(Path({str(self.shop)!r}), 'main', datetime.date(2026, 11, 24)))")
         self.assertEqual(r.stdout.strip(), "away/2026-11-24", r.stderr)
         self.assertEqual(self.remote_branches(self.shop), ["away/2026-11-24"])
-        # cut from the integration branch's head, and the checkout was left alone
-        self.assertEqual(git(self.shop, "rev-parse", "origin/away/2026-11-24").strip(),
-                         git(self.shop, "rev-parse", "origin/main").strip())
+        # cut from the integration branch's head plus the start log commit, and the checkout was left alone
+        self.assert_cut_from(self.shop, "away/2026-11-24")
         self.assertEqual(git(self.shop, "branch", "--show-current").strip(), "main")
         self.assertNotIn("away/2026-11-24", git(self.shop, "branch", "--list").split())
 
@@ -494,7 +504,7 @@ class ImproveBranchTests(ImproveTest):
         self.assertEqual(r.returncode, 0, r.stderr)
         b = self.state()["branches"]["shop"]
         self.assertEqual(self.remote_branches(self.shop), [b])
-        self.assertEqual(git(self.shop, "rev-parse", f"origin/{b}").strip(), git(self.shop, "rev-parse", "origin/develop").strip())
+        self.assert_cut_from(self.shop, b, "develop")
         self.assertEqual(self.remote_branches(self.blog), [])  # not asked for
 
     def test_lane_away_continue_reuses_branch(self):
@@ -790,7 +800,7 @@ class ImproveIntegrationBranchTests(ImproveTest):
         st = self.state()
         self.assertEqual(st["integration"]["shop"], "main")
         b = st["branches"]["shop"]
-        self.assertEqual(git(self.shop, "rev-parse", f"origin/{b}").strip(), git(self.shop, "rev-parse", "origin/main").strip())
+        self.assert_cut_from(self.shop, b, "main")
         denies = json.loads((self.shop / ".claude" / "settings.local.json").read_text())["permissions"]["deny"]
         self.assertIn("Bash(git push origin main:*)", denies)
 
@@ -812,13 +822,14 @@ class SummaryPrTests(ImproveTest):
             self.assertEqual(pr["title"], f"away: {date} ({name})")
         self.assertIn("create --draft", " ".join(self.gh_log()))
 
-    def test_a_fresh_branch_has_no_log_so_the_body_says_so(self):
+    def test_a_fresh_branch_has_the_start_log_so_the_body_shows_its_empty_summary(self):
         r = self.on("--project", "shop")
         self.assertEqual(r.returncode, 0, r.stderr)
         pr = self.summary_prs(self.shop)[str(self.state()["prs"]["shop"])]
         self.assertIn("draft", pr["body"].lower())
-        self.assertIn("no summary yet", pr["body"].lower())
         self.assertIn("never merged by an agent", pr["body"])
+        self.assertIn("- Done: nothing yet", pr["body"])
+        self.assertNotIn("<", pr["body"].replace("<date>", ""))
 
     def test_a_pr_that_cannot_be_opened_does_not_stop_the_mode(self):
         r = self.on("--project", "shop", env={"GH_CREATE_FAIL": "GraphQL: No commits between main and away/x"})
@@ -1042,6 +1053,134 @@ class CapOptionTests(ImproveTest):
         self.improve_file().write_text(json.dumps({k: v for k, v in self.state().items() if k not in ("stop_at", "max_items")}))
         self.assertIn("improve: on", self.run_script("lane-improve", "status").stdout)  # an older file without them is fine
 
+
+
+
+class StartLogTests(ImproveTest):
+    """`lane-improve on` cuts the away branch from the integration head and commits the first AWAY-LOG.md on it as one
+    commit, `away: start <date>`, so the summary PR has something to show from the start (lc-2nz)."""
+
+    def log(self, repo: Path, branch: str) -> str:
+        git(repo, "fetch", "-q", "origin")
+        return git(repo, "show", f"origin/{branch}:AWAY-LOG.md")
+
+    def test_on_commits_the_start_log_on_the_branch(self):
+        r = self.on("--project", "shop", "--limits", "nothing that needs db migrations")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        b = self.state()["branches"]["shop"]
+        self.assert_cut_from(self.shop, b)
+        self.assertEqual(git(self.shop, "log", "-1", "--format=%an <%ae>", f"origin/{b}").strip(),
+                         "Away Tester <away@example.invalid>")  # the configured identity, no attribution line
+        self.assertEqual(git(self.shop, "log", "-1", "--format=%b", f"origin/{b}").strip(), "")
+        self.assertEqual(git(self.shop, "branch", "--show-current").strip(), "main")  # the checkout was left alone
+        self.assertEqual(git(self.shop, "status", "--porcelain").strip(), "")
+
+    def test_the_log_has_the_header_limits_projects_and_an_empty_summary(self):
+        self.on("--project", "shop", "--limits", "nothing that needs db migrations")
+        b = self.state()["branches"]["shop"]
+        text = self.log(self.shop, b)
+        self.assertIn(f"# Away log: shop, {b}", text)
+        self.assertIn("The owner's limits, verbatim: nothing that needs db migrations", text)
+        self.assertIn("from main", text)
+        self.assertIn("Projects in this period: this project only.", text)
+        self.assertNotIn("blog", text)  # another project's name never goes onto a branch that may be public
+        self.assertIn("## Summary", text)
+        self.assertIn("- Done: nothing yet", text)
+        self.assertIn("## Items", text)
+        self.assertNotIn("### 1.", text)  # the template's example entry is not carried over
+        self.assertNotRegex(text, r"<[a-z][^>]*>")  # no placeholder is left
+
+    def test_no_limits_say_none_given_and_all_projects_say_all(self):
+        self.on()
+        text = self.log(self.shop, self.state()["branches"]["shop"])
+        self.assertIn('limits, verbatim: none given', text)
+        self.assertIn("Projects in this period: all set-up projects.", text)
+        self.reset()
+        self.on("--project", "shop", "--project", "blog")
+        text = self.log(self.shop, self.state()["branches"]["shop"])
+        self.assertIn("Projects in this period: this project and 1 other.", text)
+        self.assertNotIn("blog", text)
+
+    def test_the_log_is_the_one_the_pr_body_summary_comes_from(self):
+        from_pr = self.on("--project", "shop")
+        self.assertEqual(from_pr.returncode, 0, from_pr.stderr)
+        import sys as _s
+        _s.path.insert(0, str(ROOT / "core"))
+        import improve
+        b = self.state()["branches"]["shop"]
+        self.assertEqual(improve.log_summary(self.log(self.shop, b)).splitlines()[0], "- Done: nothing yet")
+
+    def test_a_continued_branch_gets_no_new_seed(self):
+        self.on("--project", "shop")
+        b = self.state()["branches"]["shop"]
+        self.run_script("lane-improve", "off")
+        self.run_script("lane-improve", "drained", "--all")
+        before = git(self.shop, "ls-remote", "origin", b)
+        self.assertEqual(self.on("--project", "shop", "--continue").returncode, 0)
+        self.assertEqual(git(self.shop, "ls-remote", "origin", b), before)
+        self.assert_cut_from(self.shop, b)  # still the one start commit
+
+    def test_a_project_added_with_continue_gets_its_own_start_commit(self):
+        self.on("--project", "shop")
+        self.assertEqual(self.on("--continue", "--project", "blog").returncode, 0)
+        self.assert_cut_from(self.blog, self.state()["branches"]["blog"])
+
+    def test_a_branch_that_only_has_the_start_commit_is_named_as_never_given_work(self):
+        self.on("--project", "shop")
+        self.run_script("lane-improve", "off")
+        self.run_script("lane-improve", "drained", "--all")
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("never given any work", r.stderr)
+        self.assertIn("delete", r.stderr)
+        self.assertIn("old base", r.stderr)
+
+    def test_a_branch_with_real_work_on_it_is_not_called_unworked(self):
+        self.on("--project", "shop")
+        b = self.state()["branches"]["shop"]
+        work = self.tmp / "work-shop"
+        subprocess.run(["git", "clone", "-q", str(self.tmp / "shop.git"), str(work)], check=True, capture_output=True)
+        git(work, "checkout", "-q", b)
+        (work / "x").write_text("x\n")
+        git(work, "add", "x")
+        git(work, "commit", "-qm", "away: x")
+        git(work, "push", "-q", "origin", b)
+        self.run_script("lane-improve", "off")
+        self.run_script("lane-improve", "drained", "--all")
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("never given any work", r.stderr)
+        self.assertNotIn("already merged", r.stderr)
+
+    def test_an_integration_branch_that_already_has_a_log_is_not_overwritten(self):
+        (self.shop / "AWAY-LOG.md").write_text("an old log\n")
+        git(self.shop, "add", "AWAY-LOG.md")
+        git(self.shop, "commit", "-qm", "an adopted log left behind")
+        git(self.shop, "push", "-q", "origin", "main")
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        b = self.state()["branches"]["shop"]
+        self.assertIn("AWAY-LOG.md", r.stderr)
+        self.assertEqual(git(self.shop, "rev-parse", f"origin/{b}").strip(), git(self.shop, "rev-parse", "origin/main").strip())
+        self.assertEqual(self.log(self.shop, b), "an old log\n")
+
+    def test_without_a_git_identity_the_branch_is_cut_plain_with_a_warning(self):
+        for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            self.env.pop(k)
+        r = self.on("--project", "shop", env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                                              "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+                                              "GIT_CONFIG_VALUE_0": "true"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        b = self.state()["branches"]["shop"]
+        self.assertEqual(git(self.shop, "rev-parse", f"origin/{b}").strip(), git(self.shop, "rev-parse", "origin/main").strip())
+        self.assertIn("start log", r.stderr)
+        self.assertIn("identity", r.stderr)
+
+    def test_the_draft_pr_opens_at_on_with_the_start_log_as_its_body(self):
+        self.on("--project", "shop")
+        pr = self.summary_prs(self.shop)[str(self.state()["prs"]["shop"])]
+        self.assertIn("- Done: nothing yet", pr["body"])
+        self.assertEqual(pr["state"], "OPEN")
 
 
 

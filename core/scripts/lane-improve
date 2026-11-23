@@ -15,9 +15,12 @@
 #       one is refused: --continue carries on with it (it takes no argument; a project with none gets one cut, so a new
 #       project can join; two or more are refused and listed), or the owner adopts it (merges it to the integration branch)
 #       or drops it (deletes it) first. A `--continue` re-run while on keeps what is not given again; without --project it keeps the projects as they were (no branch cut). Nothing is merged.
+#       Start commit: a new branch is the integration head plus one commit, "away: start <date>", adding the first AWAY-LOG.md (the
+#       template: header, limits, which projects, an empty summary); a branch that --continue carries on gets none. Without a git
+#       identity (or with a log already on the integration branch) it is cut from the head alone, with a warning.
 #       Draft PR: for each project whose branch it cuts or continues it opens the draft summary PR away/<date> -> the integration
-#       branch (title "away: <date> (<project>)", body = AWAY-LOG.md's summary) and records its number in improve.json; GitHub
-#       opens none for a branch with nothing on it yet, so then away-merge opens it after the first merge (a warning says so).
+#       branch (title "away: <date> (<project>)", body = AWAY-LOG.md's summary) and records its number in improve.json; when gh
+#       cannot (or the start commit could not be made), away-merge opens it after the first merge (a warning says so).
 #       Caps, both off unless given, both ending a project's cycles like the end time (the running lane finishes and merges,
 #       then it wraps up and runs `drained`; the mode stays on for the others): --max-items N: no new cycle after N away-merges
 #       in this period (away-merge's own record); --stop-at <weekly %>: none once `budget-state --project` gives weekly at or
@@ -35,7 +38,7 @@
 #   lane-improve pr <project>
 #       The project's draft summary PR (away/<date> -> its integration branch, titled "away: <date> (<project>)"): opened at
 #       `on` and recorded in improve.json, its body refreshed from AWAY-LOG.md's summary by every away-merge. This opens it when
-#       it is missing (gh could not at `on`, or GitHub opens none for a branch with nothing on it yet), refreshes it, and
+#       it is missing (gh could not at `on`), refreshes it, and
 #       prints the link. It stays a draft and is never merged by an agent; only the owner merges it.
 #   lane-improve status
 #       off, on (what runs, its limits, its projects and branches), or draining (what is left to wrap up).

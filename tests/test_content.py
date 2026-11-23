@@ -2091,6 +2091,7 @@ class AwayImproveContentTests(unittest.TestCase):
     def test_the_summary_pr_the_caps_and_the_protection_report_are_documented(self):
         guide = flat(ROOT / "docs" / "away-improve.md").replace("**", "")
         for needle in ("--stop-at", "--max-items", "lane-improve pr <project>", "improve-period.json", "cap reached",
+                       "`away: start <date>`", "never another project's name",
                        "no agent merges it", "Branch protection report", "admins are exempt", "not available on the repository's plan",
                        "never changes a setting", "require a PR for everyone, admins included"):
             self.assertIn(needle, guide, needle)
@@ -2100,7 +2101,8 @@ class AwayImproveContentTests(unittest.TestCase):
             self.assertIn(needle, skill.replace("**", ""), needle)
         self.assertNotIn("open a **draft PR**", skill)  # lane-improve on opens it; the wrap-up updates it
         spec = flat(ROOT / "docs" / "superpowers" / "specs" / "2026-11-23-away-improve-design.md")
-        for needle in ("Follow-ups after the merged mode", "Optional caps", "Branch protection report", "summary PR"):
+        for needle in ("Follow-ups after the merged mode", "Optional caps", "Branch protection report", "summary PR",
+                       "cut from the integration head plus the log commit"):
             self.assertIn(needle, spec, needle)
         help_text = (ROOT / "core" / "scripts" / "lane-improve").read_text()
         for needle in ("--stop-at <weekly %>", "--max-items N", "lane-improve pr <project>"):

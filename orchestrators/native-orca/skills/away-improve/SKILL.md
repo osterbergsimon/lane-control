@@ -74,8 +74,9 @@ stop (section 3).
    top. Do not wait for the night manager, the owner or a timer.
 
 ## 2. The log: AWAY-LOG.md
-`AWAY-LOG.md` at the root of the away branch (removed when the branch is adopted), from `AWAY-LOG.md` next to this
-skill. A summary at the top, kept current: what was done, what is worth looking at first, what to drop if unsure,
+`AWAY-LOG.md` at the root of the away branch (removed when the branch is adopted), format `AWAY-LOG.md` next to this
+skill. Starting the mode committed its first version as the branch's start commit, `away: start <date>` (header, the
+owner's limits, an empty summary, no items); lanes fill it in. A summary at the top, kept current: what was done, what is worth looking at first, what to drop if unsure,
 what was skipped. Then one entry per item: what, why, what it builds on, existing work checked, how to try it, how to
 drop it (the merge commit to revert and which later items depend on it), test results. A dependency between items is
 recorded so a revert never surprises the owner. Lanes write entries; summary changes ride in the build lane's PR, or
