@@ -1973,6 +1973,17 @@ PERSONA_DIR = ROOT / "orchestrators" / "native-orca" / "personas"
 
 
 class AwayImproveContentTests(unittest.TestCase):
+    def test_owner_guide_covers_every_command_and_is_linked(self):
+        guide = flat(ROOT / "docs" / "away-improve.md")
+        for cmd in ("lane-improve on", "lane-improve off", "lane-improve status", "lane-improve drained", "lane-improve rest",
+                    "--continue", "--unmetered", "--local-suite-ok", "a backstop, not a wall", "IMPROVE_IDLE_MIN",
+                    "one away branch, ever", "draft PR", "has not been run end to end"):
+            self.assertIn(cmd, guide.replace("**", ""), cmd)
+        self.assertIn("docs/away-improve.md", flat(ROOT / "README.md"))
+        self.assertIn("docs/away-improve.md", flat(ROOT / "core" / "README.md"))
+        for sub in ("rest", "wrapup"):
+            self.assertIn(sub, flat(ROOT / "core" / "README.md"))
+
     def test_skill_cycle_steps(self):
         t = flat(AWAY_SKILL)
         keys, body = frontmatter(AWAY_SKILL)

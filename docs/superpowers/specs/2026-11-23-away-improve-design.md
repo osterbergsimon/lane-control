@@ -189,3 +189,22 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
 - Exact file layout of improve.json and how the coordinator persona reads it.
 - How the scout lane's tier and model are chosen (model-routing doc).
 - The summary's wording style (plain, short, like the owner's answer card).
+
+## Follow-ups after review (2026-11-23)
+
+Decided while the branch was reviewed; the owner's guide (`docs/away-improve.md`) describes the result.
+
+- **Nudges back off.** An idle coordinator is nudged when it has been idle `IMPROVE_IDLE_MIN` and the last nudge is at
+  least as old as the idle time was at that nudge (30, 60, 120 minutes, capped at 8 h); a session that wrote since
+  starts over. `lane-improve rest <project>` (a coordinator with nothing left within the limits) quiets a project for
+  12 h; a new `on` or `off` clears it.
+- **Wrap-up nudges.** After `off` or a time end, each project still to wrap up gets `DUE <name> wrapup idle=<n>min
+  waited=<h>h` (by day or night, none at the stop step) until it runs `lane-improve drained`. The deny rules stay until
+  then (not removed at the end time), so the rules and the last merge keep working.
+- **A project set up after the mode started** joins with `lane-improve on --continue --project <name>`; `away-merge`
+  names the command when it finds no branch.
+- **`--local-suite-ok`** takes the path of a log of the full suite run through `lane-heavy` that ends in a pass; its last
+  line is printed in the merge output.
+- **Unmetered:** `budget-state --project <name>` prints `unmetered` instead of `unknown` for a project in unmetered
+  improve mode when the usage feed gives no reading.
+- Not done (bead lc-1dk): feed the built-in secret scan the public-repo name patterns the content test uses.
