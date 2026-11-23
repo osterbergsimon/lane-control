@@ -12,6 +12,9 @@ night and a changed budget never do, and the mode never changes presence. Fields
   unmetered  true on a machine with no usage limits: no budget steps for improve work
   branches   {project: "away/<YYYY-MM-DD>"}
   integration {project: "main" | "develop" | ...}: the branch the project's PRs go to, worked out once, at `on`
+  prs        {project: number}: the draft summary PR (away/<date> -> the integration branch), opened at `on` or, when gh
+             could not then, by away-merge after the first merge; its body is the AWAY-LOG.md summary, refreshed by
+             away-merge after every merge. Optional (a file without it is fine); never merged by an agent.
 
 Every reader treats a missing, malformed or ended file as improve off; a malformed one says why on one stderr line.
 lane-limits.sh has its own copy of this validation (a lone copy of that script cannot import this module):
@@ -90,6 +93,10 @@ def _problem(state, drain: bool = False) -> "str | None":
     i = state["integration"]
     if not (isinstance(i, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in i.items())):
         return "integration is not {project: branch}"
+    prs = state.get("prs", {})
+    if not (isinstance(prs, dict) and all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+                                           for k, v in prs.items())):
+        return "prs is not {project: number}"
     if drain:
         if not _time_ok(state.get("ended")):
             return "ended is not a time"
@@ -367,6 +374,111 @@ def resolve_branches(cos: list, cont: bool, today: dt.date) -> "tuple[dict, dict
     return out, integs, how
 
 
+# --- the draft summary PR: away/<date> -> the integration branch, body = the log's summary ---------------------------
+
+LOG_FILE = "AWAY-LOG.md"
+GH_WRITE_TIMEOUT = 60
+
+
+class PrError(Exception):
+    """The summary PR could not be opened, read or refreshed (the message says why)."""
+
+
+def pr_title(project: str, branch: str) -> str:
+    return f"away: {branch.split('/', 1)[-1]} ({project})"
+
+
+def log_summary(text: "str | None") -> "str | None":
+    """The `## Summary` section of an AWAY-LOG.md (up to the next `## ` heading), or None when there is none or it is empty."""
+    if not text:
+        return None
+    m = re.search(r"^## Summary[ \t]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    body = m.group(1).strip() if m else ""
+    return body or None
+
+
+def pr_body(project: str, branch: str, integration: str, log: "str | None") -> str:
+    summary = log_summary(log) or ("No summary yet: the log has none until the first item is merged into the branch.")
+    return (f"Away-improve branch for {project}: `{branch}` into `{integration}`. A draft, never merged by an agent: merge "
+            f"this PR yourself to adopt the whole branch, or name the items to drop first.\n\n{summary}\n\n"
+            f"The full log is `{LOG_FILE}` on the branch. This text is refreshed from its summary after every "
+            "`away-merge`.\n")
+
+
+def read_log(repo: Path, branch: str) -> "str | None":
+    """AWAY-LOG.md as it is on origin's `branch` (fetched now), or None when the branch has none yet or cannot be read."""
+    if _git(repo, "fetch", "-q", "origin", branch).returncode:
+        return None
+    r = _git(repo, "show", f"FETCH_HEAD:{LOG_FILE}")
+    return r.stdout if r.returncode == 0 else None
+
+
+def _gh(repo: Path, *args: str) -> str:
+    try:
+        r = subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True, timeout=GH_WRITE_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise PrError(f"gh {args[0]} {args[1]} failed ({e})") from None
+    if r.returncode:
+        raise PrError(f"gh {args[0]} {args[1]} failed ({(r.stderr.strip() or r.stdout.strip() or 'no output').splitlines()[-1]})")
+    return r.stdout
+
+
+def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, number: "int | None") -> "tuple[int, str, str]":
+    """(number, url, what) of the project's draft summary PR with its body brought up to the log's summary. With a
+    recorded `number` that PR is read and edited (a closed or merged one is left alone: PrError, the owner's call);
+    without, the open PR of the branch is found, or a draft one is opened. The only gh writes in the whole mode besides
+    away-merge's merge: `pr create --draft` and `pr edit --body`. PrError says why it could not be done."""
+    body = pr_body(project, branch, integration, read_log(repo, branch))
+    if number is None:
+        try:
+            found = json.loads(_gh(repo, "pr", "list", "--head", branch, "--state", "open", "--json", "number,url") or "[]")
+        except ValueError:
+            raise PrError("gh pr list gave an answer that is not JSON") from None
+        if found:
+            number, url, what = int(found[0]["number"]), str(found[0].get("url", "")), "refreshed"
+        else:
+            url = _gh(repo, "pr", "create", "--draft", "--base", integration, "--head", branch, "--title",
+                      pr_title(project, branch), "--body", body).strip().splitlines()[-1]
+            m = re.search(r"/pull/(\d+)\s*$", url)
+            if not m:
+                raise PrError(f"gh pr create did not print a pull request link ({url[:80]})")
+            return int(m.group(1)), url, "opened"
+    else:
+        try:
+            info = json.loads(_gh(repo, "pr", "view", str(number), "--json", "state,url"))
+        except ValueError:
+            raise PrError(f"PR #{number} cannot be read") from None
+        if str(info.get("state", "")).upper() != "OPEN":
+            raise PrError(f"summary PR #{number} is {str(info.get('state')).lower()}, so it is left alone: "
+                          "what happens to it is the owner's call")
+        url, what = str(info.get("url", "")), "refreshed"
+    _gh(repo, "pr", "edit", str(number), "--body", body)
+    return number, url, what
+
+
+def _update(fn) -> bool:
+    """Apply `fn` to the state file that holds the period (the improve file, else the drain file) and write it back."""
+    for f, drain, writer in ((path(), False, write), (drain_path(), True, write_drain)):
+        st = _read(f, drain, True)
+        if st is not None:
+            fn(st)
+            writer(st)
+            return True
+    return False
+
+
+def record_pr(project: str, number: int) -> bool:
+    return _update(lambda st: st.setdefault("prs", {}).__setitem__(project, number))
+
+
+def sync_and_record(repo: Path, state: dict, project: str) -> "tuple[int, str, str]":
+    n, url, what = sync_summary_pr(repo, project, state["branches"][project], state["integration"].get(project, "main"),
+                                   state.get("prs", {}).get(project))
+    if state.get("prs", {}).get(project) != n:
+        record_pr(project, n)
+    return n, url, what
+
+
 # --- deny rules: a backstop for away-merge while the mode is on ---------------------------------------------------
 
 def install_denies(cos: list, integrations: dict) -> "tuple[list, list]":
@@ -408,6 +520,10 @@ def describe(s: dict, how: "dict | None" = None) -> list:
     lines = [f"  runs: {end}", f"  projects: {which}"]
     for p, b in sorted(s["branches"].items()):
         lines.append(f"  branch: {p} -> {b} (from {s['integration'].get(p, '?')}" + (f"; {how[p]}" if how and p in how else "") + ")")
+    for p in sorted(s["branches"]):
+        n = s.get("prs", {}).get(p)
+        lines.append(f"  summary PR: {p} #{n}, a draft, never merged by an agent" if n else
+                     f"  summary PR: {p} not opened yet (away-merge opens it after the first merged item)")
     lines.append("  one away branch per project, ever: it stays until the owner adopts it (merges it to the integration "
                  "branch) or drops it (deletes it); `lane-improve on --continue` carries on with it")
     lines.append(f"  limits: {s['limits'] or '(none given)'}")
@@ -416,6 +532,21 @@ def describe(s: dict, how: "dict | None" = None) -> list:
     lines.append("  budget: " + ("unmetered (no budget steps for improve work; machine limits still apply)" if s["unmetered"]
                                  else "metered (follows the project's budget steps)"))
     return lines
+
+
+def open_summary_prs(cos: list, branches: dict, integs: dict, known: dict) -> "tuple[dict, list]":
+    """({project: PR number}, warnings) for the chosen coordinators' draft summary PRs, found or opened now. A PR gh cannot
+    open (offline, no login, no commits between the branches yet: GitHub opens none for a branch with nothing on it)
+    is a warning, never a refusal: away-merge opens it after the first merged item."""
+    out, warns = {}, []
+    for c in cos:
+        try:
+            n, _url, _what = sync_summary_pr(c.checkout, c.name, branches[c.name], integs[c.name], known.get(c.name))
+            out[c.name] = n
+        except (PrError, OSError) as e:
+            warns.append(f"lane-improve: {c.name}: the draft summary PR is not open yet ({e}); away-merge opens it after "
+                         f"the first merged item, or run `lane-improve pr {c.name}`")
+    return out, warns
 
 
 def cmd_on(a) -> int:
@@ -476,6 +607,7 @@ def cmd_on(a) -> int:
         print(f"lane-improve: improve not switched on: {e}", file=sys.stderr)
         return 1
     deny = None if a.deny_paths is None else [g.strip() for g in a.deny_paths.split(",") if g.strip()]
+    prs, pr_warns = open_summary_prs(chosen, branches, integs, (prev or {}).get("prs", {}))
     if prev:  # a `--continue` re-run while on: what is not named or not given again stays as it was
         keep = prev["projects"] == "all" or projects == "all"
         state = {
@@ -487,6 +619,7 @@ def cmd_on(a) -> int:
             "unmetered": bool(a.unmetered) or prev["unmetered"],
             "branches": {**prev["branches"], **branches},
             "integration": {**prev["integration"], **integs},
+            "prs": {**prev.get("prs", {}), **prs},
         }
     else:
         state = {
@@ -498,13 +631,14 @@ def cmd_on(a) -> int:
             "unmetered": bool(a.unmetered),
             "branches": branches,
             "integration": integs,
+            "prs": prs,
         }
     write(state)
     clear_rest()  # a new instruction from the owner: every coordinator looks for work again
     notes, warns = install_denies(chosen, integs)
     print("lane-improve: improve mode on")
     print("\n".join(describe(state, how) + notes))
-    for w in warns:
+    for w in [*warns, *pr_warns]:
         print(w, file=sys.stderr)
     return 0
 
@@ -573,6 +707,31 @@ def cmd_drained(a) -> int:
         drain_path().unlink(missing_ok=True)
     print(f"lane-improve: wrapped up: {', '.join(names)}" + (f"; still draining: {', '.join(left)}" if left else
                                                           "; the improve period is closed"))
+    return 0
+
+
+def cmd_pr(a) -> int:
+    """`pr <project>`: open the project's draft summary PR if it has none, and bring its body up to the log's summary
+    (away-merge does this after every merge; this is the hand for a PR that could not be opened or refreshed, and the
+    coordinator's wrap-up step). Prints the link. Never merges, never marks it ready."""
+    s, mode = merge_state(a.project)
+    if s is None:
+        print(f"lane-improve: {mode}", file=sys.stderr)
+        return 1
+    if a.project not in s["branches"]:
+        print(f"lane-improve: {a.project} has no away branch recorded (`lane-improve on --continue --project {a.project}`)",
+              file=sys.stderr)
+        return 1
+    cos = {c.name: c for c in _coordinator_list()}
+    if a.project not in cos:
+        print(f"lane-improve: {a.project} is not a coordinator in machine.conf", file=sys.stderr)
+        return 1
+    try:
+        n, url, what = sync_and_record(cos[a.project].checkout, s, a.project)
+    except (PrError, OSError) as e:
+        print(f"lane-improve: {a.project}: {e}", file=sys.stderr)
+        return 1
+    print(f"lane-improve: summary PR #{n} of {a.project} {what} (a draft; only the owner merges it): {url}")
     return 0
 
 
@@ -653,6 +812,8 @@ def main(argv=None) -> int:
     dr.add_argument("projects", nargs="*")
     dr.add_argument("--all", action="store_true")
     sub.add_parser("status")
+    pr = sub.add_parser("pr")
+    pr.add_argument("project")
     rs = sub.add_parser("rest")
     rs.add_argument("project")
     sub.add_parser("is-on")
@@ -663,7 +824,7 @@ def main(argv=None) -> int:
     except SystemExit as e:
         return 2 if e.code else 0
     return {"on": cmd_on, "off": cmd_off, "drained": cmd_drained, "status": cmd_status, "is-on": cmd_is_on,
-            "unmetered": cmd_unmetered, "rest": cmd_rest}[a.cmd](a)
+            "unmetered": cmd_unmetered, "rest": cmd_rest, "pr": cmd_pr}[a.cmd](a)
 
 
 if __name__ == "__main__":

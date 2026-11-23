@@ -25,7 +25,9 @@ and prints the merge commit. It refuses, merging nothing, with one line per fail
              cannot read paths from is a refusal
 The merge is `--match-head-commit <the head that was reviewed and scanned>`, and the head is read again after the diff,
 so a push in between is refused. The project's checkout is its coordinator's, from machine.conf. gh is called read-only
-except for the merge itself.
+except for the merge itself and, after it, the project's draft summary PR (away/<date> -> the integration branch): its body is
+brought up to the log's summary (`gh pr edit`), and it is opened as a draft (`gh pr create --draft`) when it does not exist.
+That PR is never merged by an agent; a failure there does not undo the merge (stderr says so, and names `lane-improve pr`).
 Exit: 0 merged; 1 refused or could not be checked; 2 usage.
 """
 import argparse
@@ -286,7 +288,21 @@ def run(a) -> int:
     if why:
         print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
               f"(ends: {suite_line}) (record this in AWAY-LOG.md)")
+    refresh_summary_pr(checkout, state, a.project)
     return 0
+
+
+def refresh_summary_pr(checkout: Path, state: dict, project: str) -> None:
+    """After a merge: the draft summary PR (away/<date> -> the integration branch) gets its body from the log's summary,
+    and is opened first when it does not exist. Never fails the merge, which has happened: a PR that cannot be refreshed
+    is said on stderr with the command to run by hand."""
+    try:
+        n, url, what = improve.sync_and_record(checkout, state, project)
+    except (improve.PrError, OSError) as e:
+        print(f"away-merge: the merge is done, but the summary PR was not refreshed ({e}); run `lane-improve pr {project}`",
+              file=sys.stderr)
+        return
+    print(f"away-merge: summary PR #{n} {what} from the log: {url}")
 
 
 def main(argv=None) -> int:

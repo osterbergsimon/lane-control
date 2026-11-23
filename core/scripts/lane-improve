@@ -23,13 +23,18 @@
 #   lane-improve rest <project>
 #       A coordinator's note that nothing within the limits is left: the idle nudges stop for that project for 12 h (or
 #       until the mode is switched on or off again), then one nudge looks for new work. It only quiets; it starts nothing.
+#   lane-improve pr <project>
+#       The project's draft summary PR (away/<date> -> its integration branch, titled "away: <date> (<project>)"): opened at
+#       `on` and recorded in improve.json, its body refreshed from AWAY-LOG.md's summary by every away-merge. This opens it when
+#       it is missing (gh could not at `on`, or GitHub opens none for a branch with nothing on it yet), refreshes it, and
+#       prints the link. It stays a draft and is never merged by an agent; only the owner merges it.
 #   lane-improve status
 #       off, on (what runs, its limits, its projects and branches), or draining (what is left to wrap up).
 # Exit: 0, 1 refused or nothing to do, 2 usage.
 set -u
 self=$(readlink -f "$0")
 case ${1:-} in
-  on | off | drained | status | rest) exec python3 "${self%/*}/../improve.py" "$@" ;;
+  on | off | drained | status | rest | pr) exec python3 "${self%/*}/../improve.py" "$@" ;;
   -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self" ;;
-  *) echo "usage: lane-improve on [options]|off|drained <project>|rest <project>|status" >&2; exit 2 ;;
+  *) echo "usage: lane-improve on [options]|off|drained <project>|rest <project>|pr <project>|status" >&2; exit 2 ;;
 esac

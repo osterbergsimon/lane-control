@@ -12,12 +12,47 @@ sys.path.insert(0, str(ROOT / "core"))
 from test_machine_setup import MachineTest, write_exec  # noqa: E402
 
 
+# The summary PR model both gh stubs share (lc-2nz): $GH_SUMMARY is a JSON file {"next": n, "prs": {n: {...}}}, kept per
+# checkout (cwd) so two projects with the same branch name stay apart. GH_CREATE_FAIL / GH_EDIT_FAIL make that call fail.
+GH_SUMMARY_BLOCK = r'''
+sf = os.environ.get("GH_SUMMARY")
+if sf and a[:1] == ["pr"]:
+    db = json.load(open(sf)) if os.path.exists(sf) else {"next": 100, "prs": {}}
+    def save():
+        json.dump(db, open(sf, "w"))
+    def val(flag):
+        return a[a.index(flag) + 1] if flag in a else None
+    if a[:2] == ["pr", "list"] and "--head" in a:
+        print(json.dumps([{"number": int(n), "url": p["url"]} for n, p in db["prs"].items()
+                          if p["head"] == val("--head") and p["cwd"] == os.getcwd() and p["state"] == "OPEN"])); sys.exit(0)
+    if a[:2] == ["pr", "create"]:
+        if os.environ.get("GH_CREATE_FAIL"):
+            print(os.environ["GH_CREATE_FAIL"], file=sys.stderr); sys.exit(1)
+        if "--draft" not in a:
+            print("gh stub: the summary PR must be a draft", file=sys.stderr); sys.exit(1)
+        n = db["next"]; db["next"] = n + 1
+        url = f"https://github.com/acme/shop/pull/{n}"
+        db["prs"][str(n)] = {"head": val("--head"), "base": val("--base"), "title": val("--title"), "body": val("--body"),
+                             "draft": True, "state": "OPEN", "url": url, "cwd": os.getcwd()}
+        save(); print(url); sys.exit(0)
+    if a[:2] == ["pr", "edit"] and a[2] in db["prs"]:
+        if os.environ.get("GH_EDIT_FAIL"):
+            print(os.environ["GH_EDIT_FAIL"], file=sys.stderr); sys.exit(1)
+        db["prs"][a[2]]["body"] = val("--body"); save(); sys.exit(0)
+    if a[:2] == ["pr", "view"] and len(a) > 2 and a[2] in db["prs"]:
+        p = db["prs"][a[2]]
+        print(json.dumps({"state": p["state"], "url": p["url"], "baseRefName": p["base"], "headRefName": p["head"],
+                          "isDraft": p["draft"]})); sys.exit(0)
+'''
+
 GH_BASES_STUB = """
 #!/usr/bin/env python3
-# gh stand-in: only `gh pr list --state merged ... --json baseRefName`, answered from $GH_BASES (a JSON list of bases).
+# gh stand-in: `gh pr list --state merged ... --json baseRefName`, answered from $GH_BASES (a JSON list of bases), and the
+# summary PR calls (pr list --head, pr create, pr edit, pr view), answered from $GH_SUMMARY.
 import json, os, sys
 a = sys.argv[1:]
-open(os.environ["GH_LOG"], "a").write(" ".join(a) + "\\n")
+open(os.environ["GH_LOG"], "a").write(" ".join(a).replace("\\n", " / ") + "\\n")
+""" + GH_SUMMARY_BLOCK + """
 if a[:2] == ["pr", "list"] and "baseRefName" in a:
     bases = json.load(open(os.environ["GH_BASES"])) if os.path.exists(os.environ["GH_BASES"]) else None
     if bases is None:
@@ -91,13 +126,27 @@ class PresenceUntilBackTests(MachineTest):
         self.assertFalse(self.away().exists())
 
 
+LOG_TEXT = """# Away log: shop, away/DATE
+
+## Summary
+- Done: the x feature
+- Worth looking at first: x
+
+## Items
+
+### 1. Add x
+- What: x
+"""
+
+
 class ImproveTest(MachineTest):
     def setUp(self):
         super().setUp()
         self.shop = make_repo(self.tmp, "shop")
         self.blog = make_repo(self.tmp, "blog")
         write_exec(self.bin / "gh", GH_BASES_STUB)
-        self.env.update(GH_LOG=str(self.tmp / "gh.log"), GH_BASES=str(self.tmp / "gh-bases.json"))
+        self.env.update(GH_LOG=str(self.tmp / "gh.log"), GH_BASES=str(self.tmp / "gh-bases.json"),
+                        GH_SUMMARY=str(self.tmp / "gh-summary.json"))
         self.set_bases(["main", "main"])
         self.machine_conf('COORDINATORS="\nshop %s/shop claude shop coordinator\nblog %s/blog claude blog coordinator\n"\n'
                           % (self.tmp, self.tmp))
@@ -136,6 +185,28 @@ class ImproveTest(MachineTest):
     def on(self, *args, env=None):
         return self.run_script("lane-improve", "on", "--yes", *args, env=env)
 
+    def db(self) -> dict:
+        f = self.tmp / "gh-summary.json"
+        return json.loads(f.read_text())["prs"] if f.exists() else {}
+
+    def gh_log(self) -> list:
+        f = self.tmp / "gh.log"
+        return f.read_text().splitlines() if f.exists() else []
+
+    def push_log(self, repo: Path, branch: str, text: str = LOG_TEXT):
+        """AWAY-LOG.md on the project's away branch on origin, from a clone of its own."""
+        work = self.tmp / f"work-{repo.name}"
+        if not work.exists():
+            subprocess.run(["git", "clone", "-q", str(self.tmp / f"{repo.name}.git"), str(work)], check=True, capture_output=True)
+        git(work, "checkout", "-q", branch)
+        (work / "AWAY-LOG.md").write_text(text.replace("DATE", branch.split("/")[1]))
+        git(work, "add", "AWAY-LOG.md")
+        git(work, "commit", "-qm", "log")
+        git(work, "push", "-q", "origin", branch)
+
+    def summary_prs(self, repo: Path) -> dict:
+        return {n: p for n, p in self.db().items() if p["cwd"] == str(repo)}
+
 
 class ImproveOnTests(ImproveTest):
     def test_plain_on_leaves_improve_off(self):
@@ -160,7 +231,8 @@ class ImproveOnTests(ImproveTest):
         r = self.on("--limits", "nothing that needs db migrations", "--deny-paths", "**/migrations/**,infra/*")
         self.assertEqual(r.returncode, 0, r.stderr)
         st = self.state()
-        self.assertEqual(set(st), {"started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration"})
+        self.assertEqual(set(st), {"started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration",
+                                   "prs"})
         self.assertEqual(st["integration"], {"blog": "main", "shop": "main"})
         self.assertEqual(st["end"], "until-back")
         self.assertEqual(st["limits"], "nothing that needs db migrations")
@@ -436,7 +508,7 @@ class ImproveBranchTests(ImproveTest):
     def test_gh_only_read_commands(self):
         self.on()
         for line in (self.tmp / "gh.log").read_text().splitlines():
-            self.assertTrue(line.startswith("pr list "), line)
+            self.assertTrue(line.startswith(("pr list ", "pr create --draft ")), line)
 
 
 class ImproveDenyTests(ImproveTest):
@@ -721,6 +793,147 @@ class ImproveIntegrationBranchTests(ImproveTest):
         self.assertEqual(git(self.shop, "rev-parse", f"origin/{b}").strip(), git(self.shop, "rev-parse", "origin/main").strip())
         denies = json.loads((self.shop / ".claude" / "settings.local.json").read_text())["permissions"]["deny"]
         self.assertIn("Bash(git push origin main:*)", denies)
+
+
+class SummaryPrTests(ImproveTest):
+    """The draft summary PR (away/<date> -> the integration branch): opened by `on`, its number recorded in improve.json,
+    its body kept to the AWAY-LOG.md summary (lc-2nz). gh is a stub; nothing reaches a real host."""
+
+    def test_on_opens_a_draft_pr_per_project_and_records_it(self):
+        self.assertEqual(self.on().returncode, 0)
+        st = self.state()
+        self.assertEqual(sorted(st["prs"]), ["blog", "shop"])
+        for name, repo in (("shop", self.shop), ("blog", self.blog)):
+            prs = self.summary_prs(repo)
+            self.assertEqual(list(prs), [str(st["prs"][name])])
+            pr = prs[str(st["prs"][name])]
+            date = st["branches"][name].split("/")[1]
+            self.assertEqual((pr["head"], pr["base"], pr["draft"]), (st["branches"][name], "main", True))
+            self.assertEqual(pr["title"], f"away: {date} ({name})")
+        self.assertIn("create --draft", " ".join(self.gh_log()))
+
+    def test_a_fresh_branch_has_no_log_so_the_body_says_so(self):
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        pr = self.summary_prs(self.shop)[str(self.state()["prs"]["shop"])]
+        self.assertIn("draft", pr["body"].lower())
+        self.assertIn("no summary yet", pr["body"].lower())
+        self.assertIn("never merged by an agent", pr["body"])
+
+    def test_a_pr_that_cannot_be_opened_does_not_stop_the_mode(self):
+        r = self.on("--project", "shop", env={"GH_CREATE_FAIL": "GraphQL: No commits between main and away/x"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state().get("prs", {}), {})
+        self.assertIn("shop", r.stderr)
+        self.assertIn("No commits between", r.stderr)
+        self.assertIn("away-merge opens it", r.stderr)
+        self.assertEqual(self.summary_prs(self.shop), {})
+
+    def test_continue_picks_up_the_open_pr_of_the_branch(self):
+        self.on("--project", "shop")
+        n = self.state()["prs"]["shop"]
+        self.run_script("lane-improve", "off")
+        self.run_script("lane-improve", "drained", "--all")
+        (self.tmp / "gh.log").write_text("")
+        r = self.on("--project", "shop", "--continue")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state()["prs"]["shop"], n)
+        self.assertEqual(len(self.summary_prs(self.shop)), 1)
+        self.assertNotIn("pr create", " ".join(self.gh_log()))
+
+    def test_a_continue_rerun_without_a_project_touches_no_pr(self):
+        self.on("--project", "shop")
+        before = self.db()
+        (self.tmp / "gh.log").write_text("")
+        self.assertEqual(self.on("--continue", "--hours", "2").returncode, 0)
+        self.assertEqual(self.db(), before)
+        self.assertEqual([c for c in self.gh_log() if c.startswith("pr create") or c.startswith("pr edit")], [])
+
+    def test_status_names_the_pr(self):
+        self.on("--project", "shop")
+        out = self.run_script("lane-improve", "status").stdout
+        self.assertIn(f"#{self.state()['prs']['shop']}", out)
+        self.assertIn("draft", out)
+
+    def test_pr_command_refreshes_the_body_from_the_log_summary(self):
+        self.on("--project", "shop")
+        b, n = self.state()["branches"]["shop"], str(self.state()["prs"]["shop"])
+        self.push_log(self.shop, b)
+        r = self.run_script("lane-improve", "pr", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = self.summary_prs(self.shop)[n]["body"]
+        self.assertIn("Done: the x feature", body)
+        self.assertIn("Worth looking at first: x", body)
+        self.assertNotIn("### 1. Add x", body)  # the items stay in the log
+        self.assertIn(f"/pull/{n}", r.stdout)
+
+    def test_pr_command_opens_a_missing_pr_and_records_it(self):
+        self.on("--project", "shop", env={"GH_CREATE_FAIL": "boom"})
+        self.assertNotIn("shop", self.state().get("prs", {}))
+        b = self.state()["branches"]["shop"]
+        self.push_log(self.shop, b)
+        r = self.run_script("lane-improve", "pr", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        n = self.state()["prs"]["shop"]
+        self.assertEqual(self.summary_prs(self.shop)[str(n)]["draft"], True)
+        self.assertIn("Done: the x feature", self.summary_prs(self.shop)[str(n)]["body"])
+
+    def test_pr_command_while_draining_records_into_the_drain_state(self):
+        self.on("--project", "shop", env={"GH_CREATE_FAIL": "boom"})
+        self.push_log(self.shop, self.state()["branches"]["shop"])
+        self.run_script("lane-improve", "off")
+        r = self.run_script("lane-improve", "pr", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(self.drain_file().read_text())
+        self.assertIn("shop", d["prs"])
+
+    def test_pr_command_refuses_a_project_outside_the_mode(self):
+        self.on("--project", "shop")
+        r = self.run_script("lane-improve", "pr", "blog")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("blog", r.stderr)
+
+    def test_a_closed_pr_is_left_alone(self):
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        db = json.loads((self.tmp / "gh-summary.json").read_text())
+        db["prs"][n]["state"] = "CLOSED"
+        (self.tmp / "gh-summary.json").write_text(json.dumps(db))
+        before = db["prs"][n]["body"]
+        (self.tmp / "gh.log").write_text("")
+        r = self.run_script("lane-improve", "pr", "shop")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("closed", r.stderr)
+        self.assertEqual(self.summary_prs(self.shop)[n]["body"], before)
+        self.assertEqual([c for c in self.gh_log() if c.startswith(("pr create", "pr edit"))], [])
+
+    def test_gh_writes_are_only_draft_create_and_edit_of_the_summary_pr(self):
+        self.on()
+        self.run_script("lane-improve", "pr", "shop")
+        for c in self.gh_log():
+            if c.startswith(("pr create", "pr edit")):
+                continue
+            self.assertTrue(c.startswith(("pr list", "pr view")), c)
+        for c in self.gh_log():
+            if c.startswith("pr create"):
+                self.assertIn("--draft", c)
+            self.assertNotRegex(c, r"pr (merge|ready|close|reopen)")
+
+    def test_an_old_state_file_without_prs_still_loads(self):
+        self.on("--project", "shop")
+        st = self.state()
+        st.pop("prs", None)
+        self.improve_file().write_text(json.dumps(st))
+        self.assertIn("improve: on", self.run_script("lane-improve", "status").stdout)
+
+    def test_a_malformed_prs_field_makes_the_file_unusable(self):
+        self.on("--project", "shop")
+        st = {**self.state(), "prs": {"shop": "twelve"}}
+        self.improve_file().write_text(json.dumps(st))
+        r = self.run_script("lane-improve", "status")
+        self.assertIn("improve: off", r.stdout)
+        self.assertIn("prs", r.stderr)
+
 
 
 class ReaderAgreementTests(ImproveTest):

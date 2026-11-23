@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_lane_away import ImproveTest  # noqa: E402
+from test_lane_away import GH_SUMMARY_BLOCK, ImproveTest, git  # noqa: E402
 from test_machine_setup import write_exec  # noqa: E402
 
 GH_PR_STUB = """
@@ -16,7 +16,8 @@ GH_PR_STUB = """
 # gh stand-in for away-merge: `pr view N --json ...`, `pr diff N`, `pr merge N ...` from $GH_PRS (JSON {N: {...}}).
 import json, os, sys
 a = sys.argv[1:]
-open(os.environ["GH_LOG"], "a").write(" ".join(a) + "\\n")
+open(os.environ["GH_LOG"], "a").write(" ".join(a).replace("\\n", " / ") + "\\n")
+""" + GH_SUMMARY_BLOCK + """
 prs = json.load(open(os.environ["GH_PRS"]))
 if a[:2] == ["api", "user"]:
     login = os.environ.get("GH_LOGIN", "")
@@ -337,7 +338,79 @@ class AwayMergeTests(AwayMergeTest):
     def test_only_read_commands_besides_the_merge(self):
         self.merge()
         for c in self.gh_calls():
-            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "api user -q")), c)
+            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "api user -q", "pr list --head", "pr edit",
+                                          "pr create --draft")), c)
+
+
+class AwayMergeSummaryTests(AwayMergeTest):
+    """After a merge the summary PR's body is brought up to the AWAY-LOG.md summary by away-merge itself, so the
+    coordinator has nothing to remember. The summary PR is a draft and is never merged here (lc-2nz)."""
+
+    def number(self) -> str:
+        return str(self.state()["prs"]["shop"])
+
+    def body(self) -> str:
+        return self.summary_prs(self.shop)[self.number()]["body"]
+
+    def test_a_merge_refreshes_the_summary_pr_from_the_log(self):
+        self.push_log(self.shop, self.branch)
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Done: the x feature", self.body())
+        self.assertNotIn("### 1. Add x", self.body())
+        self.assertIn(f"/pull/{self.number()}", r.stdout)
+
+    def test_the_summary_pr_is_never_merged_and_stays_a_draft(self):
+        self.merge()
+        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --match-head-commit {OID}"])
+        self.assertTrue(self.summary_prs(self.shop)[self.number()]["draft"])
+        self.assertNotRegex(" ".join(self.gh_calls()), r"pr (ready|close)")
+
+    def test_a_refusal_leaves_the_summary_pr_alone(self):
+        before = self.body()
+        self.pr(comments=[])
+        self.assertRefused(self.merge(), "review")
+        self.assertEqual(self.body(), before)
+        self.assertEqual([c for c in self.gh_calls() if c.startswith("pr edit")], [])
+
+    def test_a_refresh_that_fails_does_not_undo_the_merge(self):
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "Add the x feature",
+                            env={"GH_EDIT_FAIL": "HTTP 502"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("lane-improve pr shop", r.stderr)
+        self.assertIn("merged PR 7", r.stdout)
+
+    def test_a_missing_summary_pr_is_opened_and_recorded(self):
+        # as if it could not be opened at `on`: nothing recorded, nothing open
+        st = self.state()
+        st.pop("prs")
+        self.improve_file().write_text(json.dumps(st))
+        (self.tmp / "gh-summary.json").unlink()
+        self.push_log(self.shop, self.branch)
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(self.number(), self.summary_prs(self.shop))
+        self.assertIn("Done: the x feature", self.body())
+        self.assertTrue(self.summary_prs(self.shop)[self.number()]["draft"])
+
+    def test_a_closed_summary_pr_is_left_alone(self):
+        db = json.loads((self.tmp / "gh-summary.json").read_text())
+        db["prs"][self.number()]["state"] = "CLOSED"
+        (self.tmp / "gh-summary.json").write_text(json.dumps(db))
+        before = self.body()
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("closed", r.stderr)
+        self.assertEqual(self.body(), before)
+        self.assertEqual([c for c in self.gh_calls() if c.startswith(("pr edit", "pr create"))], [])
+
+    def test_a_merge_while_draining_refreshes_too(self):
+        self.push_log(self.shop, self.branch)
+        number = self.number()
+        self.run_script("lane-improve", "off")
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Done: the x feature", self.summary_prs(self.shop)[number]["body"])
 
 
 if __name__ == "__main__":
