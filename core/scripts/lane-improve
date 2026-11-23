@@ -8,7 +8,7 @@
 #                   [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]
 #       Switches the mode on, and it is the ONLY way it turns on: plain `lane-away on`, night, "goodnight", a changed budget
 #       never do, and an agent runs it only on the owner's own explicit request for the improve (away-improve) mode.
-#       Prints what it turned on, and without a terminal refuses unless --yes. End: a time, or until you run
+#       Prints what it turned on, and without a terminal (Claude Code's `!` prefix has none) refuses unless --yes. End: a time, or until you run
 #       `lane-improve off` (the default). --project (repeatable) limits it to those coordinators (default: all);
 #       --unmetered marks a machine with no usage limits. Each project gets ONE away branch, ever: a new away/<date> cut
 #       from its integration branch (the base of its recent merged PRs, else origin's default). A project that already has

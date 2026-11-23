@@ -191,7 +191,7 @@ def merge_state(project: str) -> "tuple[dict | None, str]":
     st, mode = mode_state(project)
     if st is None:
         return None, mode
-    stop = hard_stop(st, project)
+    stop = hard_stop(st, project, draining=(mode == "draining"))
     return (None, stop) if stop else (st, mode)
 
 
@@ -266,15 +266,31 @@ def lock_path() -> Path:
     return path().with_name("improve.lock")
 
 
+_lock_depth = 0
+
+
 @contextlib.contextmanager
 def _locked():
     """An exclusive lock on the improve state's lock file, around every read-modify-write of the period record and of the
-    state file (away-merge runs in every coordinator at once, `lane-improve` beside them)."""
+    state file (away-merge runs in every coordinator at once, `lane-improve` beside them). Re-entrant in one process, so
+    away-merge can hold it from the --max-items check through record_merge (which takes it again) without waiting on itself."""
+    global _lock_depth
+    if _lock_depth:
+        _lock_depth += 1
+        try:
+            yield
+        finally:
+            _lock_depth -= 1
+        return
     f = lock_path()
     f.parent.mkdir(parents=True, exist_ok=True)
     with open(f, "a") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        yield
+        _lock_depth = 1
+        try:
+            yield
+        finally:
+            _lock_depth = 0
 
 
 def _has_caps(state: dict) -> bool:
@@ -318,6 +334,10 @@ def period_problem(state: dict) -> "str | None":
 
 FIX_PERIOD = ("`lane-improve on --continue` starts the record again from nothing, and puts the deny rules back on every "
               "project the period covers")
+
+
+FIX_DRAINING_PERIOD = ("wrap it up with `lane-improve drained <project>` (the owner can run `lane-improve drained --all`), then "
+                       "`lane-improve on` starts a new period; the last PR waits for the owner or the new period")
 
 
 class PeriodError(OSError):
@@ -385,12 +405,15 @@ def unmark_wrapped(state: dict, projects: list) -> None:
     _modify_period(state, lambda rec: rec.__setitem__("wrapped", [p for p in rec["wrapped"] if p not in projects]))
 
 
-def hard_stop(state: dict, project: str) -> "str | None":
+def hard_stop(state: dict, project: str, draining: bool = False) -> "str | None":
     """Why away-merge refuses a merge for this project at all, or None. `--max-items N` is enforced here: the Nth merge is
     the last, whatever the coordinator reads or does (a lane that is running finishes as that Nth merge); a record that
     cannot be read stops everything; a project that wrapped up at its cap merges nothing more. `--stop-at` is not a hard
     stop (the lane that is running when it is reached still lands): the budget's own steps are its backstop."""
     why = period_problem(state)
+    if why and draining:  # a drain refuses `on --continue` (the period is not wrapped up yet): name what does work
+        return (f"{why}, so merges and caps cannot be trusted; the period is draining, so nothing more merges for it "
+                f"until it is wrapped up: {FIX_DRAINING_PERIOD}")
     if why:
         return f"{why}, so merges and caps cannot be trusted; merges are refused until it is made again: {FIX_PERIOD}"
     if is_wrapped(state, project):
@@ -949,8 +972,8 @@ def cmd_on(a) -> int:
         print(f"lane-improve: {e}", file=sys.stderr)
         return 2
     if not a.yes and not (sys.stdin.isatty() and sys.stdout.isatty()):
-        print("lane-improve: improve mode spends tokens until it is switched off; there is no terminal here, so it needs "
-              "--yes (run it yourself, or on your own explicit word)", file=sys.stderr)
+        print("lane-improve: improve mode spends tokens until it is switched off; there is no terminal here (Claude Code's "
+              "`!` prefix has none either), so it needs --yes: add it when you run this yourself, or on your own explicit word", file=sys.stderr)
         return 2
     prev = load()
     if prev:

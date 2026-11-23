@@ -26,7 +26,7 @@ mode in your own words.
 
 | Command | What it does |
 |---|---|
-| `lane-improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]` | Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps. Without a terminal it refuses unless `--yes`. |
+| `lane-improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]` | Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps. Without a terminal it refuses unless `--yes`; Claude Code's `!` prefix has no terminal, so there add `--yes` (`! lane-improve on --yes ...`). |
 | `lane-improve off` | Ends the mode; what is running drains (below). |
 | `lane-improve status` | Off, on (what runs), or draining (what is left to wrap up, and how long it has waited). |
 | `lane-improve drained <project>...` or `--all` | A coordinator's wrap-up is done: its deny rules come out. Coordinators run this themselves. While the mode is on it takes only a project whose cap is reached. |
@@ -70,9 +70,12 @@ A wrap-up is final for the period. To resume a project after you raise its cap, 
 reached, and a re-run that does not name the project leaves it wrapped up and says so.
 
 The period record (`improve-period.json`, with a lock file beside it) is written under a lock, so coordinators merging at the
-same moment are all counted. If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
+same moment are all counted. `away-merge` holds that lock from the `--max-items` check through the merge and its record, and
+checks the cap again once it has it, so two merges at once cannot both take the last slot (the second is refused). If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
 every merge, nothing is nudged and `status` says why, instead of the counts starting again from 0. `lane-improve on
---continue` starts the record again from nothing and puts the deny rules back on every project the period covers.
+--continue` starts the record again from nothing and puts the deny rules back on every project the period covers. While the
+period is draining (after `off`), `on --continue` is refused; there the refusal says to wrap up with `lane-improve drained
+<project>` (or `--all`) and then start a new period with `lane-improve on`.
 
 ### One branch per project
 

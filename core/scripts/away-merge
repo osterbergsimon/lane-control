@@ -282,20 +282,29 @@ def run(a) -> int:
     if failed:
         print("\n".join(failed), file=sys.stderr)
         return 1
-    try:
-        gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--match-head-commit", head], checkout)
-        sha = gh(["pr", "view", str(a.pr), "--json", "mergeCommit", "-q", ".mergeCommit.oid"], checkout).strip()
-    except Refuse as e:
-        print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
-        return 1
-    print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}")
-    if why:
-        print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
-              f"(ends: {suite_line}) (record this in AWAY-LOG.md)")
-    try:
-        improve.record_merge(state, a.project, a.pr, item, sha)
-    except OSError as e:
-        print(f"away-merge: the merge is done, but it could not be recorded for --max-items ({e.strerror or e})", file=sys.stderr)
+    # The cap is counted, the merge made and the merge recorded under one hold of the improve lock (lc-jpg): two merges at
+    # once cannot both see the last free slot. The state is read again under the lock, so a cap reached while the checks
+    # above ran refuses this merge.
+    with improve._locked():
+        state, mode = improve.merge_state(a.project)
+        if state is None:
+            print(f"away-merge: refused (improve): {mode}", file=sys.stderr)
+            return 1
+        try:
+            gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--match-head-commit", head], checkout)
+            sha = gh(["pr", "view", str(a.pr), "--json", "mergeCommit", "-q", ".mergeCommit.oid"], checkout).strip()
+        except Refuse as e:
+            print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
+            return 1
+        print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}")
+        if why:
+            print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
+                  f"(ends: {suite_line}) (record this in AWAY-LOG.md)")
+        try:
+            improve.record_merge(state, a.project, a.pr, item, sha)
+        except OSError as e:
+            print(f"away-merge: the merge is done, but it could not be recorded for --max-items ({e.strerror or e})",
+                  file=sys.stderr)
     refresh_summary_pr(checkout, state, a.project)
     return 0
 
