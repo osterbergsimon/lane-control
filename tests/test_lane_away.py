@@ -265,6 +265,63 @@ class ImproveBranchTests(ImproveTest):
             self.assertTrue(line.startswith("pr list "), line)
 
 
+class ImproveDenyTests(ImproveTest):
+    def settings(self, repo: Path) -> Path:
+        return repo / ".claude" / "settings.local.json"
+
+    def denies(self, repo: Path) -> list:
+        f = self.settings(repo)
+        return json.loads(f.read_text()).get("permissions", {}).get("deny", []) if f.exists() else []
+
+    def test_on_installs_denies_for_the_chosen_projects(self):
+        git(self.shop, "checkout", "-q", "-b", "develop")
+        git(self.shop, "push", "-q", "origin", "develop")
+        self.set_bases(["develop", "develop"])
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Bash(gh pr merge:*)", self.denies(self.shop))
+        self.assertIn("Bash(git push origin develop:*)", self.denies(self.shop))
+        self.assertEqual(self.denies(self.blog), [])
+        self.assertIn("deny rules", r.stdout)
+
+    def test_off_removes_them_from_every_coordinator(self):
+        self.on()
+        self.assertTrue(self.denies(self.shop) and self.denies(self.blog))
+        r = self.run_script("lane-away", "off")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.denies(self.shop), self.denies(self.blog)), ([], []))
+        self.assertFalse(self.settings(self.shop).exists())
+
+    def test_off_keeps_the_owners_own_settings(self):
+        self.settings(self.shop).parent.mkdir()
+        self.settings(self.shop).write_text(json.dumps({"model": "sonnet", "permissions": {"deny": ["Bash(rm:*)"]}}))
+        self.on("--project", "shop")
+        self.run_script("lane-away", "off")
+        self.assertEqual(json.loads(self.settings(self.shop).read_text()),
+                         {"model": "sonnet", "permissions": {"deny": ["Bash(rm:*)"]}})
+
+    def test_settings_that_cannot_take_the_rules_warn_but_do_not_block(self):
+        self.settings(self.shop).parent.mkdir()
+        self.settings(self.shop).write_text("{not json")
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("shop", r.stderr)
+        self.assertIn("deny rules NOT installed", r.stderr)
+        self.assertIn("away-merge", r.stderr)
+        self.assertTrue(self.improve_file().exists())
+        self.assertEqual(self.settings(self.shop).read_text(), "{not json")
+
+    def test_an_opencode_coordinator_is_told_away_merge_alone_guards_it(self):
+        self.machine_conf('COORDINATORS="\nshop %s claude shop coordinator\nblog %s opencode blog coordinator\n"\n'
+                          % (self.shop, self.blog))
+        r = self.on()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("blog", r.stdout)
+        self.assertIn("away-merge alone", r.stdout)
+        self.assertEqual(self.denies(self.blog), [])
+        self.assertTrue(self.denies(self.shop))
+
+
 class ImproveReadTests(ImproveTest):
     def read(self, code: str, env=None):
         e = dict(self.env, **(env or {}))

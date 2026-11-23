@@ -69,6 +69,11 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
 - 2026-11-20 UP-6: project-level install (`LANE_OPENCODE_PLUGIN=project`), the persona added once when two copies are
   loaded, and the session record published as a stable interface (`../session-record.md`, `lane-idle`).
 
+- 2026-11-23 away-improve (lc-yzb): no deny rules for the mode. Claude's coordinator gets deny rules for `gh pr merge` and
+  for pushes to the integration branch while the mode is on; OpenCode has no uncommitted per-checkout permission file that
+  is checked here (a project's `opencode.json` is usually committed and is never edited), so away-merge alone guards the
+  merge route for an OpenCode coordinator. Retest when OpenCode documents a local, uncommitted permission file.
+
 ## Retest when
 - OpenCode changes its plugin API, its `--standalone` flag or its session store: run the live check.
 

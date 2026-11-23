@@ -36,6 +36,11 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
 - 2026-11-19 adapter (NO-1): start command, persona hook, idle signal.
 - 2026-11-19 review 1: the 10,000-character cap, other hooks kept, idle from the recorded session only.
 
+- 2026-11-23 away-improve (lc-yzb): while the mode is on, `permissions.deny` in the checkout's `.claude/settings.local.json`
+  gets `Bash(gh pr merge:*)` and the push rules for the integration branch (`install_away_denies`), taken out again on
+  `lane-away off` (`remove_away_denies`, only what was added, noted in the state folder). They back up away-merge, which
+  runs gh itself outside the session's Bash rules; they are a guard against a mistake, not against a determined agent.
+
 ## Retest when
 - Claude Code changes its hook events or its transcript folder layout.
 

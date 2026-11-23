@@ -2,7 +2,8 @@
 compaction (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, sections 6 and 12).
 
 Each harness with code has core/harnesses/<name>/adapter.py exposing NAME, STATUS, ORCA_AGENT_ID, MODEL_FLAGS,
-start_command(), install_persona_hook() and idle_minutes(); every harness, tried or not, has a dated record.md.
+start_command(), install_persona_hook(), idle_minutes(), and install_away_denies() / remove_away_denies()
+(away-improve mode's deny rules; an adapter with no way to set them returns no change lines and its record.md says so); every harness, tried or not, has a dated record.md.
 The session record the adapters' idle signal reads is a published interface: session-record.md.
 Import with core/ on sys.path: `import harnesses; harnesses.load_harness("claude")`.
 """
@@ -73,6 +74,15 @@ def session_record(checkout: Path, role: str, harness: str) -> Path:
     state = Path(v) if v and os.path.isabs(v) else Path.home() / ".local" / "state"
     key = re.sub(rb"[^A-Za-z0-9]", b"-", os.fsencode(Path(checkout).resolve())).decode()  # per byte, like the writers
     return state / "lane-control" / "sessions" / key / f"{role}.{harness}"
+
+
+def away_denies_record(checkout: Path) -> Path:
+    """Where an adapter notes which deny rules it added for away-improve mode (and which parts of the settings file it
+    created), so turning the mode off takes out only those: $XDG_STATE_HOME/lane-control/away-denies/<encoded checkout>.json."""
+    v = os.environ.get("XDG_STATE_HOME")
+    state = Path(v) if v and os.path.isabs(v) else Path.home() / ".local" / "state"
+    key = re.sub(rb"[^A-Za-z0-9]", b"-", os.fsencode(Path(checkout).resolve())).decode()
+    return state / "lane-control" / "away-denies" / f"{key}.json"
 
 
 def read_session(checkout: Path, role: str, harness: str) -> "str | None":

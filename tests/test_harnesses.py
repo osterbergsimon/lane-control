@@ -1244,5 +1244,103 @@ class RecordTests(unittest.TestCase):
         self.assertIn("inherit", section)  # review m7: what a marked session starts gets the markers too
 
 
+class AwayDenyTests(HomeTest):
+    """Away-improve mode: deny rules that back up away-merge while improve is on (lc-yzb, task 5)."""
+
+    def setUp(self):
+        super().setUp()
+        self.a = self.pkg.load_harness("claude")
+        self.settings = self.checkout / ".claude" / "settings.local.json"
+
+    def data(self):
+        import json
+        return json.loads(self.settings.read_text())
+
+    def write(self, obj):
+        import json
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text(json.dumps(obj, indent=2) + "\n")
+
+    OURS = ["Bash(gh pr merge:*)", "Bash(git push origin develop:*)", "Bash(git push origin HEAD:develop:*)",
+            "Bash(git push origin HEAD:refs/heads/develop:*)"]
+
+    def test_denies_added_and_removed_exactly(self):
+        before = {"permissions": {"allow": ["Bash(ls:*)"]}, "model": "sonnet", "hooks": {"SessionStart": []}}
+        self.write(before)
+        lines = self.a.install_away_denies(self.checkout, "develop")
+        self.assertTrue(lines and all(isinstance(l, str) for l in lines))
+        d = self.data()
+        self.assertEqual(d["permissions"]["deny"], self.OURS)
+        self.assertEqual(d["permissions"]["allow"], ["Bash(ls:*)"])
+        self.assertEqual(d["model"], "sonnet")
+        self.assertTrue(self.a.remove_away_denies(self.checkout))
+        self.assertEqual(self.data(), before)
+
+    def test_no_file_before_none_after(self):
+        self.a.install_away_denies(self.checkout, "main")
+        self.assertIn("Bash(git push origin main:*)", self.data()["permissions"]["deny"])
+        self.a.remove_away_denies(self.checkout)
+        self.assertFalse(self.settings.exists())
+
+    def test_install_twice_adds_once(self):
+        self.a.install_away_denies(self.checkout, "develop")
+        self.assertEqual(self.a.install_away_denies(self.checkout, "develop"), [])
+        self.assertEqual(self.data()["permissions"]["deny"], self.OURS)
+        self.a.remove_away_denies(self.checkout)
+        self.assertFalse(self.settings.exists())
+
+    def test_existing_denies_untouched(self):
+        self.write({"permissions": {"deny": ["Bash(rm:*)", "Bash(gh pr merge:*)"]}})
+        self.a.install_away_denies(self.checkout, "develop")
+        self.assertEqual(self.data()["permissions"]["deny"], ["Bash(rm:*)", "Bash(gh pr merge:*)", *self.OURS[1:]])
+        self.a.remove_away_denies(self.checkout)
+        # the owner's own entries stay, including the one that was theirs before ours
+        self.assertEqual(self.data(), {"permissions": {"deny": ["Bash(rm:*)", "Bash(gh pr merge:*)"]}})
+
+    def test_denies_the_owner_added_after_stay(self):
+        self.a.install_away_denies(self.checkout, "develop")
+        d = self.data()
+        d["permissions"]["deny"].append("Bash(curl:*)")
+        self.write(d)
+        self.a.remove_away_denies(self.checkout)
+        self.assertEqual(self.data(), {"permissions": {"deny": ["Bash(curl:*)"]}})
+
+    def test_remove_without_install_does_nothing(self):
+        self.write({"permissions": {"deny": ["Bash(gh pr merge:*)"]}})
+        self.assertEqual(self.a.remove_away_denies(self.checkout), [])
+        self.assertEqual(self.data(), {"permissions": {"deny": ["Bash(gh pr merge:*)"]}})
+
+    def test_a_branch_name_cannot_smuggle_a_rule(self):
+        for bad in ("", "a b", "x:*)", "main\nBash(rm:*)", "-f"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.a.install_away_denies(self.checkout, bad)
+        self.assertFalse(self.settings.exists())
+
+    def test_invalid_settings_refused_and_left(self):
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_text("{not json")
+        with self.assertRaises(ValueError):
+            self.a.install_away_denies(self.checkout, "main")
+        self.assertEqual(self.settings.read_text(), "{not json")
+        self.write({"permissions": ["odd"]})
+        with self.assertRaises(ValueError):
+            self.a.install_away_denies(self.checkout, "main")
+
+    def test_opencode_or_recorded_gap(self):
+        oc = self.pkg.load_harness("opencode")
+        self.assertEqual(oc.install_away_denies(self.checkout, "main"), [])
+        self.assertEqual(oc.remove_away_denies(self.checkout), [])
+        self.assertEqual(list(self.checkout.iterdir()), [])  # it wrote nothing into the checkout
+        record = " ".join((HARNESSES / "opencode" / "record.md").read_text().split())
+        self.assertIn("away-improve", record)
+        self.assertIn("away-merge alone", record)
+        self.assertIn("away-improve", " ".join((HARNESSES / "claude" / "record.md").read_text().split()))
+
+    def test_every_adapter_has_the_deny_functions(self):
+        for name, mod in self.pkg.harnesses().items():
+            for fn in ("install_away_denies", "remove_away_denies"):
+                self.assertTrue(callable(getattr(mod, fn)), (name, fn))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -217,13 +217,14 @@ def continue_branch(repo: Path, name: "str | None") -> str:
     return have[-1]
 
 
-def resolve_branches(cos: list, cont: "str | None", today: dt.date) -> dict:
-    """{project: branch} for these coordinators: new branches, or with `cont` (not None; "" = the newest) the existing
-    ones. All are checked before any is cut, so a refusal leaves origin as it was."""
-    out, plan = {}, []
+def resolve_branches(cos: list, cont: "str | None", today: dt.date) -> "tuple[dict, dict]":
+    """({project: branch}, {project: integration branch}) for these coordinators: new branches, or with `cont` (not
+    None; "" = the newest) the existing ones. All are checked before any is cut, so a refusal leaves origin as it was."""
+    out, integs, plan = {}, {}, []
     for c in cos:
         try:
             integ = integration_branch(c.checkout)
+            integs[c.name] = integ
             if cont is not None:
                 out[c.name] = continue_branch(c.checkout, cont or None)
             else:
@@ -236,7 +237,40 @@ def resolve_branches(cos: list, cont: "str | None", today: dt.date) -> dict:
             out[c.name] = cut_branch(c.checkout, integ, today)
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             raise ValueError(f"{c.name}: {e}") from None
-    return out
+    return out, integs
+
+
+# --- deny rules: a backstop for away-merge while the mode is on ---------------------------------------------------
+
+def install_denies(cos: list, integrations: dict) -> "tuple[list, list]":
+    """Ask each coordinator's harness adapter for away-improve deny rules. (notes, warnings): what was done or is
+    not possible per harness, and what could not be done (the mode still runs: away-merge is the main guard)."""
+    import harnesses
+    notes, warns = [], []
+    for c in cos:
+        try:
+            mod = harnesses.load_harness(c.harness)
+            changes = mod.install_away_denies(c.checkout, integrations[c.name])
+        except (ValueError, OSError) as e:
+            warns.append(f"lane-away: {c.name}: deny rules NOT installed ({e}); away-merge is the only guard on its merge route")
+            continue
+        if changes:
+            notes.append(f"  deny rules: {c.name}: gh pr merge and pushes to {integrations[c.name]} are denied to its coordinator")
+        elif c.harness != "claude":
+            notes.append(f"  deny rules: {c.name}: none for {c.harness}; away-merge alone guards its merge route")
+    return notes, warns
+
+
+def remove_denies(cos: list) -> list:
+    """Take the deny rules out of every coordinator's checkout; returns warnings for what could not be removed."""
+    import harnesses
+    warns = []
+    for c in cos:
+        try:
+            harnesses.load_harness(c.harness).remove_away_denies(c.checkout)
+        except (ValueError, OSError) as e:
+            warns.append(f"lane-away: {c.name}: deny rules not removed ({e})")
+    return warns
 
 
 def describe(s: dict) -> list:
@@ -291,7 +325,7 @@ def cmd_on(a) -> int:
     projects = list(dict.fromkeys(a.project)) if a.project else "all"
     chosen = cos if projects == "all" else [c for c in cos if c.name in projects]
     try:
-        branches = resolve_branches(chosen, a.cont, now().date())
+        branches, integs = resolve_branches(chosen, a.cont, now().date())
     except ValueError as e:
         print(f"lane-away: improve not switched on: {e}", file=sys.stderr)
         return 1
@@ -309,13 +343,23 @@ def cmd_on(a) -> int:
         af = Path(a.away_file)
         af.parent.mkdir(parents=True, exist_ok=True)
         af.touch()
+    notes, warns = install_denies(chosen, integs)
     print("lane-away: improve mode on (the owner counts as away while it runs)")
-    print("\n".join(describe(state)))
+    print("\n".join(describe(state) + notes))
+    for w in warns:
+        print(w, file=sys.stderr)
     return 0
 
 
 def cmd_off(a) -> int:
+    try:
+        cos = coordinators()
+    except Exception:  # no readable machine.conf: nothing to take rules out of
+        cos = []
+    warns = remove_denies(cos)
     clear()
+    for w in warns:
+        print(w, file=sys.stderr)
     return 0
 
 

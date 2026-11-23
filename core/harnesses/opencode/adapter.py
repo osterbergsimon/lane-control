@@ -187,3 +187,15 @@ def idle_minutes(checkout: Path, now: float, role: str = "coordinator") -> "int 
     if newest is None:
         return None
     return max(0, int((now - newest / 1000) // 60))
+
+
+def install_away_denies(checkout: Path, integration: str) -> list:
+    """Away-improve mode's deny rules: none for OpenCode. It has no uncommitted per-checkout permission file that this
+    repo has checked (a project's opencode.json is usually committed, and is never edited), so away-merge alone is the
+    guard here, as record.md says. Nothing is written; no change lines."""
+    return []
+
+
+def remove_away_denies(checkout: Path) -> list:
+    """The counterpart of install_away_denies: nothing was added, so nothing is removed."""
+    return []
