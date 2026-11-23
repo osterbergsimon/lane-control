@@ -6,17 +6,24 @@ docs/superpowers/specs/2026-11-23-away-improve-design.md).
 
 Merges PR N into the project's active away/<date> branch as a merge commit titled `away: <item>` (never squashed),
 and prints the merge commit. It refuses, merging nothing, with one line per failed check, unless all of these hold:
-  improve    improve mode is on for NAME (core/improve.py), which names the project's away branch
+  improve    improve mode is on for NAME (core/improve.py), which names the project's away branch; or it is draining
+             (`lane-away off` or the end time, until `lane-away drained NAME`): the running lane's last PR still merges
   base       the PR's base is exactly that branch: never main, develop or another project's away branch
   open       the PR is open
-  review     the PR body or a comment has a line `Review: passed` (the coordinator writes it after the reviewer's
-             clean round)
+  review     a comment on the PR, by the gh login running this script, says `Review: passed <head sha>` for the PR's
+             current head commit (the coordinator writes it after the reviewer's clean round; the PR body never
+             counts). A push after the review needs a new review. That a lane never writes it or runs away-merge is a
+             rule of the skill, not something one gh identity can enforce.
   ci         every check on the PR passed, or --local-suite-ok names the lane-heavy run of the full suite (use it only
              when CI itself is failing or unavailable for reasons outside the change; say so in AWAY-LOG.md)
   secrets    the diff is clean: gitleaks when the project has a .gitleaks.toml (no gitleaks to run it is a refusal),
              otherwise a built-in scan of the added lines for keys, tokens, home paths and private addresses
-  deny       the PR touches none of improve.json's deny_paths
-The project's checkout is its coordinator's, from machine.conf. gh is called read-only except for the merge itself.
+  deny       the PR touches none of improve.json's deny_paths: every old and new path in the `diff --git` headers of
+             the PR's diff is checked (gh's file list stops at 100 files and drops a rename's old name); a diff it
+             cannot read paths from is a refusal
+The merge is `--match-head-commit <the head that was reviewed and scanned>`, and the head is read again after the diff,
+so a push in between is refused. The project's checkout is its coordinator's, from machine.conf. gh is called read-only
+except for the merge itself.
 Exit: 0 merged; 1 refused or could not be checked; 2 usage.
 """
 import argparse
@@ -31,7 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import improve  # noqa: E402
 import machineconf  # noqa: E402
 
-REVIEW = re.compile(r"^\s*Review: passed\s*$", re.M)
+MARKER = re.compile(r"^\s*Review: passed ([0-9a-f]{40})\s*$", re.M)
+HEADER = re.compile(r'^diff --git (?:"a/((?:[^"\\]|\\.)*)"|a/(.*?)) (?:"b/((?:[^"\\]|\\.)*)"|b/(.*))$', re.M)
 GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 # The built-in scan, for a project without a gitleaks config: what must never reach a public branch.
 PRIVATE = [
@@ -81,10 +89,44 @@ def glob_re(glob: str) -> "re.Pattern":
     return re.compile(out)
 
 
+def _unquote(path: str) -> str:
+    """A git-quoted path (C escapes, octal bytes for non-ASCII) as text."""
+    out, i = bytearray(), 0
+    while i < len(path):
+        c = path[i]
+        if c == "\\" and i + 1 < len(path):
+            n = path[i + 1]
+            if n in "01234567" and re.fullmatch(r"[0-7]{3}", path[i + 1:i + 4]):
+                out.append(int(path[i + 1:i + 4], 8))
+                i += 4
+                continue
+            out += {"n": b"\n", "t": b"\t", '"': b'"', "\\": b"\\"}.get(n, n.encode()) if n in 'nt"\\' else n.encode()
+            i += 2
+            continue
+        out += c.encode()
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def diff_paths(diff: str) -> "set | None":
+    """Every old and new path named in the `diff --git` headers of a diff (a rename gives both); None when it has no
+    header at all."""
+    found = set()
+    for m in HEADER.finditer(diff):
+        old = _unquote(m.group(1)) if m.group(1) is not None else m.group(2)
+        new = _unquote(m.group(3)) if m.group(3) is not None else m.group(4)
+        found.update((old, new))
+    for m in re.finditer(r"^rename (?:from|to) (.+)$", diff, re.M):
+        found.add(_unquote(m.group(1)[1:-1]) if m.group(1).startswith('"') else m.group(1))
+    return found or None
+
+
 def ci_green(rollup: list) -> "str | None":
     """None when every check passed; else why not."""
     if not rollup:
         return "no checks are reported on the PR"
+    if all(str(c.get("conclusion") or c.get("state") or "").upper() == "SKIPPED" for c in rollup):
+        return "every check was skipped, none passed"
     bad = []
     for c in rollup:
         verdict = c.get("conclusion") or c.get("state") or c.get("status") or ""
@@ -132,12 +174,10 @@ def run(a) -> int:
     def refuse(check: str, why: str):
         failed.append(f"away-merge: refused ({check}): {why}")
 
-    state = improve.load()
+    state, mode = improve.merge_state(a.project)
     branch = None
-    if not state:
-        refuse("improve", "improve mode is not on (or its file cannot be used)")
-    elif not improve.active_for(a.project):
-        refuse("improve", f"improve mode is not on for {a.project}")
+    if state is None:
+        refuse("improve", mode)
     else:
         branch = state["branches"].get(a.project)
         if not branch:
@@ -156,20 +196,35 @@ def run(a) -> int:
         print("\n".join(failed), file=sys.stderr)
         return 1
     try:
-        pr = json.loads(gh(["pr", "view", str(a.pr), "--json", "baseRefName,state,body,comments,statusCheckRollup,files"],
+        pr = json.loads(gh(["pr", "view", str(a.pr), "--json", "baseRefName,headRefOid,state,comments,statusCheckRollup,files"],
                            checkout))
         diff = gh(["pr", "diff", str(a.pr)], checkout)
+        head_now = json.loads(gh(["pr", "view", str(a.pr), "--json", "headRefOid"], checkout)).get("headRefOid")
     except (Refuse, ValueError) as e:
         print(f"away-merge: refused: PR {a.pr} cannot be read ({e})", file=sys.stderr)
         return 1
+    head = pr.get("headRefOid") or ""
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        print(f"away-merge: refused: PR {a.pr} has no readable head commit", file=sys.stderr)
+        return 1
+    if head_now != head:
+        refuse("head", f"PR {a.pr} was pushed to while it was being checked ({head[:7]} then {str(head_now)[:7]}); run again")
     if pr.get("baseRefName") != branch:
         refuse("base", f"PR {a.pr} goes into {pr.get('baseRefName')!r}, not {a.project}'s away branch {branch!r}; "
                        "away-merge never merges anywhere else")
     if str(pr.get("state", "")).upper() != "OPEN":
         refuse("open", f"PR {a.pr} is {str(pr.get('state')).lower()}, not open")
-    texts = [pr.get("body") or ""] + [c.get("body") or "" for c in pr.get("comments") or []]
-    if not any(REVIEW.search(t) for t in texts):
-        refuse("review", f"PR {a.pr} has no `Review: passed` line (the coordinator writes it after the reviewer's clean round)")
+    try:
+        login = gh(["api", "user", "-q", ".login"], checkout).strip()
+    except Refuse:
+        login = ""
+    reviewed = bool(login) and any(
+        (c.get("author") or {}).get("login") == login and head in MARKER.findall(c.get("body") or "")
+        for c in pr.get("comments") or [])
+    if not reviewed:
+        refuse("review", f"no comment by {login or '(the gh login could not be read)'} says `Review: passed {head}` "
+                         f"for PR {a.pr}'s current head (the coordinator writes it after the reviewer's clean round; "
+                         "the PR body never counts; a push after the review needs a new one)")
     why = ci_green(pr.get("statusCheckRollup") or [])
     if why and not a.local_suite_ok:
         refuse("ci", f"{why} (CI must be green; or, when CI itself is failing for reasons outside the change, "
@@ -177,16 +232,19 @@ def run(a) -> int:
     hit = secret_scan(checkout, diff)
     if hit:
         refuse("secrets", hit)
-    globs = [(g, glob_re(g)) for g in state["deny_paths"]]
-    for f in pr.get("files") or []:
-        for g, rx in globs:
-            if rx.fullmatch(f.get("path", "")):
-                refuse("deny", f"{f['path']} matches the owner's deny path {g}")
+    paths = diff_paths(diff)
+    if paths is None or (pr.get("files") and not paths):
+        refuse("deny", "the PR's diff has no `diff --git` headers to read paths from, so the deny paths cannot be checked")
+    else:
+        for g, rx in [(g, glob_re(g)) for g in state["deny_paths"]]:
+            for f in sorted(paths):
+                if rx.fullmatch(f):
+                    refuse("deny", f"{f} matches the owner's deny path {g}")
     if failed:
         print("\n".join(failed), file=sys.stderr)
         return 1
     try:
-        gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}"], checkout)
+        gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--match-head-commit", head], checkout)
         sha = gh(["pr", "view", str(a.pr), "--json", "mergeCommit", "-q", ".mergeCommit.oid"], checkout).strip()
     except Refuse as e:
         print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
