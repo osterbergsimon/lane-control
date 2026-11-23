@@ -246,8 +246,41 @@ def committed_bd_hooks(repo: Path, include_prime: bool = True) -> list[tuple[str
 _WRAPPERS = (r"(?:(?:then|do|else|elif|exec|command|nice|time|nohup|env|\w+=\S*)\s+|timeout(?:\s+-\S+)*\s+\d\S*\s+"
              r"|(?:ba|z|da)?sh\s+-\w*c\s+)*")
 _RUNS_PRIME = re.compile(r"(?:^|[;&|({!`\n]|\$\()\s*" + _WRAPPERS + r"[\"']?(?:\S*/)?bd\s+(?:-\S+\s+)*prime(?![\w.-])")
+OUR_HOOK_MATCHER = "startup|resume|clear|compact"  # the matcher of lane-control's SessionStart hooks (persona and bd prime)
+_SHELL_C = re.compile(r"(?:ba|z|da)?sh\s+-\w*c\s+$")
 _SIMPLE_MATCHER = re.compile(r"[\w|-]+")
 UNCHECKED = ("Not checked: managed settings, plugin hooks and hook scripts (a second `bd prime` there would run it twice).")
+
+
+def _open_quote(command: str, pos: int) -> int | None:
+    """The index of the quote that is still open at `pos` in a shell command line, or None (backslash escapes outside
+    single quotes are skipped)."""
+    quote, start, i = None, None, 0
+    while i < pos:
+        c = command[i]
+        if quote is None:
+            if c == "\\":
+                i += 1
+            elif c in "\"'":
+                quote, start = c, i
+        elif c == quote:
+            quote = None
+        elif c == "\\" and quote == '"':
+            i += 1
+        i += 1
+    return start if quote else None
+
+
+def runs_bd_prime(command: str) -> bool:
+    """Whether a hook command line runs `bd prime`: at the start or after a shell operator (see _RUNS_PRIME), and not as
+    text inside a quoted string (`echo "tip: bd ready; bd prime"`), unless that string is the argument of `sh -c`."""
+    pos = 0
+    while (m := _RUNS_PRIME.search(command, pos)):
+        q = _open_quote(command, m.start())
+        if q is None or _SHELL_C.search(command[:q]):
+            return True
+        pos = m.start() + 1
+    return False
 
 
 def _matcher_covers_startup(matcher: str) -> bool:
@@ -303,7 +336,7 @@ def _scan_prime(repo: Path) -> tuple[list[PrimeHook], list[tuple[str, Path, str]
         if why:
             problems.append((layer, path, why))
         for event, matcher, command in entries:
-            if not _RUNS_PRIME.search(command):
+            if not runs_bd_prime(command):
                 continue
             words = _bd_words(command)
             plain = words is not None and words[1] == "prime" and not re.search(r"[|&;<>$`()\\]", command)
@@ -325,6 +358,11 @@ def prime_hooks(repo: Path) -> list[PrimeHook]:
     ...` command is probed (run once, no shell); a shell line is present but not judged. Not scanned (UNCHECKED):
     managed settings, plugin hooks, hook scripts. Reads only."""
     return _scan_prime(repo)[0]
+
+
+def _is_ours(h: PrimeHook) -> bool:
+    """lane-control's own entry: `bd prime` under its matcher, in the checkout's uncommitted settings."""
+    return h.layer == "local" and h.event == "SessionStart" and h.matcher == OUR_HOOK_MATCHER and h.command == "bd prime"
 
 
 def _where(h: PrimeHook) -> str:
@@ -364,7 +402,7 @@ def hook_notes(repo: Path) -> list[tuple[str, str, str]]:
                                         "does not rewrite an entry it did not write: change the command to `bd prime`."))
     live = [h for h in hooks if h.runs is not False]
     for h in live:
-        if not h.covers_start:
+        if not h.covers_start and h.event != "PreCompact":  # bd's own layout pairs SessionStart with PreCompact: no noise
             out.append((step, "noted", f"`{h.command}` also runs from {_where(h)}; that does not cover a new session's "
                                        "start, so it does not count as the session hook."))
     covering = [h for h in live if h.covers_start]
@@ -378,17 +416,26 @@ def hook_notes(repo: Path) -> list[tuple[str, str, str]]:
         out.append((step, "exists", f"{h.path} already runs `{h.command}` ({h.event}) at session start; lane-control adds "
                                     f"no second one" + (f" ({more} more file(s) run it too)" if more else "") + f". {checked}"))
     elif covering:
-        out.append((step, "exists", f"bd prime runs at session start from {covering[0].path} (lane-control's hook). {checked}"))
-    for event in dict.fromkeys(h.event for h in live):
-        same = [h for h in live if h.event == event]
+        h = covering[0]
+        whose = " (lane-control's hook)" if _is_ours(h) else ""
+        out.append((step, "exists", f"bd prime runs at session start from {h.path}{whose}. {checked}"))
+    # duplicates: entries on one event whose matchers overlap. Lane-control's own entry is left out of the comparison
+    # unless another entry still covers session start (then it is the redundant one): an overlap with an entry that
+    # does not cover the start (bd's `compact`, a hand-added `resume`) is not a duplicate, and removing ours would leave
+    # a session starting with no bd prime
+    others_cover_start = any(h.covers_start for h in live if not _is_ours(h))
+    pool = live if others_cover_start else [h for h in live if not _is_ours(h)]
+    for event in dict.fromkeys(h.event for h in pool):
+        same = [h for h in pool if h.event == event]
         dup = [h for h in same if any(g is not h and _matchers_overlap(h.matcher, g.matcher) for g in same)]
         if dup:
-            local = next((h for h in dup if h.layer == "local"), None)
+            ours = next((h for h in dup if _is_ours(h)), None)
             out.append((step, "warning", f"bd prime runs more than once at {event}, from "
                                          + "; ".join(f"{_where(h)}: `{h.command}`" for h in dup)
                                          + ". Remove all but one; setup edits none of these files."
-                                         + (f" To fix it, remove the entry in {local.path} (lane-control's own; it is not "
-                                            "added again while another one covers session start)." if local else "")))
+                                         + (f" To fix it, remove the entry in {ours.path} with matcher `{ours.matcher}` "
+                                            "(lane-control's own; it is not added again while another one covers session "
+                                            "start)." if ours else "")))
     return out
 
 
@@ -668,6 +715,9 @@ def restore(repo: Path, slug: tuple[str, str], yes) -> list[tuple[str, str, str]
     if (dest.exists() or dest.is_symlink()) and not reuse:
         origin = _git_out(dest, "config", "--get", "remote.origin.url") if (dest / ".git").exists() else None
         shown = re.sub(r"(?<=://)[^/@]*@", "", origin) if origin else None  # never print a token held in a URL
+        if _same_github_repo(origin, owner, name):
+            return stop(f"{dest} is a checkout of {full} but has no .beads folder (or it is not a folder), so there is "
+                        "nothing to link or restore and it was not touched; move it away.")
         why = (f" (its origin is {shown}, which is not recognised as {full})" if shown
                else " (it has no origin I can read)" if (dest / ".git").exists() else "")
         return stop(f"{dest} already exists and is not a checkout of {full}{why}, so it was not touched; move it away.")

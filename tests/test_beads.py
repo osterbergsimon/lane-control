@@ -411,13 +411,18 @@ class HookTests(BeadsCase):
         self.assertEqual(beads.hook_notes(self.repo), [])
 
     def test_a_prime_hook_on_another_event_is_listed_but_is_not_a_session_start_hook(self):
-        self.settings_at(self.repo / ".claude" / "settings.json", "PreCompact", "bd prime --memories-only")
+        self.settings_at(self.repo / ".claude" / "settings.json", "Stop", "bd prime --memories-only")
         hooks = beads.prime_hooks(self.repo)
-        self.assertEqual([(h.event, h.covers_start) for h in hooks], [("PreCompact", False)])
+        self.assertEqual([(h.event, h.covers_start) for h in hooks], [("Stop", False)])
         lines = beads.hook_notes(self.repo)
         self.assertEqual([w for _, w, _ in lines], ["noted"])
-        self.assertIn("PreCompact", self.details(lines))
+        self.assertIn("Stop", self.details(lines))
         self.assertNotIn("adds no second one", self.details(lines))  # a project with only this has no start-up prime
+
+    def test_bds_own_precompact_hook_is_listed_but_not_noted_on_every_run(self):
+        self.settings_at(self.user_settings(), "PreCompact", "bd prime")
+        self.assertEqual([(h.event, h.covers_start) for h in beads.prime_hooks(self.repo)], [("PreCompact", False)])
+        self.assertEqual(beads.hook_notes(self.repo), [])  # bd's standard layout: accurate, but noise
 
     def test_which_matchers_cover_a_session_start(self):
         for matcher, covers in (("", True), ("*", True), ("startup", True), ("startup|resume", True),
@@ -576,6 +581,67 @@ class HookTests(BeadsCase):
             with self.subTest(command=command):
                 self.settings_at(self.user_settings(), "SessionStart", command)
                 self.assertEqual(beads.prime_hooks(self.repo), [])
+
+    OURS = "startup|resume|clear|compact"
+
+    def test_our_matcher_is_the_one_the_adapter_writes(self):
+        self.assertEqual(beads.OUR_HOOK_MATCHER, self.OURS)
+
+    def test_a_compact_only_overlap_never_tells_the_owner_to_remove_our_hook(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime", matcher="compact")
+        self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher=self.OURS)
+        lines = beads.hook_notes(self.repo)
+        self.assertNotIn("warning", [w for _, w, _ in lines])  # following that advice would leave no start-up prime
+        self.assertNotIn("remove the entry", self.details(lines).lower())
+
+    def test_a_hand_added_local_entry_next_to_ours_is_not_called_a_duplicate_of_it(self):
+        import json
+        f = self.local_settings()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"matcher": "resume", "hooks": [{"type": "command", "command": "bd prime"}]},
+            {"matcher": self.OURS, "hooks": [{"type": "command", "command": "bd prime"}]}]}}))
+        lines = beads.hook_notes(self.repo)
+        self.assertNotIn("warning", [w for _, w, _ in lines])
+
+    def test_the_duplicate_advice_names_our_entry_by_its_matcher_when_another_still_covers_start(self):
+        import json
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime")
+        f = self.local_settings()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"matcher": "resume", "hooks": [{"type": "command", "command": "bd prime"}]},
+            {"matcher": self.OURS, "hooks": [{"type": "command", "command": "bd prime"}]}]}}))
+        warn = [d for _, w, d in beads.hook_notes(self.repo) if w == "warning"]
+        self.assertEqual(len(warn), 1)
+        self.assertIn(f"matcher `{self.OURS}`", warn[0].split("To fix it")[1])  # the advice says which entry is ours
+
+    def test_two_entries_that_both_miss_startup_are_still_reported_without_advice_about_ours(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime", matcher="compact")
+        self.settings_at(self.repo / ".claude" / "settings.json", "SessionStart", "bd prime", matcher="compact")
+        warn = [d for _, w, d in beads.hook_notes(self.repo) if w == "warning"]
+        self.assertEqual(len(warn), 1)
+        self.assertNotIn("lane-control's own", warn[0])
+
+    def test_only_our_own_entry_is_called_lane_controls_hook(self):
+        self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher="startup")  # added by hand
+        self.assertNotIn("lane-control's hook", self.details(beads.hook_notes(self.repo)))
+        self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher=self.OURS)
+        self.assertIn("lane-control's hook", self.details(beads.hook_notes(self.repo)))
+
+    def test_bd_prime_quoted_inside_other_text_is_not_a_hook(self):
+        for command in ('echo "Tip: bd ready; bd prime"', 'echo "tip: (bd prime)"', 'git commit -m "fix; bd prime"',
+                        'echo "x; bd prime"', "echo 'x && bd prime'", 'echo "a \\" ; bd prime"'):
+            with self.subTest(command=command):
+                self.settings_at(self.user_settings(), "SessionStart", command)
+                self.assertEqual(beads.prime_hooks(self.repo), [])
+
+    def test_bd_prime_after_quoted_text_or_inside_a_shell_c_string_is_a_hook(self):
+        for command in ('echo "ok"; bd prime', "echo ok; bd prime", 'sh -c "echo hi; bd prime"',
+                        "bash -lc 'echo hi && bd prime'", 'echo "a b" && bd prime'):
+            with self.subTest(command=command):
+                self.settings_at(self.user_settings(), "SessionStart", command)
+                self.assertEqual([h.command for h in beads.prime_hooks(self.repo)], [command])
 
     def test_a_plain_prime_command_is_run_once_per_setup_note(self):
         self.committed("bd prime")
@@ -973,6 +1039,15 @@ class RestoreTests(BeadsCase):
             with self.subTest(url=url):
                 shutil.rmtree(self.dest2, ignore_errors=True)
                 self.assertIn("not a checkout of acme/widget-beads", self.problems(self.reuse_with_origin(url)))
+
+    def test_a_clone_of_the_right_repo_with_no_beads_folder_says_so(self):
+        subprocess.run(["git", "clone", "-q", str(self.remotes / "widget-beads.git"), str(self.dest2)], check=True,
+                       capture_output=True)
+        git(self.dest2, "remote", "set-url", "origin", "https://github.com/acme/widget-beads.git")
+        shutil.rmtree(self.dest2 / ".beads", ignore_errors=True)
+        text = self.problems(self.restore())
+        self.assertIn("no .beads folder", text)
+        self.assertNotIn("not recognised", text)  # the origin is right; do not contradict it
 
     def test_an_origin_that_is_not_recognised_is_named_in_the_refusal(self):
         for url in ("git@github-work:acme/widget-beads.git", "https://github.com/acme/widget-beads-old.git",

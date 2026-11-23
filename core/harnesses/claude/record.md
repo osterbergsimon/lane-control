@@ -15,9 +15,12 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
   a settings layer already runs `bd prime` as a `SessionStart` hook whose matcher covers `startup` (`core/beads.py`
   `prime_hooks`: the user's `settings.json`, where `bd setup claude --global` puts it, the committed
   `.claude/settings.json` and the uncommitted `settings.local.json`; a plain command or a shell line such as
-  `bd prime 2>/dev/null || true`): two would run it twice. A `bd prime` on another event (`PreCompact`, `Stop`) or
-  for other matchers only (`compact`, `resume`) is noted and does not stop ours, since a new session would start with
-  no beads context. Overlapping entries on one event are reported as a duplicate, naming each and which to remove.
+  `bd prime 2>/dev/null || true`; `bd prime` quoted inside other text, such as `echo "tip: bd prime"`, does not
+  count): two would run it twice. A `bd prime` on another event (`Stop`) or for other matchers only (`compact`,
+  `resume`) is noted and does not stop ours, since a new session would start with no beads context; bd's own
+  `PreCompact` one is not noted. Overlapping entries on one event are reported as a duplicate, naming each. The advice
+  points at ours (by its matcher) only while another entry still covers the start; an overlap with one that does not
+  is not a duplicate.
   A `bd prime` hook that fails is named with the fix; no settings file but the uncommitted one is ever written.
   What is not scanned, and said in the setup output: managed settings, plugin hooks and hook scripts (one of those
   running `bd prime` too runs it twice), and the user's file is the one under project-setup's `CLAUDE_CONFIG_DIR`

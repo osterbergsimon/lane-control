@@ -21,7 +21,7 @@ NAME = "claude"
 STATUS = "in use"
 ORCA_AGENT_ID = "claude"
 MODEL_FLAGS = frozenset({"model", "effort"})
-MATCHER = "startup|resume|clear|compact"
+MATCHER = beads.OUR_HOOK_MATCHER  # one place, so beads.hook_notes can tell our own entry from another
 HOOK_TAIL = ("core", "harnesses", "persona-hook.sh")
 
 
