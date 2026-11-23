@@ -20,7 +20,11 @@ merging nothing, with one line per failed check, unless all of these hold:
              failing end is refused). Use it only when CI itself is failing or unavailable for reasons outside the
              change; the log's last line is printed, and say so in AWAY-LOG.md
   secrets    the diff is clean: gitleaks when the project has a .gitleaks.toml (no gitleaks to run it is a refusal),
-             otherwise a built-in scan of the added lines for keys, tokens, home paths and private addresses
+             otherwise a built-in scan of the added lines for keys, tokens, home paths, private addresses and the
+             public-repo names (this machine's hostname and user, the other projects' names, and the names in the
+             private-names file outside the repo: core/privatenames.py). A hit says the kind, never the name; a
+             private-names file that cannot be read, or no name to check at all, is a refusal; no such file is
+             said in the merge's output ("name scan: ...") rather than passed over
   caps       the project has not wrapped up at a cap (`lane-improve drained` while the mode is on: nothing more merges), --max-items
              is not yet reached (the Nth merge is the last), and the period's record (improve-period.json) can be read (a lost
              or unreadable one refuses every merge: `lane-improve on --continue` makes it again)
@@ -45,6 +49,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import improve  # noqa: E402
 import machineconf  # noqa: E402
+import privatenames  # noqa: E402
 
 AWAY_BRANCH = re.compile(r"away/\d{4}-\d{2}-\d{2}")
 MARKER = re.compile(r"^\s*Review: passed ([0-9a-f]{40})\s*$", re.M)
@@ -166,17 +171,20 @@ def ci_green(rollup: list) -> "str | None":
     return "; ".join(bad) or None
 
 
-def scan_added(diff: str) -> "str | None":
+def scan_added(diff: str, names: "privatenames.Names | None" = None) -> "str | None":
     for line in diff.splitlines():
         if line.startswith("+") and not line.startswith("+++"):
             for rx, what in PRIVATE:
                 if rx.search(line):
                     return what
+            hit = names.find(line[1:]) if names else None
+            if hit:  # the kind only: the name itself is private and this line may be logged somewhere public
+                return f"{hit} (see core/privatenames.py for where the list comes from)"
     return None
 
 
-def secret_scan(checkout: Path, diff: str) -> "str | None":
-    """None when clean; else why not."""
+def secret_scan(checkout: Path, diff: str, names: "privatenames.Names | None" = None) -> "str | None":
+    """None when clean; else why not. Only the built-in scan (no .gitleaks.toml) checks `names`."""
     if (checkout / ".gitleaks.toml").is_file():
         with tempfile.TemporaryDirectory(prefix="away-merge-") as d:
             (Path(d) / "pr.diff").write_text(diff)
@@ -191,7 +199,7 @@ def secret_scan(checkout: Path, diff: str) -> "str | None":
         if r.returncode:
             return "gitleaks found a secret in the diff" if r.returncode == 1 else f"gitleaks failed (exit {r.returncode})"
         return None
-    what = scan_added(diff)
+    what = scan_added(diff, names)
     return f"the diff adds {what}" if what else None
 
 
@@ -268,7 +276,13 @@ def run(a) -> int:
         if bad:
             refuse("ci", f"{why} (CI must be green; or, when CI itself is failing for reasons outside the change, "
                          f"pass --local-suite-ok <log of the full suite run through lane-heavy> and note it in the log; {bad})")
-    hit = secret_scan(checkout, diff)
+    names, hit = None, None
+    try:
+        if not (checkout / ".gitleaks.toml").is_file():  # the built-in scan; with gitleaks, its config decides
+            names = privatenames.load(projects=list(cos), own=a.project)
+        hit = secret_scan(checkout, diff, names)
+    except privatenames.NamesError as e:
+        hit = str(e)
     if hit:
         refuse("secrets", hit)
     paths = diff_paths(diff)
@@ -289,6 +303,8 @@ def run(a) -> int:
         print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
         return 1
     print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}")
+    if names:
+        print(f"away-merge: name scan: {names.note}")
     if why:
         print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
               f"(ends: {suite_line}) (record this in AWAY-LOG.md)")
