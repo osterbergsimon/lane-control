@@ -50,9 +50,9 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
 
 - 2026-11-23 away-improve (lc-yzb): while the mode is on, `permissions.deny` in the checkout's
   `.claude/settings.local.json` gets `Bash(gh pr merge:*)` and the push rules for the integration branch
-  (`install_away_denies`), taken out again on `lane-improve drained` (`remove_away_denies`, only what was added, noted in the
-  state folder). **They are a backstop, not a wall.** A rule matches the command text, not the repository or what the
-  command does, so these get past it: `git -C <checkout> push origin main`, `git push origin feature:main`,
+  (`install_away_denies`), taken out again on `lane-improve drained` (`remove_away_denies`, only what was added,
+  noted in the state folder). **They are a backstop, not a wall.** A rule matches the command text, not the
+  repository or what the command does, so these get past it: `git -C <checkout> push origin main`, `git push origin feature:main`,
   `git push -f origin main`, a bare `git push` whose upstream is main, and `gh api .../merge`. A lane's worktree has
   no `settings.local.json`, so it has no rules at all. The real guards are `away-merge` (the only route the skill
   gives), the persona rule and branch protection where the repo has it. The rules are shaped so that the coordinator's

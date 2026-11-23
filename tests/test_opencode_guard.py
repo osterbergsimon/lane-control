@@ -236,7 +236,7 @@ class GuardTests(HomeTest):
         sys.path.insert(0, str(ROOT / "core"))
         import improve
         from test_lane_away import ReaderAgreementTests
-        cases = list(ReaderAgreementTests.cases(ReaderAgreementTests("test_both_readers_agree_on_every_file")))
+        cases = list(ReaderAgreementTests.cases(ReaderAgreementTests("test_the_reader_accepts_exactly_the_complete_valid_files")))
         self.install()
         os.environ["LANE_IMPROVE_FILE"] = str(self.improve)
         os.environ["LANE_IMPROVE_DRAIN_FILE"] = str(self.drain)
