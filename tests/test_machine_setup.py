@@ -98,6 +98,9 @@ if cmd == "automations edit":
     if "--prompt" in a: x["prompt"] = opt("--prompt")
     if "--precheck" in a: x["precheck"] = {"command": opt("--precheck"), "timeoutSeconds": int(opt("--precheck-timeout", "60"))}
     out({"automation": x})
+if cmd == "workspace cleanup":  # the preview only: `run` removes worktrees and is never modelled
+    if a[2:3] != ["preview"] or "cleanup_rows" not in state: print("orca stub: not modelled", file=sys.stderr); sys.exit(1)
+    out({"evaluatedAt": 1, "rows": state["cleanup_rows"]})
 if cmd == "repo list": out({"repos": state["repos"]})
 if cmd == "repo add":
     r = {"id": "repo-%d" % (len(state["repos"]) + 1), "path": opt("--path"), "kind": opt("--kind", "git")}
@@ -1314,6 +1317,48 @@ class MachineSetupTests(BudgetTest):
         conf = machineconf.load(ROOT / "core" / "templates" / "machine.conf.example")
         self.assertEqual(machineconf.coordinators(conf), [])
         self.assertEqual((conf["IDLE_MIN"], conf["warnings"]), (45, []))
+
+    def cleanup_rows(self, *rows):
+        """Orca's cleanup preview rows: (project, cause) pairs, each a main workspace plus a lane worktree."""
+        out = []
+        for project, cause in rows:
+            ev = lambda c: {"action": "keep", "cause": c}
+            out.append({"repoId": f"id-{project}", "repoName": project, "displayName": "main", "path": f"/src/{project}",
+                        "evaluation": ev("not-removable")})
+            if cause:
+                out.append({"repoId": f"id-{project}", "repoName": project, "displayName": "lane",
+                            "path": f"/w/{project}/lane", "evaluation": ev(cause)})
+        f = self.tmp / "orca.json"
+        f.write_text(json.dumps({**json.loads(f.read_text() or "{}"), "cleanup_rows": out}))
+
+    def test_cleanup_rules_off_machine_wide_says_where_to_turn_the_merged_rule_on(self):
+        self.cleanup_rows(("alpha", "rules-off"), ("beta", "rules-off"))
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        line = next(l for l in r.stdout.splitlines() if l.startswith("orca cleanup: off"))
+        self.assertIn("Settings -> Workspace Cleanup -> Cleanup rules -> 'Delete merged workspaces'", line)
+        self.assertIn("alpha", line)
+        self.assertIn("beta", line)
+
+    def test_a_project_with_cleanup_off_is_named(self):
+        self.cleanup_rows(("alpha", "no-rule-matched"), ("beta", "project-off"))
+        out = self.setup_machine("--no-start").stdout
+        self.assertIn("orca cleanup: off", out)
+        self.assertIn("beta", next(l for l in out.splitlines() if l.startswith("orca cleanup: off")))
+        self.assertIn("orca cleanup: check", out)
+
+    def test_cleanup_with_some_rule_on_is_check_and_nothing_is_run_or_changed(self):
+        self.cleanup_rows(("alpha", "no-rule-matched"))
+        out = self.setup_machine("--no-start").stdout
+        self.assertIn("orca cleanup: check", out)  # some rule is on; the preview does not say it is the merged one
+        self.assertNotIn("orca cleanup: exists", out)
+        self.assertEqual([c for c in self.orca_calls() if c[:2] == ["workspace", "cleanup"]],
+                         [["workspace", "cleanup", "preview"]])
+
+    def test_an_orca_without_the_cleanup_command_is_skipped_not_a_failure(self):
+        r = self.setup_machine("--no-start")  # the stub models no cleanup state: it exits 1
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("orca cleanup: skipped", r.stdout)
 
     def bd_stub(self, version: str):
         write_exec(self.bin / "bd", f"#!/bin/sh\n[ \"$1\" = version ] && echo 'bd version {version} (ce242a8: HEAD@ce242a8)'\n")

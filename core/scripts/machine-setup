@@ -31,7 +31,11 @@ precheck and prompt, and never from a lane worktree.
    cannot wake a session it did not start. An automation of ours whose precheck or prompt points elsewhere (a moved
    checkout) is repaired in place. One an earlier hand-made setup made (`night-manager`, `lane-sweep`) is reported
    with the command to remove it, and no second one is added.
-6. The ci-presence user timer (every 15 minutes and at boot), if systemd --user works; otherwise a warning and the
+6. Workspace cleanup, report only: whether Orca's cleanup rules would remove a merged lane's worktree (`orca-ide
+   workspace cleanup preview`, which removes nothing). When no rule is on, or a project has cleanup off, it says
+   where in Orca's Settings to turn on "Delete merged workspaces"; Orca's settings are never edited, and an Orca
+   without the command is skipped.
+7. The ci-presence user timer (every 15 minutes and at boot), if systemd --user works; otherwise a warning and the
    CI limits stay the slice unit's own. An older timer that sets the CI slice (ci-cpu) is reported with the command
    to stop it, and ci-presence is not installed beside it.
 Exit: 0 done (warnings included); 1 a step failed; 2 usage or a refused harness/model.
@@ -55,6 +59,7 @@ sys.path.insert(0, str(ROOT / "core"))
 import harnesses  # noqa: E402
 import machineconf  # noqa: E402
 import beads  # noqa: E402
+import cleanup  # noqa: E402
 
 ROLE = "machine-coordinator"
 TITLE = "machine coordinator"
@@ -164,6 +169,13 @@ def bd_version_step():
         return say("bd", "too old", f"(bd {'.'.join(map(str, have))} is older than the {floor} lane-control needs; "
                                     "update it the way you installed it. Nothing was changed)")
     say("bd", "exists", f"({'.'.join(map(str, have))}, floor {floor})")
+
+
+def cleanup_step():
+    """Whether Orca's workspace cleanup has the merged rule on for lane worktrees, machine-wide. Report only: Orca's
+    settings are never changed (core/cleanup.py)."""
+    for step, what, detail in cleanup.orca_report(machineconf.orca_cli()):
+        say(step, what, detail)
 
 
 def folder_step(folder: Path):
@@ -401,6 +413,7 @@ def main(argv) -> int:
         machine_conf()
         usage_feed()
         bd_version_step()
+        cleanup_step()
         folder_step(folder)
         persona = persona_step(harness, model, folder)
         if a.no_start:

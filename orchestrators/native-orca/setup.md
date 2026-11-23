@@ -29,6 +29,13 @@ the layout, offers the move of a plain `.beads` folder or the restore on a new m
 `--beads-repo OWNER/NAME` overrides the beads repo's name and is kept in the settings store. On a box, setup says
 when `gh` needs a sign-in (a fine-grained token limited to the beads repos) and never handles the token.
 
+## Lane cleanup
+A merged lane's worktree is removed by Orca's own cleanup rule "Delete merged workspaces", not by a script of ours
+(`docs/orca-cleanup.md`). `project-setup` and `machine-setup` read `orca-ide workspace cleanup preview` and say
+plainly when no rule is on or the project has cleanup off, with where to turn it on in Orca (Settings -> Workspace
+Cleanup -> Cleanup rules); they never change Orca's settings. `project-setup` also turns on GitHub's "Automatically
+delete head branches" on your yes in a terminal (without one it only says so; a re-run says `exists`).
+
 ## How a coordinator works
 - **Run and tasks:** the coordinator makes a run and its tasks (with dependencies), then starts every ready task
   itself: a run never schedules work.

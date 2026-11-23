@@ -38,19 +38,24 @@ input that breaks it) and what to do instead:
   done.
 - `major`: someone would hit it, or it proves one of the change's claims false.
 - `minor`: rarely hit, or style.
+- `nit`: taste only; the change is optional.
 
 No praise, no summary of the diff. Say what you exercised in a running system and what you only read. A finding you
 are unsure of says so; never inflate a level to be heard or drop one to be agreeable.
 
 Report them once (below), in this shape:
 ```
-review <KEY> @<sha7>: blocker <n> · major <n> · minor <n>
+review <KEY> @<sha7>: blocker <n> · major <n> · minor <n> · nit <n>
 checks: <command> ok|fail, ...
 exercised: <what you ran> | read only: <what you could not run>
-- blocker <file>:<line> <what is wrong> -> <what to do> (proof: <one line>)
-- major ...
-- minor ...
+
+### <ID> [blocker|major|minor|nit] <title>
+<file>:<line> <what is wrong> -> <what to do> (proof: <one line>)
 ```
+Every finding is one such heading and its block, `<ID>` numbering them in the order you found them (B1, M1, m1, n1),
+so your coordinator can send the whole block of each `blocker` and `major` to the lane word for word. Scope is frozen
+once a reviewer starts: you review the lane's change as it is; a thing the lane should also do is a finding only if
+the issue asked for it, never a new ask.
 A new round is a new commit: review only what changed since the last round, plus anything it touches.
 
 ## Reporting
