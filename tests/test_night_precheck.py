@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_machine_setup import MachineTest, age  # noqa: E402
 
 
-class ImprovePrecheckTests(MachineTest):
+class PrecheckBase(MachineTest):
     def setUp(self):
         super().setUp()
         self.playbook(20, 10)  # step 0
@@ -26,6 +26,8 @@ class ImprovePrecheckTests(MachineTest):
     def pre(self, *args, hour="12"):
         return self.run_script("night-precheck", *args, env={"LANE_HOUR": hour})
 
+
+class ImprovePrecheckTests(PrecheckBase):
     def test_improve_due_by_day(self):
         self.conf(("proj", 31))
         self.improve_on()
@@ -170,6 +172,119 @@ class ImprovePrecheckTests(MachineTest):
         r = self.pre()
         self.assertEqual(r.returncode, 1)
         self.assertIn("improve.json", r.stderr)
+
+
+class ImproveNudgeBackoffTests(PrecheckBase):
+    """lc-c6j: an idle coordinator is not nudged every IMPROVE_IDLE_MIN forever."""
+
+    def stamp(self, minutes_ago, name="proj", kind="improve"):
+        self.assertEqual(self.pre("--checked", name, kind).returncode, 0)
+        age(Path(self.env["HOME"]) / ".cache" / "lane-control" / "night" / f"{name}.{kind}", minutes_ago)
+
+    def test_the_wait_doubles_while_the_coordinator_stays_idle(self):
+        self.conf(("proj", 120))
+        self.improve_on()
+        self.stamp(30)   # nudged when it had been idle 90 min: not again until 90 min have passed
+        self.assertEqual(self.pre().returncode, 1)
+        self.stamp(95)
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=120min\n")
+
+    def test_a_coordinator_that_worked_since_the_nudge_starts_over(self):
+        self.conf(("proj", 31))
+        self.improve_on()
+        self.stamp(100)  # its session wrote after the nudge (idle 31 < 100): the plain wait applies
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
+        self.stamp(20)
+        self.assertEqual(self.pre().returncode, 1)
+
+    def test_the_wait_stops_growing_at_eight_hours(self):
+        self.conf(("proj", 3000))
+        self.improve_on()
+        self.stamp(400)
+        self.assertEqual(self.pre().returncode, 1)
+        self.stamp(481)
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=3000min\n")
+
+    def test_rest_stops_the_nudges_and_a_new_on_or_off_clears_it(self):
+        self.conf(("proj", 90))
+        self.improve_on()
+        r = self.run_script("lane-improve", "rest", "proj")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.pre().returncode, 1)
+        self.run_script("lane-improve", "off")
+        self.assertFalse((self.conf_dir / "improve-rest.json").exists())
+
+    def test_rest_lapses_after_twelve_hours_so_new_work_is_found(self):
+        self.conf(("proj", 90))
+        self.improve_on()
+        self.run_script("lane-improve", "rest", "proj")
+        f = self.conf_dir / "improve-rest.json"
+        age(f, 11 * 60)
+        d = json.loads(f.read_text())
+        d["proj"] = (__import__("datetime").datetime.now().astimezone()
+                     - __import__("datetime").timedelta(hours=13)).isoformat(timespec="seconds")
+        f.write_text(json.dumps(d))
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=90min\n")
+
+    def test_rest_needs_the_mode_on_for_that_project(self):
+        self.conf(("proj", 90))
+        r = self.run_script("lane-improve", "rest", "proj")
+        self.assertNotEqual(r.returncode, 0)
+        self.improve_on(projects=["other"])
+        self.assertNotEqual(self.run_script("lane-improve", "rest", "proj").returncode, 0)
+        self.assertFalse((self.conf_dir / "improve-rest.json").exists())
+
+
+class ImproveWrapUpNudgeTests(PrecheckBase):
+    """lc-maw and lc-mf7: after the end the running coordinators are still nudged to wrap up, and an old drain says so."""
+
+    PAST = "2020-01-01T00:00:00+00:00"
+
+    def drain_on(self, pending=("proj",), hours_ago=2):
+        import datetime as dt
+        ended = (dt.datetime.now().astimezone() - dt.timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+        (self.conf_dir / "improve-drain.json").write_text(json.dumps({
+            "started": "2026-11-23T10:00:00+00:00", "end": ended, "limits": "", "deny_paths": [], "projects": list(pending),
+            "unmetered": False, "branches": {}, "integration": {}, "ended": ended, "pending": list(pending)}))
+
+    def test_a_time_end_nudges_the_coordinator_to_wrap_up(self):
+        self.conf(("proj", 31))
+        self.improve_on(end=self.PAST)
+        r = self.pre()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"^DUE proj wrapup idle=31min waited=\d+h\n$")
+
+    def test_a_drain_after_off_nudges_only_the_pending_projects(self):
+        self.conf(("a", 31), ("b", 31))
+        self.drain_on(pending=["a"])
+        self.assertEqual(self.pre().stdout, "DUE a wrapup idle=31min waited=2h\n")
+
+    def test_a_drain_that_waited_long_says_how_long(self):
+        self.conf(("proj", 31))
+        self.drain_on(hours_ago=15)
+        self.assertEqual(self.pre().stdout, "DUE proj wrapup idle=31min waited=15h\n")
+
+    def test_checked_wrapup_waits_one_idle_period(self):
+        self.conf(("proj", 31))
+        self.drain_on()
+        self.assertEqual(self.pre("--checked", "proj", "wrapup").returncode, 0)
+        self.assertEqual(self.pre().returncode, 1)
+        age(Path(self.env["HOME"]) / ".cache" / "lane-control" / "night" / "proj.wrapup", 31)
+        self.assertEqual(self.pre().stdout, "DUE proj wrapup idle=31min waited=2h\n")
+
+    def test_wrapup_gets_nothing_at_the_stop_step(self):
+        self.conf(("proj", 31))
+        self.drain_on()
+        self.playbook(92, 10)  # no turn is spent at the stop step, a wrap-up included
+        r = self.pre()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("stop step", r.stderr)
+
+    def test_no_wrapup_nudge_when_nothing_is_left(self):
+        self.conf(("proj", 31))
+        self.assertEqual(self.pre().returncode, 1)
+        self.drain_on(pending=["other"])
+        self.assertEqual(self.pre().returncode, 1)
 
 
 class NightManagerImproveDocTests(unittest.TestCase):

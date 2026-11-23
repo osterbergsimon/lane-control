@@ -38,6 +38,7 @@ sys.path.insert(0, str(HERE))
 
 UNTIL_BACK = "until-back"
 DRAIN_NOTICE_HOURS = 12   # `status` says so when a drain has waited this long
+REST_HOURS = 12           # `lane-improve rest` quiets a project's nudges this long, then one nudge looks for new work
 FIELDS = ("started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration")
 
 
@@ -159,6 +160,32 @@ def merge_state(project: str) -> "tuple[dict | None, str]":
     if e and covers(e, project):
         return e, "draining"
     return None, "improve mode is not on for " + project + (" (and nothing of it is left to wrap up)" if not s else "")
+
+
+def draining() -> "dict | None":
+    """The drain state while a period is wrapping up (after `off` or a time end, until every project is `drained`),
+    else None. A time end that nobody has turned into a drain yet counts."""
+    d = load_drain(quiet=True)
+    if d is None and (e := ended_state()) is not None:
+        d = _to_drain(e)
+    return d
+
+
+def rest_path() -> Path:
+    return path().with_name("improve-rest.json")
+
+
+def rested(project: str) -> bool:
+    """True while `lane-improve rest <project>` is in force (REST_HOURS), so night-precheck nudges nobody."""
+    try:
+        t = json.loads(rest_path().read_text()).get(project)
+        return now() - dt.datetime.fromisoformat(t).astimezone() < dt.timedelta(hours=REST_HOURS)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def clear_rest() -> None:
+    rest_path().unlink(missing_ok=True)
 
 
 def active_for(project: str) -> bool:
@@ -469,6 +496,7 @@ def cmd_on(a) -> int:
             "integration": integs,
         }
     write(state)
+    clear_rest()  # a new instruction from the owner: every coordinator looks for work again
     notes, warns = install_denies(chosen, integs)
     print("lane-improve: improve mode on")
     print("\n".join(describe(state, how) + notes))
@@ -502,6 +530,7 @@ def cmd_off(a) -> int:
     if state is not None:
         write_drain(_to_drain(state))
         clear()
+        clear_rest()
         print("lane-improve: improve mode ended; the running lanes drain: each coordinator merges its last PR with "
               "away-merge, opens its draft PR, then runs `lane-improve drained <project>` (`lane-improve status` lists them)")
     elif load_drain(quiet=True) is None:
@@ -540,6 +569,29 @@ def cmd_drained(a) -> int:
         drain_path().unlink(missing_ok=True)
     print(f"lane-improve: wrapped up: {', '.join(names)}" + (f"; still draining: {', '.join(left)}" if left else
                                                           "; the improve period is closed"))
+    return 0
+
+
+def cmd_rest(a) -> int:
+    """A coordinator's note that nothing within the limits is left: its idle nudges stop for REST_HOURS (or until the
+    owner switches the mode on or off again), then one nudge looks for new work. Only quiets; starts nothing."""
+    s = load(quiet=True)
+    if not (s and covers(s, a.project)):
+        print(f"lane-improve: improve mode is not on for {a.project}; nothing to rest", file=sys.stderr)
+        return 1
+    try:
+        d = json.loads(rest_path().read_text())
+        d = d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        d = {}
+    d[a.project] = now().isoformat(timespec="seconds")
+    f = rest_path()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+    tmp.replace(f)
+    print(f"lane-improve: {a.project} rests for {REST_HOURS} h: no idle nudges until then, or until the mode is switched "
+          "on or off again")
     return 0
 
 
@@ -597,6 +649,8 @@ def main(argv=None) -> int:
     dr.add_argument("projects", nargs="*")
     dr.add_argument("--all", action="store_true")
     sub.add_parser("status")
+    rs = sub.add_parser("rest")
+    rs.add_argument("project")
     sub.add_parser("is-on")
     um = sub.add_parser("unmetered")
     um.add_argument("project")
@@ -605,7 +659,7 @@ def main(argv=None) -> int:
     except SystemExit as e:
         return 2 if e.code else 0
     return {"on": cmd_on, "off": cmd_off, "drained": cmd_drained, "status": cmd_status, "is-on": cmd_is_on,
-            "unmetered": cmd_unmetered}[a.cmd](a)
+            "unmetered": cmd_unmetered, "rest": cmd_rest}[a.cmd](a)
 
 
 if __name__ == "__main__":

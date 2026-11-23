@@ -20,13 +20,16 @@
 #       rules stay until each coordinator has wrapped up.
 #   lane-improve drained <project>... | --all
 #       A coordinator's wrap-up is done (last PR merged, draft PR opened): its deny rules come out and the drain clears.
+#   lane-improve rest <project>
+#       A coordinator's note that nothing within the limits is left: the idle nudges stop for that project for 12 h (or
+#       until the mode is switched on or off again), then one nudge looks for new work. It only quiets; it starts nothing.
 #   lane-improve status
 #       off, on (what runs, its limits, its projects and branches), or draining (what is left to wrap up).
 # Exit: 0, 1 refused or nothing to do, 2 usage.
 set -u
 self=$(readlink -f "$0")
 case ${1:-} in
-  on | off | drained | status) exec python3 "${self%/*}/../improve.py" "$@" ;;
+  on | off | drained | status | rest) exec python3 "${self%/*}/../improve.py" "$@" ;;
   -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self" ;;
-  *) echo "usage: lane-improve on [options]|off|drained <project>|status" >&2; exit 2 ;;
+  *) echo "usage: lane-improve on [options]|off|drained <project>|rest <project>|status" >&2; exit 2 ;;
 esac

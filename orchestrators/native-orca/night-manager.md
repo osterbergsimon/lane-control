@@ -10,7 +10,10 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    check in on; each `OFFLINE <runners> repo=<repo>` line is a runner down; a `BUDGET unknown` line means no
    check-ins tonight: pass that line to the machine coordinator once. A `DUE <name> improve idle=<n>min` line means
    away-improve mode is on for that coordinator (set by the owner, never by you) and it has been idle too long; it is
-   a fallback for a lost wake, not a cycle driver. Exit 1 means nothing is due now: end.
+   a fallback for a lost wake, not a cycle driver (a coordinator that stays idle is nudged less often: the wait
+   doubles, up to 8 h, and a coordinator that has nothing left within its limits can ask for quiet). A
+   `DUE <name> wrapup idle=<n>min waited=<h>h` line means the period has ended and that coordinator has not yet
+   wrapped up (its draft PR and `lane-improve drained`). Exit 1 means nothing is due now: end.
 2. **Budget gate.** A `BUDGET push-and-handover` line (the no-new-work or push-and-handover step, or the short
    window at 95 or 98 %) means each check-in asks only to commit and push work in progress, write the handover,
    back beads up (in the beads repo `git push`, then `bd dolt push`) and start nothing new. Run `<lc>/core/scripts/budget-state` once more: if it now shows step 4 stop, or unknown,
@@ -27,6 +30,11 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    out, and start the next cycle if none is running and your limits and budget allow. If a lane is running, reply
    'running' in one line." Then run `<lc>/core/scripts/night-precheck --checked <name> improve`, so it is not due
    again for the idle time. You never turn improve mode on or off and never decide what it works on.
+   For a `DUE <name> wrapup` line send: "night manager: the improve period has ended and you have not wrapped up (<h>
+   h ago). Finish as the away-improve skill says (section 3): last PR through away-merge, the draft PR to the integration
+   branch, the log summary to the owner, then `lane-improve drained <project>`. If you are waiting on a lane, reply
+   'waiting' in one line." Then run `<lc>/core/scripts/night-precheck --checked <name> wrapup`. When `waited` is 12 or
+   more, add that line to what you tell the machine coordinator once: the owner should know.
 4. **Runners.** Send each `OFFLINE` line to the machine coordinator. Never restart a runner yourself.
 5. **Lanes.** Before sending the check-ins, run `<lc>/core/scripts/lane-sweep --stuck-hours 2` (report only,
    never `--apply`) and add each `STUCK` line whose `owner=` is a coordinator you check in on to that coordinator's

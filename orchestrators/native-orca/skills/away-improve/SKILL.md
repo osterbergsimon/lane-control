@@ -80,7 +80,10 @@ in a small docs lane when nothing else is open. Plain, short words, like the own
 Stop starting cycles at: the end time or `lane-improve off`; no-new-work on a metered budget (`budget-state --project`;
 from there only push, handover and the wrap-up below); nothing within the limits left to do; the deny rules or
 `away-merge` refusing for a reason only the owner can settle (tell the owner). At push-and-handover or beyond, push
-what the branch has and write the handover.
+what the branch has and write the handover. When you stop because nothing within the limits is left, run
+`lane-improve rest <your project>` so the night manager stops nudging you every half hour: it quiets the nudges for
+12 h (or until the owner switches the mode on or off again) and then one nudge looks for new work. A coordinator waiting
+on a long lane need do nothing: its nudges back off by themselves (30, 60, 120 minutes, at most 8 h).
 
 **After `off` or the end time the mode is draining**: `lane-improve status` says `improve: draining` and lists your
 project, and the machine coordinator tells you when it ran `off`. No new cycle starts, but the running lane finishes
