@@ -128,16 +128,17 @@ REPLY_GRACE_MIN = 10   # a session write this soon after a nudge is the coordina
 
 def nudge_state(name: str, kind: str, idle: float, now: float) -> "tuple[float, float | None]":
     """(idle, wait): how long the coordinator has effectively been idle, and how long to wait after the last nudge
-    (None when there was none). The nudge asks for a one-line reply, so the session writes just after it: a write within
-    REPLY_GRACE_MIN of the nudge does not count as work, and the idle time at the last nudge, kept in a sidecar file when
-    the line went out, carries on from there. A write later than that is work: the wait starts over."""
+    (None when there was none). The nudge is delivered into the session and asks for a one-line reply, so the session
+    writes around it, before `--checked` stamps it or after: a write within REPLY_GRACE_MIN either side of the stamp is
+    not work, and the idle time at the last nudge, kept in a sidecar file when the line went out, carries on from
+    there. A write later than that is work: the wait starts over."""
     stamp = stamp_dir() / f"{name}.{kind}"
     try:
         age = (now - stamp.stat().st_mtime) / 60
     except FileNotFoundError:
         return idle, None
     wrote = age - idle   # minutes after the nudge the session last wrote (negative: before it)
-    if wrote <= 0:
+    if wrote < -REPLY_GRACE_MIN or (wrote <= 0 and not (stamp_dir() / f"{name}.{kind}.idle").exists()):
         return idle, idle - age
     if wrote <= REPLY_GRACE_MIN:
         try:

@@ -195,7 +195,7 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
 Decided while the branch was reviewed; the owner's guide (`docs/away-improve.md`) describes the result.
 
 - **Nudges back off.** An idle coordinator is nudged when it has been idle `IMPROVE_IDLE_MIN` and the last nudge is at
-  least as old as the idle time was at that nudge (30, 60, 120 minutes, capped at 8 h); a session write within 10 minutes after a nudge is its reply to it, not work; a later write
+  least as old as the idle time was at that nudge (30, 60, 120 minutes, capped at 8 h); a session write within 10 minutes of a nudge (the delivered message, its reply) is its reply to it, not work; a later write
   starts over. `lane-improve rest <project>` (a coordinator with nothing left within the limits) quiets a project for
   12 h; a new `on` or `off` clears it.
 - **Wrap-up nudges.** After `off` or a time end, each project still to wrap up gets `DUE <name> wrapup idle=<n>min

@@ -100,7 +100,7 @@ Be clear about what is enforced and what is a backstop.
 
 While the mode is on, the night manager nudges an idle coordinator (`DUE <name> improve`), a fallback for a lost wake.
 A coordinator that stays idle is nudged less and less often (30, 60, 120 minutes, at most every 8 hours). The nudge asks
-for a one-line reply, so a session write within 10 minutes after a nudge counts as that reply, not as work; a write
+for a one-line reply, so a session write within 10 minutes of a nudge (the delivered message, the reply) is not work; a write
 later than that starts the wait over. A coordinator that
 runs `lane-improve rest <project>` because nothing within your limits is left is left alone for 12 hours, then nudged
 once to look for new work. Nudges go out by day or night; the plain check-ins still wait for you to be away.

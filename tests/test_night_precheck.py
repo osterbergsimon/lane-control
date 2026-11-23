@@ -201,21 +201,32 @@ class ImproveNudgeBackoffTests(PrecheckBase):
         f = next((self.home / ".claude" / "projects").glob("*/*.jsonl"))
         age(f, minutes)
 
+    def reset_night(self):
+        import shutil
+        shutil.rmtree(Path(self.env["HOME"]) / ".cache" / "lane-control" / "night", ignore_errors=True)
+        shutil.rmtree(self.home / "code", ignore_errors=True)
+        shutil.rmtree(self.home / ".claude", ignore_errors=True)
+
     def test_a_reply_to_the_nudge_is_not_work(self):
-        # review M9: the night manager asks for a one-line reply, so the session writes just after every nudge; the wait
-        # must still double (31, 62, 124 min), not start over each time
-        self.conf(("proj", 31))
-        self.improve_on()
-        self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
-        stamp = Path(self.env["HOME"]) / ".cache" / "lane-control" / "night" / "proj.improve"
-        for wait in (31, 62, 124):
-            self.assertEqual(self.pre("--checked", "proj", "improve").returncode, 0)
-            for minutes, due in ((wait - 1, False), (wait, True)):
-                age(stamp, minutes)
-                self.set_idle(minutes - 1)  # it replied one minute after the nudge and wrote nothing since
-                r = self.pre()
-                self.assertEqual(r.returncode, 0 if due else 1, f"wait {wait}, {minutes} min after: {r.stdout}{r.stderr}")
-            self.assertEqual(self.pre().returncode, 0)
+        # review M9/M11: the nudge is delivered into the session, which writes at once, and the night manager asks for a
+        # one-line reply; whether the last write lands before --checked (-1: the delivered message, or a reply that was
+        # quick) or after it (+1), the wait must double (31, 62, 124 min), not start over each time
+        for offset in (1, -1):
+            with self.subTest(last_write_minutes_after_the_stamp=offset):
+                self.reset_night()
+                self.conf(("proj", 31))
+                self.improve_on()
+                self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
+                stamp = Path(self.env["HOME"]) / ".cache" / "lane-control" / "night" / "proj.improve"
+                for wait in (31, 62, 124):
+                    self.assertEqual(self.pre("--checked", "proj", "improve").returncode, 0)
+                    for minutes, due in ((wait - 1, False), (wait, True)):
+                        age(stamp, minutes)
+                        self.set_idle(minutes - offset)  # its last write: `offset` minutes after the stamp (negative: before)
+                        r = self.pre()
+                        self.assertEqual(r.returncode, 0 if due else 1,
+                                         f"wait {wait}, {minutes} min after: {r.stdout}{r.stderr}")
+                    self.assertEqual(self.pre().returncode, 0)
 
     def test_real_work_after_the_nudge_starts_the_wait_over(self):
         self.conf(("proj", 31))
