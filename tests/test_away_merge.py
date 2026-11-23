@@ -217,12 +217,30 @@ class AwayMergeTests(AwayMergeTest):
         self.pr(statusCheckRollup=[])
         self.assertRefused(self.merge(), "ci")
 
+    RED = [{"name": "unittest", "status": "COMPLETED", "conclusion": "FAILURE"}]
+
+    def suite_log(self, text="Ran 1530 tests in 412.0s\n\nOK (skipped=9)\n"):
+        f = Path(self.tmp) / "suite.log"
+        f.write_text(text)
+        return str(f)
+
     def test_red_ci_with_local_suite_ok_merges_and_says_so(self):
-        self.pr(statusCheckRollup=[{"name": "unittest", "status": "COMPLETED", "conclusion": "FAILURE"}])
-        r = self.merge("--local-suite-ok", "heavy-run-42")
+        self.pr(statusCheckRollup=self.RED)
+        log = self.suite_log()
+        r = self.merge("--local-suite-ok", log)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("heavy-run-42", r.stdout)
+        self.assertIn(log, r.stdout)
+        self.assertIn("OK (skipped=9)", r.stdout)  # the log's last line is printed, so the AWAY-LOG entry can quote it
         self.assertEqual(len(self.merged()), 1)
+
+    def test_local_suite_ok_must_be_a_real_log_with_a_passing_end(self):
+        # lc-372: any string used to bypass red CI
+        self.pr(statusCheckRollup=self.RED)
+        for ref in ("heavy-run-42", "yes", "", str(Path(self.tmp) / "missing.log"), str(self.tmp),
+                    self.suite_log(""), self.suite_log("Ran 3 tests in 0.1s\n\nFAILED (failures=1)\n")):
+            with self.subTest(ref=ref):
+                self.assertRefused(self.merge("--local-suite-ok", ref), "ci")
+        self.assertEqual(self.merged(), [])
 
     def test_refuses_secret_hit_builtin(self):
         for line in ("+key = 'ghp_" + "a" * 36 + "'", "+path = '/ho" + "me/u/code/x'", "+host = '192.168.1.20'",
