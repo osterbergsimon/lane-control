@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import improve  # noqa: E402
 import machineconf  # noqa: E402
 
+AWAY_BRANCH = re.compile(r"away/\d{4}-\d{2}-\d{2}")
 MARKER = re.compile(r"^\s*Review: passed ([0-9a-f]{40})\s*$", re.M)
 HEADER = re.compile(r'^diff --git (?:"a/((?:[^"\\]|\\.)*)"|a/(.*?)) (?:"b/((?:[^"\\]|\\.)*)"|b/(.*))$', re.M)
 GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -182,6 +183,10 @@ def run(a) -> int:
         branch = state["branches"].get(a.project)
         if not branch:
             refuse("improve", f"{a.project} has no away branch recorded in the improve file")
+        elif not AWAY_BRANCH.fullmatch(branch) or branch == state["integration"].get(a.project):
+            refuse("improve", f"the branch recorded for {a.project} ({branch!r}) is not an away/<date> branch, or is its "
+                              "integration branch: away-merge merges only into away branches, never into main or develop")
+            branch = None
     try:
         cos = {c.name: c for c in machineconf.coordinators(machineconf.load())}
     except machineconf.ConfError as e:

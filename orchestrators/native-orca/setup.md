@@ -88,7 +88,7 @@ this); one started by hand is named on the precheck's stderr instead.
 Away-improve mode (optional, off by default) is a separate switch from presence, the owner's own: `core/scripts/lane-improve
 on [--until HH:MM | --hours N | --until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]...
 [--unmetered] [--continue]` cuts an `away/<date>` branch for each project (at most one per project, ever; `--continue`
-carries on with it, or the owner adopts or drops it first) and has each coordinator keep improving its product there until
+carries on with it and cuts one for a project that has none, or the owner adopts or drops it first) and has each coordinator keep improving its product there until
 `lane-improve off`; the coordinator's `away-improve` skill (installed with the other lane skills) runs it, and
 `core/scripts/away-merge` is its only merge route. `lane-away on` (even `--until-back`), night and the budget never start it,
 and it does not make the owner count as away (`docs/superpowers/specs/2026-11-23-away-improve-design.md`). `IMPROVE_IDLE_MIN` in `machine.conf` (default 30) is the

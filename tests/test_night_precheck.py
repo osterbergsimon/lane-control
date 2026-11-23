@@ -64,6 +64,14 @@ class ImprovePrecheckTests(MachineTest):
         night = self.pre(hour="2")  # at night the plain check-in for b comes too
         self.assertEqual(night.stdout.splitlines(), ["DUE b idle=90min", "DUE a improve idle=31min"])
 
+    def test_runner_lines_still_wait_for_the_owner_to_be_away(self):
+        # review m13: improve's nudges go on by day, but the runner check is still the away check
+        self.conf(("proj", 31), extra='RUNNER_REPOS="o/r"\n')
+        self.improve_on()
+        r = self.pre()  # noon, owner present
+        self.assertEqual(r.stdout, "DUE proj improve idle=31min\n")
+        self.assertNotIn("runner", r.stderr)  # gh was not even asked
+
     def test_improve_replaces_the_plain_check_in(self):
         self.conf(("proj", 60))
         self.improve_on()

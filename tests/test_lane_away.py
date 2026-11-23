@@ -321,14 +321,33 @@ class ImproveBranchTests(ImproveTest):
         self.assertIn("ValueError", r.stderr)
         self.assertEqual(self.remote_branches(self.shop), [])
 
-    def test_continue_refused_by_lane_away_without_cutting(self):
+    def test_continue_cuts_where_a_project_has_none(self):
         r = self.on("--project", "shop", "--continue")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.remote_branches(self.shop)), 1)
+        self.assertIn("cut", r.stdout)
+
+    def test_continue_mixes_a_project_that_has_its_branch_with_one_that_has_none(self):
+        # review M8: project A continues its branch while project B (new, or left out last time) gets one
+        git(self.shop, "push", "-q", "origin", "main:refs/heads/away/2026-11-20")
+        r = self.on("--continue")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.state()
+        self.assertEqual(st["branches"]["shop"], "away/2026-11-20")
+        self.assertRegex(st["branches"]["blog"], r"^away/\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(self.remote_branches(self.shop), ["away/2026-11-20"])  # no second branch for shop
+        self.assertEqual(self.remote_branches(self.blog), [st["branches"]["blog"]])
+        out = r.stdout
+        self.assertRegex(out, r"shop -> away/2026-11-20 \(from main; continued\)")
+        self.assertRegex(out, r"blog -> away/\S+ \(from main; cut now\)")
+
+    def test_continue_still_refuses_two_branches_of_one_project_and_cuts_nothing_for_the_others(self):
+        for d in ("2026-11-20", "2026-11-22"):
+            git(self.shop, "push", "-q", "origin", f"main:refs/heads/away/{d}")
+        r = self.on("--continue")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("shop", r.stderr)
-        self.assertIn("no away branch", r.stderr)
-        self.assertEqual(self.remote_branches(self.shop), [])
+        self.assertEqual(self.remote_branches(self.blog), [])
         self.assertFalse(self.improve_file().exists())
-        self.assertFalse(self.away().exists())
 
     def test_on_is_refused_when_the_project_already_has_its_away_branch(self):
         self.on("--project", "shop")
@@ -357,6 +376,8 @@ class ImproveBranchTests(ImproveTest):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("already merged", r.stderr)
         self.assertIn("delete", r.stderr)
+        self.assertIn("usual", r.stderr)  # deleting is the usual step: continuing it builds on the old base
+        self.assertIn("old base", r.stderr)
 
     def test_the_same_date_is_fine_once_the_branch_is_gone(self):
         self.on("--project", "shop")
@@ -582,6 +603,46 @@ class ImproveDrainTests(ImproveTest):
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("started", r.stderr)
         self.assertIn("improve: off", r.stdout)
+
+
+class ImproveRerunAndDrainAgeTests(ImproveTest):
+    def test_a_continue_rerun_keeps_the_projects_it_does_not_name(self):
+        # review m14: `--continue --project shop` while on for shop and blog must not strand blog's rules and guard
+        self.on("--limits", "no db migrations", "--hours", "5")
+        before = self.state()
+        r = self.on("--continue", "--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        after = self.state()
+        self.assertEqual(sorted(after["branches"]), ["blog", "shop"])
+        self.assertEqual(after["branches"], before["branches"])
+        self.assertEqual(after["projects"], "all")
+        self.assertEqual(after["limits"], "no db migrations")  # not given again: kept
+        self.assertEqual(after["end"], before["end"])
+        self.assertEqual(after["started"], before["started"])
+        self.assertTrue((self.blog / ".claude" / "settings.local.json").exists())
+
+    def test_a_continue_rerun_with_new_options_replaces_only_those(self):
+        self.on("--project", "shop", "--limits", "old")
+        r = self.on("--continue", "--project", "blog", "--limits", "new", "--deny-paths", "infra/*")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.state()
+        self.assertEqual(st["projects"], ["shop", "blog"])
+        self.assertEqual((st["limits"], st["deny_paths"]), ("new", ["infra/*"]))
+        self.assertEqual(sorted(st["branches"]), ["blog", "shop"])
+
+    def test_status_says_how_long_a_drain_has_waited(self):
+        self.on("--project", "shop")
+        self.run_script("lane-improve", "off")
+        d = json.loads(self.drain_file().read_text())
+        s = self.run_script("lane-improve", "status").stdout
+        self.assertNotIn("has waited", s)
+        import datetime as dt
+        d["ended"] = (dt.datetime.now().astimezone() - dt.timedelta(hours=20)).isoformat(timespec="seconds")
+        self.drain_file().write_text(json.dumps(d))
+        s = self.run_script("lane-improve", "status").stdout
+        self.assertIn("20 h", s)
+        self.assertIn("has waited", s)
+        self.assertIn("lane-improve drained --all", s)
 
 
 class ImproveIntegrationBranchTests(ImproveTest):

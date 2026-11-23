@@ -116,6 +116,21 @@ class AwayMergeTests(AwayMergeTest):
         self.pr(baseRefName=f"{self.branch}-2")
         self.assertRefused(self.merge(), "base")
 
+    def test_refuses_a_branch_that_is_not_an_away_branch(self):
+        # review M7: improve.json is a plain file; a branch it names must still be an away/<date> branch, and never the
+        # project's integration branch
+        for branches, integration in (({"shop": "main"}, {"shop": "main"}), ({"shop": "develop"}, {"shop": "main"}),
+                                      ({"shop": "away/2026-11-23"}, {"shop": "away/2026-11-23"}),
+                                      ({"shop": "away/x"}, {"shop": "main"}), ({"shop": "away/2026-11-23/../main"}, {"shop": "main"})):
+            with self.subTest(branches=branches, integration=integration):
+                st = self.state()
+                st["branches"], st["integration"] = branches, integration
+                self.improve_file().write_text(json.dumps(st))
+                self.pr(baseRefName=branches["shop"])
+                r = self.merge()
+                self.assertRefused(r, "improve")
+                self.assertIn("away", r.stderr)
+
     def test_refuses_when_improve_off(self):
         self.reset()
         self.assertRefused(self.merge(), "improve")

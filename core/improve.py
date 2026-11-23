@@ -37,6 +37,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 UNTIL_BACK = "until-back"
+DRAIN_NOTICE_HOURS = 12   # `status` says so when a drain has waited this long
 FIELDS = ("started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration")
 
 
@@ -273,7 +274,8 @@ def _already_merged(repo: Path, branch: str, integration: str) -> bool:
 
 def _has_one_already(repo: Path, have: list, integration: str) -> str:
     b = have[0]
-    merged = (f" It is already merged into {integration} (or was never given any work): delete it, or continue it."
+    merged = (f" It is already merged into {integration} (or was never given any work): deleting it is the usual step, "
+              "since continuing it builds on the old base."
               if _already_merged(repo, b, integration) else "")
     return (f"it already has its away branch {b}: a project has at most one, ever. Continue it (`--continue`), or adopt it "
             f"(merge it to {integration}) or drop it (delete it) first.{merged}")
@@ -307,31 +309,35 @@ def continue_branch(repo: Path) -> str:
     return have[0]
 
 
-def resolve_branches(cos: list, cont: bool, today: dt.date) -> "tuple[dict, dict]":
-    """({project: branch}, {project: integration branch}) for these coordinators: with `cont` each project's one existing
-    away branch, else a newly cut away/<today>. Every repo is checked (fetched, integration branch found, the one-branch
-    rule applied) before any branch is cut, so a refusal in that phase leaves origin as it was; a push that fails while
-    cutting can leave the branches already cut on origin (harmless: `--continue` reuses them)."""
-    out, integs, plan = {}, {}, []
+def resolve_branches(cos: list, cont: bool, today: dt.date) -> "tuple[dict, dict, dict]":
+    """({project: branch}, {project: integration branch}, {project: "continued" | "cut now"}) for these coordinators.
+    Without `cont` every project must have no away branch and gets a newly cut away/<today>. With `cont` a project that
+    has its one away branch carries on with it, and one that has none gets one cut (so a new project can join a period
+    whose others continue); a project with two or more is refused. Every repo is checked (fetched, integration branch
+    found, the one-branch rule applied) before any branch is cut, so a refusal in that phase leaves origin as it was; a
+    push that fails while cutting can leave the branches already cut on origin (harmless: `--continue` reuses them)."""
+    out, integs, how, plan = {}, {}, {}, []
     for c in cos:
         try:
             integ = integration_branch(c.checkout)
             integs[c.name] = integ
-            if cont:
-                out[c.name] = continue_branch(c.checkout)
+            have = _away_branches(c.checkout)  # fetches: a repo that cannot be reached refuses before anything is cut
+            if len(have) > 1:
+                raise ValueError(_several(have))
+            if have and cont:
+                out[c.name], how[c.name] = have[0], "continued"
+            elif have:
+                raise ValueError(_has_one_already(c.checkout, have, integ))
             else:
-                have = _away_branches(c.checkout)  # fetches: a repo that cannot be reached refuses before anything is cut
-                if have:
-                    raise ValueError(_has_one_already(c.checkout, have, integ) if len(have) == 1 else _several(have))
                 plan.append((c, integ))
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             raise ValueError(f"{c.name}: {e}") from None
     for c, integ in plan:
         try:
-            out[c.name] = cut_branch(c.checkout, integ, today)
+            out[c.name], how[c.name] = cut_branch(c.checkout, integ, today), "cut now"
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             raise ValueError(f"{c.name}: {e}") from None
-    return out, integs
+    return out, integs, how
 
 
 # --- deny rules: a backstop for away-merge while the mode is on ---------------------------------------------------
@@ -367,14 +373,14 @@ def remove_denies(cos: list) -> list:
     return warns
 
 
-def describe(s: dict) -> list:
+def describe(s: dict, how: "dict | None" = None) -> list:
     """The lines `on` and `status` show: what is on, so the owner sees exactly what will run."""
     end = ("until back (until you run lane-improve off)" if s["end"] == UNTIL_BACK
            else "ends " + dt.datetime.fromisoformat(s["end"]).strftime("%a %d %b %H:%M"))
     which = "all set-up projects (including ones set up later)" if s["projects"] == "all" else ", ".join(s["projects"])
     lines = [f"  runs: {end}", f"  projects: {which}"]
     for p, b in sorted(s["branches"].items()):
-        lines.append(f"  branch: {p} -> {b} (from {s['integration'].get(p, '?')})")
+        lines.append(f"  branch: {p} -> {b} (from {s['integration'].get(p, '?')}" + (f"; {how[p]}" if how and p in how else "") + ")")
     lines.append("  one away branch per project, ever: it stays until the owner adopts it (merges it to the integration "
                  "branch) or drops it (deletes it); `lane-improve on --continue` carries on with it")
     lines.append(f"  limits: {s['limits'] or '(none given)'}")
@@ -398,7 +404,7 @@ def cmd_on(a) -> int:
         elif a.until:
             end = parse_until(a.until).isoformat(timespec="seconds")
         else:
-            end = UNTIL_BACK
+            end = UNTIL_BACK if a.until_back else None  # none given: a re-run keeps the current end, a first run has none
     except ValueError as e:
         print(f"lane-improve: {e}", file=sys.stderr)
         return 2
@@ -406,7 +412,8 @@ def cmd_on(a) -> int:
         print("lane-improve: improve mode spends tokens until it is switched off; there is no terminal here, so it needs "
               "--yes (run it yourself, or on your own explicit word)", file=sys.stderr)
         return 2
-    if load():
+    prev = load()
+    if prev:
         if not a.cont:
             print("lane-improve: improve mode is already on; switching it on again would cut new away branches and leave "
                   "the open PRs without a home. Use `lane-improve off` first, or `--continue` to carry on with the "
@@ -433,24 +440,38 @@ def cmd_on(a) -> int:
     projects = list(dict.fromkeys(a.project)) if a.project else "all"
     chosen = cos if projects == "all" else [c for c in cos if c.name in projects]
     try:
-        branches, integs = resolve_branches(chosen, a.cont, now().date())
+        branches, integs, how = resolve_branches(chosen, a.cont, now().date())
     except ValueError as e:
         print(f"lane-improve: improve not switched on: {e}", file=sys.stderr)
         return 1
-    state = {
-        "started": now().isoformat(timespec="seconds"),
-        "end": end,
-        "limits": a.limits or "",
-        "deny_paths": [g.strip() for g in (a.deny_paths or "").split(",") if g.strip()],
-        "projects": projects,
-        "unmetered": bool(a.unmetered),
-        "branches": branches,
-        "integration": integs,
-    }
+    deny = None if a.deny_paths is None else [g.strip() for g in a.deny_paths.split(",") if g.strip()]
+    if prev:  # a `--continue` re-run while on: what is not named or not given again stays as it was
+        keep = prev["projects"] == "all" or projects == "all"
+        state = {
+            "started": prev["started"],
+            "end": end or prev["end"],
+            "limits": prev["limits"] if a.limits is None else a.limits,
+            "deny_paths": prev["deny_paths"] if deny is None else deny,
+            "projects": "all" if keep else list(dict.fromkeys([*prev["projects"], *projects])),
+            "unmetered": bool(a.unmetered) or prev["unmetered"],
+            "branches": {**prev["branches"], **branches},
+            "integration": {**prev["integration"], **integs},
+        }
+    else:
+        state = {
+            "started": now().isoformat(timespec="seconds"),
+            "end": end or UNTIL_BACK,
+            "limits": a.limits or "",
+            "deny_paths": deny or [],
+            "projects": projects,
+            "unmetered": bool(a.unmetered),
+            "branches": branches,
+            "integration": integs,
+        }
     write(state)
     notes, warns = install_denies(chosen, integs)
     print("lane-improve: improve mode on")
-    print("\n".join(describe(state) + notes))
+    print("\n".join(describe(state, how) + notes))
     for w in warns:
         print(w, file=sys.stderr)
     return 0
@@ -535,6 +556,10 @@ def cmd_status(a) -> int:
         when = dt.datetime.fromisoformat(d["ended"]).strftime("%a %d %b %H:%M")
         print(f"improve: draining (ended {when}); no new cycle starts, the running lanes' PRs can still merge")
         print("  to wrap up: " + ", ".join(d["pending"]))
+        waited = (now() - dt.datetime.fromisoformat(d["ended"]).astimezone()).total_seconds() / 3600
+        if waited >= DRAIN_NOTICE_HOURS:
+            print(f"  it has waited {int(waited)} h: nobody has run `lane-improve drained` for it; ask the coordinator, or run "
+                  "`lane-improve drained --all` yourself once its last PR is dealt with")
         for p in d["pending"]:
             if p in d["branches"]:
                 print(f"  {p}: away-merge the last PR into {d['branches'][p]}, open a draft PR into "

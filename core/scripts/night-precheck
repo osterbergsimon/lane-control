@@ -231,7 +231,7 @@ def main(argv: list) -> int:
             err(f"budget unknown ({why}): no check-ins would go out (nobody is due now)")
     if nudge:
         due += improve_lines(nudge, istate, now)
-    for repo in machineconf.runner_repos(conf):
+    for repo in machineconf.runner_repos(conf) if owner_away else []:  # improve's nudges by day do not bring runner lines
         try:
             off = machineconf.offline_runners(repo)
         except machineconf.RunnerError as e:

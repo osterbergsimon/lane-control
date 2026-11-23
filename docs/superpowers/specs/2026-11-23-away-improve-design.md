@@ -140,7 +140,8 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
   not polling: the coordinator never loops on `check`. Night alone never starts improve work.
 - **The branch is the coordinator's (the owner, 2026-11-23).** `lane-improve on` cuts `away/<YYYY-MM-DD>` per project from its
   integration branch when the project has no away branch; when it has one, it refuses unless given `--continue` (which takes no
-  argument and carries on with that one branch, its log continuing; two or more are refused and listed), telling the owner to continue
+  argument, carries on with that one branch, its log continuing, and cuts one for a project that has none, so a new project can
+  join a period; two or more are refused and listed), telling the owner to continue
   it, adopt it (merge it to the integration branch) or drop it (delete it) first. The same date is fine again once the branch is gone. The coordinator owns that branch: it merges
   build lanes' PRs into it on its own, with no owner's word per item, when (1) the review passed, (2) tests are green
   (CI on the PR, or, when CI itself is failing or unavailable for reasons outside the change, the full suite through
