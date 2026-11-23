@@ -14,7 +14,7 @@ from test_machine_setup import write_exec  # noqa: E402
 GH_PR_STUB = """
 #!/usr/bin/env python3
 # gh stand-in for away-merge: `pr view N --json ...`, `pr diff N`, `pr merge N ...` from $GH_PRS (JSON {N: {...}}).
-import json, os, sys
+import json, os, sys, time
 a = sys.argv[1:]
 open(os.environ["GH_LOG"], "a").write(" ".join(a).replace("\\n", " / ") + "\\n")
 """ + GH_SUMMARY_BLOCK + """
@@ -36,13 +36,20 @@ if pr is None:
     print("gh stub: no such PR / not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 if a[:2] == ["pr", "diff"]:
     print(pr.get("diff", "")); sys.exit(0)
+if a[:2] == ["pr", "view"] and "state,mergeCommit" in a:  # the one look after a failed `pr merge`
+    print(json.dumps({"state": os.environ.get("GH_STATE_AFTER", "MERGED"), "mergeCommit": {"oid": pr.get("merge_oid", "")}})); sys.exit(0)
 if a[:2] == ["pr", "view"] and "mergeCommit" in a:
+    if os.environ.get("GH_SHA_FAIL"):
+        print("gh: " + os.environ["GH_SHA_FAIL"], file=sys.stderr); sys.exit(1)
     print(pr.get("merge_oid", "")); sys.exit(0)
 if a[:2] == ["pr", "view"] and a[a.index("--json") + 1] == "headRefOid":
     print(json.dumps({"headRefOid": pr.get("head_after", pr["headRefOid"])})); sys.exit(0)
 if a[:2] == ["pr", "view"]:
     print(json.dumps({k: pr[k] for k in ("baseRefName", "headRefOid", "state", "body", "comments", "statusCheckRollup", "files")})); sys.exit(0)
 if a[:2] == ["pr", "merge"]:
+    time.sleep(float(os.environ.get("GH_MERGE_SLEEP", "0")))  # a slow merge: lets a second away-merge run beside it
+    if os.environ.get("GH_MERGE_FAIL"):  # gh itself failed (a timeout, a 5xx); GH_STATE_AFTER says what GitHub did
+        print("gh: " + os.environ["GH_MERGE_FAIL"], file=sys.stderr); sys.exit(1)
     sys.exit(0)
 print("gh stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 """
@@ -601,6 +608,51 @@ class AwayMergeCapTests(AwayMergeTest):
         self.assertIn("reached", line)
         self.assertIn("lane-improve drained shop", line)
 
+    def test_two_merges_at_once_cannot_overshoot_max_items(self):
+        """lc-jpg: the count is read and the merge recorded under one lock, so with one slot left only one of two
+        simultaneous away-merges lands (the other waits, reads the new count, and is refused)."""
+        self.merge(item="one")  # 1 of 2 used: one slot left
+        self.pr(8)
+        (self.tmp / "gh.log").write_text("")
+        env = dict(self.env, GH_MERGE_SLEEP="1.5")
+        procs = [subprocess.Popen([str(ROOT / "core" / "scripts" / "away-merge"), "--project", "shop", "--pr", n, "--item",
+                                   f"item {n}"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for n in ("7", "8")]
+        outs = [p.communicate(timeout=60) for p in procs]
+        codes = sorted(p.returncode for p in procs)
+        self.assertEqual(codes, [0, 1], outs)
+        self.assertEqual(len(self.merged()), 1, self.merged())
+        refused = [err for _, err in outs if "refused" in err]
+        self.assertEqual(len(refused), 1, outs)
+        self.assertIn("--max-items 2", refused[0])
+        self.assertEqual(len(self.period()["merges"]["shop"]), 2)
+        self.assertIn("items 2/2", self.status())
+
+    # --- M2: a gh failure after the merge must not leave the merge uncounted
+
+    def test_a_failed_sha_lookup_after_the_merge_still_counts_it(self):
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "one", env={"GH_SHA_FAIL": "HTTP 502"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("did not go through", r.stderr)
+        self.assertIn("commit", r.stderr)  # says the merge commit is unknown
+        self.assertEqual([(m["pr"], m["sha"]) for m in self.period()["merges"]["shop"]], [(7, "")])
+        self.assertIn("items 1/2", self.status())
+
+    def test_a_merge_call_that_failed_after_github_merged_is_counted(self):
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "one",
+                            env={"GH_MERGE_FAIL": "timeout", "GH_STATE_AFTER": "MERGED"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("merged", r.stdout + r.stderr)
+        self.assertEqual([m["pr"] for m in self.period()["merges"]["shop"]], [7])
+        self.assertIn("items 1/2", self.status())
+
+    def test_a_merge_call_that_failed_and_did_not_merge_is_not_counted(self):
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "one",
+                            env={"GH_MERGE_FAIL": "HTTP 502", "GH_STATE_AFTER": "OPEN"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("did not go through", r.stderr)
+        self.assertIn("items 0/2", self.status())
+
     def test_a_weekly_cap_is_reached_at_the_value(self):
         self.playbook(65, 10, ceiling=70)
         self.assertNotIn("reached", self.status())
@@ -764,6 +816,28 @@ class AwayMergeCapTests(AwayMergeTest):
         (self.conf_dir / "improve-period.json").unlink()
         self.assertRefused(self.merge(item="two"), "improve")
         self.assertNotIn("items 0/2", self.status())
+
+    def test_a_lost_record_while_draining_names_what_works(self):
+        """lc-kbb: a drain refuses `on --continue`, so the message must not send the owner there."""
+        self.merge(item="one")
+        self.run_script("lane-improve", "off")
+        (self.conf_dir / "improve-period.json").unlink()
+        r = self.merge(item="two")
+        self.assertRefused(r, "improve")
+        self.assertIn("improve-period.json", r.stderr)
+        self.assertIn("lane-improve drained", r.stderr)
+        self.assertIn("draining", r.stderr)
+        self.assertIn("`lane-improve on --continue` starts a new period on the same away branch", r.stderr)
+        # status says it too, and the last PR is not told to be merged by away-merge meanwhile
+        st = self.status()
+        self.assertIn("improve-period.json", st)
+        self.assertNotIn("away-merge the last PR", st)
+        # and what it names works, in the order it names: the drain closes, then `on --continue` (a plain `on` is refused
+        # while the project has its away branch) starts a new period on the same branch, where the last PR can merge
+        self.assertEqual(self.run_script("lane-improve", "drained", "--all").returncode, 0)
+        self.assertNotEqual(self.on("--project", "shop").returncode, 0)
+        self.assertEqual(self.on("--continue", "--project", "shop").returncode, 0)
+        self.assertEqual(self.merge(item="two").returncode, 0)
 
     def test_a_continue_rerun_makes_a_fresh_period_record_and_says_so(self):
         self.merge(item="one")
