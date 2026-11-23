@@ -9,6 +9,9 @@
 #   LANE_MACHINE_CONF  the machine config (default ~/.config/lane-control/machine.conf; absent is fine): night is
 #                      NIGHT_START-NIGHT_END there (default 23-07) and the away file lasts AWAY_HOURS. Only plain
 #                      `KEY=<digits>` lines are read; the file is never sourced here.
+#   LANE_IMPROVE_FILE  away-improve mode is on while it holds a usable, unended state (default
+#                      ~/.config/lane-control/improve.json; `lane-away on --improve` writes it): the owner then counts
+#                      as away whatever AWAY_HOURS says (core/improve.py is-on)
 #   LANE_BUDGET_STOPPED_FILE  the budget is at its stop step while it is younger than 1 h: agents sit idle until the
 #                      reset, so the machine is CI's (default ~/.config/lane-control/budget-stopped). Its writer
 #                      touches it on every check while the budget stays stopped and removes it after the reset.
@@ -26,6 +29,8 @@ LANE_LIMITS_FILE=${LANE_LIMITS_FILE:-$HOME/.config/lane-control/limits.sh}
 LANE_AWAY_FILE=${LANE_AWAY_FILE:-$HOME/.config/lane-control/away}
 LANE_BUDGET_STOPPED_FILE=${LANE_BUDGET_STOPPED_FILE:-$HOME/.config/lane-control/budget-stopped}
 LANE_MACHINE_CONF=${LANE_MACHINE_CONF:-$HOME/.config/lane-control/machine.conf}
+LANE_IMPROVE_FILE=${LANE_IMPROVE_FILE:-$HOME/.config/lane-control/improve.json}
+export LANE_IMPROVE_FILE
 
 # `--all`: plain nproc shrinks with OMP_NUM_THREADS and affinity, so two lanes could compute different limits.
 LANE_CORES=$(nproc --all 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
@@ -55,7 +60,14 @@ elif [ "$lane_hour" -ge "$LANE_NIGHT_START" ] && [ "$lane_hour" -lt "$LANE_NIGHT
   lane_night=1
 fi
 LANE_PRESENCE=day LANE_PRESENCE_WHY=day LANE_OWNER_AWAY=
-if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -$((LANE_AWAY_HOURS * 60)) 2>/dev/null)" ]; then
+lane_improve=
+if [ -e "$LANE_IMPROVE_FILE" ]; then   # only then is python3 started: improve mode is rare
+  lane_improve_py=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../improve.py
+  [ -r "$lane_improve_py" ] && python3 "$lane_improve_py" is-on 2>/dev/null && lane_improve=1
+fi
+if [ -n "$lane_improve" ]; then
+  LANE_PRESENCE=away LANE_PRESENCE_WHY=improve LANE_OWNER_AWAY=1
+elif [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -$((LANE_AWAY_HOURS * 60)) 2>/dev/null)" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY="owner away" LANE_OWNER_AWAY=1
 elif [ -n "$lane_night" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY=night LANE_OWNER_AWAY=1
