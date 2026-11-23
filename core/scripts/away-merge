@@ -206,7 +206,8 @@ def run(a) -> int:
     else:
         branch = state["branches"].get(a.project)
         if not branch:
-            refuse("improve", f"{a.project} has no away branch recorded in the improve file")
+            refuse("improve", f"{a.project} has no away branch recorded in the improve file (a project set up after the "
+                              f"mode started: tell the owner to run `lane-improve on --continue --project {a.project}`)")
         elif not AWAY_BRANCH.fullmatch(branch) or branch == state["integration"].get(a.project):
             refuse("improve", f"the branch recorded for {a.project} ({branch!r}) is not an away/<date> branch, or is its "
                               "integration branch: away-merge merges only into away branches, never into main or develop")

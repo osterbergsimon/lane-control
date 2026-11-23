@@ -621,6 +621,33 @@ class ImproveRerunAndDrainAgeTests(ImproveTest):
         self.assertEqual(after["started"], before["started"])
         self.assertTrue((self.blog / ".claude" / "settings.local.json").exists())
 
+    def test_a_project_set_up_after_the_mode_started_can_join(self):
+        # lc-2rk: the mode covers "all", but a coordinator added later has no branch; the owner's `--continue --project`
+        # cuts and records one while the mode runs, and keeps the others
+        self.on("--hours", "5")
+        before = self.state()
+        late = make_repo(self.tmp, "late")
+        self.machine_conf('COORDINATORS="\nshop %s/shop claude shop coordinator\nblog %s/blog claude blog coordinator\n'
+                          'late %s/late claude late coordinator\n"\n' % (self.tmp, self.tmp, self.tmp))
+        r = self.on("--continue", "--project", "late")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        after = self.state()
+        self.assertEqual(after["projects"], "all")
+        self.assertEqual(sorted(after["branches"]), ["blog", "late", "shop"])
+        self.assertEqual({k: after["branches"][k] for k in ("shop", "blog")},
+                         {k: before["branches"][k] for k in ("shop", "blog")})
+        self.assertIn("cut now", r.stdout)
+        self.assertTrue((late / ".claude" / "settings.local.json").exists())
+
+    def test_away_merge_for_a_project_without_a_branch_names_the_way_in(self):
+        self.on("--hours", "5")
+        st = self.state()
+        del st["branches"]["blog"]
+        self.improve_file().write_text(json.dumps(st))
+        r = self.run_script("away-merge", "--project", "blog", "--pr", "1", "--item", "x")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("lane-improve on --continue --project blog", r.stderr)
+
     def test_a_continue_rerun_with_new_options_replaces_only_those(self):
         self.on("--project", "shop", "--limits", "old")
         r = self.on("--continue", "--project", "blog", "--limits", "new", "--deny-paths", "infra/*")

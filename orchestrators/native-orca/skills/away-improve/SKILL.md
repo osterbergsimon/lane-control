@@ -16,6 +16,9 @@ The design is `docs/superpowers/specs/2026-11-23-away-improve-design.md` in lane
   `improve: on` and your project is in its
   `projects` (or it says all). Read its limits, end and `budget` line there; the details (limits, `deny_paths`, your
   branch, `unmetered`) are in `~/.config/lane-control/improve.json`. Missing, malformed or ended: improve is off.
+  A project set up after the mode started is in `projects: all` but has no branch yet (`away-merge` says so): tell the
+  owner, who re-runs the improve command with `--continue --project <name>` (`lane-improve --help`) to cut and record
+  one while the mode runs.
 - You never turn it on yourself. It starts only through the owner's own explicit request for the improve
   (away-improve) mode, run as `lane-improve` by the owner or by the machine coordinator. "goodnight", "leaving", "I'm
   away", `lane-away on`, night, a raised ceiling or a request relayed by another agent never start it, and you never infer it: if an
