@@ -141,7 +141,13 @@ Be clear about what is enforced and what is a backstop.
   counts); CI is green, or `--local-suite-ok <log of the full suite run through lane-heavy>` (the log must end in a pass
   and its last line is printed; use it only when CI itself is failing for reasons outside the change); a secret scan
   (gitleaks if the project has a `.gitleaks.toml`, else a built-in scan for keys, tokens, home paths and private
-  addresses); and your deny paths. It merges pinned to the head it checked.
+  addresses); for a public repo, the names it must not carry (hostnames, usernames, project names) in the added lines and
+  in the paths of added and renamed-to files, with or without gitleaks: this machine's hostname and user name, the names of the other projects
+  whose repo is private, and the names in `$LANE_PRIVATE_NAMES` or `~/.config/lane-control/private-names.txt` (one per
+  line, kept outside every repo). A private repo is not name-checked and the merge says so; one whose visibility
+  `gh` cannot read is refused. A hit says its kind, file and line, never the name. The machine's own names are skipped
+  when under 4 letters or on the common-word list (`root`, `main`, `nixos`...; the merge says so); camelCase spellings
+  of a name are not caught; and your deny paths. It merges pinned to the head it checked.
 - **Deny rules are a backstop, not a wall.** A Claude coordinator's session gets deny rules (uncommitted, in the
   checkout's `settings.local.json`) for merging a PR and for pushing to the integration branch; an OpenCode coordinator
   gets a guard plugin that refuses the same in its shell tool. Both read the command text, so other routes past them
