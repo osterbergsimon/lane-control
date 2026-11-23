@@ -8,9 +8,11 @@
 #                         (-STEP_NO_NEW), 3 push-and-handover (-STEP_WIP_STOP), 4 stop (-STEP_STOP_ALL); the short
 #                         window's: 0 none, 1 no-new-work (WINDOW_WARN_PCT, 95), 2 push (WINDOW_STOP_PCT, 98)
 #   budget-state --project <name>
-#                         the same, with that project's own ceiling (.projects.<name>.ceiling in the ceiling file,
-#                         LANE_CEILING_FILE; lib.sh project_ceiling) in place of the budget's when it has one; steps
-#                         follow it. Workers read their own project's steps this way.
+#                         the same, with that project's own ceiling (.projects.<name>.ceiling in the ceiling file) in
+#                         place of the budget's when it has one, for a budget whose BUDGET_CEILING is that file
+#                         (file:<path>); another budget keeps its own. Without an entry the project's
+#                         COORD_CEILING_ADD raise, if any, applies. Steps follow the ceiling. Workers read their own
+#                         project's steps this way.
 #   budget-state --mark   also writes the budget-stopped marker (LANE_BUDGET_STOPPED_FILE, default
 #                         ~/.config/lane-control/budget-stopped) while every metered budget a lane tier runs on is
 #                         stopped: weekly at its stop step (with the largest per-project COORD_CEILING_ADD, since one
@@ -55,7 +57,7 @@ for t in ${TIERS:-}; do
   [ "${TIER_ENGINE[$t]:-none}" = none ] || lane_budgets+="${TIER_BUDGET[$t]:-} "
 done
 
-all_stopped= any_lane=
+all_stopped= any_lane= warned=
 for b in $(metered | sort); do
   reading=$(bash -c "${BUDGET_USAGE[$b]}" 2>/dev/null)
   if ! [[ "$reading" =~ ^[0-9]+\ [0-9]+$ ]]; then
@@ -65,7 +67,17 @@ for b in $(metered | sort); do
   fi
   read -r wk ss <<<"$reading"
   ceil=$(budget_ceiling "$b")
-  if [ -n "$project" ]; then pc=$(project_ceiling "$project"); [ -z "$pc" ] || ceil=$pc; fi
+  if [ -n "$project" ]; then
+    # a project's own ceiling applies to a budget whose ceiling is that same file; else its COORD_CEILING_ADD raise does
+    bc=${BUDGET_CEILING[$b]:-}
+    pc= rc=1
+    if [[ "$bc" == file:* ]]; then pc=$(project_ceiling "${bc#file:}" "$project"); rc=$?; fi
+    if [ "$rc" -eq 2 ] && [ -z "$warned" ]; then
+      warned=1
+      echo "budget-state: ${bc#file:} is not valid JSON: using each budget's own ceiling for --project $project" >&2
+    fi
+    if [ -n "$pc" ]; then ceil=$pc; else ceil=$((ceil + ${COORD_CEILING_ADD[$project]:-0})); fi
+  fi
   [[ "$ceil" =~ ^[0-9]+$ ]] || ceil=${DEFAULT_CEILING:-40}
   step=0
   if [ "$wk" -ge $((ceil - stop)) ]; then step=4

@@ -22,8 +22,9 @@ adapter; Orca's terminal output is no idle signal (status-line redraws keep it f
 
 Improve mode (core/improve.py; `lane-away on --improve`) makes the owner count as away, so by day too. For a
 coordinator it covers, the plain check-in is replaced by `DUE <name> improve`: a fallback nudge for a lost wake, since the
-coordinator starts its next cycle itself. Metered, it follows that project's budget steps (budget-state --project): none
-at no-new-work or beyond, a BUDGET unknown line when the feed gives no reading. Unmetered (improve.json) it is not gated
+coordinator starts its next cycle itself. Metered, it follows that project's budget steps (budget-state --project): from
+no-new-work it is the push-and-handover check-in (a BUDGET push-and-handover line first, as for a plain one), at the stop
+step none, and a BUDGET unknown line when the feed gives no reading. Unmetered (improve.json) it is not gated
 by budget and never reports unknown. Night alone never starts improve work.
 
 Budget gate (budget-state, free), as the machine coordinator's night routine had it: at the no-new-work and
@@ -133,8 +134,13 @@ def improve_lines(nudge: list, istate: dict, now: float) -> list:
                 stamp.parent.mkdir(parents=True, exist_ok=True)
                 stamp.touch()
                 out.insert(0, f"BUDGET unknown ({why}): no improve nudges until the usage feed gives a reading")
+        elif gate == "push":
+            # as for a plain check-in: it asks only to push and write the handover (no new cycle from here on)
+            out.append(line)
+            if not any(x.startswith("BUDGET push-and-handover") for x in out):
+                out.insert(0, f"BUDGET push-and-handover ({why}): check-ins ask only to push and write the handover")
         else:
-            err(f"{name}: budget at {gate} ({why}): no new cycle, no improve nudge")
+            err(f"{name}: budget at {gate} ({why}): no improve nudge")
     return out
 
 

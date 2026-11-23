@@ -17,7 +17,11 @@
 #                      Each project gets a new away/<date> branch on origin, cut from its integration branch
 #                      (the base of its recent merged PRs, else origin's default); --continue reuses the newest
 #                      (or the named) away branch instead and refuses when there is none. Nothing is merged.
-#   lane-away off      the owner is back: removes the away file and ends improve mode.
+#   lane-away off      the owner is back: removes the away file and ends improve mode. What was running drains: no
+#                      new cycle, the last PRs can still merge through away-merge, the deny rules stay.
+#   lane-away drained <project>... | --all
+#                      a coordinator's wrap-up is done (last PR merged, draft PR opened): its deny rules come out and
+#                      the drain state clears. `status` lists what is still draining.
 #   lane-away status   presence as lane-limits.sh sees it now: for limits (day or away, and why) and whether the
 #                      owner counts as away (night or the away file; never a stopped budget).
 #
@@ -47,6 +51,10 @@ case ${1:-} in
     python3 "${self%/*}/../improve.py" off || exit 1
     echo "lane-away: back; the CI slice follows within 15 minutes"
     ;;
+  drained)
+    shift
+    exec python3 "${self%/*}/../improve.py" drained "$@"
+    ;;
   status)
     if [ -e "$LANE_AWAY_FILE" ]; then
       since=$(date -r "$LANE_AWAY_FILE" '+%a %H:%M')
@@ -64,5 +72,5 @@ case ${1:-} in
     python3 "${self%/*}/../improve.py" status
     ;;
   -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self" ;;
-  *) echo "usage: lane-away on [--improve ...]|off|status" >&2; exit 2 ;;
+  *) echo "usage: lane-away on [--improve ...]|off|drained <project>|status" >&2; exit 2 ;;
 esac

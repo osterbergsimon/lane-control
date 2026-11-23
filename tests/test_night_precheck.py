@@ -21,7 +21,7 @@ class ImprovePrecheckTests(MachineTest):
     def improve_on(self, projects="all", unmetered=False, end="until-back"):
         (self.conf_dir / "improve.json").write_text(json.dumps({
             "started": "2026-11-23T10:00:00+00:00", "end": end, "limits": "", "deny_paths": [], "projects": projects,
-            "unmetered": unmetered, "branches": {}}))
+            "unmetered": unmetered, "branches": {}, "integration": {}}))
 
     def pre(self, *args, hour="12"):
         return self.run_script("night-precheck", *args, env={"LANE_HOUR": hour})
@@ -101,24 +101,36 @@ class ImprovePrecheckTests(MachineTest):
         self.improve_on(unmetered=True)
         self.assertEqual(self.pre().stdout, "DUE proj improve idle=40min\n")
 
-    def test_metered_improve_stops_at_no_new_work(self):
+    def test_metered_improve_at_push_and_handover_gets_the_push_check_in(self):
+        # review M6: the plain check-in says "push and hand over" there; the improve nudge must not swallow it
         self.conf(("proj", 40))
         self.improve_on()
         self.playbook(86, 10)  # ceiling 93: no-new-work
         r = self.pre()
-        self.assertEqual(r.returncode, 1)
-        self.assertNotIn("DUE", r.stdout)
-        self.assertIn("no new cycle", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertTrue(lines[0].startswith("BUDGET push-and-handover"), r.stdout)
+        self.assertEqual(lines[1:], ["DUE proj improve idle=40min"])
+        self.playbook(89, 10)  # push-and-handover
+        self.assertTrue(self.pre().stdout.splitlines()[0].startswith("BUDGET push-and-handover"))
         self.playbook(70, 10)
         self.assertEqual(self.pre().stdout, "DUE proj improve idle=40min\n")
+
+    def test_metered_improve_at_the_stop_step_gets_nothing(self):
+        self.conf(("proj", 40))
+        self.improve_on()
+        self.playbook(92, 10)  # stop
+        r = self.pre()
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("DUE", r.stdout)
+        self.assertIn("stopped", r.stderr)
 
     def test_metered_improve_follows_the_project_ceiling(self):
         self.conf(("proj", 40))
         self.improve_on()
         ceil = self.tmp / "ceiling.json"
         ceil.write_text(json.dumps({"ceiling": 93, "projects": {"proj": {"ceiling": 99}}}))
-        self.env["LANE_CEILING_FILE"] = str(ceil)
-        self.playbook(86, 10)  # no-new-work at 93, plain at 99
+        self.playbook(86, 10, ceiling=f"file:{ceil}")  # no-new-work at 93, plain at 99
         self.assertEqual(self.pre().stdout, "DUE proj improve idle=40min\n")
 
     def test_malformed_improve_file_is_off_and_says_why(self):

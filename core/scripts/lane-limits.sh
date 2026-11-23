@@ -11,7 +11,7 @@
 #                      `KEY=<digits>` lines are read; the file is never sourced here.
 #   LANE_IMPROVE_FILE  away-improve mode is on while it holds a usable, unended state (default
 #                      ~/.config/lane-control/improve.json; `lane-away on --improve` writes it): the owner then counts
-#                      as away whatever AWAY_HOURS says (its `end` line is read here in plain shell)
+#                      as away whatever AWAY_HOURS says (read here by a copy of improve.py's validation)
 #   LANE_BUDGET_STOPPED_FILE  the budget is at its stop step while it is younger than 1 h: agents sit idle until the
 #                      reset, so the machine is CI's (default ~/.config/lane-control/budget-stopped). Its writer
 #                      touches it on every check while the budget stays stopped and removes it after the reset.
@@ -60,17 +60,31 @@ elif [ "$lane_hour" -ge "$LANE_NIGHT_START" ] && [ "$lane_hour" -lt "$LANE_NIGHT
   lane_night=1
 fi
 LANE_PRESENCE=day LANE_PRESENCE_WHY=day LANE_OWNER_AWAY=
-# Improve mode: a plain-shell read of the file core/improve.py writes (this script is also installed as a lone copy, so it
-# cannot call improve.py): its `"end": "<until-back | ISO time>"` value, still in the future. The Python reader is the
-# strict one (night-precheck, away-merge); this lax one only decides limits, and a file it cannot read means off.
+# Improve mode: on while the file `lane-away on --improve` writes holds a complete, valid state whose end has not passed.
+# A copy of core/improve.py's validation, because this script is installed as a lone copy where improve.py is not; the
+# two are kept in step by tests/test_lane_away.py ReaderAgreementTests, which runs both over the same files. It runs
+# only when the file exists (improve mode is rare). Anything it cannot read means off.
 lane_improve=
-if [ -r "$LANE_IMPROVE_FILE" ]; then
-  lane_end=$(grep -o '"end": *"[^"]*"' "$LANE_IMPROVE_FILE" 2>/dev/null | head -1 | sed 's/^.*: *"\(.*\)"$/\1/')
-  if [ "$lane_end" = until-back ]; then
-    lane_improve=1
-  elif [ -n "$lane_end" ]; then
-    lane_end_s=$(date -d "$lane_end" +%s 2>/dev/null) && [ "$lane_end_s" -gt "$(date +%s)" ] && lane_improve=1
-  fi
+if [ -r "$LANE_IMPROVE_FILE" ] && python3 -c '
+import datetime as d, json, sys
+def t(v):
+    try:
+        d.datetime.fromisoformat(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+def names(x):
+    return isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items())
+s = json.load(open(sys.argv[1]))
+ok = (isinstance(s, dict)
+      and all(k in s for k in ("started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration"))
+      and t(s["started"]) and (s["end"] == "until-back" or t(s["end"])) and isinstance(s["limits"], str)
+      and isinstance(s["deny_paths"], list) and all(isinstance(x, str) for x in s["deny_paths"])
+      and (s["projects"] == "all" or (isinstance(s["projects"], list) and all(isinstance(x, str) for x in s["projects"])))
+      and isinstance(s["unmetered"], bool) and names(s["branches"]) and names(s["integration"]))
+sys.exit(0 if ok and (s["end"] == "until-back" or d.datetime.fromisoformat(s["end"]).astimezone() > d.datetime.now().astimezone()) else 1)
+' "$LANE_IMPROVE_FILE" 2>/dev/null; then
+  lane_improve=1
 fi
 if [ -n "$lane_improve" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY=improve LANE_OWNER_AWAY=1

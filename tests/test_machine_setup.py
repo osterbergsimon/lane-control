@@ -1091,44 +1091,68 @@ class BudgetStateTests(BudgetTest):
         self.run_script("budget-state", "--mark")
         self.assertFalse(self.marker().exists())
 
-    def ceiling_file(self, text):
+    def ceiling_file(self, text, weekly=59, extra=""):
+        """A ceiling file the main budget reads (BUDGET_CEILING=file:...), and the config around it."""
         f = self.tmp / "ceiling.json"
         f.write_text(text)
-        self.env["LANE_CEILING_FILE"] = str(f)
+        self.playbook(weekly, 10, ceiling=f"file:{f}", extra=extra)
 
     def test_project_ceiling_read(self):
-        self.playbook(59, 10, ceiling=60)
         self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
         r = self.run_script("budget-state", "--project", "lane-control")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "main weekly=59 window=10 ceiling=80 step=0 none window_step=0\n")
 
     def test_project_ceiling_steps_follow_it(self):
-        self.playbook(76, 10, ceiling=60)
-        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
+        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}', weekly=76)
         r = self.run_script("budget-state", "--project", "lane-control")
         self.assertIn("ceiling=80 step=3 push-and-handover", r.stdout)
 
     def test_project_without_entry_uses_budget_ceiling(self):
-        self.playbook(57, 10, ceiling=60)
-        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
+        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}', weekly=57)
         r = self.run_script("budget-state", "--project", "other")
         self.assertIn("ceiling=60 step=3 push-and-handover", r.stdout)
 
     def test_no_project_unchanged(self):
-        self.playbook(57, 10, ceiling=60)
-        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
+        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}', weekly=57)
         r = self.run_script("budget-state")
         self.assertIn("ceiling=60 step=3 push-and-handover", r.stdout)
 
-    def test_malformed_json_falls_back(self):
-        self.playbook(57, 10, ceiling=60)
-        self.ceiling_file("{not json")
+    def test_a_budget_on_another_ceiling_keeps_it_under_project(self):
+        # review M4: only a budget whose ceiling is this file takes the project's ceiling
+        f = self.tmp / "ceiling.json"
+        f.write_text('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
+        feed2 = self.tmp / "feed2"
+        feed2.write_text("25 10\n")
+        self.playbook(20, 10, ceiling=f"file:{f}", extra=(
+            f'BUDGET_USAGE[other]="cat {feed2}"\nBUDGET_CEILING[other]=30\n'))
+        with_project = self.run_script("budget-state", "--project", "lane-control").stdout.splitlines()
+        without = self.run_script("budget-state").stdout.splitlines()
+        self.assertIn("main weekly=20 window=10 ceiling=80 step=0 none window_step=0", with_project)
+        self.assertIn("other weekly=25 window=10 ceiling=30 step=2 no-new-work window_step=0", with_project)
+        self.assertIn("main weekly=20 window=10 ceiling=60 step=0 none window_step=0", without)
+        self.assertEqual([l for l in with_project if l.startswith("other")], [l for l in without if l.startswith("other")])
+
+    def test_malformed_json_falls_back_and_says_so_once(self):
+        f = self.tmp / "ceiling.json"
+        f.write_text("{not json")
+        feed2 = self.tmp / "feed2"
+        feed2.write_text("5 5\n")
+        self.playbook(57, 10, ceiling=f"file:{f}", extra=f'BUDGET_USAGE[other]="cat {feed2}"\nBUDGET_CEILING[other]=file:{f}\n')
         r = self.run_script("budget-state", "--project", "lane-control")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("ceiling=60 step=3 push-and-handover", r.stdout)
-        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)  # once in all, not once per budget
         self.assertIn("ceiling", r.stderr)
+
+    def test_a_float_ceiling_is_read(self):
+        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80.0}}}')
+        r = self.run_script("budget-state", "--project", "lane-control")
+        self.assertIn("ceiling=80 step=0", r.stdout)
+
+    def test_the_projects_own_raise_applies_when_the_json_has_no_entry(self):
+        self.ceiling_file('{"ceiling": 60}', weekly=60, extra='declare -A COORD_CEILING_ADD=( [lane-control]=10 )')
+        r = self.run_script("budget-state", "--project", "lane-control")
+        self.assertIn("ceiling=70 step=1 pressure", r.stdout)  # 60 + the project's COORD_CEILING_ADD of 10
 
     def test_project_needs_a_name(self):
         self.playbook(20, 10)

@@ -71,8 +71,16 @@ class ImproveTest(MachineTest):
     def improve_file(self) -> Path:
         return self.conf_dir / "improve.json"
 
+    def drain_file(self) -> Path:
+        return self.conf_dir / "improve-drain.json"
+
     def state(self) -> dict:
         return json.loads(self.improve_file().read_text())
+
+    def reset(self):
+        """Back to no improve period at all (a new `on` is refused while one is on or draining)."""
+        self.run_script("lane-away", "off")
+        self.run_script("lane-away", "drained", "--all")
 
     def on(self, *args, env=None):
         return self.run_script("lane-away", "on", "--improve", "--yes", *args, env=env)
@@ -95,7 +103,8 @@ class ImproveOnTests(ImproveTest):
         r = self.on("--limits", "nothing that needs db migrations", "--deny-paths", "**/migrations/**,infra/*")
         self.assertEqual(r.returncode, 0, r.stderr)
         st = self.state()
-        self.assertEqual(set(st), {"started", "end", "limits", "deny_paths", "projects", "unmetered", "branches"})
+        self.assertEqual(set(st), {"started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration"})
+        self.assertEqual(st["integration"], {"blog": "main", "shop": "main"})
         self.assertEqual(st["end"], "until-back")
         self.assertEqual(st["limits"], "nothing that needs db migrations")
         self.assertEqual(st["deny_paths"], ["**/migrations/**", "infra/*"])
@@ -109,6 +118,7 @@ class ImproveOnTests(ImproveTest):
     def test_hours_and_until_set_a_time_end(self):
         self.on("--hours", "3")
         self.assertRegex(self.state()["end"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+        self.reset()
         self.on("--until", "23:30")
         self.assertRegex(self.state()["end"], r"T23:30")
         self.assertEqual(self.on("--hours", "3", "--until-back").returncode, 2)
@@ -119,6 +129,7 @@ class ImproveOnTests(ImproveTest):
         st = self.state()
         self.assertEqual(st["projects"], ["shop"])
         self.assertEqual(list(st["branches"]), ["shop"])
+        self.reset()
         self.on("--project", "shop", "--project", "blog")
         self.assertEqual(self.state()["projects"], ["shop", "blog"])
 
@@ -152,18 +163,21 @@ class ImproveOnTests(ImproveTest):
         self.assertIn("no db migrations", out)
         self.assertIn("unmetered", out)
         self.assertIn("ends", out)
+        self.reset()
         r = self.on()
         self.assertIn("until back", r.stdout)
         self.assertIn("metered", r.stdout)
         self.assertIn("all set-up projects", r.stdout)
 
-    def test_off_clears_both(self):
+    def test_off_ends_the_mode_and_leaves_a_drain_state(self):
         self.on()
         r = self.run_script("lane-away", "off")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(self.away().exists())
         self.assertFalse(self.improve_file().exists())
-        self.assertEqual(self.run_script("lane-away", "off").returncode, 0)
+        self.assertTrue(self.drain_file().exists())
+        self.assertEqual(self.run_script("lane-away", "off").returncode, 0)  # again: harmless
+        self.assertTrue(self.drain_file().exists())
 
     def test_status_shows_improve(self):
         self.on("--project", "shop", "--limits", "no db migrations")
@@ -289,14 +303,19 @@ class ImproveDenyTests(ImproveTest):
         self.assertTrue(self.denies(self.shop) and self.denies(self.blog))
         r = self.run_script("lane-away", "off")
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.denies(self.shop) and self.denies(self.blog))  # kept while the last PRs drain
+        r = self.run_script("lane-away", "drained", "--all")
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((self.denies(self.shop), self.denies(self.blog)), ([], []))
         self.assertFalse(self.settings(self.shop).exists())
+        self.assertFalse(self.drain_file().exists())
 
     def test_off_keeps_the_owners_own_settings(self):
         self.settings(self.shop).parent.mkdir()
         self.settings(self.shop).write_text(json.dumps({"model": "sonnet", "permissions": {"deny": ["Bash(rm:*)"]}}))
         self.on("--project", "shop")
         self.run_script("lane-away", "off")
+        self.run_script("lane-away", "drained", "shop")
         self.assertEqual(json.loads(self.settings(self.shop).read_text()),
                          {"model": "sonnet", "permissions": {"deny": ["Bash(rm:*)"]}})
 
@@ -322,6 +341,208 @@ class ImproveDenyTests(ImproveTest):
         self.assertTrue(self.denies(self.shop))
 
 
+class ImproveDrainTests(ImproveTest):
+    """Review M1: `off` or the end time leaves a drain state, so the running lane's PR can still merge."""
+
+    def settings(self, repo: Path) -> Path:
+        return repo / ".claude" / "settings.local.json"
+
+    def drain(self) -> dict:
+        return json.loads(self.drain_file().read_text())
+
+    def test_off_records_what_is_left_to_wrap_up(self):
+        self.on("--project", "shop")
+        before = self.state()
+        self.run_script("lane-away", "off")
+        d = self.drain()
+        self.assertEqual(d["pending"], ["shop"])
+        self.assertEqual(d["branches"], before["branches"])
+        self.assertEqual(d["integration"], before["integration"])
+        self.assertRegex(d["ended"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_off_for_all_projects_lists_every_coordinator(self):
+        self.on()
+        self.run_script("lane-away", "off")
+        self.assertEqual(sorted(self.drain()["pending"]), ["blog", "shop"])
+
+    def test_status_shows_the_drain(self):
+        self.on("--project", "shop")
+        self.run_script("lane-away", "off")
+        s = self.run_script("lane-away", "status").stdout
+        self.assertIn("improve: draining", s)
+        self.assertIn("shop", s)
+        self.assertIn("lane-away drained", s)
+        self.assertIn("owner away: no", s)
+
+    def test_drained_one_project_at_a_time(self):
+        self.on()
+        self.run_script("lane-away", "off")
+        r = self.run_script("lane-away", "drained", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.drain()["pending"], ["blog"])
+        self.assertEqual(json.loads(self.settings(self.shop).read_text()) if self.settings(self.shop).exists() else {}, {})
+        self.assertTrue(self.settings(self.blog).exists())
+        self.assertEqual(self.run_script("lane-away", "drained", "shop").returncode, 1)  # nothing left to drain there
+        self.assertEqual(self.run_script("lane-away", "drained", "blog").returncode, 0)
+        self.assertFalse(self.drain_file().exists())
+        self.assertIn("improve: off", self.run_script("lane-away", "status").stdout)
+
+    def test_the_end_time_drains_too(self):
+        self.on("--project", "shop", "--hours", "1")
+        st = self.state()
+        st["end"] = "2020-01-01T00:00:00+00:00"
+        self.improve_file().write_text(json.dumps(st))
+        s = self.run_script("lane-away", "status").stdout
+        self.assertIn("improve: draining", s)
+        self.assertIn("shop", s)
+        r = self.run_script("lane-away", "drained", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self.improve_file().exists())
+        self.assertFalse(self.drain_file().exists())
+
+    def test_on_is_refused_while_on_unless_continue(self):
+        self.on("--project", "shop")
+        first = self.state()["branches"]["shop"]
+        r = self.on("--project", "shop")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already on", r.stderr)
+        self.assertIn("--continue", r.stderr)
+        self.assertEqual(self.state()["branches"]["shop"], first)
+        self.assertEqual(self.on("--project", "shop", "--continue").returncode, 0)
+
+    def test_on_is_refused_while_draining(self):
+        self.on("--project", "shop")
+        self.run_script("lane-away", "off")
+        r = self.on("--project", "shop")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("drained", r.stderr)
+        self.assertFalse(self.improve_file().exists())
+
+    def test_off_without_the_mode_cleans_up_leftover_rules_and_leaves_no_drain(self):
+        self.on("--project", "shop")
+        self.improve_file().unlink()
+        self.drain_file().unlink(missing_ok=True)
+        self.run_script("lane-away", "off")
+        self.assertFalse(self.settings(self.shop).exists())
+        self.assertFalse(self.drain_file().exists())
+
+    def test_a_bad_started_time_is_off_and_status_does_not_crash(self):
+        self.on("--project", "shop")
+        st = self.state()
+        st["started"] = "yesterday"
+        self.improve_file().write_text(json.dumps(st))
+        r = self.run_script("lane-away", "status")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("started", r.stderr)
+        self.assertIn("improve: off", r.stdout)
+
+
+class ImproveIntegrationBranchTests(ImproveTest):
+    """Review M2: the integration branch is never an away branch, and it is recorded once, at `on`."""
+
+    def read(self, code: str):
+        return subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {str(ROOT / 'core')!r}); "
+                               f"from pathlib import Path; import improve; {code}"], env=self.env, capture_output=True,
+                              text=True)
+
+    def test_away_bases_do_not_count(self):
+        self.set_bases(["away/2026-11-23"] * 8 + ["main", "main"])
+        r = self.read(f"print(improve.integration_branch(Path({str(self.shop)!r})))")
+        self.assertEqual(r.stdout.strip(), "main", r.stderr)
+        self.set_bases(["away/2026-11-23"] * 5)  # nothing else to go on: origin's default
+        r = self.read(f"print(improve.integration_branch(Path({str(self.shop)!r})))")
+        self.assertEqual(r.stdout.strip(), "main", r.stderr)
+
+    def test_a_second_period_cuts_from_the_integration_branch_and_denies_it(self):
+        self.on("--project", "shop")
+        self.run_script("lane-away", "off")
+        self.run_script("lane-away", "drained", "--all")
+        self.set_bases(["away/2026-11-23"] * 9 + ["main"])  # what the first period left behind
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.state()
+        self.assertEqual(st["integration"]["shop"], "main")
+        b = st["branches"]["shop"]
+        self.assertEqual(git(self.shop, "rev-parse", f"origin/{b}").strip(), git(self.shop, "rev-parse", "origin/main").strip())
+        denies = json.loads((self.shop / ".claude" / "settings.local.json").read_text())["permissions"]["deny"]
+        self.assertIn("Bash(git push origin main:*)", denies)
+
+
+class ReaderAgreementTests(ImproveTest):
+    """Review M5: the plain-shell reader in lane-limits.sh and improve.py say the same about every file."""
+
+    GOOD = {"started": "2026-11-23T10:00:00+00:00", "end": "until-back", "limits": "", "deny_paths": [],
+            "projects": "all", "unmetered": False, "branches": {"shop": "away/2026-11-23"},
+            "integration": {"shop": "main"}}
+
+    def cases(self):
+        g = self.GOOD
+        canon = json.dumps(g, indent=2, sort_keys=True) + "\n"
+        future = {**g, "end": "2999-01-01T00:00:00+00:00"}
+        yield "canonical", canon
+        yield "one line", json.dumps(g)
+        yield "future end", json.dumps(future)
+        yield "naive future end", json.dumps({**g, "end": "2999-01-01T00:00:00"})
+        yield "ended", json.dumps({**g, "end": "2020-01-01T00:00:00+00:00"})
+        yield "truncated", canon[: canon.index('"limits"')]
+        yield "truncated after end", canon[: canon.index('"end"') + 22] + ", "
+        yield "only end", '{"end": "until-back"}'
+        yield "project named end", json.dumps({**g, "branches": {"end": "away/x"}, "projects": ["end"],
+                                               "integration": {"end": "main"}, "end": "2020-01-01T00:00:00+00:00"})
+        yield "branch named end, until back", json.dumps({**g, "branches": {"end": "away/x"}})
+        yield "limits text with end", json.dumps({**g, "limits": 'no "end": "until-back" tricks'})
+        for key in ("started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration"):
+            yield f"missing {key}", json.dumps({k: v for k, v in g.items() if k != key})
+        yield "end is a number", json.dumps({**g, "end": 5})
+        yield "end is junk", json.dumps({**g, "end": "tomorrow"})
+        yield "started is junk", json.dumps({**g, "started": "yesterday"})
+        yield "started is a number", json.dumps({**g, "started": 5})
+        yield "projects a string", json.dumps({**g, "projects": "shop"})
+        yield "projects a list", json.dumps({**g, "projects": ["shop"]})
+        yield "projects mixed", json.dumps({**g, "projects": ["shop", 3]})
+        yield "unmetered a string", json.dumps({**g, "unmetered": "yes"})
+        yield "deny_paths a string", json.dumps({**g, "deny_paths": "x"})
+        yield "branches a list", json.dumps({**g, "branches": []})
+        yield "integration a list", json.dumps({**g, "integration": []})
+        yield "extra keys", json.dumps({**g, "note": 1})
+        yield "empty", ""
+        yield "spaces", "  \n"
+        yield "list", "[]"
+        yield "null", "null"
+        yield "text", "hello"
+
+    def python_says(self, text: str) -> bool:
+        self.improve_file().write_text(text)
+        r = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {str(ROOT / 'core')!r}); "
+                            "import improve; sys.exit(0 if improve.load(quiet=True) else 1)"], env=self.env)
+        return r.returncode == 0
+
+    def shell_says(self, text: str) -> str:
+        self.improve_file().write_text(text)
+        return self.lane_limits("LANE_OWNER_AWAY", "LANE_PRESENCE_WHY")["LANE_PRESENCE_WHY"]
+
+    def test_both_readers_agree_on_every_file(self):
+        env_hour = {"LANE_HOUR": "12"}
+        self.env.update(env_hour)
+        wrong = []
+        for name, text in self.cases():
+            py = self.python_says(text)
+            sh = self.shell_says(text) == "improve"
+            if py != sh:
+                wrong.append((name, "python on" if py else "python off", "shell on" if sh else "shell off"))
+        self.assertEqual(wrong, [])
+
+    def test_a_truncated_file_gives_no_daytime_check_in(self):
+        # the reviewer's reproduction: night-precheck at noon with a truncated improve.json
+        canon = json.dumps(self.GOOD, indent=2, sort_keys=True) + "\n"
+        self.improve_file().write_text(canon[: canon.index('"limits"')])
+        self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "")
+        s = self.run_script("lane-away", "status").stdout
+        self.assertIn("improve: off", s)
+        self.assertIn("owner away: no", s)
+
+
 class ImproveReadTests(ImproveTest):
     def read(self, code: str, env=None):
         e = dict(self.env, **(env or {}))
@@ -339,7 +560,7 @@ class ImproveReadTests(ImproveTest):
         self.assertEqual(v["LANE_PRESENCE"], "away")
         self.assertEqual(v["LANE_PRESENCE_WHY"], "improve")
         self.run_script("lane-away", "off")
-        self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "")
+        self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "")  # draining is not away
 
     def test_a_lone_copy_of_lane_limits_sees_improve_too(self):
         # ~/.agents/bin/lane-limits.sh is a copy by itself (project-setup's lane tools): it must not need improve.py
@@ -396,13 +617,14 @@ class ImproveReadTests(ImproveTest):
         self.on("--project", "shop")
         r = self.read("print(improve.active_for('shop'), improve.active_for('blog'))")
         self.assertEqual(r.stdout.strip(), "True False")
+        self.reset()
         self.on()
         r = self.read("print(improve.active_for('shop'), improve.active_for('blog'))")
         self.assertEqual(r.stdout.strip(), "True True")
 
     def test_write_and_clear(self):
         r = self.read("improve.write({'started':'2026-01-01T00:00:00+00:00','end':'until-back','limits':'','deny_paths':[],"
-                      "'projects':'all','unmetered':False,'branches':{}}); print(improve.active_for('x')); improve.clear(); "
+                      "'projects':'all','unmetered':False,'branches':{},'integration':{}}); print(improve.active_for('x')); improve.clear(); "
                       "print(improve.load())")
         self.assertEqual(r.stdout.split(), ["True", "None"], r.stderr)
 
