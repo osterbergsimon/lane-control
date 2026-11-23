@@ -1,4 +1,4 @@
-"""lane-away on --improve, the improve state (core/improve.py) and what reads it (away-improve mode, lc-yzb). Temp HOME
+"""lane-improve (on, off, drained, status), the improve state (core/improve.py) and what reads it (away-improve mode, lc-yzb). Temp HOME
 and temp git repos; no real away file, improve file, branch or repo is touched."""
 import json
 import subprocess
@@ -47,6 +47,50 @@ def make_repo(root: Path, name: str, branch: str = "main") -> Path:
     return clone
 
 
+class PresenceUntilBackTests(MachineTest):
+    """`lane-away on --until-back`: the away file has no 14 h expiry until `lane-away off`."""
+
+    def away(self):
+        return self.conf_dir / "away"
+
+    def test_until_back_does_not_expire(self):
+        import os, time
+        r = self.run_script("lane-away", "on", "--until-back")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("until you run `lane-away off`", r.stdout)
+        t = time.time() - 60 * 3600
+        os.utime(self.away(), (t, t))
+        v = self.lane_limits("LANE_OWNER_AWAY", "LANE_PRESENCE_WHY")
+        self.assertEqual((v["LANE_OWNER_AWAY"], v["LANE_PRESENCE_WHY"]), ("1", "owner away"))
+        s = self.run_script("lane-away", "status").stdout
+        self.assertIn("until back", s)
+        self.assertIn("owner away: yes", s)
+        self.assertNotIn("expired", s)
+        self.assertEqual(self.run_script("lane-away", "off").returncode, 0)
+        self.assertFalse(self.away().exists())
+        self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "")
+
+    def test_a_plain_on_goes_back_to_the_timed_away(self):
+        import os, time
+        self.run_script("lane-away", "on", "--until-back")
+        self.run_script("lane-away", "on")
+        self.assertEqual(self.away().read_text(), "")
+        t = time.time() - 15 * 3600
+        os.utime(self.away(), (t, t))
+        self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "")  # 14 h passed again
+        self.assertIn("expired", self.run_script("lane-away", "status").stdout)
+
+    def test_a_plain_away_file_still_expires_and_counts(self):
+        r = self.run_script("lane-away", "on")
+        self.assertIn("away for", r.stdout)
+        self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "1")
+
+    def test_other_options_are_refused(self):
+        for args in (("--hours", "3"), ("--until", "10:00"), ("--limits", "x"), ("--until-back", "--hours", "2")):
+            self.assertEqual(self.run_script("lane-away", "on", *args).returncode, 2, args)
+        self.assertFalse(self.away().exists())
+
+
 class ImproveTest(MachineTest):
     def setUp(self):
         super().setUp()
@@ -80,8 +124,8 @@ class ImproveTest(MachineTest):
     def reset(self):
         """Back to no improve period at all: ended, wrapped up, and the owner has dropped the away branches (a new `on` is
         refused while a period is on or draining, or a project still has its away branch)."""
-        self.run_script("lane-away", "off")
-        self.run_script("lane-away", "drained", "--all")
+        self.run_script("lane-improve", "off")
+        self.run_script("lane-improve", "drained", "--all")
         self.drop_branches()
 
     def drop_branches(self):
@@ -90,7 +134,7 @@ class ImproveTest(MachineTest):
                 git(repo, "push", "-q", "origin", "--delete", b)
 
     def on(self, *args, env=None):
-        return self.run_script("lane-away", "on", "--improve", "--yes", *args, env=env)
+        return self.run_script("lane-improve", "on", "--yes", *args, env=env)
 
 
 class ImproveOnTests(ImproveTest):
@@ -99,12 +143,18 @@ class ImproveOnTests(ImproveTest):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.away().is_file())
         self.assertFalse(self.improve_file().exists())
-        self.assertIn("improve: off", self.run_script("lane-away", "status").stdout)
+        self.assertIn("improve: off", self.run_script("lane-improve", "status").stdout)
+        r = self.run_script("lane-away", "on", "--until-back")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self.improve_file().exists())  # being away, even until back, never starts it
+        self.assertFalse(self.drain_file().exists())
 
     def test_night_and_budget_marker_leave_improve_off(self):
         (self.conf_dir / "budget-stopped").touch()
-        self.run_script("lane-away", "status", env={"LANE_HOUR": "2"})
+        self.run_script("lane-improve", "status", env={"LANE_HOUR": "2"})
+        self.run_script("night-precheck", env={"LANE_HOUR": "2"})
         self.assertFalse(self.improve_file().exists())
+        self.assertIn("improve: off", self.run_script("lane-improve", "status", env={"LANE_HOUR": "2"}).stdout)
 
     def test_improve_writes_state(self):
         r = self.on("--limits", "nothing that needs db migrations", "--deny-paths", "**/migrations/**,infra/*")
@@ -120,7 +170,7 @@ class ImproveOnTests(ImproveTest):
         self.assertEqual(sorted(st["branches"]), ["blog", "shop"])
         for b in st["branches"].values():
             self.assertRegex(b, r"^away/\d{4}-\d{2}-\d{2}$")
-        self.assertTrue(self.away().is_file())  # the owner counts as away
+        self.assertFalse(self.away().exists())  # presence is lane-away's, not improve's
 
     def test_hours_and_until_set_a_time_end(self):
         self.on("--hours", "3")
@@ -154,7 +204,7 @@ class ImproveOnTests(ImproveTest):
         self.assertFalse(self.away().exists())
 
     def test_no_terminal_needs_yes(self):
-        r = self.run_script("lane-away", "on", "--improve")
+        r = self.run_script("lane-improve", "on")
         self.assertEqual(r.returncode, 2)
         self.assertIn("--yes", r.stderr)
         self.assertFalse(self.improve_file().exists())
@@ -178,24 +228,23 @@ class ImproveOnTests(ImproveTest):
 
     def test_off_ends_the_mode_and_leaves_a_drain_state(self):
         self.on()
-        r = self.run_script("lane-away", "off")
+        r = self.run_script("lane-improve", "off")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(self.away().exists())
         self.assertFalse(self.improve_file().exists())
         self.assertTrue(self.drain_file().exists())
-        self.assertEqual(self.run_script("lane-away", "off").returncode, 0)  # again: harmless
+        self.assertEqual(self.run_script("lane-improve", "off").returncode, 0)  # again: harmless
         self.assertTrue(self.drain_file().exists())
 
     def test_status_says_the_branch_stays_until_the_owner_adopts_or_drops_it(self):
         self.on("--project", "shop")
-        s = self.run_script("lane-away", "status").stdout
+        s = self.run_script("lane-improve", "status").stdout
         self.assertIn("one away branch per project", s)
         for word in ("adopt", "drop"):
             self.assertIn(word, s)
 
     def test_status_shows_improve(self):
         self.on("--project", "shop", "--limits", "no db migrations")
-        s = self.run_script("lane-away", "status").stdout
+        s = self.run_script("lane-improve", "status").stdout
         self.assertIn("improve: on", s)
         self.assertIn("until back", s)
         self.assertIn("no db migrations", s)
@@ -205,6 +254,27 @@ class ImproveOnTests(ImproveTest):
     def test_usage_refuses_improve_flags_without_improve(self):
         self.assertEqual(self.run_script("lane-away", "on", "--limits", "x").returncode, 2)
         self.assertFalse(self.improve_file().exists())
+
+    def test_lane_away_no_longer_starts_improve_and_points_to_lane_improve(self):
+        for args in (("on", "--improve"), ("on", "--improve", "--yes"), ("on", "--yes", "--improve")):
+            r = self.run_script("lane-away", *args)
+            self.assertEqual(r.returncode, 2, args)
+            self.assertIn("lane-improve", r.stderr)
+            self.assertFalse(self.improve_file().exists())
+            self.assertFalse(self.away().exists())
+
+    def test_improve_and_presence_are_separate(self):
+        # `lane-improve on` writes no away file; `lane-away off` does not end improve; `lane-improve off` leaves presence
+        self.on("--project", "shop")
+        self.assertFalse(self.away().exists())
+        self.run_script("lane-away", "on")
+        self.run_script("lane-away", "off")
+        self.assertTrue(self.improve_file().exists())
+        self.run_script("lane-away", "on")
+        self.run_script("lane-improve", "off")
+        self.assertTrue(self.away().exists())
+        self.assertIn("owner away: yes", self.run_script("lane-away", "status").stdout)
+        self.assertNotIn("improve", self.run_script("lane-away", "status").stdout)
 
 
 class ImproveBranchTests(ImproveTest):
@@ -263,8 +333,8 @@ class ImproveBranchTests(ImproveTest):
     def test_on_is_refused_when_the_project_already_has_its_away_branch(self):
         self.on("--project", "shop")
         first = self.state()["branches"]["shop"]
-        self.run_script("lane-away", "off")
-        self.run_script("lane-away", "drained", "--all")
+        self.run_script("lane-improve", "off")
+        self.run_script("lane-improve", "drained", "--all")
         r = self.on("--project", "shop")
         self.assertNotEqual(r.returncode, 0)
         for word in ("shop", first, "--continue", "adopt", "drop", "main"):
@@ -370,10 +440,10 @@ class ImproveDenyTests(ImproveTest):
     def test_off_removes_them_from_every_coordinator(self):
         self.on()
         self.assertTrue(self.denies(self.shop) and self.denies(self.blog))
-        r = self.run_script("lane-away", "off")
+        r = self.run_script("lane-improve", "off")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.denies(self.shop) and self.denies(self.blog))  # kept while the last PRs drain
-        r = self.run_script("lane-away", "drained", "--all")
+        r = self.run_script("lane-improve", "drained", "--all")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((self.denies(self.shop), self.denies(self.blog)), ([], []))
         self.assertFalse(self.settings(self.shop).exists())
@@ -383,8 +453,8 @@ class ImproveDenyTests(ImproveTest):
         self.settings(self.shop).parent.mkdir()
         self.settings(self.shop).write_text(json.dumps({"model": "sonnet", "permissions": {"deny": ["Bash(rm:*)"]}}))
         self.on("--project", "shop")
-        self.run_script("lane-away", "off")
-        self.run_script("lane-away", "drained", "shop")
+        self.run_script("lane-improve", "off")
+        self.run_script("lane-improve", "drained", "shop")
         self.assertEqual(json.loads(self.settings(self.shop).read_text()),
                          {"model": "sonnet", "permissions": {"deny": ["Bash(rm:*)"]}})
 
@@ -412,9 +482,9 @@ class ImproveDenyTests(ImproveTest):
         rec = self.home / ".local" / "state" / "lane-control" / "away-denies" / f"{key}.opencode.json"
         self.assertEqual(json.loads(rec.read_text()), {"integration": "main", "project": "blog"})
         self.assertTrue(self.denies(self.shop))
-        self.run_script("lane-away", "off")
+        self.run_script("lane-improve", "off")
         self.assertTrue(rec.exists())  # still draining
-        self.run_script("lane-away", "drained", "--all")
+        self.run_script("lane-improve", "drained", "--all")
         self.assertFalse(rec.exists())
 
 
@@ -430,7 +500,7 @@ class ImproveDrainTests(ImproveTest):
     def test_off_records_what_is_left_to_wrap_up(self):
         self.on("--project", "shop")
         before = self.state()
-        self.run_script("lane-away", "off")
+        self.run_script("lane-improve", "off")
         d = self.drain()
         self.assertEqual(d["pending"], ["shop"])
         self.assertEqual(d["branches"], before["branches"])
@@ -439,40 +509,39 @@ class ImproveDrainTests(ImproveTest):
 
     def test_off_for_all_projects_lists_every_coordinator(self):
         self.on()
-        self.run_script("lane-away", "off")
+        self.run_script("lane-improve", "off")
         self.assertEqual(sorted(self.drain()["pending"]), ["blog", "shop"])
 
     def test_status_shows_the_drain(self):
         self.on("--project", "shop")
-        self.run_script("lane-away", "off")
-        s = self.run_script("lane-away", "status").stdout
+        self.run_script("lane-improve", "off")
+        s = self.run_script("lane-improve", "status").stdout
         self.assertIn("improve: draining", s)
         self.assertIn("shop", s)
-        self.assertIn("lane-away drained", s)
-        self.assertIn("owner away: no", s)
+        self.assertIn("lane-improve drained", s)
 
     def test_drained_one_project_at_a_time(self):
         self.on()
-        self.run_script("lane-away", "off")
-        r = self.run_script("lane-away", "drained", "shop")
+        self.run_script("lane-improve", "off")
+        r = self.run_script("lane-improve", "drained", "shop")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.drain()["pending"], ["blog"])
         self.assertEqual(json.loads(self.settings(self.shop).read_text()) if self.settings(self.shop).exists() else {}, {})
         self.assertTrue(self.settings(self.blog).exists())
-        self.assertEqual(self.run_script("lane-away", "drained", "shop").returncode, 1)  # nothing left to drain there
-        self.assertEqual(self.run_script("lane-away", "drained", "blog").returncode, 0)
+        self.assertEqual(self.run_script("lane-improve", "drained", "shop").returncode, 1)  # nothing left to drain there
+        self.assertEqual(self.run_script("lane-improve", "drained", "blog").returncode, 0)
         self.assertFalse(self.drain_file().exists())
-        self.assertIn("improve: off", self.run_script("lane-away", "status").stdout)
+        self.assertIn("improve: off", self.run_script("lane-improve", "status").stdout)
 
     def test_the_end_time_drains_too(self):
         self.on("--project", "shop", "--hours", "1")
         st = self.state()
         st["end"] = "2020-01-01T00:00:00+00:00"
         self.improve_file().write_text(json.dumps(st))
-        s = self.run_script("lane-away", "status").stdout
+        s = self.run_script("lane-improve", "status").stdout
         self.assertIn("improve: draining", s)
         self.assertIn("shop", s)
-        r = self.run_script("lane-away", "drained", "shop")
+        r = self.run_script("lane-improve", "drained", "shop")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(self.improve_file().exists())
         self.assertFalse(self.drain_file().exists())
@@ -489,7 +558,7 @@ class ImproveDrainTests(ImproveTest):
 
     def test_on_is_refused_while_draining(self):
         self.on("--project", "shop")
-        self.run_script("lane-away", "off")
+        self.run_script("lane-improve", "off")
         r = self.on("--project", "shop")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("drained", r.stderr)
@@ -499,7 +568,7 @@ class ImproveDrainTests(ImproveTest):
         self.on("--project", "shop")
         self.improve_file().unlink()
         self.drain_file().unlink(missing_ok=True)
-        self.run_script("lane-away", "off")
+        self.run_script("lane-improve", "off")
         self.assertFalse(self.settings(self.shop).exists())
         self.assertFalse(self.drain_file().exists())
 
@@ -508,7 +577,7 @@ class ImproveDrainTests(ImproveTest):
         st = self.state()
         st["started"] = "yesterday"
         self.improve_file().write_text(json.dumps(st))
-        r = self.run_script("lane-away", "status")
+        r = self.run_script("lane-improve", "status")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("started", r.stderr)
@@ -546,7 +615,8 @@ class ImproveIntegrationBranchTests(ImproveTest):
 
 
 class ReaderAgreementTests(ImproveTest):
-    """Review M5: the plain-shell reader in lane-limits.sh and improve.py say the same about every file."""
+    """The improve file's cases: what improve.py accepts. (test_opencode_guard.py runs the guard plugin over the same
+    cases; lane-limits.sh no longer reads the file at all: improve never changes presence.)"""
 
     GOOD = {"started": "2026-11-23T10:00:00+00:00", "end": "until-back", "limits": "", "deny_paths": [],
             "projects": "all", "unmetered": False, "branches": {"shop": "away/2026-11-23"},
@@ -588,35 +658,28 @@ class ReaderAgreementTests(ImproveTest):
         yield "null", "null"
         yield "text", "hello"
 
+    ON = {"canonical", "one line", "future end", "naive future end", "ended", "branch named end, until back",
+          "limits text with end", "extra keys", "projects a list", "project named end"}
+
     def python_says(self, text: str) -> bool:
         self.improve_file().write_text(text)
         r = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {str(ROOT / 'core')!r}); "
-                            "import improve; sys.exit(0 if improve.load(quiet=True) else 1)"], env=self.env)
+                            "import improve; sys.exit(0 if improve.load(quiet=True) or improve.ended_state() else 1)"],
+                           env=self.env)
         return r.returncode == 0
 
-    def shell_says(self, text: str) -> str:
-        self.improve_file().write_text(text)
-        return self.lane_limits("LANE_OWNER_AWAY", "LANE_PRESENCE_WHY")["LANE_PRESENCE_WHY"]
+    def test_the_reader_accepts_exactly_the_complete_valid_files(self):
+        got = {name for name, text in self.cases() if self.python_says(text)}
+        self.assertEqual(sorted(got - self.ON), [])
+        self.assertEqual(sorted(self.ON - got), [])
 
-    def test_both_readers_agree_on_every_file(self):
-        env_hour = {"LANE_HOUR": "12"}
-        self.env.update(env_hour)
-        wrong = []
-        for name, text in self.cases():
-            py = self.python_says(text)
-            sh = self.shell_says(text) == "improve"
-            if py != sh:
-                wrong.append((name, "python on" if py else "python off", "shell on" if sh else "shell off"))
-        self.assertEqual(wrong, [])
-
-    def test_a_truncated_file_gives_no_daytime_check_in(self):
-        # the reviewer's reproduction: night-precheck at noon with a truncated improve.json
+    def test_a_truncated_file_is_off_and_gives_no_daytime_check_in(self):
         canon = json.dumps(self.GOOD, indent=2, sort_keys=True) + "\n"
         self.improve_file().write_text(canon[: canon.index('"limits"')])
         self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "")
-        s = self.run_script("lane-away", "status").stdout
-        self.assertIn("improve: off", s)
-        self.assertIn("owner away: no", s)
+        s = self.run_script("lane-improve", "status")
+        self.assertIn("improve: off", s.stdout)
+        self.assertIn("not valid JSON", s.stderr)
 
 
 class ImproveReadTests(ImproveTest):
@@ -625,40 +688,14 @@ class ImproveReadTests(ImproveTest):
         return subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {str(ROOT / 'core')!r}); "
                                f"import improve; {code}"], env=e, capture_output=True, text=True)
 
-    def test_improve_keeps_owner_away_past_away_hours(self):
+    def test_improve_never_changes_presence(self):
         self.on()
-        # age the away file past AWAY_HOURS: the owner still counts as away while improve is on
-        import os, time
-        t = time.time() - 40 * 3600
-        os.utime(self.away(), (t, t))
         v = self.lane_limits("LANE_OWNER_AWAY", "LANE_PRESENCE", "LANE_PRESENCE_WHY")
-        self.assertEqual(v["LANE_OWNER_AWAY"], "1")
-        self.assertEqual(v["LANE_PRESENCE"], "away")
-        self.assertEqual(v["LANE_PRESENCE_WHY"], "improve")
-        self.run_script("lane-away", "off")
-        self.assertEqual(self.lane_limits("LANE_OWNER_AWAY")["LANE_OWNER_AWAY"], "")  # draining is not away
-
-    def test_a_lone_copy_of_lane_limits_sees_improve_too(self):
-        # ~/.agents/bin/lane-limits.sh is a copy by itself (project-setup's lane tools): it must not need improve.py
-        import os, shutil, time
-        alone = self.tmp / "agents-bin"
-        alone.mkdir()
-        shutil.copy(ROOT / "core" / "scripts" / "lane-limits.sh", alone / "lane-limits.sh")
-        self.on()
-        t = time.time() - 40 * 3600
-        os.utime(self.away(), (t, t))
-
-        def limits():
-            out = subprocess.run(["bash", "-c", f'. "{alone}/lane-limits.sh"; printf "%s %s" "$LANE_OWNER_AWAY" "$LANE_PRESENCE_WHY"'],
-                                 env=self.env, capture_output=True, text=True, check=True).stdout
-            return out
-        self.assertEqual(limits(), "1 improve")
-        st = self.state()
-        st["end"] = "2020-01-01T00:00:00+00:00"
-        self.improve_file().write_text(json.dumps(st))
-        self.assertNotIn("improve", limits())
-        self.improve_file().write_text("{not json")
-        self.assertNotIn("improve", limits())
+        self.assertEqual((v["LANE_OWNER_AWAY"], v["LANE_PRESENCE"], v["LANE_PRESENCE_WHY"]), ("", "day", "day"))
+        self.assertFalse(self.away().exists())
+        s = self.run_script("lane-away", "status").stdout
+        self.assertIn("presence: day", s)
+        self.assertIn("owner away: no", s)
 
     def test_malformed_file_is_off_and_says_why(self):
         self.improve_file().write_text("{not json")
@@ -684,10 +721,8 @@ class ImproveReadTests(ImproveTest):
         st = self.state()
         st["end"] = "2020-01-01T00:00:00+00:00"
         self.improve_file().write_text(json.dumps(st))
-        self.away().unlink()
         r = self.read("print(improve.load())")
         self.assertEqual(r.stdout.strip(), "None")
-        self.assertEqual(self.lane_limits("LANE_PRESENCE_WHY")["LANE_PRESENCE_WHY"], "day")
 
     def test_active_for_names(self):
         self.on("--project", "shop")

@@ -4,14 +4,11 @@
 # Limits: presence, then the owner's per-machine file (limits.example.sh documents it), then defaults from cores,
 # memory and presence for whatever the file left unset:
 #   LANE_LIMITS_FILE   the file (default ~/.config/lane-control/limits.sh; absent is fine)
-#   LANE_AWAY_FILE     the owner is away while it is younger than AWAY_HOURS, 14 h by default
-#                      (default ~/.config/lane-control/away; lane-away writes it)
+#   LANE_AWAY_FILE     the owner is away while it is younger than AWAY_HOURS, 14 h by default, or with no limit while it
+#                      holds `until-back` (default ~/.config/lane-control/away; lane-away writes it)
 #   LANE_MACHINE_CONF  the machine config (default ~/.config/lane-control/machine.conf; absent is fine): night is
 #                      NIGHT_START-NIGHT_END there (default 23-07) and the away file lasts AWAY_HOURS. Only plain
 #                      `KEY=<digits>` lines are read; the file is never sourced here.
-#   LANE_IMPROVE_FILE  away-improve mode is on while it holds a usable, unended state (default
-#                      ~/.config/lane-control/improve.json; `lane-away on --improve` writes it): the owner then counts
-#                      as away whatever AWAY_HOURS says (read here by a copy of improve.py's validation)
 #   LANE_BUDGET_STOPPED_FILE  the budget is at its stop step while it is younger than 1 h: agents sit idle until the
 #                      reset, so the machine is CI's (default ~/.config/lane-control/budget-stopped). Its writer
 #                      touches it on every check while the budget stays stopped and removes it after the reset.
@@ -29,8 +26,6 @@ LANE_LIMITS_FILE=${LANE_LIMITS_FILE:-$HOME/.config/lane-control/limits.sh}
 LANE_AWAY_FILE=${LANE_AWAY_FILE:-$HOME/.config/lane-control/away}
 LANE_BUDGET_STOPPED_FILE=${LANE_BUDGET_STOPPED_FILE:-$HOME/.config/lane-control/budget-stopped}
 LANE_MACHINE_CONF=${LANE_MACHINE_CONF:-$HOME/.config/lane-control/machine.conf}
-LANE_IMPROVE_FILE=${LANE_IMPROVE_FILE:-$HOME/.config/lane-control/improve.json}
-export LANE_IMPROVE_FILE
 
 # `--all`: plain nproc shrinks with OMP_NUM_THREADS and affinity, so two lanes could compute different limits.
 LANE_CORES=$(nproc --all 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
@@ -60,35 +55,10 @@ elif [ "$lane_hour" -ge "$LANE_NIGHT_START" ] && [ "$lane_hour" -lt "$LANE_NIGHT
   lane_night=1
 fi
 LANE_PRESENCE=day LANE_PRESENCE_WHY=day LANE_OWNER_AWAY=
-# Improve mode: on while the file `lane-away on --improve` writes holds a complete, valid state whose end has not passed.
-# A copy of core/improve.py's validation, because this script is installed as a lone copy where improve.py is not; the
-# two are kept in step by tests/test_lane_away.py ReaderAgreementTests, which runs both over the same files. It runs
-# only when the file exists (improve mode is rare). Anything it cannot read means off.
-lane_improve=
-if [ -r "$LANE_IMPROVE_FILE" ] && python3 -c '
-import datetime as d, json, sys
-def t(v):
-    try:
-        d.datetime.fromisoformat(v)
-        return True
-    except (TypeError, ValueError):
-        return False
-def names(x):
-    return isinstance(x, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in x.items())
-s = json.load(open(sys.argv[1]))
-ok = (isinstance(s, dict)
-      and all(k in s for k in ("started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration"))
-      and t(s["started"]) and (s["end"] == "until-back" or t(s["end"])) and isinstance(s["limits"], str)
-      and isinstance(s["deny_paths"], list) and all(isinstance(x, str) for x in s["deny_paths"])
-      and (s["projects"] == "all" or (isinstance(s["projects"], list) and all(isinstance(x, str) for x in s["projects"])))
-      and isinstance(s["unmetered"], bool) and names(s["branches"]) and names(s["integration"]))
-sys.exit(0 if ok and (s["end"] == "until-back" or d.datetime.fromisoformat(s["end"]).astimezone() > d.datetime.now().astimezone()) else 1)
-' "$LANE_IMPROVE_FILE" 2>/dev/null; then
-  lane_improve=1
-fi
-if [ -n "$lane_improve" ]; then
-  LANE_PRESENCE=away LANE_PRESENCE_WHY=improve LANE_OWNER_AWAY=1
-elif [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -$((LANE_AWAY_HOURS * 60)) 2>/dev/null)" ]; then
+# The away file counts for AWAY_HOURS, or with no limit when `lane-away on --until-back` wrote `until-back` in it.
+# Away-improve mode (lane-improve) is a separate switch and never changes presence.
+if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -$((LANE_AWAY_HOURS * 60)) 2>/dev/null)" ] ||
+  grep -qx until-back "$LANE_AWAY_FILE" 2>/dev/null; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY="owner away" LANE_OWNER_AWAY=1
 elif [ -n "$lane_night" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY=night LANE_OWNER_AWAY=1

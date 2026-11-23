@@ -1984,7 +1984,7 @@ class AwayImproveContentTests(unittest.TestCase):
         for needle in ("deep tier", "why you picked", "Review: passed <head sha>"):
             self.assertIn(needle, t, needle)
         for needle in ("read-only", "3-5", "builds on", "`budget-state --project", "no-new-work", "nothing within the limits",
-                       "draft PR", "away/<date>", "lane-room", "`lane-away status`",
+                       "draft PR", "away/<date>", "lane-room", "`lane-improve status`",
                        "`improve: on`", "never polling", "the running lane finishes", "never squash",
                        "never force-push", "never merge into the integration branch"):
             self.assertIn(needle.lower(), t.lower(), needle)
@@ -1997,7 +1997,7 @@ class AwayImproveContentTests(unittest.TestCase):
         self.assertIn("never turn it on yourself", t)
         for phrase in ("goodnight", "leaving", "relayed"):
             self.assertIn(phrase, t)
-        self.assertNotIn("on --improve", t)
+        self.assertNotIn("lane-improve on", t)
 
     def test_skill_refuses_other_merge_routes(self):
         t = flat(AWAY_SKILL)
@@ -2045,9 +2045,9 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_personas_explicit_only(self):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
-        self.assertIn("`lane-away on --improve`", mc)
+        self.assertIn("`lane-improve on`", mc)
         for needle in ("only when the owner's own message", "explicitly asks for the improve", "goodnight", "leaving",
-                       "relayed", "never from", "plain `lane-away on`"):
+                       "relayed", "never from", "`lane-away on --until-back`", "Presence is separate from improve mode"):
             self.assertIn(needle, mc, needle)
         co = flat(PERSONA_DIR / "coordinator.md")
         self.assertIn("away-improve", co)
@@ -2058,7 +2058,7 @@ class AwayImproveContentTests(unittest.TestCase):
                      NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md"):
             if path.name == "machine-coordinator.md":
                 continue
-            self.assertNotIn("on --improve", flat(path), path.name)
+            self.assertNotIn("lane-improve on", flat(path), path.name)
         self.assertIn("never turn improve mode on", flat(NATIVE_DIR / "night-manager.md"))
 
     def test_skill_review_marker_is_bound_to_the_head_and_written_by_the_coordinator_alone(self):
@@ -2072,10 +2072,10 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_skill_drain_flow_after_off_or_the_end(self):
         t = flat(AWAY_SKILL)
-        for needle in ("`improve: draining`", "No new cycle starts", "still merges", "`lane-away drained <project>`",
+        for needle in ("`improve: draining`", "No new cycle starts", "still merges", "`lane-improve drained <project>`",
                        "`integration` in `~/.config/lane-control/improve.json`", "draft PR", "deny rules stay until"):
             self.assertIn(needle, t, needle)
-        self.assertLess(t.index("away-merge` the last PR"), t.index("`lane-away drained <project>`"))
+        self.assertLess(t.index("away-merge` the last PR"), t.index("`lane-improve drained <project>`"))
 
     def test_skill_and_record_call_the_deny_rules_a_backstop(self):
         t = flat(AWAY_SKILL)
@@ -2094,8 +2094,8 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_machine_coordinator_tells_the_coordinators_when_it_runs_off(self):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
-        for needle in ("run `lane-away off`", "tell each named project's coordinator", "wrap up",
-                       "`lane-away drained <project>`"):
+        for needle in ("run `lane-improve off`", "tell each named project's coordinator", "wrap up",
+                       "`lane-improve drained <project>`"):
             self.assertIn(needle, mc, needle)
 
     def test_build_brief_leaves_the_merge_sha_to_the_coordinator(self):
@@ -2105,7 +2105,7 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_machine_presence_line_keeps_plain_on_plain(self):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
-        self.assertIn("never starts improve mode", mc)
+        self.assertIn("never start improve mode", mc)
 
     def test_skill_installed_for_claude_and_opencode(self):
         src = (ROOT / "core" / "scripts" / "project-setup").read_text()

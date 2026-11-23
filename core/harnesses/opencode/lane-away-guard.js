@@ -10,11 +10,11 @@
 // and throwing from it stops the call, the model getting the message as the tool result. The shell tool is `shell`
 // (`bash` in older builds); its input has `command` and an optional `workdir`.
 //
-// It acts only in a session started with LANE_ROLE=coordinator, and only for a checkout that `lane-away on --improve`
+// It acts only in a session started with LANE_ROLE=coordinator, and only for a checkout that `lane-improve on`
 // recorded (<state>/lane-control/away-denies/<checkout as one folder name>.opencode.json: the project's name and its
 // integration branch). Every call reads ~/.config/lane-control/improve.json (LANE_IMPROVE_FILE) and improve-drain.json
 // beside it, so it is live with no restart: it starts with `on`, stays while the mode drains after `off` or the end
-// time, and lifts at `lane-away drained <project>`. State it cannot read (missing, malformed: the same rules as
+// time, and lifts at `lane-improve drained <project>`. State it cannot read (missing, malformed: the same rules as
 // core/improve.py; tests/test_opencode_guard.py runs both over the same files) means no guard, said once on stderr.
 // A restart is needed once for a coordinator already running when this plugin was installed.
 //
@@ -398,7 +398,7 @@ async function guard(event) {
     if (!rec) return;
     if (!active(rec.project)) {
       if (!existsSync(improveFile()) && !existsSync(drainFile()))
-        say("a guard record is installed but there is no improve state: failing open (no guard); `lane-away drained <project>` clears it");
+        say("a guard record is installed but there is no improve state: failing open (no guard); `lane-improve drained <project>` clears it");
       return;
     }
     const wd = event?.input?.workdir;

@@ -15,7 +15,8 @@ drops.
 
 - **Toggled by the owner**, on when away, off on return. Optional; off by default; only ever on by an explicit
   request for this mode (never inferred from "goodnight" or "leaving").
-- **One branch per project per away period**, so work builds on earlier work instead of a pile of unrelated PRs.
+- **At most one away branch per project, ever** (owner, 2026-11-23), so work builds on earlier work instead of a pile of
+  unrelated PRs: a project that has one is refused a second until the owner continues, adopts (merges) or drops (deletes) it.
 - **Strong prompting for innovation:** agents are told plainly they may and should propose and build new things.
 - **No size cap.** Only the owner's limits, review and judgement bound a change.
 - **Limits given when turning it on**, free text, e.g. "nothing that needs db migrations".
@@ -48,24 +49,30 @@ drops.
 ### Turning it on and off
 
 **Only on an explicit request (the owner, 2026-11-23: it may spend a lot of tokens).**
-- It turns on only through `lane-away on --improve`, run by the owner, or run by the machine coordinator when the
-  owner's own message explicitly asks for the improve (away-improve) mode. Plain `lane-away on`, night, a stopped or
+- It turns on only through `lane-improve on`, run by the owner, or run by the machine coordinator when the
+  owner's own message explicitly asks for the improve (away-improve) mode. `lane-away on` (also `--until-back`), night, a stopped or
   raised budget, and phrases like "goodnight", "leaving" or "I'm away" never turn it on, and no agent may infer it.
 - A request relayed by another agent is not enough; the agent asks the owner directly.
-- On switching on, `lane-away` prints what was turned on (projects, branch per project, end or "until back",
+- On switching on, `lane-improve` prints what was turned on (projects, branch per project, end or "until back",
   limits, metered or unmetered) so the owner sees exactly what will run. Without a terminal it refuses unless
   `--yes` is given, so nothing starts it unattended by accident.
-- Tests pin that plain `lane-away on` leaves improve off.
+- Tests pin that `lane-away on` leaves improve off.
+- **Improve is separate from presence (owner, 2026-11-23).** It has its own command, `core/scripts/lane-improve
+  on|off|status|drained`; `lane-away` is presence only and refuses `--improve`. Being away does not start improve, and improve does
+  not make the owner count as away: limits and the plain check-ins follow the away file and night as before, while the
+  improve cycles and the improve nudge run day or night whatever presence says. `lane-away on --until-back` writes an away
+  file with no expiry (until `lane-away off`) for "until I get back".
 
-- `lane-away on --improve [--until <time>|--hours N|--until-back] [--limits "<text>"] [--project <name>]...` writes
-  the away file as today plus an improve file (`~/.config/lane-control/improve.json`): start time, end (a time, or
-  "until back"), limits text, and which projects (all set-up projects by default).
+- `lane-improve on [--until <time>|--hours N|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]...
+  [--unmetered] [--continue] [--yes]` writes an improve file (`~/.config/lane-control/improve.json`): start time, end (a
+  time, or "until back"), limits text, which projects (all set-up projects by default), their away branches and their
+  integration branches. It writes no away file.
 - **Until back (the owner's requirement):** `--until-back` has no end time; the mode runs until the owner runs
-  `lane-away off`. This is the default when no end is given. While improve is on, the owner counts as away for
-  limits and check-ins whatever AWAY_HOURS says, so a long absence never drops back to day limits.
-- `lane-away off` ends both. `lane-away status` shows the mode, its end, its limits and its projects.
+  `lane-improve off`. This is the default when no end is given.
+- `lane-improve off` ends the mode (the running lanes drain, see "On return"). `lane-improve status` shows the mode, its end,
+  its limits and its projects, or what is still draining.
 - `--unmetered` marks a machine with no usage limits: the budget steps are then off for improve work only. It may be
-  combined with until-back; then only `lane-away off`, machine limits and the owner's limits stop the work.
+  combined with until-back; then only `lane-improve off`, machine limits and the owner's limits stop the work.
 
 ### The cycle (approach A)
 
@@ -109,7 +116,9 @@ and explain themselves; check what exists first and build on it. The exact text 
 
 ### On return
 
-`lane-away off` ends the mode; the coordinator's first message to the owner is the log summary and a link to a
+`lane-improve off` ends the mode (or its end time passes) and leaves a drain state: the running lane's last PR can still merge through
+`away-merge`, no new cycle starts, and each coordinator then opens the draft PR and runs `lane-improve drained <project>`. The
+coordinator's first message to the owner is the log summary and a link to a
 draft PR from `away/<date>` to the integration branch. The owner adopts the whole branch, or names items to drop
 (the coordinator runs a lane to revert them on the branch), then merges as usual.
 
@@ -118,7 +127,7 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
 - With limits: improve work follows the project's budget steps as all work does (per-project ceilings, lc-mtj must
   make budget-state read them). At no-new-work no new cycle starts; at push-and-handover the branch and log are
   pushed.
-- Unmetered: no budget steps for improve work, the time end is optional (until-back is allowed; then only `lane-away off`, machine limits and the owner's limits stop it), machine limits (lane-heavy slots, CI
+- Unmetered: no budget steps for improve work, the time end is optional (until-back is allowed; then only `lane-improve off`, machine limits and the owner's limits stop it), machine limits (lane-heavy slots, CI
   slice) still apply.
 
 ## Calls made after the builder check (coordinator's calls; the owner can overturn any)
@@ -129,9 +138,10 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
   limits leave nothing to do. The night manager is only a fallback: while improve is on (day or night), a coordinator
   idle IMPROVE_IDLE_MIN (default 30) gets a `DUE <name> improve` check-in to resume, which covers a lost wake. This is
   not polling: the coordinator never loops on `check`. Night alone never starts improve work.
-- **The branch is the coordinator's (the owner, 2026-11-23).** Each `lane-away on --improve` cuts a new
-  `away/<YYYY-MM-DD>` per project from its integration branch, or with `--continue [away/<name>]` carries on an
-  existing away branch (the newest one by default; its log continues). The coordinator owns that branch: it merges
+- **The branch is the coordinator's (the owner, 2026-11-23).** `lane-improve on` cuts `away/<YYYY-MM-DD>` per project from its
+  integration branch when the project has no away branch; when it has one, it refuses unless given `--continue` (which takes no
+  argument and carries on with that one branch, its log continuing; two or more are refused and listed), telling the owner to continue
+  it, adopt it (merge it to the integration branch) or drop it (delete it) first. The same date is fine again once the branch is gone. The coordinator owns that branch: it merges
   build lanes' PRs into it on its own, with no owner's word per item, when (1) the review passed, (2) tests are green
   (CI on the PR, or, when CI itself is failing or unavailable for reasons outside the change, the full suite through
   lane-heavy, recorded in the log), and (3) a secret and private-data scan of the diff is clean (gitleaks when the
@@ -139,7 +149,7 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
   does the merge and refuses any base that is not the project's active `away/*` branch, so the integration branch
   stays untouched; merges are merge commits titled `away: <item>`. The owner's word is still needed for anything that
   reaches the integration branch.
-- **Unmetered** is per machine: `lane-away on --improve --unmetered` records it in improve.json; budget-state and
+- **Unmetered** is per machine: `lane-improve on --unmetered` records it in improve.json; budget-state and
   night-precheck then report `unmetered` (not `unknown`), and improve check-ins are not gated by budget. Other work
   keeps its normal rules.
 - **Per-project ceilings (lc-mtj)** are the first task of this work: budget-state reads the per-project ceiling the
@@ -148,9 +158,9 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
   `--deny-paths "<glob>,..."` checked by away-merge against the PR diff (e.g. `**/migrations/**`).
 - **Which projects (the owner: must be limitable):** `--project <name>` (repeatable) limits the mode to those
   projects; only without any `--project` does it mean all, which then includes projects set up later. Names are the
-  machine's coordinator names; an unknown name is refused when the mode is switched on. `lane-away status` lists them.
+  machine's coordinator names; an unknown name is refused when the mode is switched on. `lane-improve status` lists them.
 - **Scout tier:** deep (idea quality is the point); build lanes use normal routing.
-- **End:** improve ends at its own end time (none for until-back) or `lane-away off`, independent of the away file; when it ends, the
+- **End:** improve ends at its own end time (none for until-back) or `lane-improve off`, independent of the away file; when it ends, the
   running cycle finishes, the log summary is updated and pushed, and no new cycle starts.
 
 ## Skill and permission rules (the owner, 2026-11-23)

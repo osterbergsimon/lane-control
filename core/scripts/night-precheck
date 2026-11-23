@@ -20,8 +20,9 @@ IDLE_MIN minutes and not checked in on for RECHECK_MIN minutes, or a runner of R
 newest write of the coordinator's own session (the one started with LANE_ROLE/LANE_PERSONA), read by its harness
 adapter; Orca's terminal output is no idle signal (status-line redraws keep it fresh).
 
-Improve mode (core/improve.py; `lane-away on --improve`) makes the owner count as away, so by day too. For a
-coordinator it covers, the plain check-in is replaced by `DUE <name> improve`: a fallback nudge for a lost wake, since the
+Improve mode (core/improve.py; `lane-improve on`) is separate from presence: it does not make the owner count as away,
+and its nudges go out by day or night whatever presence says (the plain check-ins above wait for the owner to be away).
+For a coordinator it covers, the plain check-in is replaced by `DUE <name> improve`: a fallback nudge for a lost wake, since the
 coordinator starts its next cycle itself. Metered, it follows that project's budget steps (budget-state --project): from
 no-new-work it is the push-and-handover check-in (a BUDGET push-and-handover line first, as for a plain one), at the stop
 step none, and a BUDGET unknown line when the feed gives no reading. Unmetered (improve.json) it is not gated
@@ -172,7 +173,8 @@ def main(argv: list) -> int:
     for w in conf["warnings"]:
         err(w)
     istate = improve.load()  # None = off; a file that cannot be used says why on stderr
-    if not away.get("LANE_OWNER_AWAY"):
+    owner_away = bool(away.get("LANE_OWNER_AWAY"))
+    if not owner_away and not istate:  # improve mode's nudges do not wait for the owner to be away
         err(f"the owner is not away ({away.get('LANE_PRESENCE_WHY') or 'day'}): nothing is due")
         return 1
     now, due, broken = time.time(), [], False
@@ -201,7 +203,7 @@ def main(argv: list) -> int:
             # improve covers it: the resume nudge stands in for the plain check-in
             if idle >= conf["IMPROVE_IDLE_MIN"] and not recently_checked(f"{c.name}.improve", conf["IMPROVE_IDLE_MIN"], now):
                 nudge.append((c.name, idle))
-        elif idle >= conf["IDLE_MIN"] and not recently_checked(c.name, conf["RECHECK_MIN"], now):
+        elif owner_away and idle >= conf["IDLE_MIN"] and not recently_checked(c.name, conf["RECHECK_MIN"], now):
             due.append(f"DUE {c.name} idle={idle}min")
     if due:  # coordinators due: the budget decides what, if anything, they get
         gate, why = budget_gate()

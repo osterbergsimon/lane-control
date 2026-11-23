@@ -123,11 +123,11 @@ class AwayMergeTests(AwayMergeTest):
 
     def test_merges_while_draining_but_not_after(self):
         # review M1: the running lane's PR still merges after `off`; once the project is wrapped up it does not
-        self.run_script("lane-away", "off")
+        self.run_script("lane-improve", "off")
         r = self.merge()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(self.merged()), 1)
-        self.assertEqual(self.run_script("lane-away", "drained", "shop").returncode, 0)
+        self.assertEqual(self.run_script("lane-improve", "drained", "shop").returncode, 0)
         self.assertRefused(self.merge(), "improve")
 
     def test_merges_after_the_end_time_until_drained(self):
@@ -135,11 +135,11 @@ class AwayMergeTests(AwayMergeTest):
         st["end"] = "2020-01-01T00:00:00+00:00"
         self.improve_file().write_text(json.dumps(st))
         self.assertEqual(self.merge().returncode, 0)
-        self.run_script("lane-away", "drained", "shop")
+        self.run_script("lane-improve", "drained", "shop")
         self.assertRefused(self.merge(), "improve")
 
     def test_draining_still_checks_the_base(self):
-        self.run_script("lane-away", "off")
+        self.run_script("lane-improve", "off")
         self.pr(baseRefName="main")
         self.assertRefused(self.merge(), "base")
 

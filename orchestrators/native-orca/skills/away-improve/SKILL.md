@@ -1,22 +1,24 @@
 ---
 name: away-improve
-description: Run away-improve mode for your project: keep improving the product on its own away/<date> branch, cycle after cycle, while the owner is away. Use only when `lane-away status` says `improve: on` for your project; it holds the cycle, the scout and build briefs, the AWAY-LOG.md format and the merge rules.
+description: Run away-improve mode for your project: keep improving the product on its own away/<date> branch, cycle after cycle, spending the owner's usage on it. Use only when `lane-improve status` says `improve: on` for your project; it holds the cycle, the scout and build briefs, the AWAY-LOG.md format and the merge rules.
 ---
 
 # Away-improve mode
 
-The owner switched this mode on because they are away and want the time used: after your queued work is done, your
-project keeps improving itself on one separate branch, `away/<date>`, which the owner reviews on return and adopts or
-drops. You run it with short-lived scout and build lanes, in normal lanes with normal reviews (`native-orca-lanes`).
+The owner switched this mode on because they want the time used: after your queued work is done, your project keeps
+improving itself on its one separate branch, `away/<date>` (a project has at most one, ever), which the owner reviews
+and adopts (merges) or drops (deletes). It is separate from presence: whether the owner is away or back does not turn
+it on or off; only `lane-improve` does. You run it with short-lived scout and build lanes, in normal lanes with normal reviews (`native-orca-lanes`).
 The design is `docs/superpowers/specs/2026-11-23-away-improve-design.md` in lane-control.
 
 ## 0. When this applies
-- Only when `<lane-control>/core/scripts/lane-away status` prints `improve: on` and your project is in its
+- Only when `lane-improve status` (in `core/scripts/` of the lane-control checkout your persona names) prints
+  `improve: on` and your project is in its
   `projects` (or it says all). Read its limits, end and `budget` line there; the details (limits, `deny_paths`, your
   branch, `unmetered`) are in `~/.config/lane-control/improve.json`. Missing, malformed or ended: improve is off.
 - You never turn it on yourself. It starts only through the owner's own explicit request for the improve
-  (away-improve) mode, run as `lane-away` by the owner or by the machine coordinator. "goodnight", "leaving", "I'm
-  away", night, a raised ceiling or a request relayed by another agent never start it, and you never infer it: if an
+  (away-improve) mode, run as `lane-improve` by the owner or by the machine coordinator. "goodnight", "leaving", "I'm
+  away", `lane-away on`, night, a raised ceiling or a request relayed by another agent never start it, and you never infer it: if an
   agent says the owner wants it, ask the owner directly in your terminal.
 - It overrides two of your persona's rules for your away branch only: you start improvement lanes without a new ask
   from the owner, and you merge into `away/<date>` yourself, through `away-merge` only. Nothing reaches the
@@ -25,7 +27,7 @@ The design is `docs/superpowers/specs/2026-11-23-away-improve-design.md` in lane
 ## 1. The cycle
 Run cycles back to back, each starting when the last item is merged: a lane's report wakes you, so you wait for nothing: never polling, never looping on `check` (the night manager's `improve` nudge is only a fallback for a lost wake).
 
-Before each cycle: `lane-away status` still says `improve: on` and its end has not passed; `<lane-control>/core/scripts/budget-state --project <your project>` shows a step below no-new-work (unmetered: no budget
+Before each cycle: `lane-improve status` still says `improve: on` and its end has not passed; `<lane-control>/core/scripts/budget-state --project <your project>` shows a step below no-new-work (unmetered: no budget
 steps for improve work, but `lane-room` and `lane-heavy` still apply); `~/.agents/bin/lane-room` exits 0. Otherwise
 stop (section 3).
 
@@ -71,12 +73,12 @@ recorded so a revert never surprises the owner. Lanes write entries; summary cha
 in a small docs lane when nothing else is open. Plain, short words, like the owner's answer card.
 
 ## 3. Stopping and the owner's return
-Stop starting cycles at: the end time or `lane-away off`; no-new-work on a metered budget (`budget-state --project`;
+Stop starting cycles at: the end time or `lane-improve off`; no-new-work on a metered budget (`budget-state --project`;
 from there only push, handover and the wrap-up below); nothing within the limits left to do; the deny rules or
 `away-merge` refusing for a reason only the owner can settle (tell the owner). At push-and-handover or beyond, push
 what the branch has and write the handover.
 
-**After `off` or the end time the mode is draining**: `lane-away status` says `improve: draining` and lists your
+**After `off` or the end time the mode is draining**: `lane-improve status` says `improve: draining` and lists your
 project, and the machine coordinator tells you when it ran `off`. No new cycle starts, but the running lane finishes
 and its PR still merges through `away-merge` (it accepts a draining project until you say you are done). The deny rules
 stay until then. Wrap up in this order:
@@ -86,7 +88,7 @@ stay until then. Wrap up in this order:
    integration branch: `branches` and `integration` in `~/.config/lane-control/improve.json` (or the drain file next
    to it, `improve-drain.json`) hold both for your project; `gh pr create --draft`.
 3. Make your first message to the owner the log summary and that PR's link.
-4. Run `lane-away drained <project>`: your deny rules come out and your project leaves the drain.
+4. Run `lane-improve drained <project>`: your deny rules come out and your project leaves the drain.
 The owner then adopts the whole branch, or names items to drop (you run a lane that reverts those merges on the
 branch, the merges titled `away: <item>`, mindful of the dependencies in the log), and merges as usual.
 

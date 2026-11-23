@@ -1,11 +1,11 @@
 """Away-improve mode state (design: docs/superpowers/specs/2026-11-23-away-improve-design.md).
 
 The state is one file, ~/.config/lane-control/improve.json (LANE_IMPROVE_FILE), written only by
-`lane-away on --improve` (this module's `on`), which is the only thing that turns the mode on: plain `lane-away on`,
-night and a changed budget never do. Fields:
+`lane-improve on` (this module's `on`), which is the only thing that turns the mode on: `lane-away on`, being away,
+night and a changed budget never do, and the mode never changes presence. Fields:
 
   started    ISO time the mode was switched on
-  end        ISO time, or "until-back" (no end; `lane-away off` ends it)
+  end        ISO time, or "until-back" (no end; `lane-improve off` ends it)
   limits     the owner's limits, free text, binding
   deny_paths globs a merge must not touch (away-merge checks the PR diff)
   projects   list of coordinator names, or "all"
@@ -18,10 +18,10 @@ lane-limits.sh has its own copy of this validation (a lone copy of that script c
 tests/test_lane_away.py ReaderAgreementTests runs both over the same files, so keep them in step.
 
 Ending the mode (`off`, or the end time) leaves a drain state: the running lane's PR can still merge through
-away-merge, no new cycle starts, and each coordinator then opens its draft PR and runs `lane-away drained <project>`.
+away-merge, no new cycle starts, and each coordinator then opens its draft PR and runs `lane-improve drained <project>`.
 After `off` the drain state is improve-drain.json (the same fields, plus `ended` and `pending`); after an end time it is
 the old improve.json, which `drained` turns into improve-drain.json. The deny rules stay until `drained`.
-Command line (lane-away calls it): `improve.py on ...`, `off`, `drained`, `status`.
+Command line (lane-improve calls it): `improve.py on ...`, `off`, `drained`, `status`.
 """
 import argparse
 import datetime as dt
@@ -346,7 +346,7 @@ def install_denies(cos: list, integrations: dict) -> "tuple[list, list]":
             mod = harnesses.load_harness(c.harness)
             changes = mod.install_away_denies(c.checkout, integrations[c.name], c.name)
         except (ValueError, OSError) as e:
-            warns.append(f"lane-away: {c.name}: deny rules NOT installed ({e}); away-merge is the only guard on its merge route")
+            warns.append(f"lane-improve: {c.name}: deny rules NOT installed ({e}); away-merge is the only guard on its merge route")
             continue
         how = "deny rules" if c.harness == "claude" else f"its {c.harness} guard plugin"
         if changes or c.harness != "claude":
@@ -363,20 +363,20 @@ def remove_denies(cos: list) -> list:
         try:
             harnesses.load_harness(c.harness).remove_away_denies(c.checkout)
         except (ValueError, OSError) as e:
-            warns.append(f"lane-away: {c.name}: deny rules not removed ({e})")
+            warns.append(f"lane-improve: {c.name}: deny rules not removed ({e})")
     return warns
 
 
 def describe(s: dict) -> list:
     """The lines `on` and `status` show: what is on, so the owner sees exactly what will run."""
-    end = ("until back (until you run lane-away off)" if s["end"] == UNTIL_BACK
+    end = ("until back (until you run lane-improve off)" if s["end"] == UNTIL_BACK
            else "ends " + dt.datetime.fromisoformat(s["end"]).strftime("%a %d %b %H:%M"))
     which = "all set-up projects (including ones set up later)" if s["projects"] == "all" else ", ".join(s["projects"])
     lines = [f"  runs: {end}", f"  projects: {which}"]
     for p, b in sorted(s["branches"].items()):
         lines.append(f"  branch: {p} -> {b} (from {s['integration'].get(p, '?')})")
     lines.append("  one away branch per project, ever: it stays until the owner adopts it (merges it to the integration "
-                 "branch) or drops it (deletes it); `lane-away on --improve --continue` carries on with it")
+                 "branch) or drops it (deletes it); `lane-improve on --continue` carries on with it")
     lines.append(f"  limits: {s['limits'] or '(none given)'}")
     if s["deny_paths"]:
         lines.append(f"  never touching: {', '.join(s['deny_paths'])}")
@@ -400,34 +400,34 @@ def cmd_on(a) -> int:
         else:
             end = UNTIL_BACK
     except ValueError as e:
-        print(f"lane-away: {e}", file=sys.stderr)
+        print(f"lane-improve: {e}", file=sys.stderr)
         return 2
     if not a.yes and not (sys.stdin.isatty() and sys.stdout.isatty()):
-        print("lane-away: improve mode spends tokens until it is switched off; there is no terminal here, so it needs "
+        print("lane-improve: improve mode spends tokens until it is switched off; there is no terminal here, so it needs "
               "--yes (run it yourself, or on your own explicit word)", file=sys.stderr)
         return 2
     if load():
         if not a.cont:
-            print("lane-away: improve mode is already on; switching it on again would cut new away branches and leave "
-                  "the open PRs without a home. Use `lane-away off` first, or `--continue` to carry on with the "
+            print("lane-improve: improve mode is already on; switching it on again would cut new away branches and leave "
+                  "the open PRs without a home. Use `lane-improve off` first, or `--continue` to carry on with the "
                   "current branches", file=sys.stderr)
             return 1
     elif load_drain(quiet=True) or ended_state():
-        print("lane-away: the last improve period is not wrapped up yet; each coordinator runs `lane-away drained "
-              "<project>` after its draft PR (the owner can run `lane-away drained --all`) before a new period starts",
+        print("lane-improve: the last improve period is not wrapped up yet; each coordinator runs `lane-improve drained "
+              "<project>` after its draft PR (the owner can run `lane-improve drained --all`) before a new period starts",
               file=sys.stderr)
         return 1
     try:
         cos = coordinators()
     except Exception as e:  # machineconf.ConfError, or a missing module in a broken install
         if a.project:
-            print(f"lane-away: cannot check --project names: {e}", file=sys.stderr)
+            print(f"lane-improve: cannot check --project names: {e}", file=sys.stderr)
             return 1
         cos = []
     known = [c.name for c in cos]
     unknown = [p for p in a.project if p not in known]
     if unknown:
-        print(f"lane-away: unknown project {', '.join(unknown)}; this machine's coordinators: "
+        print(f"lane-improve: unknown project {', '.join(unknown)}; this machine's coordinators: "
               f"{', '.join(known) or '(none)'}", file=sys.stderr)
         return 1
     projects = list(dict.fromkeys(a.project)) if a.project else "all"
@@ -435,7 +435,7 @@ def cmd_on(a) -> int:
     try:
         branches, integs = resolve_branches(chosen, a.cont, now().date())
     except ValueError as e:
-        print(f"lane-away: improve not switched on: {e}", file=sys.stderr)
+        print(f"lane-improve: improve not switched on: {e}", file=sys.stderr)
         return 1
     state = {
         "started": now().isoformat(timespec="seconds"),
@@ -448,12 +448,8 @@ def cmd_on(a) -> int:
         "integration": integs,
     }
     write(state)
-    if a.away_file:
-        af = Path(a.away_file)
-        af.parent.mkdir(parents=True, exist_ok=True)
-        af.touch()
     notes, warns = install_denies(chosen, integs)
-    print("lane-away: improve mode on (the owner counts as away while it runs)")
+    print("lane-improve: improve mode on")
     print("\n".join(describe(state) + notes))
     for w in warns:
         print(w, file=sys.stderr)
@@ -485,8 +481,8 @@ def cmd_off(a) -> int:
     if state is not None:
         write_drain(_to_drain(state))
         clear()
-        print("lane-away: improve mode ended; the running lanes drain: each coordinator merges its last PR with "
-              "away-merge, opens its draft PR, then runs `lane-away drained <project>` (`lane-away status` lists them)")
+        print("lane-improve: improve mode ended; the running lanes drain: each coordinator merges its last PR with "
+              "away-merge, opens its draft PR, then runs `lane-improve drained <project>` (`lane-improve status` lists them)")
     elif load_drain(quiet=True) is None:
         for w in remove_denies(_coordinator_list()):
             print(w, file=sys.stderr)
@@ -503,15 +499,15 @@ def cmd_drained(a) -> int:
             write_drain(state)
             clear()
     if state is None:
-        print("lane-away: nothing is draining", file=sys.stderr)
+        print("lane-improve: nothing is draining", file=sys.stderr)
         return 1
     names = list(state["pending"]) if a.all else a.projects
     if not names:
-        print("lane-away: say which project is wrapped up (`lane-away drained <project>`), or --all", file=sys.stderr)
+        print("lane-improve: say which project is wrapped up (`lane-improve drained <project>`), or --all", file=sys.stderr)
         return 2
     bad = [n for n in names if n not in state["pending"]]
     if bad:
-        print(f"lane-away: not draining: {', '.join(bad)} (draining: {', '.join(state['pending']) or 'none'})", file=sys.stderr)
+        print(f"lane-improve: not draining: {', '.join(bad)} (draining: {', '.join(state['pending']) or 'none'})", file=sys.stderr)
         return 1
     cos = {c.name: c for c in _coordinator_list()}
     for w in remove_denies([cos[n] for n in names if n in cos]):
@@ -521,7 +517,7 @@ def cmd_drained(a) -> int:
         write_drain({**state, "pending": left})
     else:
         drain_path().unlink(missing_ok=True)
-    print(f"lane-away: wrapped up: {', '.join(names)}" + (f"; still draining: {', '.join(left)}" if left else
+    print(f"lane-improve: wrapped up: {', '.join(names)}" + (f"; still draining: {', '.join(left)}" if left else
                                                           "; the improve period is closed"))
     return 0
 
@@ -542,7 +538,7 @@ def cmd_status(a) -> int:
         for p in d["pending"]:
             if p in d["branches"]:
                 print(f"  {p}: away-merge the last PR into {d['branches'][p]}, open a draft PR into "
-                      f"{d['integration'].get(p, '?')}, then run `lane-away drained {p}`")
+                      f"{d['integration'].get(p, '?')}, then run `lane-improve drained {p}`")
         return 0
     print("improve: off")
     return 0
@@ -565,7 +561,6 @@ def main(argv=None) -> int:
     on.add_argument("--unmetered", action="store_true")
     on.add_argument("--continue", dest="cont", action="store_true")
     on.add_argument("--yes", action="store_true")
-    on.add_argument("--away-file")
     sub.add_parser("off")
     dr = sub.add_parser("drained")
     dr.add_argument("projects", nargs="*")

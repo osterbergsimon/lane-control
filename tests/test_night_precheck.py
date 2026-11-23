@@ -54,6 +54,16 @@ class ImprovePrecheckTests(MachineTest):
         self.improve_on(projects=["a"])
         self.assertEqual(self.pre().stdout, "DUE a improve idle=31min\n")
 
+    def test_the_nudge_does_not_wait_for_the_owner_to_be_away(self):
+        # improve is separate from presence: by day, owner present, a covered project is nudged and an uncovered
+        # one (idle far longer) gets no plain check-in, because the owner is not away
+        self.conf(("a", 31), ("b", 90))
+        self.improve_on(projects=["a"])
+        r = self.pre()  # noon
+        self.assertEqual(r.stdout, "DUE a improve idle=31min\n")
+        night = self.pre(hour="2")  # at night the plain check-in for b comes too
+        self.assertEqual(night.stdout.splitlines(), ["DUE b idle=90min", "DUE a improve idle=31min"])
+
     def test_improve_replaces_the_plain_check_in(self):
         self.conf(("proj", 60))
         self.improve_on()

@@ -73,11 +73,11 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
   hook (`lane-away-guard.js`, installed beside `lane-persona.js`). `setup(ctx)` registers
   `ctx.tool.hook("execute.before", fn)`; throwing from `fn` stops the call and the model gets the message as the tool
   result (probed live, below). The shell tool is `shell` (`bash` in older builds); the plugin matches both. It acts
-  only in a session started with `LANE_ROLE=coordinator`, and only for a checkout `lane-away on --improve` recorded
+  only in a session started with `LANE_ROLE=coordinator`, and only for a checkout `lane-improve on` recorded
   (`install_away_denies` writes the project and its integration branch to the state folder; `remove_away_denies`
   deletes it). On every shell call it reads `improve.json` and `improve-drain.json` (the same validation as
   `core/improve.py`; unreadable state means no guard, said once on stderr), so it follows `on`, `off` and
-  `lane-away drained` live, with no restart; a running coordinator needs one restart to load the plugin the first
+  `lane-improve drained` live, with no restart; a running coordinator needs one restart to load the plugin the first
   time. It refuses `gh pr merge` (and a gh api call that merges) and a git push to the integration branch, and says to
   use away-merge. A push is judged by its effective repository (the call's `workdir`, a `cd` earlier in the command,
   `git -C`), so the coordinator's beads backup, whose branch is also `main`, is never blocked: an explicit push to the

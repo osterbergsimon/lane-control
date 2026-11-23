@@ -7,7 +7,7 @@ docs/superpowers/specs/2026-11-23-away-improve-design.md).
 Merges PR N into the project's active away/<date> branch as a merge commit titled `away: <item>` (never squashed),
 and prints the merge commit. It refuses, merging nothing, with one line per failed check, unless all of these hold:
   improve    improve mode is on for NAME (core/improve.py), which names the project's away branch; or it is draining
-             (`lane-away off` or the end time, until `lane-away drained NAME`): the running lane's last PR still merges
+             (`lane-improve off` or the end time, until `lane-improve drained NAME`): the running lane's last PR still merges
   base       the PR's base is exactly that branch: never main, develop or another project's away branch
   open       the PR is open
   review     a comment on the PR, by the gh login running this script, says `Review: passed <head sha>` for the PR's

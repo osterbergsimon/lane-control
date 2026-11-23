@@ -200,7 +200,7 @@ def guard_path(checkout: "Path | None" = None) -> Path:
 
 def install_away_guard(checkout: Path) -> list:
     """Copy lane-away-guard.js beside lane-persona.js (the same user or project folder, LANE_OPENCODE_PLUGIN). It does
-    nothing until `lane-away on --improve` records this checkout (install_away_denies) and only in a session started
+    nothing until `lane-improve on` records this checkout (install_away_denies) and only in a session started
     with LANE_ROLE=coordinator; once loaded it follows improve.json live. A coordinator already running when it is
     first installed needs one restart to load it. Returns change lines; empty when it was in place."""
     what = _write(guard_path(checkout), GUARD.read_bytes())
