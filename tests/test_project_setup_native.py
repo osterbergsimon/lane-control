@@ -1665,5 +1665,129 @@ class Round2Tests(Case):
         self.assertNotIn("..", r.stderr)
 
 
+GH_PROTECTION = """#!/usr/bin/env python3
+# gh stand-in for the branch-protection report: `gh api repos/{owner}/{repo}/branches/<b>/protection` answers from
+# $GH_PROTECTION (JSON {"status": 200|403|404, "body": {...}, "message": "..."}), `gh api .../rules/branches/<b>`
+# from $GH_RULES (a JSON list); `gh pr list` has no merged PRs. Every call is logged.
+import json, os, sys
+a = sys.argv[1:]
+open(os.environ["GH_LOG"], "a").write(" ".join(a) + "\\n")
+if a[:2] == ["pr", "list"]:
+    print("[]"); sys.exit(0)
+if a[:1] == ["api"] and a[1].endswith("/protection"):
+    r = json.load(open(os.environ["GH_PROTECTION"]))
+    if r["status"] == 200:
+        print(json.dumps(r["body"])); sys.exit(0)
+    print(f"gh: {r['message']} (HTTP {r['status']})", file=sys.stderr); sys.exit(1)
+if a[:1] == ["api"] and "/rules/branches/" in a[1]:
+    print(os.environ.get("GH_RULES", "[]")); sys.exit(0)
+print("gh stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
+"""
+
+FULL = {"required_pull_request_reviews": {"required_approving_review_count": 0}, "enforce_admins": {"enabled": True},
+        "allow_force_pushes": {"enabled": False}, "allow_deletions": {"enabled": False},
+        "required_status_checks": {"contexts": ["unittest"], "checks": [{"context": "unittest"}]}}
+
+
+class BranchProtectionTests(Case):
+    """The integration branch's protection is read and reported, never changed (lc-2nz)."""
+
+    def setUp(self):
+        super().setUp()
+        bare = self.e.home / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=self.repo, check=True)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "remote", "set-head", "origin", "main"], cwd=self.repo, check=True, capture_output=True)
+        gh = self.e.bin / "gh"
+        gh.unlink()
+        gh.write_text(GH_PROTECTION)
+        gh.chmod(0o755)
+        self.log = self.e.home / "gh-prot.log"
+        self.e.env.update(GH_LOG=str(self.log), GH_PROTECTION=str(self.e.home / "prot.json"))
+
+    def protection(self, status=200, body=None, message="", rules=None):
+        (self.e.home / "prot.json").write_text(json.dumps({"status": status, "body": body or {}, "message": message}))
+        if rules is not None:
+            self.e.env["GH_RULES"] = json.dumps(rules)
+
+    def report(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        lines = [l for l in r.stdout.splitlines() if l.startswith("branch-protection:")]
+        self.assertEqual(len(lines), 1, r.stdout)
+        return lines[0]
+
+    def test_protected_for_everyone(self):
+        self.protection(body=FULL)
+        line = self.report()
+        self.assertIn("everyone", line)
+        self.assertIn("main", line)
+        self.assertIn("admins included", line)
+
+    def test_admins_exempt_is_partly_and_says_what_is_missing(self):
+        self.protection(body={**FULL, "enforce_admins": {"enabled": False}})
+        line = self.report()
+        self.assertIn("partly", line)
+        self.assertIn("admins are exempt", line)
+        self.assertNotIn("everyone", line)
+
+    def test_no_required_pull_request_and_force_pushes_allowed_are_both_named(self):
+        body = {k: v for k, v in FULL.items() if k != "required_pull_request_reviews"}
+        self.protection(body={**body, "allow_force_pushes": {"enabled": True}})
+        line = self.report()
+        self.assertIn("partly", line)
+        self.assertIn("no pull request is required", line)
+        self.assertIn("force pushes are allowed", line)
+
+    def test_no_protection_says_none(self):
+        self.protection(status=404, message="Branch not protected")
+        line = self.report()
+        self.assertIn("none", line)
+        self.assertIn("main", line)
+
+    def test_a_ruleset_is_not_reported_as_none(self):
+        self.protection(status=404, message="Branch not protected", rules=[{"type": "pull_request"}, {"type": "non_fast_forward"}])
+        line = self.report()
+        self.assertIn("ruleset", line)
+        self.assertIn("pull_request", line)
+        self.assertNotIn("none", line)
+
+    def test_a_plan_without_protection_says_so(self):
+        self.protection(status=403, message="Upgrade to GitHub Pro or make this repository public to enable this feature.")
+        line = self.report()
+        self.assertIn("not available", line)
+        self.assertIn("plan", line)
+
+    def test_another_failure_is_unknown_not_none(self):
+        self.protection(status=403, message="Resource not accessible by personal access token")
+        line = self.report()
+        self.assertIn("unknown", line)
+        self.assertIn("Resource not accessible", line)
+
+    def test_ci_that_exists_but_is_not_required_is_said(self):
+        wf = self.repo / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "ci.yml").write_text("on: push\n")
+        self.protection(body={k: v for k, v in FULL.items() if k != "required_status_checks"})
+        line = self.report()
+        self.assertIn("CI exists but is not required", line)
+
+    def test_a_project_without_a_git_host_says_unknown(self):
+        subprocess.run(["git", "remote", "remove", "origin"], cwd=self.repo, check=True)
+        self.protection(body=FULL)
+        self.assertIn("unknown", self.report())
+
+    def test_it_only_reads(self):
+        self.protection(body=FULL)
+        self.report()
+        calls = self.log.read_text().splitlines()
+        self.assertTrue(any(c.startswith("api ") for c in calls), calls)
+        for c in calls:
+            self.assertTrue(c.startswith(("api ", "pr list")), c)
+            self.assertNotRegex(c, r"-X|--method|-f |-F |--field|--input|PUT|PATCH|DELETE|POST")
+
+
+
 if __name__ == "__main__":
     unittest.main()
