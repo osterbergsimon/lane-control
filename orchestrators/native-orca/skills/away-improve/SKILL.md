@@ -47,11 +47,18 @@ stop (section 3).
    lane commits the log). A frontend lane also gets `frontend-brief.md`.
 5. **Review.** A reviewer on a different model, as for any lane, who also checks the owner's limits, duplication and
    that a big change justifies itself, as well as correctness. At most two rounds. After the reviewer's clean round
-   you write `Review: passed` on its own line in a PR comment (`gh pr comment <n> --body "Review: passed"`). Only the coordinator writes it; a lane never does.
-6. **Merge with `away-merge`.** `away-merge --project <your project> --pr <n> --item "<item title>"` (in `<lane-control>/core/scripts/`). It checks improve is on for you, the PR's base is exactly your away branch, the review line, CI
-   green, a secret and private-data scan, and the deny paths; then it merges with a merge commit titled `away: <item>`
-   (never squashed) and prints the commit. When CI itself is failing or unavailable for reasons outside the change,
-   run the full suite through a lane and `lane-heavy`, pass `--local-suite-ok <the run>` and have the log say so. A refusal is a finding: fix what it names, never around it. Never use `gh pr merge`, a merge by hand or a push to the integration branch (your session has deny rules for the first and last; they are a net, not permission).
+   you write `Review: passed <head sha>` on its own line in a comment (`gh pr comment <n> --body "Review: passed
+   $(gh pr view <n> --json headRefOid -q .headRefOid)"`): a comment, never the PR body, naming the head commit the
+   reviewer saw, and a push after the review needs a new one. `away-merge` accepts only that comment, by the gh login
+   it runs as; a lane never writes it and never runs `away-merge`. With one gh identity that is procedural, a rule you
+   keep, not something the script can enforce.
+6. **Merge with `away-merge`.** `away-merge --project <your project> --pr <n> --item "<item title>"` (in `core/scripts/` of the lane-control
+   checkout your persona names). It checks improve is on for you (or draining, section 3), the PR's base is exactly
+   your away branch, the review comment, CI green, a secret and private-data scan, and the deny paths from the diff; then it merges with a merge commit titled `away: <item>`
+   (never squashed), pinned to the head it checked, and prints the commit. When CI itself is failing or unavailable for reasons outside the change,
+   run the full suite through a lane and `lane-heavy`, pass `--local-suite-ok <the run>` and have the log say so. A refusal is a finding: fix what it names, never around it. Never use `gh pr merge`, a merge by hand or a push to the integration branch (your session has deny rules for the first and last: a backstop, not a wall. `git -C <repo> push ...`, `feature:main`
+   refspecs, `gh api` and a lane's own shell go past them, and a lane's worktree has no rules at all. The real
+   guards are `away-merge`, your persona's rule and branch protection where the repo has it.)
 7. **Next cycle at once.** Close the lane (its worktree is clean and merged), then start the next cycle from the
    top. Do not wait for the night manager, the owner or a timer.
 
@@ -64,15 +71,24 @@ recorded so a revert never surprises the owner. Lanes write entries; summary cha
 in a small docs lane when nothing else is open. Plain, short words, like the owner's answer card.
 
 ## 3. Stopping and the owner's return
-Stop starting cycles at: the end time or `lane-away off`; no-new-work or later on a metered budget (`budget-state
---project`); nothing within the limits left to do; the deny rules or `away-merge` refusing for a reason only the owner
-can settle (tell the owner). The running lane finishes: wait for its report, review and merge it as usual, then stop.
-At push-and-handover or beyond, push what the branch has and write the handover.
+Stop starting cycles at: the end time or `lane-away off`; no-new-work on a metered budget (`budget-state --project`;
+from there only push, handover and the wrap-up below); nothing within the limits left to do; the deny rules or
+`away-merge` refusing for a reason only the owner can settle (tell the owner). At push-and-handover or beyond, push
+what the branch has and write the handover.
 
-When the mode ends, or the owner is back: update the log summary (a lane), push the branch, open a **draft PR**
-from `away/<date>` to the integration branch (`gh pr create --draft`), and make your first message to the owner the
-log summary and that PR's link. The owner adopts the whole branch, or names items to drop (you run a lane that
-reverts those merge commits on the branch, mindful of the dependencies in the log), and then merges as usual.
+**After `off` or the end time the mode is draining**: `lane-away status` says `improve: draining` and lists your
+project, and the machine coordinator tells you when it ran `off`. No new cycle starts, but the running lane finishes
+and its PR still merges through `away-merge` (it accepts a draining project until you say you are done). The deny rules
+stay until then. Wrap up in this order:
+1. Wait for the running lane's report, review it, write the review comment, and `away-merge` the last PR (or leave an
+   unfinished item out and say so in the log).
+2. Update the log summary (a lane), push the branch, and open a **draft PR** from `away/<date>` into the project's
+   integration branch: `branches` and `integration` in `~/.config/lane-control/improve.json` (or the drain file next
+   to it, `improve-drain.json`) hold both for your project; `gh pr create --draft`.
+3. Make your first message to the owner the log summary and that PR's link.
+4. Run `lane-away drained <project>`: your deny rules come out and your project leaves the drain.
+The owner then adopts the whole branch, or names items to drop (you run a lane that reverts those merges on the
+branch, the merges titled `away: <item>`, mindful of the dependencies in the log), and merges as usual.
 
 ## 4. What counts as failure, even when it works
 - A whole area **rewritten from scratch** (the frontend, say). With no size cap, a big change must show it is a

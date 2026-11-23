@@ -201,5 +201,7 @@ Keep a `handover-latest` beads memory (`bd remember`) at every natural stop: lan
 tier), what each waits on, open owner questions. A fresh session resumes from it (the resume rule above).
 
 Back beads up at the same stop, in the beads repo (the folder `.beads` links to): `git push`, then `bd dolt push`;
-the second carries the database, memories included. A failed backup is reported to the owner in your next message,
+the second carries the database, memories included. Run the git push as `git -C <beads-repo> push` (the repo
+folder, not a `cd`): the beads repo's branch is also `main`, and in away-improve mode the push guards must see another
+repository, never your project's integration branch. A failed backup is reported to the owner in your next message,
 with the error, and never retried silently.

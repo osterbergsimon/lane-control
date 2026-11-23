@@ -17,9 +17,10 @@ item (picked by <PARENT>, who says why): <ITEM>. Why it was picked: <WHY_PICKED>
 - Write your entry in `AWAY-LOG.md` at the root of the branch (start the file from the template at
   `<LANE_CONTROL>/core/templates/AWAY-LOG.md` if it is missing), in the same PR, and update the summary lines
   <PARENT> gives you here: <SUMMARY_UPDATE>. The entry has: what, why, what it builds on, existing work checked,
-  how to try it, how to drop it (the merge commit to revert, and which later items depend on it), test results.
+  how to try it, how to drop it (the merge titled `away: <item>`, which <PARENT> fills in with its commit once it is merged, and which later items depend on it), test results.
   Plain, short words, for an owner who was not here.
 - Tests green before you report (through `lane-heavy` for the full suite). Nothing private in anything you commit
   (hostnames, usernames, private paths, keys): the branch is public if the repository is.
 - The reviewer, on another model, checks correctness, the owner's limits, duplication and the big-change rule. The
-  `Review: passed` line is written by <PARENT> alone after a clean round: never write it yourself.
+  `Review: passed <head sha>` comment is written by <PARENT> alone after a clean round: never write it yourself, and
+  never run `away-merge`; you open the PR and report.

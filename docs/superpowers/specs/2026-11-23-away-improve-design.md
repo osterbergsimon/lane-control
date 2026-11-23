@@ -118,7 +118,7 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
 - With limits: improve work follows the project's budget steps as all work does (per-project ceilings, lc-mtj must
   make budget-state read them). At no-new-work no new cycle starts; at push-and-handover the branch and log are
   pushed.
-- Unmetered: no budget steps for improve work, the time end is required, machine limits (lane-heavy slots, CI
+- Unmetered: no budget steps for improve work, the time end is optional (until-back is allowed; then only `lane-away off`, machine limits and the owner's limits stop it), machine limits (lane-heavy slots, CI
   slice) still apply.
 
 ## Calls made after the builder check (coordinator's calls; the owner can overturn any)

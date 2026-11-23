@@ -1981,12 +1981,12 @@ class AwayImproveContentTests(unittest.TestCase):
                  "**Merge with `away-merge`.**", "**Next cycle at once.**"]
         pos = [t.index(s) for s in order]
         self.assertEqual(pos, sorted(pos), "the steps are out of order")
-        for needle in ("deep tier", "why you picked", "`Review: passed`"):
+        for needle in ("deep tier", "why you picked", "Review: passed <head sha>"):
             self.assertIn(needle, t, needle)
         for needle in ("read-only", "3-5", "builds on", "`budget-state --project", "no-new-work", "nothing within the limits",
                        "draft PR", "away/<date>", "lane-room", "`lane-away status`",
                        "`improve: on`", "never polling", "the running lane finishes", "never squash",
-                       "never force-push", "never merge into the integration branch", "only the coordinator writes"):
+                       "never force-push", "never merge into the integration branch"):
             self.assertIn(needle.lower(), t.lower(), needle)
         # the failures the owner named
         for needle in ("rewritten from scratch", "cannot understand", "duplicates something that already exists"):
@@ -2060,6 +2060,48 @@ class AwayImproveContentTests(unittest.TestCase):
                 continue
             self.assertNotIn("on --improve", flat(path), path.name)
         self.assertIn("never turn improve mode on", flat(NATIVE_DIR / "night-manager.md"))
+
+    def test_skill_review_marker_is_bound_to_the_head_and_written_by_the_coordinator_alone(self):
+        t = flat(AWAY_SKILL)
+        for needle in ("`Review: passed <head sha>`", "a comment, never the PR body", "a push after the review needs a new one",
+                       "a lane never writes it and never runs `away-merge`", "one gh identity", "procedural"):
+            self.assertIn(needle, t, needle)
+        b = flat(AWAY_TEMPLATES / "away-build-brief.md")
+        self.assertIn("never write it yourself", b)
+        self.assertIn("never run `away-merge`", b)
+
+    def test_skill_drain_flow_after_off_or_the_end(self):
+        t = flat(AWAY_SKILL)
+        for needle in ("`improve: draining`", "No new cycle starts", "still merges", "`lane-away drained <project>`",
+                       "`integration` in `~/.config/lane-control/improve.json`", "draft PR", "deny rules stay until"):
+            self.assertIn(needle, t, needle)
+        self.assertLess(t.index("away-merge` the last PR"), t.index("`lane-away drained <project>`"))
+
+    def test_skill_and_record_call_the_deny_rules_a_backstop(self):
+        t = flat(AWAY_SKILL)
+        self.assertIn("backstop, not a wall", t)
+        for needle in ("away-merge", "branch protection", "a lane's worktree has no rules"):
+            self.assertIn(needle, t, needle)
+        rec = flat(ROOT / "core" / "harnesses" / "claude" / "record.md")
+        for needle in ("backstop, not a wall", "git -C <checkout> push origin main", "branch protection",
+                       "git -C <beads-repo> push"):
+            self.assertIn(needle, rec, needle)
+
+    def test_the_persona_backup_step_pushes_the_beads_repo_with_dash_c(self):
+        for name in ("coordinator.md",):
+            t = flat(PERSONA_DIR / name)
+            self.assertIn("`git -C <beads-repo> push`", t)
+
+    def test_machine_coordinator_tells_the_coordinators_when_it_runs_off(self):
+        mc = flat(PERSONA_DIR / "machine-coordinator.md")
+        for needle in ("run `lane-away off`", "tell each named project's coordinator", "wrap up",
+                       "`lane-away drained <project>`"):
+            self.assertIn(needle, mc, needle)
+
+    def test_build_brief_leaves_the_merge_sha_to_the_coordinator(self):
+        b = flat(AWAY_TEMPLATES / "away-build-brief.md")
+        self.assertIn("the merge titled `away: <item>`", b)
+        self.assertNotIn("the merge commit to revert", b)
 
     def test_machine_presence_line_keeps_plain_on_plain(self):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")

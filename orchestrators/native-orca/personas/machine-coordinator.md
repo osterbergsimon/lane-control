@@ -46,7 +46,8 @@ nothing: when nothing needs action, keep the turn short and end it.
   whether this machine is unmetered (`--unmetered`). You have no terminal, so pass `--yes`, and show the owner the
   summary it prints. Then tell each named project's coordinator once (one message, starting `machine coordinator:`)
   that improve mode is on and it should load its `away-improve` skill. When the owner says they are back, run
-  `lane-away off`.
+  `lane-away off`, then tell each named project's coordinator once (`machine coordinator:`) that improve mode ended and it
+  should wrap up: merge its last PR, open its draft PR, message the owner, and run `lane-away drained <project>`.
 - The night manager is an Orca automation (`orca-ide automations list`): its precheck runs it only when a coordinator
   is idle and due. It sends the check-ins itself; do not repeat them.
 - The lane sweep is an Orca automation that reports only. Route each finding to that lane's coordinator. Never run
