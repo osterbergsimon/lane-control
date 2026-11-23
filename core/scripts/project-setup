@@ -122,7 +122,7 @@ ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop sh
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-shots")  # the library first: a new tool never sees an old one
 OLD_PATH_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # kept as links in scripts/ for machines
-HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "core/improve.py", "core/protection.py",
+HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "core/cleanup.py", "core/improve.py", "core/protection.py",
               "scripts/project-setup",
               *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
               "core/templates/frontend-brief.md", "core/templates/DESIGN.md", "core/templates/away-innovation.md",
@@ -704,6 +704,22 @@ def beads_report(repo, override=None):
     for step, what, detail in lines:
         if what in b.PROBLEMS:
             print(f"project-setup: note: {detail}", file=sys.stderr)
+        else:
+            say(step, what, detail)
+
+
+def lane_cleanup(repo: Path) -> None:
+    """Lane close leaves the worktree to Orca's merged cleanup rule and the remote branch to GitHub (core/cleanup.py):
+    says where the owner turns the rule on when it is off (Orca's settings are never touched) and, on the owner's yes
+    in a terminal, turns on GitHub's "Automatically delete head branches". Never stops a run."""
+    core = str(HERE / "core")
+    if core not in sys.path:
+        sys.path.insert(0, core)
+    import cleanup
+    yes = (lambda q: owner_says_yes(q, "github")) if has_terminal() else None
+    for step, what, detail in [*cleanup.orca_report(LOCAL.argv()[0], repo), *cleanup.github_report(repo, yes)]:
+        if what in cleanup.PROBLEMS:
+            print(f"project-setup: note: {step}: {what} {detail}", file=sys.stderr)
         else:
             say(step, what, detail)
 
@@ -3463,6 +3479,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
         beads_hooks(repo, {pins["coordinator"][0]} & {"claude", "opencode"})
         setup_script(repo, a.write_orca_yaml)
+        lane_cleanup(repo)
         if a.no_start:
             if changed:
                 say("restart", "maybe", "the personas of " + ", ".join(changed) + " changed: a running session "

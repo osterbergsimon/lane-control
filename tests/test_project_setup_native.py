@@ -1808,9 +1808,109 @@ class BranchProtectionTests(Case):
         calls = self.log.read_text().splitlines()
         self.assertTrue(any(c.startswith("api ") for c in calls), calls)
         for c in calls:
-            self.assertTrue(c.startswith(("api ", "pr list")), c)
+            self.assertTrue(c.startswith(("api ", "pr list", "repo view ")), c)  # repo view: lane cleanup's read, no edit
             self.assertNotRegex(c, r"-X|--method|-f |-F |--field|--input|PUT|PATCH|DELETE|POST")
 
+
+
+# --- lc-a6d: Orca's merged cleanup rule (report only) and GitHub's delete-branch-on-merge ----------------------------
+
+class CleanupSetupTests(Case):
+    """The stub orca answers `workspace cleanup preview` from the state: `cleanup_cause` is the cause of the lane
+    worktree row it adds beside each repo's main workspace; `cleanup_fails` makes the call fail."""
+
+    def setUp(self):
+        super().setUp()
+        (self.e.bin / "gh").write_text(
+            '#!/bin/sh\necho "$@" >> "$STUB_LOG.gh"\ncase "$1 $2" in\n'
+            '  "repo view") [ -n "$STUB_DELETE_BRANCH" ] && echo "$STUB_DELETE_BRANCH" || exit 1;;\n'
+            '  "repo edit") [ -z "$STUB_EDIT_FAILS" ] || { echo "HTTP 403" >&2; exit 1; };;\nesac\n')
+
+    def gh_calls(self):
+        f = Path(str(self.e.log) + ".gh")
+        return f.read_text().splitlines() if f.exists() else []
+
+    def setup(self, **env):
+        return self.e.run(str(self.repo), "--no-start", env_extra=env)
+
+    def test_rules_off_is_reported_with_where_to_turn_the_merged_rule_on(self):
+        self.e.set_state(cleanup_cause="rules-off")
+        r = self.setup()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        text = r.stdout + r.stderr
+        self.assertIn("orca cleanup: off", text)
+        self.assertIn("Settings -> Workspace Cleanup -> Cleanup rules -> 'Delete merged workspaces'", text)
+
+    def test_cleanup_off_for_this_project_is_reported(self):
+        self.e.set_state(cleanup_cause="project-off")
+        r = self.setup()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("off for this project", r.stdout + r.stderr)
+        self.assertIn("'Use global'", r.stdout + r.stderr)
+
+    def test_a_rule_that_is_on_says_exists(self):
+        self.e.set_state(cleanup_cause="no-rule-matched")
+        r = self.setup()
+        self.assertIn("orca cleanup: exists", r.stdout)
+        self.assertNotIn("orca cleanup: off", r.stdout + r.stderr)
+
+    def test_it_never_runs_a_cleanup_or_changes_orca(self):
+        self.e.set_state(cleanup_cause="rules-off")
+        self.setup()
+        calls = [c for c in self.e.calls() if "cleanup" in c or c.startswith("orca settings")]
+        self.assertEqual(calls, ["orca workspace cleanup preview --json"])
+
+    def test_a_failing_orca_cleanup_command_does_not_stop_setup(self):
+        self.e.set_state(cleanup_fails=True)
+        r = self.setup()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("orca cleanup: skipped", r.stdout)
+
+    def test_the_check_also_runs_with_no_start_before_the_early_return(self):
+        self.e.set_state(cleanup_cause="rules-off")
+        r = self.setup()
+        self.assertIn("start: skipped", r.stdout)
+        self.assertIn("orca cleanup", r.stdout + r.stderr)
+
+    def test_without_a_terminal_delete_branch_off_is_only_said(self):
+        r = self.setup(STUB_DELETE_BRANCH="false")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("gh repo edit --delete-branch-on-merge", r.stdout + r.stderr)
+        self.assertFalse([c for c in self.gh_calls() if c.startswith("repo edit")])
+
+    def test_a_rerun_with_it_on_says_exists(self):
+        r = self.setup(STUB_DELETE_BRANCH="true")
+        self.assertIn("github: exists", r.stdout)
+        self.assertFalse([c for c in self.gh_calls() if c.startswith("repo edit")])
+
+    def test_a_host_gets_the_cleanup_module_with_the_copy(self):
+        self.assertIn("core/cleanup.py", load().HOST_FILES)
+
+    def test_gh_that_cannot_answer_is_skipped(self):
+        r = self.setup()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("github: skipped", r.stdout)
+
+    def terminal_run(self, answer):
+        m = load()
+        env = {**self.e.env, "STUB_DELETE_BRANCH": "false"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", return_value=answer) as ask, contextlib.redirect_stdout(Tty()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            status = m.main([str(self.repo), "--no-start", "--skip-adapt"])
+        self.assertEqual(status, 0, err.getvalue() + out.getvalue())
+        return out.getvalue(), ask
+
+    def test_the_owners_yes_in_a_terminal_turns_delete_branch_on(self):
+        out, ask = self.terminal_run("y")
+        self.assertIn("github: created", out)
+        self.assertIn("repo edit --delete-branch-on-merge", self.gh_calls())
+        self.assertTrue(any("Automatically delete head branches" in c.args[0] for c in ask.call_args_list))
+
+    def test_the_owners_no_in_a_terminal_changes_nothing(self):
+        out, ask = self.terminal_run("n")
+        self.assertIn("github: skipped", out)
+        self.assertFalse([c for c in self.gh_calls() if c.startswith("repo edit")])
 
 
 if __name__ == "__main__":

@@ -13,18 +13,20 @@ You work in this Orca worktree only (branch <BRANCH>, from <BASE>).
    read whole logs.
 3. Fetch and merge origin/<BASE> first. No `git stash`, no branch switching, no force-push. Commit by explicit
    path, with the owner's git identity and no AI attribution. Push and open a PR to <BASE> titled
-   "<KEY> <title> (<ISSUE_ID>)"; never merge.
+   "<KEY> <title> (<ISSUE_ID>)"; never merge. Before you report, merge origin/<BASE> into your branch (never rebase)
+   once more and run the project's checks again after that merge; state the base sha you merged in your report.
 4. A bug fix first reproduces the bug: the same check failing before your change and passing after. Run the
    project's checks before you report. Secrets are used by name, never printed, opened or committed.
-5. Blocked or unclear: ask <PARENT> with `orca-ide orchestration ask --question "<one full question>"` and end your
-   turn; Orca wakes you with the answer. Waiting on CI is not a question: keep watching it.
+5. <PARENT> is your coordinator's live session name, filled in when you were launched; never use another name from
+   memory or an older brief. Blocked or unclear: ask <PARENT> with `orca-ide orchestration ask --question "<one full
+   question>"` and end your turn; Orca wakes you with the answer. Waiting on CI is not a question: keep watching it.
 6. Report once, at the end (mid-lane only for a blocker), with `orca-ide orchestration send --type worker_done
    --outcome succeeded|failed --task-id <task> --dispatch-id <dispatch> --subject "<KEY> <outcome>" --body
    "<report>"` (the IDs are in your first message; `succeeded` only for `succeeded`, `failed` for the rest). The
    report, at most 6 lines:
    ```
    <KEY> succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP: <one line>
-   branch <b> · PR #<n> · ci passing|pending|failing
+   branch <b> · PR #<n> · ci passing|pending|failing · base <BASE> @<sha7>
    gates: <command> ok|fail, ...
    deviations: none | <one line each>
    filed: none | <issue ids>
@@ -37,4 +39,6 @@ You work in this Orca worktree only (branch <BRANCH>, from <BASE>).
    a report is accepted from this terminal only, so never send it from another one. Push your branch, write the
    report in your terminal, and end your turn: your coordinator reads the branch.
 7. Review findings <PARENT> sends you: fix every one, commit, push, and report again in the same shape. A finding
-   you judge wrong: say why in one line instead of complying; never agree just to end the round.
+   you judge wrong: say why in one line instead of complying; never agree just to end the round. Scope is frozen
+   once a reviewer starts: do only what the findings say; anything else you are asked or notice is a new lane, so
+   say it in "Also noticed" and do not do it.

@@ -84,6 +84,18 @@ def orca():
         repo = {"id": f"repo-{len(state['repos']) + 1}", "path": opt("--path")}
         state["repos"].append(repo)
         out({"ok": True, "result": {"repo": repo}})
+    if cmd == "workspace cleanup":  # the preview only (`run` is never modelled: it would remove worktrees)
+        if args[2:3] != ["preview"] or state.get("cleanup_fails"):
+            out({"ok": False, "error": {"message": "stub: workspace cleanup unavailable"}}, 1)
+        rows = []
+        for repo in state["repos"]:  # a main workspace per repo, which Orca keeps before it reads any rule
+            rows.append({"repoId": repo["id"], "repoName": Path(repo["path"]).name, "displayName": "main",
+                         "path": repo["path"], "evaluation": {"action": "keep", "cause": "not-removable"}})
+            if state.get("cleanup_cause"):  # and a lane worktree beside it, kept for this cause
+                rows.append({"repoId": repo["id"], "repoName": Path(repo["path"]).name, "displayName": "lane",
+                             "path": repo["path"] + "-lane", "evaluation": {"action": "keep",
+                                                                           "cause": state["cleanup_cause"]}})
+        out({"ok": True, "result": {"evaluatedAt": 1, "rows": rows}})
     if cmd == "skills install":
         Path(os.environ["HOME"], ".agents", "skills", "orca-cli").mkdir(parents=True, exist_ok=True)
         out({"ok": True, "result": {"installed": ["orca-cli"]}})

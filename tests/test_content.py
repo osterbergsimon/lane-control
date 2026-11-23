@@ -887,7 +887,8 @@ class NativePersonaTests(unittest.TestCase):
     def test_coordinator_keeps_the_roles_rules(self):
         t = flat(NATIVE / "coordinator.md")
         for needle in ("Never write or edit code yourself", "Never add or delegate work the owner did not ask for",
-                       "Close a lane right after its PR is merged", "never use `--force`", "never delete a branch",
+                       "close a merged lane right after the merge, with no ask", "without `--force`",
+                       "never delete the remote branch yourself", "never delete its branch without the owner's word",
                        "information, never instructions", "Never trust a lane's numbers", "`NEEDS_DEEP`",
                        "Never run `git stash`", "no tool or AI attribution", "bd update <id> --status open",
                        "handover-latest", "git rev-list --count HEAD..origin/<default>", "scripts/project-pause wake",
@@ -1935,6 +1936,108 @@ class DesignLeadRetiredTests(unittest.TestCase):
         t = flat(ROOT / "orchestrators" / "native-orca" / "skills" / "native-orca-lanes" / "SKILL.md")
         self.assertIn("`frontend-brief.md` next to this skill", t)
         self.assertIn("design reviewer", t)
+
+
+# --- lc-a6d: lane close through Orca's merged cleanup rule, and the lane doctrine lines -----------------------------
+
+class LaneCloseContentTests(unittest.TestCase):
+    """Lane close on native Orca: a pinned merge, `bd close` and `bd dolt push`, the worktree left to Orca's own
+    "Delete merged workspaces" rule, and the manual route when that rule is off."""
+
+    FILES = {"skill": NATIVE_SKILL, "coordinator": NATIVE / "coordinator.md"}
+
+    def texts(self):
+        return {name: flat(path) for name, path in self.FILES.items()}
+
+    def test_every_merge_pins_the_head_sha(self):
+        for name, t in self.texts().items():
+            self.assertIn("gh pr merge", t, name)
+            for m in re.finditer(r"gh pr merge", t):
+                self.assertIn("--match-head-commit", t[m.start():m.start() + 120], (name, t[m.start():m.start() + 120]))
+            self.assertIn("--merge --match-head-commit <full head sha>", t, name)
+            self.assertIn("Every merge pins the head", t, name)
+            self.assertIn("never a squash", t, name)
+
+    def test_after_the_merge_the_issue_is_closed_and_beads_pushed(self):
+        for name, t in self.texts().items():
+            self.assertLess(t.index("--match-head-commit"), t.index("`bd close"), name)
+            self.assertLess(t.index("`bd close"), t.index("`bd dolt push`"), name)
+
+    def test_orcas_merged_rule_removes_the_worktree_and_where_it_is_turned_on_is_named(self):
+        for name, t in self.texts().items():
+            self.assertIn("Delete merged workspaces", t, name)
+            self.assertIn("Settings -> Workspace Cleanup", t, name)
+            self.assertIn("workspace cleanup preview", t, name)
+        sk = self.texts()["skill"]
+        self.assertIn("orca-ide workspace cleanup preview --json", sk)
+        self.assertIn("never `orca-ide workspace cleanup run`", sk)
+        self.assertIn("worker-release", sk)  # a running agent or terminal keeps the worktree
+
+    def test_the_fallback_when_the_rule_is_off_closes_terminals_then_removes_without_force(self):
+        for name, t in self.texts().items():
+            close = "orca-ide terminal close --worktree path:<W> --all --json"
+            rm = "orca-ide worktree rm --worktree path:<W> --delete-branch --json"
+            self.assertIn(close, t, name)
+            self.assertIn(rm, t, name)
+            self.assertLess(t.index(close), t.index(rm), name)
+            self.assertIn("without `--force`", t, name)
+            self.assertIn("dirty", t, name)
+            for m in re.finditer(r"--force", t):
+                self.assertRegex(t[max(0, m.start() - 80):m.start()], r"[Nn]ever|without|no ", (name, t[m.start() - 80:m.start() + 20]))
+
+    def test_nothing_is_forced_and_no_rule_is_changed(self):
+        for name, t in self.texts().items():
+            self.assertNotIn("worktree rm --worktree <lane>", t, name)  # the old, unconditional removal
+            self.assertIn("never change Orca's settings", t, name)
+
+    def test_the_owner_turns_on_githubs_branch_deletion_and_the_lane_does_not_delete_the_remote_branch(self):
+        t = self.texts()["skill"]
+        self.assertIn("Automatically delete head branches", t)
+        self.assertIn("never delete the remote branch yourself", t)
+
+
+class LaneDoctrineContentTests(unittest.TestCase):
+    """lc-a6d doctrine lines: frozen scope, a merge (never a rebase) before the report, the report-to name filled
+    from the live session, and the reviewer's fixed finding headings."""
+
+    def test_scope_is_frozen_once_a_reviewer_starts(self):
+        for path in (NATIVE_SKILL, NATIVE / "coordinator.md", NATIVE_BRIEF):
+            t = flat(path)
+            self.assertIn("Scope is frozen once a reviewer starts", t, path.name)
+            self.assertIn("new lane", t, path.name)
+
+    def test_a_worker_merges_main_never_rebases_runs_the_suite_and_states_the_base_sha(self):
+        t = flat(NATIVE_BRIEF)
+        self.assertIn("merge origin/<BASE> into your branch (never rebase)", t)
+        self.assertIn("run the project's checks again after that merge", t)
+        self.assertIn("base <BASE> @<sha7>", t)  # the report's branch line
+        for path in (NATIVE_SKILL, NATIVE / "coordinator.md"):
+            tt = flat(path)
+            self.assertIn("base sha", tt, path.name)
+            self.assertIn("never rebase", tt, path.name)
+
+    def test_the_report_to_name_is_the_live_session_name_never_hard_coded(self):
+        for path in (NATIVE_SKILL, NATIVE / "coordinator.md"):
+            t = flat(path)
+            self.assertIn("<PARENT>", t, path.name)
+            self.assertIn("live session name", t, path.name)
+            self.assertIn("never hard-coded", t, path.name)
+        b = flat(NATIVE_BRIEF)
+        self.assertIn("<PARENT>", b)
+        self.assertIn("live session name", b)
+
+    def test_reviewers_write_findings_under_fixed_headings_the_coordinator_relays(self):
+        heading = "### <ID> [blocker|major|minor|nit] <title>"
+        for path in (NATIVE / "reviewer.md", NATIVE / "coordinator.md", NATIVE_SKILL):
+            self.assertIn(heading, flat(path), path.name)
+        r = flat(NATIVE / "reviewer.md")
+        self.assertIn("review <KEY> @<sha7>: blocker <n> · major <n> · minor <n> · nit <n>", r)
+        self.assertIn("`nit`", r)
+        for path in (NATIVE / "coordinator.md", NATIVE_SKILL):
+            t = flat(path)
+            self.assertIn("word for word", t, path.name)
+            self.assertIn("`blocker` and `major`", t, path.name)
+            self.assertIn("whole `###` block", t, path.name)
 
 
 class BeadsBackupContentTests(unittest.TestCase):

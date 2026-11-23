@@ -38,9 +38,12 @@ Do these in order; any that fails holds the lane, and you tell the owner what it
 ## 2. Brief and open the lane
 Write the brief from `brief.md` next to this skill (the project's copy of lane-control's native lane brief): fill in
 every `<...>`, add what the lane needs from AGENTS.md and `.lane-control/project.md`, and save it outside the repo
-(your scratch folder). A lane on a failing test, a CI run or a bug report starts its brief with the debugger persona
-(`.lane-control/debugger.md`). A lane that changes what a user sees gets `frontend-brief.md` next to this skill
-appended to its brief, and the design reviewer beside its code reviewer (your persona, Frontend lanes).
+(your scratch folder). `<PARENT>`, the name the lane reports and asks to, is your own live session name, read from
+your session when you launch the lane (the objective of your Run, `orca-ide orchestration run-current`): never
+hard-coded, never copied from an earlier brief. A lane on a failing test, a CI run or a bug report starts its brief
+with the debugger persona (`.lane-control/debugger.md`). A lane that changes what a user sees gets `frontend-brief.md`
+next to this skill appended to its brief, and the design reviewer beside its code reviewer (your persona, Frontend
+lanes).
 
 Your own Run is your lanes' Run and your Orca address: if `orca-ide orchestration run-current` shows none, create it
 from your own terminal with `orca-ide orchestration run-create --objective "<your session name>"`.
@@ -91,12 +94,16 @@ lines:
 
 ```
 <KEY> succeeded|failed|blocked|NEEDS_STANDARD|NEEDS_DEEP: <one line>
-branch <b> · PR #<n> · ci passing|pending|failing
+branch <b> · PR #<n> · ci passing|pending|failing · base <BASE> @<sha7>
 gates: <command> ok|fail, ...
 deviations: none | <one line each>
 filed: none | <issue ids>
 agents-md: none | <one line the next agent would need that AGENTS.md lacks; never commit it yourself>
 ```
+
+The lane merges origin/<BASE> into its branch (never rebase) and runs the project's checks again before it reports,
+and the report states the base sha it merged. If the base moved since (`git fetch origin`), send the lane a new Task
+to merge it again and re-run its checks before you merge.
 
 `NEEDS_STANDARD` or `NEEDS_DEEP`: reopen the lane one tier up. After one failed round on swift the next runs on
 standard. `agents-md` lines go to the owner as a list, never into AGENTS.md by you.
@@ -109,19 +116,41 @@ From review tier B up, and whenever the owner asks, a reviewer runs before you c
 1. Start it as its own worker in the lane's worktree (`worker-start --worktree path:<lane worktree>`), on a
    different model from the lane's, at the lane's tier or one up; its spec starts with the reviewer persona.
 2. Give it the issue, the branch, its base and the exact commit, never the lane's report.
-3. Send its `blocker` and `major` findings to the lane as a new Task, word for word, not your summary. At most two
-   rounds; after that, or when the lane disputes a finding, the owner decides.
+3. The reviewer writes each finding under the heading `### <ID> [blocker|major|minor|nit] <title>`. Send the whole
+   `###` block of every `blocker` and `major` finding to the lane as a new Task, word for word, not your summary. At
+   most two rounds; after that, or when the lane disputes a finding, the owner decides.
+   Scope is frozen once a reviewer starts: a new ask, from the owner or anyone, becomes a new lane, never an addition
+   to this one; a fix round fixes findings only.
 4. Mirror each round: `--comment "<KEY> review 1: blocker 0 · major 1"`. Stop the reviewer after its last round.
 
 ## 7. Close
-Merge only on the owner's word for that lane (`DOCTRINE: owner yes, merge <KEY>-<n>`); then close its issue.
+Merge only on the owner's word for that lane (`DOCTRINE: owner yes, merge <KEY>-<n>`). Every merge pins the head:
+read the PR's full head sha (`gh pr view <n> --json headRefOid -q .headRefOid`), check it is the commit you
+reviewed, then `gh pr merge <n> --merge --match-head-commit <full head sha>` (a merge commit, never a squash or a
+rebase merge, never `--admin`). If the head moved, gh refuses: review the new commit first. After the merge:
+`bd close <id>`, then `bd dolt push`.
 
-Close a lane right after its PR merged, with no ask, when its worktree is clean (`git status --ignored`: only known
-build output and the `.beads` link), pushed, and its branch is an ancestor of the branch it merged into
-(`git fetch origin`, `git merge-base --is-ancestor <branch> origin/<base>`). Release its worker with
-`orca-ide orchestration worker-release`, then `orca-ide worktree rm --worktree <lane>`.
+Orca removes the worktree, not you. Its own cleanup rule "Delete merged workspaces" (in Orca: Settings -> Workspace
+Cleanup -> Cleanup rules) removes a merged lane's worktree and its merged branch once nothing runs in it, it is clean
+and pushed, and it was not used in the last hour. So release the lane's worker (`orca-ide orchestration
+worker-release`) and stop its reviewer after the last round: a running agent or terminal keeps the worktree.
+`orca-ide workspace cleanup preview --json` is read-only and shows why a worktree stays (`rows[].evaluation.cause`);
+never `orca-ide workspace cleanup run`, which is the owner's. You never change Orca's settings.
 
-Ask the owner instead, never automatic: a lane whose work did not merge, uncommitted changes, `--force`, any failed
-check above. Stop a live lane only on the owner's word: `orca-ide orchestration worker-stop`, then put its issue
-back to open (`bd update <id> --status open`) with a Resume note (`--notes`). Closing a lane never deletes its
-branch.
+The rule is off when the lane's row says `rules-off` (no rule on) or `project-off` (cleanup off for this project);
+project-setup said so too (`orca cleanup: off`). Tell the owner once where to turn it on: Settings -> Workspace
+Cleanup -> Cleanup rules -> 'Delete merged workspaces', or, for a project with its own setting, that project's
+'Workspace cleanup' page in Settings. Until it is on, close the lane yourself right after the merge, with no ask, in
+this order:
+```
+orca-ide terminal close --worktree path:<W> --all --json
+orca-ide worktree rm --worktree path:<W> --delete-branch --json
+```
+Both without `--force`: a dirty worktree stops the removal. Never force it; ask the owner. Ask the owner too, never
+automatic, for a lane whose work did not merge (its branch stays: no `--delete-branch`), uncommitted changes and any
+failed check above.
+
+The remote branch goes at the merge when the repo has GitHub's "Automatically delete head branches" on (project-setup
+offers it, `github: exists` when it is); when it is off, say so to the owner and never delete the remote branch
+yourself. Stop a live lane only on the owner's word: `orca-ide orchestration worker-stop`, then put its issue back to
+open (`bd update <id> --status open`) with a Resume note (`--notes`).
