@@ -313,16 +313,38 @@ class ClaudeBeadsHookTests(HomeTest):
         self.assertFalse(self.settings.exists())
         self.assertEqual(c.read_bytes(), before)
 
-    def test_a_prime_hook_on_another_event_means_no_second_one(self):
-        self.prime_at(self.checkout / ".claude" / "settings.json", event="PreCompact")
-        self.assertEqual(self.a.install_beads_hook(self.checkout), [])
-        self.assertFalse(self.settings.exists())
+    def test_a_prime_hook_that_is_not_a_session_start_hook_does_not_stop_ours(self):
+        for event, matcher in (("PreCompact", ""), ("Stop", ""), ("PostToolUse", "Bash"), ("SessionStart", "compact"),
+                               ("SessionStart", "resume|clear")):
+            with self.subTest(event=event, matcher=matcher):
+                c = self.prime_at(self.checkout / ".claude" / "settings.json", event=event, matcher=matcher,
+                                  command="bd prime --memories-only")
+                before = c.read_bytes()
+                self.assertEqual(len(self.a.install_beads_hook(self.checkout)), 1)
+                self.assertIn("bd prime", self.commands())
+                self.assertEqual(c.read_bytes(), before)  # the committed file is never touched
+                self.settings.unlink()
+
+    def test_a_user_session_start_hook_that_misses_startup_does_not_stop_ours(self):
+        u = self.prime_at(self.home / ".claude" / "settings.json", matcher="compact")
+        before = u.read_bytes()
+        self.assertEqual(len(self.a.install_beads_hook(self.checkout)), 1)
+        self.assertEqual(u.read_bytes(), before)
 
     def test_a_local_prime_hook_under_another_matcher_means_no_second_one(self):
         self.prime_at(self.settings, matcher="startup")
         before = self.settings.read_bytes()
         self.assertEqual(self.a.install_beads_hook(self.checkout), [])
         self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_a_local_prime_hook_that_misses_startup_does_not_stop_ours(self):
+        self.prime_at(self.settings, matcher="resume")
+        self.assertEqual(len(self.a.install_beads_hook(self.checkout)), 1)
+        self.assertEqual(self.commands().count("bd prime"), 2)
+
+    def test_a_shell_form_of_bd_prime_in_the_user_settings_means_no_second_one(self):
+        self.prime_at(self.home / ".claude" / "settings.json", command="if command -v bd >/dev/null; then bd prime; fi")
+        self.assertEqual(self.a.install_beads_hook(self.checkout), [])
 
     def test_a_user_hook_that_bd_rejects_does_not_stop_ours(self):
         self.prime_at(self.home / ".claude" / "settings.json", command="bd prime --hook-json")

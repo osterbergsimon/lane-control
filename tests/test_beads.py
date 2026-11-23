@@ -410,10 +410,34 @@ class HookTests(BeadsCase):
         self.assertEqual(beads.prime_hooks(self.repo), [])
         self.assertEqual(beads.hook_notes(self.repo), [])
 
-    def test_a_prime_hook_on_any_event_counts(self):
-        self.settings_at(self.repo / ".claude" / "settings.json", "PreCompact", "bd prime")
-        self.assertEqual([h.event for h in beads.prime_hooks(self.repo)], ["PreCompact"])
-        self.assertEqual([w for _, w, _ in beads.hook_notes(self.repo)], ["exists"])
+    def test_a_prime_hook_on_another_event_is_listed_but_is_not_a_session_start_hook(self):
+        self.settings_at(self.repo / ".claude" / "settings.json", "PreCompact", "bd prime --memories-only")
+        hooks = beads.prime_hooks(self.repo)
+        self.assertEqual([(h.event, h.covers_start) for h in hooks], [("PreCompact", False)])
+        lines = beads.hook_notes(self.repo)
+        self.assertEqual([w for _, w, _ in lines], ["noted"])
+        self.assertIn("PreCompact", self.details(lines))
+        self.assertNotIn("adds no second one", self.details(lines))  # a project with only this has no start-up prime
+
+    def test_which_matchers_cover_a_session_start(self):
+        for matcher, covers in (("", True), ("*", True), ("startup", True), ("startup|resume", True),
+                                ("startup|resume|clear|compact", True), ("resume", False), ("compact", False),
+                                ("resume|clear", False), ("startupx", False), ("(", False)):
+            with self.subTest(matcher=matcher):
+                self.settings_at(self.user_settings(), "SessionStart", "bd prime", matcher=matcher)
+                self.assertEqual([h.covers_start for h in beads.prime_hooks(self.repo)], [covers])
+
+    def test_a_session_start_hook_that_misses_startup_is_noted_not_counted(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime", matcher="compact")
+        lines = beads.hook_notes(self.repo)
+        self.assertEqual([w for _, w, _ in lines], ["noted"])
+        self.assertIn("compact", self.details(lines))
+
+    def test_a_hook_on_an_event_that_is_not_session_start_never_counts(self):
+        for event in ("Stop", "PostToolUse", "PreCompact", "UserPromptSubmit"):
+            with self.subTest(event=event):
+                self.settings_at(self.user_settings(), event, "bd prime")
+                self.assertEqual([h.covers_start for h in beads.prime_hooks(self.repo)], [False])
 
     def test_a_local_prime_hook_under_another_matcher_is_found(self):
         self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher="startup")
@@ -453,6 +477,118 @@ class HookTests(BeadsCase):
         self.assertEqual([w for _, w, _ in lines], ["broken"])
         self.assertIn(str(f), self.details(lines))
         self.assertEqual(f.read_bytes(), before)
+
+    def test_two_entries_whose_matchers_never_overlap_are_not_a_duplicate(self):
+        import json
+        f = self.repo / ".claude" / "settings.json"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"matcher": "startup", "hooks": [{"type": "command", "command": "bd prime"}]},
+            {"matcher": "resume", "hooks": [{"type": "command", "command": "bd prime"}]}]}}))
+        lines = beads.hook_notes(self.repo)
+        self.assertNotIn("warning", [w for _, w, _ in lines])
+        self.assertNotIn("more place", self.details(lines))
+
+    def test_entries_whose_matchers_overlap_are_a_duplicate(self):
+        import json
+        f = self.repo / ".claude" / "settings.json"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text(json.dumps({"hooks": {"SessionStart": [
+            {"matcher": "startup|resume", "hooks": [{"type": "command", "command": "bd prime"}]},
+            {"matcher": "resume|clear", "hooks": [{"type": "command", "command": "bd prime"}]},
+            {"matcher": "", "hooks": [{"type": "command", "command": "bd prime"}]}]}}))
+        self.assertEqual([w for _, w, _ in beads.hook_notes(self.repo)].count("warning"), 1)
+
+    def test_the_duplicate_warning_says_which_entry_to_remove(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime")
+        self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher="startup|resume|clear|compact")
+        warn = [d for _, w, d in beads.hook_notes(self.repo) if w == "warning"]
+        self.assertEqual(len(warn), 1)
+        self.assertIn(f"remove the entry in {self.local_settings()}", warn[0])
+        self.assertIn("lane-control's own", warn[0])
+
+    def test_the_notes_say_what_is_not_checked(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime")
+        text = self.details(beads.hook_notes(self.repo))
+        for gap in ("managed settings", "plugin hooks", "hook scripts"):
+            self.assertIn(gap, text)
+        self.assertIn("CLAUDE_CONFIG_DIR", text)  # the user's file read is named, and a session on another folder is not
+        self.assertIn(str(self.user_settings()), text)
+
+    def test_when_only_our_own_hook_is_there_the_gap_is_still_said(self):
+        self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher="startup|resume|clear|compact")
+        text = self.details(beads.hook_notes(self.repo))
+        for gap in ("managed settings", "plugin hooks", "hook scripts"):
+            self.assertIn(gap, text)
+
+    def test_a_malformed_settings_file_is_reported_not_crashed_on_or_rewritten(self):
+        for layer, f in (("user", self.user_settings()), ("committed", self.repo / ".claude" / "settings.json")):
+            with self.subTest(layer=layer):
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("{not json")
+                lines = beads.hook_notes(self.repo)
+                warn = [d for _, w, d in lines if w == "warning"]
+                self.assertEqual(len(warn), 1)
+                self.assertIn(str(f), warn[0])
+                self.assertIn("not valid JSON", warn[0])
+                self.assertEqual(f.read_text(), "{not json")
+                f.unlink()
+
+    def test_a_missing_settings_file_is_not_a_problem(self):
+        self.assertEqual(beads.hook_notes(self.repo), [])
+
+    def test_without_bd_nothing_is_probed_and_no_hook_is_called_rejected(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime")
+        self.settings_at(self.local_settings(), "SessionStart", "bd prime", matcher="startup|resume|clear|compact")
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            hooks = beads.prime_hooks(self.repo)
+            lines = beads.hook_notes(self.repo)
+        self.assertEqual([h.runs for h in hooks], [None, None])  # present, not judged: there is no bd to judge
+        self.assertNotIn("broken", [w for _, w, _ in lines])
+        self.assertNotIn("rejects", self.details(lines))
+
+    def test_a_rejected_hook_in_the_local_file_says_it_is_the_checkouts_uncommitted_file(self):
+        self.settings_at(self.local_settings(), "SessionStart", "bd prime --hook-json", matcher="startup")
+        lines = beads.hook_notes(self.repo)
+        self.assertEqual([w for _, w, _ in lines], ["broken"])
+        text = self.details(lines)
+        self.assertIn("uncommitted", text)
+        self.assertNotIn("not lane-control's file", text)
+
+    def test_a_timeout_or_failure_to_start_is_not_a_rejection(self):
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime")
+        for rc in (124, 127):
+            with self.subTest(rc=rc), mock.patch.object(beads, "_run", return_value=subprocess.CompletedProcess([], rc, "", "x")):
+                self.assertEqual([h.runs for h in beads.prime_hooks(self.repo)], [None])
+
+    def test_common_shell_forms_of_bd_prime_are_recognised(self):
+        for command in ("bd prime>/dev/null", "bd prime 2>/dev/null || true", "if command -v bd >/dev/null; then bd prime; fi",
+                        "{ bd prime; }", "timeout 10 bd prime", "exec bd prime", "nice bd prime", "! bd prime",
+                        "sh -c \"bd prime\"", "bash -lc 'bd prime'", "bd -q prime", "cd . && bd prime", "FOO=1 bd prime",
+                        "/usr/local/bin/bd prime", "(bd prime)", "true; bd prime | cat"):
+            with self.subTest(command=command):
+                self.settings_at(self.user_settings(), "SessionStart", command)
+                self.assertEqual([h.command for h in beads.prime_hooks(self.repo)], [command])
+
+    def test_commands_that_do_not_run_bd_prime_are_not_recognised(self):
+        for command in ('echo "bd prime"', "echo bd prime", "bd primer", "bd create prime", "abd prime", "bd show prime-1",
+                        "# bd prime", "bd prime-x"):
+            with self.subTest(command=command):
+                self.settings_at(self.user_settings(), "SessionStart", command)
+                self.assertEqual(beads.prime_hooks(self.repo), [])
+
+    def test_a_plain_prime_command_is_run_once_per_setup_note(self):
+        self.committed("bd prime")
+        self.settings_at(self.user_settings(), "SessionStart", "bd prime")
+        beads.hook_notes(self.repo)
+        self.assertEqual([c for c in self.bd_calls() if c.startswith("prime")], ["prime"])  # the same command, one probe
+
+    def test_the_hook_files_record_names_the_gaps_and_wraps_at_120(self):
+        text = (ROOT / "core/harnesses/claude/record.md").read_text()
+        flat = " ".join(text.split())
+        for gap in ("managed settings", "plugin hooks", "hook scripts", "CLAUDE_CONFIG_DIR"):
+            self.assertIn(gap, flat)
+        self.assertEqual([n for n, ln in enumerate(text.splitlines(), 1) if len(ln) > 120], [])
 
 
 class AdoptLayoutTests(BeadsCase):
@@ -837,6 +973,16 @@ class RestoreTests(BeadsCase):
             with self.subTest(url=url):
                 shutil.rmtree(self.dest2, ignore_errors=True)
                 self.assertIn("not a checkout of acme/widget-beads", self.problems(self.reuse_with_origin(url)))
+
+    def test_an_origin_that_is_not_recognised_is_named_in_the_refusal(self):
+        for url in ("git@github-work:acme/widget-beads.git", "https://github.com/acme/widget-beads-old.git",
+                    "https://tok:secret@gitlab.com/acme/widget-beads.git"):
+            with self.subTest(url=url):
+                shutil.rmtree(self.dest2, ignore_errors=True)
+                text = self.problems(self.reuse_with_origin(url))
+                self.assertIn("not a checkout of acme/widget-beads", text)
+                self.assertIn("not recognised", text)
+                self.assertNotIn("secret", text)  # a token in an origin URL is never printed
 
     def test_a_folder_in_the_way_is_never_touched(self):
         self.dest2.mkdir()
