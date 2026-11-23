@@ -19,6 +19,11 @@ a = sys.argv[1:]
 open(os.environ["GH_LOG"], "a").write(" ".join(a).replace("\\n", " / ") + "\\n")
 """ + GH_SUMMARY_BLOCK + """
 prs = json.load(open(os.environ["GH_PRS"]))
+if a[:2] == ["repo", "view"]:
+    here = os.path.basename(os.getcwd())
+    if here in os.environ.get("GH_VIS_FAIL", "").split(","):
+        print("gh: could not resolve repository", file=sys.stderr); sys.exit(1)
+    print("PRIVATE" if here in os.environ.get("GH_PRIVATE", "").split(",") else "PUBLIC"); sys.exit(0)
 if a[:2] == ["api", "user"]:
     login = os.environ.get("GH_LOGIN", "")
     if not login:
@@ -260,41 +265,72 @@ class AwayMergeTests(AwayMergeTest):
         f.write_text(text)
         return f
 
-    def test_a_listed_name_in_an_added_line_refuses_without_printing_it(self):
+    def test_a_listed_name_in_an_added_line_refuses_with_file_and_line_but_without_the_name(self):
         self.names_file("example-host\n")
-        self.pr(diff=CLEAN_DIFF + "+ssh Example-Host\n")
+        self.pr(diff=CLEAN_DIFF.replace("+print", "@@ -1,2 +10,3 @@\n keep\n+print") + "+ssh Example-Host\n")
         r = self.merge()
-        self.assertRefused(r, "secrets")
-        self.assertIn("a listed name", r.stderr)
+        self.assertRefused(r, "names")
+        self.assertIn("a listed name at x.py:12", r.stderr)
         self.assertNotIn("example-host", r.stderr.lower())
+        self.assertIn("ask the owner", r.stderr)
 
-    def test_another_projects_name_refuses_but_its_own_is_fine(self):
+    def test_only_private_projects_names_count_and_the_own_name_never_does(self):
+        self.pr(diff=CLEAN_DIFF + "+# copied from blog, see the shop docs\n")
+        self.assertEqual(self.merge().returncode, 0)  # blog is a public repo
+        self.env["GH_PRIVATE"] = "blog"
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("a project name", r.stderr)
         self.pr(diff=CLEAN_DIFF + "+# see the shop docs\n")
         self.assertEqual(self.merge().returncode, 0)
-        self.pr(diff=CLEAN_DIFF + "+# copied from blog\n")
-        r = self.merge()
-        self.assertRefused(r, "secrets")
-        self.assertIn("a project name", r.stderr)
+        self.names_file("shop\n")  # the own name in the names file is no secret either
+        self.assertEqual(self.merge().returncode, 0)
 
     def test_the_machines_own_hostname_and_username_refuse(self):
         import getpass
         import socket
         sys.path.insert(0, str(ROOT / "core"))
         import privatenames
+        hit = False
         for kind, name in (("a hostname", socket.gethostname().split(".")[0]), ("a username", getpass.getuser())):
-            if name.lower() in privatenames.GENERIC or len(name) < privatenames.MIN_LEN:
+            if name.lower() in privatenames.GENERIC or len(name) < privatenames.MIN_MACHINE_LEN:
                 continue
+            hit = True
             with self.subTest(kind=kind):
                 self.pr(diff=CLEAN_DIFF + f"+ssh {name}\n")
                 r = self.merge()
-                self.assertRefused(r, "secrets")
+                self.assertRefused(r, "names")
                 self.assertIn(kind, r.stderr)
-                self.assertNotIn(name, r.stderr)
+                self.assertNotIn(name, r.stderr, msg=f"the refusal printed {kind}")
+        if not hit:
+            self.skipTest("this machine's hostname and user are both short or common words")
 
     def test_names_in_removed_and_context_lines_and_longer_words_pass(self):
         self.names_file("example-host\n")
-        self.pr(diff=CLEAN_DIFF + "-ssh example-host\n ssh example-host\n+example-hosting and blogger\n")
+        self.pr(diff=CLEAN_DIFF.replace("+print", "@@ -1,2 +1,3 @@\n+print") +
+                "-ssh example-host\n ssh example-host\n+example-hosting and blogger\n")
         self.assertEqual(self.merge().returncode, 0)
+
+    def test_a_name_in_a_file_path_or_a_rename_refuses_and_the_path_is_masked(self):
+        self.names_file("example-host\n")
+        new = "diff --git a/hosts/example-host.nix b/hosts/example-host.nix\nnew file mode 100644\n--- /dev/null\n+++ b/hosts/example-host.nix\n+x = 1\n"
+        ren = ("diff --git a/a.md b/example-host.md\nsimilarity index 100%\nrename from a.md\nrename to example-host.md\n")
+        for diff in (new, ren):
+            with self.subTest(diff=diff[:40]):
+                self.pr(diff=diff, files=[{"path": "x"}])
+                r = self.merge()
+                self.assertRefused(r, "names")
+                self.assertIn("a listed name in the path ", r.stderr)
+                self.assertIn("***", r.stderr)
+                self.assertNotIn("example-host", r.stderr.lower())
+
+    def test_an_added_line_that_starts_with_plus_plus_is_still_scanned(self):
+        self.names_file("example-host\n")
+        self.pr(diff=CLEAN_DIFF.replace("+print", "@@ -1 +1,2 @@\n+print") + "++ example-host\n+++ example-host\n")
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("x.py:2", r.stderr)
+        self.assertIn("x.py:3", r.stderr)
 
     def test_the_merge_says_what_the_name_scan_checked(self):
         self.pr()
@@ -307,24 +343,56 @@ class AwayMergeTests(AwayMergeTest):
         r = self.merge()
         self.assertIn("2 from the private-names file", r.stdout)
 
+    def test_a_private_repo_is_not_name_checked_and_the_merge_says_so(self):
+        self.names_file("example-host\n")
+        self.env["GH_PRIVATE"] = "shop"
+        self.pr(diff=CLEAN_DIFF + "+ssh example-host\n")
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("name scan skipped", r.stdout)
+        self.assertIn("private", r.stdout)
+
+    def test_a_repo_whose_visibility_cannot_be_read_refuses(self):
+        self.env["GH_VIS_FAIL"] = "shop"
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("visibility", r.stderr)
+
+    def test_another_project_whose_visibility_cannot_be_read_counts_as_private_and_is_said(self):
+        self.env["GH_VIS_FAIL"] = "blog"
+        self.pr(diff=CLEAN_DIFF + "+# copied from blog\n")
+        self.assertRefused(self.merge(), "names")
+        self.pr()
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("could not be read", r.stdout)
+
     def test_the_env_var_names_the_file_and_a_missing_one_refuses(self):
         other = self.names_file("elsewhere-host\n", "other.txt")
         self.env["LANE_PRIVATE_NAMES"] = str(other)
         self.pr(diff=CLEAN_DIFF + "+elsewhere-host\n")
-        self.assertRefused(self.merge(), "secrets")
+        self.assertRefused(self.merge(), "names")
         self.env["LANE_PRIVATE_NAMES"] = str(self.conf_dir / "gone.txt")
         self.pr()
         r = self.merge()
-        self.assertRefused(r, "secrets")
+        self.assertRefused(r, "names")
         self.assertIn("cannot be read", r.stderr)
 
-    def test_a_gitleaks_project_leaves_the_names_to_its_config(self):
+    def test_a_gitleaks_project_gets_the_name_check_after_gitleaks(self):
         (self.shop / ".gitleaks.toml").write_text("title = 'x'\n")
         self.names_file("example-host\n")
         self.pr(diff=CLEAN_DIFF + "+ssh example-host\n")
         r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("detect", (self.tmp / "gitleaks.log").read_text())
+        self.pr(diff=CLEAN_DIFF + "+LEAKME example-host\n")
+        r = self.merge()
+        self.assertIn("refused (secrets)", r.stderr)
+        self.assertIn("refused (names)", r.stderr)
+        self.pr()
+        r = self.merge()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("name scan", r.stdout)
+        self.assertIn("name scan", r.stdout)
 
     def test_refuses_secret_hit_gitleaks(self):
         (self.shop / ".gitleaks.toml").write_text("title = 'x'\n")
@@ -410,7 +478,7 @@ class AwayMergeTests(AwayMergeTest):
     def test_only_read_commands_besides_the_merge(self):
         self.merge()
         for c in self.gh_calls():
-            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "api user -q", "pr list --head", "pr edit",
+            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "repo view", "api user -q", "pr list --head", "pr edit",
                                           "pr create --draft")), c)
 
 
