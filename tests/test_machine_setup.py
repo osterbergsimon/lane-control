@@ -1091,6 +1091,49 @@ class BudgetStateTests(BudgetTest):
         self.run_script("budget-state", "--mark")
         self.assertFalse(self.marker().exists())
 
+    def ceiling_file(self, text):
+        f = self.tmp / "ceiling.json"
+        f.write_text(text)
+        self.env["LANE_CEILING_FILE"] = str(f)
+
+    def test_project_ceiling_read(self):
+        self.playbook(59, 10, ceiling=60)
+        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
+        r = self.run_script("budget-state", "--project", "lane-control")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "main weekly=59 window=10 ceiling=80 step=0 none window_step=0\n")
+
+    def test_project_ceiling_steps_follow_it(self):
+        self.playbook(76, 10, ceiling=60)
+        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
+        r = self.run_script("budget-state", "--project", "lane-control")
+        self.assertIn("ceiling=80 step=3 push-and-handover", r.stdout)
+
+    def test_project_without_entry_uses_budget_ceiling(self):
+        self.playbook(57, 10, ceiling=60)
+        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
+        r = self.run_script("budget-state", "--project", "other")
+        self.assertIn("ceiling=60 step=3 push-and-handover", r.stdout)
+
+    def test_no_project_unchanged(self):
+        self.playbook(57, 10, ceiling=60)
+        self.ceiling_file('{"ceiling": 60, "projects": {"lane-control": {"ceiling": 80}}}')
+        r = self.run_script("budget-state")
+        self.assertIn("ceiling=60 step=3 push-and-handover", r.stdout)
+
+    def test_malformed_json_falls_back(self):
+        self.playbook(57, 10, ceiling=60)
+        self.ceiling_file("{not json")
+        r = self.run_script("budget-state", "--project", "lane-control")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ceiling=60 step=3 push-and-handover", r.stdout)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertIn("ceiling", r.stderr)
+
+    def test_project_needs_a_name(self):
+        self.playbook(20, 10)
+        self.assertEqual(self.run_script("budget-state", "--project").returncode, 2)
+
     def test_no_config(self):
         self.marker().touch()
         self.env["PLAYBOOK_CONFIG"] = str(self.tmp / "none.sh")

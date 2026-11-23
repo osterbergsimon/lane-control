@@ -29,6 +29,16 @@ budget_ceiling() {
     *)      echo "$c" ;;
   esac
 }
+# project_ceiling <project>: that project's own weekly ceiling (percent) from the ceiling file's .projects.<project>.ceiling,
+# or nothing when there is none. The file is LANE_CEILING_FILE (default ~/.config/claude-usage-ceiling.json), the one the
+# machine coordinator records raises in. A file that is not valid JSON gives one stderr line and nothing.
+project_ceiling() {
+  local f=${LANE_CEILING_FILE:-$HOME/.config/claude-usage-ceiling.json} v
+  [ -r "$f" ] || return 0
+  v=$(jq -r --arg p "$1" '.projects[$p].ceiling // empty' "$f" 2>/dev/null) || { echo "project ceiling: $f is not valid JSON; using the budget's ceiling" >&2; return 0; }
+  [[ "$v" =~ ^[0-9]+$ ]] && echo "$v"
+  return 0
+}
 # budget_usage <budget>: "<weekly%> <window%>"; a failed feed reads "100 100" (fail safe: blocks night launches)
 budget_usage() { local o; o=$(bash -c "${BUDGET_USAGE[$1]}" 2>/dev/null) && [ -n "$o" ] && echo "$o" || echo "100 100"; }
 # budget_tiers <budget>: tiers drawing on it

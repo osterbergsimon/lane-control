@@ -7,6 +7,10 @@
 #                         steps from the ceiling: 0 none, 1 pressure (ceiling-PRESSURE_MARGIN), 2 no-new-work
 #                         (-STEP_NO_NEW), 3 push-and-handover (-STEP_WIP_STOP), 4 stop (-STEP_STOP_ALL); the short
 #                         window's: 0 none, 1 no-new-work (WINDOW_WARN_PCT, 95), 2 push (WINDOW_STOP_PCT, 98)
+#   budget-state --project <name>
+#                         the same, with that project's own ceiling (.projects.<name>.ceiling in the ceiling file,
+#                         LANE_CEILING_FILE; lib.sh project_ceiling) in place of the budget's when it has one; steps
+#                         follow it. Workers read their own project's steps this way.
 #   budget-state --mark   also writes the budget-stopped marker (LANE_BUDGET_STOPPED_FILE, default
 #                         ~/.config/lane-control/budget-stopped) while every metered budget a lane tier runs on is
 #                         stopped: weekly at its stop step (with the largest per-project COORD_CEILING_ADD, since one
@@ -17,13 +21,16 @@
 # limits. It is never a reason to spend budget: the night manager reads LANE_OWNER_AWAY, not this. A feed that gives
 # no reading is unknown, never assumed stopped. Exit: 0; 2 no config (the marker is removed) or usage.
 set -u
-mark=
-case ${1:-} in
-  '') ;;
+mark= project=
+while [ $# -gt 0 ]; do
+case $1 in
   --mark) mark=1 ;;
+  --project) [ $# -ge 2 ] && [ -n "$2" ] || { echo "usage: budget-state [--mark] [--project <name>]" >&2; exit 2; }; project=$2; shift ;;
   -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$(readlink -f "$0")"; exit 0 ;;
-  *) echo "usage: budget-state [--mark]" >&2; exit 2 ;;
+  *) echo "usage: budget-state [--mark] [--project <name>]" >&2; exit 2 ;;
 esac
+shift
+done
 marker=${LANE_BUDGET_STOPPED_FILE:-$HOME/.config/lane-control/budget-stopped}
 conf=${PLAYBOOK_CONFIG:-$HOME/.config/rove/playbook.conf.sh}
 if [ ! -r "$conf" ]; then
@@ -58,6 +65,7 @@ for b in $(metered | sort); do
   fi
   read -r wk ss <<<"$reading"
   ceil=$(budget_ceiling "$b")
+  if [ -n "$project" ]; then pc=$(project_ceiling "$project"); [ -z "$pc" ] || ceil=$pc; fi
   [[ "$ceil" =~ ^[0-9]+$ ]] || ceil=${DEFAULT_CEILING:-40}
   step=0
   if [ "$wk" -ge $((ceil - stop)) ]; then step=4
