@@ -21,5 +21,8 @@ NIGHT_END=7
 # A coordinator is due a check-in after IDLE_MIN minutes idle, at most once every RECHECK_MIN minutes.
 IDLE_MIN=45
 RECHECK_MIN=120
+# While improve mode is on (lane-away on --improve), a coordinator idle this many minutes is due a `DUE <name> improve`
+# check-in to resume its cycle: a fallback for a lost wake, day or night.
+IMPROVE_IDLE_MIN=30
 # `lane-away on` counts for this many hours.
 AWAY_HOURS=14

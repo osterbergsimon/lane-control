@@ -17,7 +17,8 @@ from typing import NamedTuple
 HERE = Path(__file__).resolve().parent
 LANE_LIMITS = HERE / "scripts" / "lane-limits.sh"
 EXAMPLE = HERE / "templates" / "machine.conf.example"
-NUMBERS = {"NIGHT_START": 23, "NIGHT_END": 7, "IDLE_MIN": 45, "RECHECK_MIN": 120, "AWAY_HOURS": 14}
+NUMBERS = {"NIGHT_START": 23, "NIGHT_END": 7, "IDLE_MIN": 45, "RECHECK_MIN": 120, "AWAY_HOURS": 14,
+           "IMPROVE_IDLE_MIN": 30}
 KEYS = ("COORDINATORS", "RUNNER_REPOS", *NUMBERS)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
