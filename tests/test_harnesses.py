@@ -1384,6 +1384,29 @@ class AwayDenyTests(HomeTest):
         with self.assertRaises(ValueError):
             self.a.install_away_denies(self.checkout, "main")
 
+    @staticmethod
+    def blocked(rules, command):
+        """Whether a Bash deny rule `Bash(<prefix>:*)` matches any part of a compound command: Claude checks each
+        subcommand of `a && b; c | d` on its own, by prefix, with no notion of the repository or a `cd` before it."""
+        import re
+        parts = [p.strip() for p in re.split(r"&&|\|\||;|\||\n", command)]
+        prefixes = [r[len("Bash("):-len(":*)")] for r in rules if r.startswith("Bash(") and r.endswith(":*)")]
+        return any(p == x or p.startswith(x + " ") for p in parts for x in prefixes)
+
+    def test_the_beads_backup_is_not_blocked_but_an_integration_push_is(self):
+        rules = self.a.away_deny_rules("main")
+        for ok in ("git -C /srv/proj-beads push", "git push", "bd dolt push", "cd ../proj-beads && git push && bd dolt push",
+                   "git -C ../proj-beads push origin main", "git push origin feature-x", "gh pr view 3"):
+            self.assertFalse(self.blocked(rules, ok), ok)
+        for bad in ("git push origin main", "git push origin HEAD:main", "git push origin HEAD:refs/heads/main",
+                    "gh pr merge 5 --merge", "cd /x && git push origin main"):
+            self.assertTrue(self.blocked(rules, bad), bad)
+        # the recorded gaps (claude/record.md, the skill): a prefix rule gets past `-C`, other refspecs and `-f`, and it
+        # cannot tell the beads repo's `main` from the project's, which is why the persona pushes it with `git -C`
+        for gap in ("git -C /srv/proj push origin main", "git push origin feature:main", "git push -f origin main"):
+            self.assertFalse(self.blocked(rules, gap), gap)
+        self.assertTrue(self.blocked(rules, "cd ../proj-beads && git push origin main"))
+
     def test_opencode_or_recorded_gap(self):
         oc = self.pkg.load_harness("opencode")
         self.assertEqual(oc.install_away_denies(self.checkout, "main"), [])
