@@ -5,7 +5,7 @@
 #                      AWAY_HOURS from machine.conf (default 14 h), so a forgotten `off` never lasts for days; run
 #                      `on` again to extend it.
 #   lane-away on --improve [--until HH:MM|--hours N|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."]
-#                      [--project <name>]... [--unmetered] [--yes]
+#                      [--project <name>]... [--unmetered] [--continue [away/<name>]] [--yes]
 #                      also switches on away-improve mode (core/improve.py; docs/superpowers/specs/
 #                      2026-11-23-away-improve-design.md): each chosen project's coordinator keeps improving its
 #                      product on its own away/<date> branch until the end (default: until you run `off`). It is
@@ -14,6 +14,9 @@
 #                      terminal it refuses unless --yes. While it is on the owner counts as away whatever
 #                      AWAY_HOURS says. --project (repeatable) limits it to those coordinators (default: all);
 #                      --unmetered marks a machine with no usage limits.
+#                      Each project gets a new away/<date> branch on origin, cut from its integration branch
+#                      (the base of its recent merged PRs, else origin's default); --continue reuses the newest
+#                      (or the named) away branch instead and refuses when there is none. Nothing is merged.
 #   lane-away off      the owner is back: removes the away file and ends improve mode.
 #   lane-away status   presence as lane-limits.sh sees it now: for limits (day or away, and why) and whether the
 #                      owner counts as away (night or the away file; never a stopped budget).

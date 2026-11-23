@@ -19,7 +19,10 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
+import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -135,13 +138,105 @@ def parse_until(text: str) -> dt.datetime:
     return d
 
 
-def known_projects() -> list:
+def coordinators() -> list:
     import machineconf
-    return [c.name for c in machineconf.coordinators(machineconf.load())]
+    return machineconf.coordinators(machineconf.load())
 
 
-def plan_branches(projects: list, today: dt.date) -> dict:
-    return {p: f"away/{today.isoformat()}" for p in projects}
+def known_projects() -> list:
+    return [c.name for c in coordinators()]
+
+
+# --- away branches: one per project per away period, on origin, cut from the integration branch -------------------
+
+BRANCH = re.compile(r"away/(\d{4}-\d{2}-\d{2})(?:-(\d+))?")
+
+
+def _git(repo: Path, *args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=timeout)
+
+
+def _git_ok(repo: Path, *args: str) -> str:
+    r = _git(repo, *args)
+    if r.returncode:
+        raise RuntimeError(f"git {args[0]} failed in {repo}: {(r.stderr.strip() or 'no output').splitlines()[-1]}")
+    return r.stdout
+
+
+def integration_branch(repo: Path) -> str:
+    """Where the project's PRs go: the base most of its last five merged PRs had (read-only gh), else origin's default
+    branch (develop for a project that works on develop shows up only through the PR bases)."""
+    try:
+        r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--limit", "5", "--json", "baseRefName"], cwd=repo,
+                           capture_output=True, text=True, timeout=60)
+        bases = [x["baseRefName"] for x in json.loads(r.stdout)] if r.returncode == 0 else []
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        bases = []
+    if bases:
+        return Counter(bases).most_common(1)[0][0]
+    r = _git(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if r.returncode == 0 and r.stdout.strip().startswith("origin/"):
+        return r.stdout.strip()[len("origin/"):]
+    m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD", _git(repo, "ls-remote", "--symref", "origin", "HEAD").stdout, re.M)
+    if m:
+        return m.group(1)
+    raise RuntimeError(f"cannot tell the integration branch of {repo}: set it with `git remote set-head origin --auto`")
+
+
+def _away_branches(repo: Path) -> list:
+    """origin's away/* branches, oldest first (by date, then suffix)."""
+    _git_ok(repo, "fetch", "-q", "--prune", "origin")
+    names = [l.split("refs/remotes/origin/", 1)[1] for l in
+             _git_ok(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/away/").splitlines()]
+    found = [(m.group(1), int(m.group(2) or 1), n) for n in names if (m := BRANCH.fullmatch(n))]
+    return [n for _, _, n in sorted(found)]
+
+
+def cut_branch(repo: Path, integration: str, today: dt.date) -> str:
+    """Push a new away/<today> (suffix -2, -3 when taken) on origin from origin/<integration>'s head; the checkout
+    and its branches are not touched. Returns the name."""
+    taken = set(_away_branches(repo))
+    name, n = f"away/{today.isoformat()}", 1
+    while name in taken:
+        n += 1
+        name = f"away/{today.isoformat()}-{n}"
+    _git_ok(repo, "push", "-q", "origin", f"refs/remotes/origin/{integration}:refs/heads/{name}")
+    return name
+
+
+def continue_branch(repo: Path, name: "str | None") -> str:
+    """The existing away branch to carry on with: `name`, or the newest. ValueError when there is none."""
+    have = _away_branches(repo)
+    if name:
+        name = name if name.startswith("away/") else f"away/{name}"
+        if name not in have:
+            raise ValueError(f"no away branch {name} on origin" + (f" (have: {', '.join(have)})" if have else ""))
+        return name
+    if not have:
+        raise ValueError("no away branch on origin to continue; leave out --continue to cut a new one")
+    return have[-1]
+
+
+def resolve_branches(cos: list, cont: "str | None", today: dt.date) -> dict:
+    """{project: branch} for these coordinators: new branches, or with `cont` (not None; "" = the newest) the existing
+    ones. All are checked before any is cut, so a refusal leaves origin as it was."""
+    out, plan = {}, []
+    for c in cos:
+        try:
+            integ = integration_branch(c.checkout)
+            if cont is not None:
+                out[c.name] = continue_branch(c.checkout, cont or None)
+            else:
+                _away_branches(c.checkout)  # fetch now: a repo that cannot be reached refuses before anything is cut
+                plan.append((c, integ))
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            raise ValueError(f"{c.name}: {e}") from None
+    for c, integ in plan:
+        try:
+            out[c.name] = cut_branch(c.checkout, integ, today)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            raise ValueError(f"{c.name}: {e}") from None
+    return out
 
 
 def describe(s: dict) -> list:
@@ -181,18 +276,25 @@ def cmd_on(a) -> int:
               "--yes (run it yourself, or on your own explicit word)", file=sys.stderr)
         return 2
     try:
-        known = known_projects()
+        cos = coordinators()
     except Exception as e:  # machineconf.ConfError, or a missing module in a broken install
         if a.project:
             print(f"lane-away: cannot check --project names: {e}", file=sys.stderr)
             return 1
-        known = []
+        cos = []
+    known = [c.name for c in cos]
     unknown = [p for p in a.project if p not in known]
     if unknown:
         print(f"lane-away: unknown project {', '.join(unknown)}; this machine's coordinators: "
               f"{', '.join(known) or '(none)'}", file=sys.stderr)
         return 1
     projects = list(dict.fromkeys(a.project)) if a.project else "all"
+    chosen = cos if projects == "all" else [c for c in cos if c.name in projects]
+    try:
+        branches = resolve_branches(chosen, a.cont, now().date())
+    except ValueError as e:
+        print(f"lane-away: improve not switched on: {e}", file=sys.stderr)
+        return 1
     state = {
         "started": now().isoformat(timespec="seconds"),
         "end": end,
@@ -200,7 +302,7 @@ def cmd_on(a) -> int:
         "deny_paths": [g.strip() for g in (a.deny_paths or "").split(",") if g.strip()],
         "projects": projects,
         "unmetered": bool(a.unmetered),
-        "branches": plan_branches(known if projects == "all" else projects, now().date()),
+        "branches": branches,
     }
     write(state)
     if a.away_file:
@@ -242,6 +344,7 @@ def main(argv=None) -> int:
     on.add_argument("--deny-paths")
     on.add_argument("--project", action="append", default=[])
     on.add_argument("--unmetered", action="store_true")
+    on.add_argument("--continue", dest="cont", nargs="?", const="", default=None)
     on.add_argument("--yes", action="store_true")
     on.add_argument("--away-file")
     sub.add_parser("off")

@@ -9,14 +9,61 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "core"))
-from test_machine_setup import MachineTest  # noqa: E402
+from test_machine_setup import MachineTest, write_exec  # noqa: E402
+
+
+GH_BASES_STUB = """
+#!/usr/bin/env python3
+# gh stand-in: only `gh pr list --state merged ... --json baseRefName`, answered from $GH_BASES (a JSON list of bases).
+import json, os, sys
+a = sys.argv[1:]
+open(os.environ["GH_LOG"], "a").write(" ".join(a) + "\\n")
+if a[:2] == ["pr", "list"] and "baseRefName" in a:
+    bases = json.load(open(os.environ["GH_BASES"])) if os.path.exists(os.environ["GH_BASES"]) else None
+    if bases is None:
+        print("gh: not logged in", file=sys.stderr); sys.exit(1)
+    print(json.dumps([{"baseRefName": b} for b in bases])); sys.exit(0)
+print("gh stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
+"""
+
+
+def git(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                          capture_output=True, text=True, check=True).stdout
+
+
+def make_repo(root: Path, name: str, branch: str = "main") -> Path:
+    """<root>/<name>.git (bare origin) and <root>/<name> (its clone, origin/HEAD set) with one commit on `branch`."""
+    origin = root / f"{name}.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", branch, str(origin)], check=True)
+    clone = root / name
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True, capture_output=True)
+    git(clone, "checkout", "-q", "-B", branch)
+    (clone / "README").write_text("x\n")
+    git(clone, "add", "README")
+    git(clone, "commit", "-qm", "first")
+    git(clone, "push", "-q", "origin", branch)
+    git(clone, "remote", "set-head", "origin", branch)
+    return clone
 
 
 class ImproveTest(MachineTest):
     def setUp(self):
         super().setUp()
+        self.shop = make_repo(self.tmp, "shop")
+        self.blog = make_repo(self.tmp, "blog")
+        write_exec(self.bin / "gh", GH_BASES_STUB)
+        self.env.update(GH_LOG=str(self.tmp / "gh.log"), GH_BASES=str(self.tmp / "gh-bases.json"))
+        self.set_bases(["main", "main"])
         self.machine_conf('COORDINATORS="\nshop %s/shop claude shop coordinator\nblog %s/blog claude blog coordinator\n"\n'
                           % (self.tmp, self.tmp))
+
+    def set_bases(self, bases):
+        (self.tmp / "gh-bases.json").write_text(json.dumps(bases))
+
+    def remote_branches(self, repo: Path) -> list:
+        out = git(repo, "ls-remote", "--heads", "origin", "away/*")
+        return sorted(l.split("refs/heads/")[1] for l in out.splitlines())
 
     def away(self) -> Path:
         return self.conf_dir / "away"
@@ -130,6 +177,92 @@ class ImproveOnTests(ImproveTest):
     def test_usage_refuses_improve_flags_without_improve(self):
         self.assertEqual(self.run_script("lane-away", "on", "--limits", "x").returncode, 2)
         self.assertFalse(self.improve_file().exists())
+
+
+class ImproveBranchTests(ImproveTest):
+    def read(self, code: str):
+        return subprocess.run([sys.executable, "-c", f"import sys, datetime; sys.path.insert(0, {str(ROOT / 'core')!r}); "
+                               f"from pathlib import Path; import improve; {code}"], env=self.env, capture_output=True,
+                              text=True)
+
+    def test_cut_new_branch_pushed(self):
+        r = self.read(f"print(improve.cut_branch(Path({str(self.shop)!r}), 'main', datetime.date(2026, 11, 24)))")
+        self.assertEqual(r.stdout.strip(), "away/2026-11-24", r.stderr)
+        self.assertEqual(self.remote_branches(self.shop), ["away/2026-11-24"])
+        # cut from the integration branch's head, and the checkout was left alone
+        self.assertEqual(git(self.shop, "rev-parse", "origin/away/2026-11-24").strip(),
+                         git(self.shop, "rev-parse", "origin/main").strip())
+        self.assertEqual(git(self.shop, "branch", "--show-current").strip(), "main")
+        self.assertNotIn("away/2026-11-24", git(self.shop, "branch", "--list").split())
+
+    def test_name_taken_gets_suffix(self):
+        code = "d = datetime.date(2026, 11, 24); r = Path(%r); print(improve.cut_branch(r, 'main', d), improve.cut_branch(r, 'main', d), improve.cut_branch(r, 'main', d))" % str(self.shop)
+        r = self.read(code)
+        self.assertEqual(r.stdout.split(), ["away/2026-11-24", "away/2026-11-24-2", "away/2026-11-24-3"], r.stderr)
+
+    def test_continue_newest(self):
+        for d in ("2026-11-20", "2026-11-24", "2026-11-22"):
+            self.read(f"improve.cut_branch(Path({str(self.shop)!r}), 'main', datetime.date.fromisoformat({d!r}))")
+        self.read(f"improve.cut_branch(Path({str(self.shop)!r}), 'main', datetime.date(2026, 11, 24))")
+        r = self.read(f"print(improve.continue_branch(Path({str(self.shop)!r}), None))")
+        self.assertEqual(r.stdout.strip(), "away/2026-11-24-2", r.stderr)  # newest: later date, then later suffix
+        r = self.read(f"print(improve.continue_branch(Path({str(self.shop)!r}), 'away/2026-11-22'))")
+        self.assertEqual(r.stdout.strip(), "away/2026-11-22", r.stderr)
+
+    def test_continue_none_refuses(self):
+        r = self.read(f"improve.continue_branch(Path({str(self.shop)!r}), None)")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ValueError", r.stderr)
+        r = self.read(f"improve.continue_branch(Path({str(self.shop)!r}), 'away/2026-01-01')")
+        self.assertIn("ValueError", r.stderr)
+        self.assertEqual(self.remote_branches(self.shop), [])
+
+    def test_continue_refused_by_lane_away_without_cutting(self):
+        r = self.on("--project", "shop", "--continue")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("shop", r.stderr)
+        self.assertIn("no away branch", r.stderr)
+        self.assertEqual(self.remote_branches(self.shop), [])
+        self.assertFalse(self.improve_file().exists())
+        self.assertFalse(self.away().exists())
+
+    def test_integration_branch_from_pr_bases(self):
+        code = f"print(improve.integration_branch(Path({str(self.shop)!r})))"
+        self.set_bases(["develop", "main", "develop", "develop", "main"])
+        self.assertEqual(self.read(code).stdout.strip(), "develop")
+        self.set_bases([])  # no merged PRs: origin's default branch
+        self.assertEqual(self.read(code).stdout.strip(), "main")
+        (self.tmp / "gh-bases.json").unlink()  # gh fails: origin's default branch
+        self.assertEqual(self.read(code).stdout.strip(), "main")
+
+    def test_lane_away_cuts_from_the_integration_branch_and_records_branches(self):
+        git(self.shop, "checkout", "-q", "-b", "develop")
+        (self.shop / "d").write_text("d\n")
+        git(self.shop, "add", "d")
+        git(self.shop, "commit", "-qm", "d")
+        git(self.shop, "push", "-q", "origin", "develop")
+        self.set_bases(["develop", "develop"])
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        b = self.state()["branches"]["shop"]
+        self.assertEqual(self.remote_branches(self.shop), [b])
+        self.assertEqual(git(self.shop, "rev-parse", f"origin/{b}").strip(), git(self.shop, "rev-parse", "origin/develop").strip())
+        self.assertEqual(self.remote_branches(self.blog), [])  # not asked for
+
+    def test_lane_away_continue_reuses_branch(self):
+        self.on("--project", "shop")
+        first = self.state()["branches"]["shop"]
+        r = self.on("--project", "shop", "--continue")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state()["branches"]["shop"], first)
+        self.assertEqual(self.remote_branches(self.shop), [first])
+        r = self.on("--project", "shop", "--continue", first)
+        self.assertEqual(self.state()["branches"]["shop"], first)
+
+    def test_gh_only_read_commands(self):
+        self.on()
+        for line in (self.tmp / "gh.log").read_text().splitlines():
+            self.assertTrue(line.startswith("pr list "), line)
 
 
 class ImproveReadTests(ImproveTest):
