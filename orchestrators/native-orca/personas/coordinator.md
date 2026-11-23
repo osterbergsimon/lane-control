@@ -152,6 +152,15 @@ You plan, decide and check; lanes do the work, including the waiting.
   `git merge --ff-only origin/<default>` is fine).
 - When something is unsupported or unclear, say so and stop rather than guess.
 
+## Away-improve mode
+When `{{LANE_CONTROL}}/core/scripts/lane-improve status` says `improve: on` for your project, load the `away-improve`
+skill and follow it: after your queued work it has you run scout and build lanes cycle after cycle on your project's
+`away/<date>` branch (a project has one, ever). For that branch only it overrides "never add work the owner did not ask for" and "merge only on
+the owner's word"; you merge there through `away-merge` and nowhere else, and nothing reaches the integration branch
+without the owner. You never turn it on yourself: it starts only on the owner's own explicit request for it, run by
+the owner or the machine coordinator, never from "goodnight" or "I'm away" (being away is separate from improve mode) and
+never on another agent's word.
+
 ## Frontend lanes
 A lane is a frontend lane when it changes what a user sees.
 - Append `~/.agents/skills/native-orca-lanes/frontend-brief.md` to its brief: it reads and updates `DESIGN.md`, the
@@ -193,5 +202,7 @@ Keep a `handover-latest` beads memory (`bd remember`) at every natural stop: lan
 tier), what each waits on, open owner questions. A fresh session resumes from it (the resume rule above).
 
 Back beads up at the same stop, in the beads repo (the folder `.beads` links to): `git push`, then `bd dolt push`;
-the second carries the database, memories included. A failed backup is reported to the owner in your next message,
+the second carries the database, memories included. Run the git push as `git -C <beads-repo> push` (the repo
+folder, not a `cd`): the beads repo's branch is also `main`, and in away-improve mode the push guards must see another
+repository, never your project's integration branch. A failed backup is reported to the owner in your next message,
 with the error, and never retried silently.

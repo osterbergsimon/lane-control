@@ -7,6 +7,7 @@ Idle: the newest transcript write in ~/.claude/projects/<encoded path>/.
 """
 import json
 import os
+import re
 import shlex
 import stat
 import sys
@@ -115,6 +116,96 @@ def install_beads_hook(checkout: Path) -> list:
     data["hooks"] = {**data.get("hooks", {}), "SessionStart": starts + [want]}
     _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     return [f"{path}: added the SessionStart beads hook `{command}` ({MATCHER})"]
+
+
+BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+
+
+def away_deny_rules(integration: str) -> list:
+    """The deny rules of away-improve mode: no `gh pr merge`, no push to the integration branch. away-merge, a script
+    that runs gh itself, is the only merge route, and it only merges into away/* branches."""
+    if not BRANCH.fullmatch(integration or ""):
+        raise ValueError(f"not a branch name: {integration!r}")
+    return ["Bash(gh pr merge:*)", f"Bash(git push origin {integration}:*)",
+            f"Bash(git push origin HEAD:{integration}:*)", f"Bash(git push origin HEAD:refs/heads/{integration}:*)"]
+
+
+def _read_denies(path: Path):
+    """(data, permissions dict, deny list) of the uncommitted settings file; ValueError (file left as it is) when it is
+    not JSON or permissions.deny is not shaped as expected. Missing parts come back empty, not created."""
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text().strip() or "{}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path}: not valid JSON ({e}); fix it by hand, it was left as it is") from None
+    perms = data.get("permissions", {}) if isinstance(data, dict) else None
+    deny = perms.get("deny", []) if isinstance(perms, dict) else None
+    if not isinstance(deny, list):
+        raise ValueError(f"{path}: not an object with permissions.deny a list; fix it by hand, it was left as it is")
+    return data, perms, deny
+
+
+def install_away_denies(checkout: Path, integration: str, project: "str | None" = None) -> list:
+    """Add the away-improve deny rules (away_deny_rules) to permissions.deny of <checkout>/.claude/settings.local.json,
+    skipping any already there. What was added, and which parts of the file did not exist before, is noted in
+    harnesses.away_denies_record, so remove_away_denies takes out only ours. Returns change lines (none when nothing
+    was added)."""
+    rules = away_deny_rules(integration)
+    path = Path(checkout) / ".claude" / "settings.local.json"
+    data, perms, deny = _read_denies(path)
+    missing = [r for r in rules if r not in deny]
+    if not missing:
+        return []
+    rec_path = harnesses.away_denies_record(checkout)
+    try:
+        rec = json.loads(rec_path.read_text())
+        added = [r for r in rec["added"] if isinstance(r, str)]
+    except (OSError, ValueError, KeyError, TypeError):
+        rec, added = {}, []
+    rec = {"added": added + missing,
+           "created_file": rec.get("created_file", not path.exists()),
+           "created_permissions": rec.get("created_permissions", "permissions" not in data),
+           "created_deny": rec.get("created_deny", "deny" not in perms)}
+    rec_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_atomic(rec_path, json.dumps(rec, indent=2) + "\n")  # the record first: a rule is never in place unrecorded
+    data["permissions"] = {**perms, "deny": deny + missing}
+    _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return [f"{path}: added {len(missing)} away-improve deny rule(s): {', '.join(missing)}"]
+
+
+def remove_away_denies(checkout: Path) -> list:
+    """Take out the deny rules install_away_denies added (and the file or sections it created, if they are empty now);
+    every other rule stays. Nothing recorded, nothing removed. Returns change lines."""
+    rec_path = harnesses.away_denies_record(checkout)
+    try:
+        rec = json.loads(rec_path.read_text())
+        added = [r for r in rec["added"] if isinstance(r, str)]
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError(f"{rec_path}: cannot be read; the away-improve deny rules in the checkout's settings must be "
+                         "taken out by hand") from None
+    path = Path(checkout) / ".claude" / "settings.local.json"
+    lines = []
+    if path.exists():
+        data, perms, deny = _read_denies(path)
+        gone = [r for r in added if r in deny]
+        rest = [r for r in deny if r not in added]
+        if gone:
+            perms = {k: v for k, v in perms.items() if k != "deny"}
+            if rest or not rec.get("created_deny"):
+                perms["deny"] = rest
+            data = {k: v for k, v in data.items() if k != "permissions"}
+            if perms or not rec.get("created_permissions"):
+                data["permissions"] = perms
+            if not data and rec.get("created_file"):
+                path.unlink()
+            else:
+                _write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            lines.append(f"{path}: removed {len(gone)} away-improve deny rule(s)")
+    rec_path.unlink(missing_ok=True)
+    return lines
 
 
 def _write_atomic(path: Path, text: str):

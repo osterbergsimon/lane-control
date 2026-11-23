@@ -385,6 +385,15 @@ class RenderTests(Case):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(plugin.read_bytes(), (ROOT / "core" / "harnesses" / "opencode" / "lane-persona.js").read_bytes())
 
+    def test_the_away_improve_guard_goes_beside_the_persona_plugin(self):
+        guard = Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "lane-away-guard.js"
+        self.e.run(str(self.repo), "--no-start")
+        self.assertFalse(guard.exists())  # no OpenCode role: nothing of OpenCode's is touched
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(guard.read_bytes(), (ROOT / "core" / "harnesses" / "opencode" / "lane-away-guard.js").read_bytes())
+        self.assertIn("away-guard opencode", r.stdout)
+
 
 ADDITION = ".lane-control/additions/coordinator.md"
 WRITE_NATIVE = {"write": {ADDITION: "## First turn\nRead docs/plan.md.\n", ".lane-control/project.md": "facts\n"}}
@@ -475,6 +484,8 @@ class StartTests(Case):
         self.assertTrue((self.repo / plugin).is_file())
         self.assertFalse((self.e.home / ".config" / "opencode" / "plugins").exists())  # user folder untouched
         self.assertIn("/.opencode/plugins/lane-persona.js", (self.repo / ".git" / "info" / "exclude").read_text())
+        self.assertTrue((self.repo / ".opencode" / "plugins" / "lane-away-guard.js").is_file())
+        self.assertIn("/.opencode/plugins/lane-away-guard.js", (self.repo / ".git" / "info" / "exclude").read_text())
 
     def test_a_user_level_opencode_coordinator_needs_nothing_in_its_checkout(self):
         r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1")
@@ -561,6 +572,20 @@ class NativeSkillTests(Case):
             self.assertEqual(link.resolve(), self.skill().resolve())
         self.assertIn("skills: created", r.stdout)
         self.assertFalse((self.e.home / ".agents" / "skills" / "orca-cotal-lanes").exists())
+
+    def test_setup_installs_the_away_improve_skill_with_its_templates_for_claude_and_opencode(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        skill = self.e.home / ".agents" / "skills" / "away-improve"
+        src = ROOT / "orchestrators" / "native-orca" / "skills" / "away-improve" / "SKILL.md"
+        self.assertEqual((skill / "SKILL.md").read_text(), src.read_text())
+        for name in ("away-innovation.md", "away-scout-brief.md", "away-build-brief.md", "AWAY-LOG.md"):
+            self.assertEqual((skill / name).read_text(), (ROOT / "core" / "templates" / name).read_text(), name)
+        for agent_dir in (self.e.home / ".claude" / "skills", Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills"):
+            link = agent_dir / "away-improve"
+            self.assertTrue(link.is_symlink(), link)
+            self.assertEqual(link.resolve(), skill.resolve())
+        self.assertIn("away-improve", r.stdout)
 
     def test_refresh_puts_back_a_changed_or_missing_skill_file(self):
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
@@ -755,7 +780,7 @@ class DesignSkillsTests(Case):
         sources = sorted(p.name for p in (self.e.home / ".agents" / "skill-sources").iterdir())
         self.assertEqual(sources, [f"modern-web-guidance@{sha[:12]}"])
         self.assertEqual(sorted(p.name for p in self.skills().iterdir() if not p.name.startswith(".")),
-                         sorted(["modern-web-guidance", "native-orca-lanes", "component-gallery"]))
+                         sorted(["modern-web-guidance", "native-orca-lanes", "component-gallery", "away-improve"]))
         self.assertEqual(list(self.e.home.rglob("pwned")), [])
 
     def test_the_shipped_table_needs_https(self):

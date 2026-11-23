@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# lane-improve: away-improve mode, the owner's switch for it (core/improve.py; docs/superpowers/specs/
+# 2026-11-23-away-improve-design.md). Each chosen project's coordinator keeps improving its product on its one away
+# branch, cycle after cycle, spending the owner's usage. It is separate from presence: `lane-away` says the owner is away
+# (limits, check-ins); this says what the machine may spend its time on. Neither starts the other.
+#
+#   lane-improve on [--until HH:MM|--hours N|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."]
+#                   [--project <name>]... [--unmetered] [--continue] [--yes]
+#       Switches the mode on, and it is the ONLY way it turns on: plain `lane-away on`, night, "goodnight", a changed budget
+#       never do, and an agent runs it only on the owner's own explicit request for the improve (away-improve) mode.
+#       Prints what it turned on, and without a terminal refuses unless --yes. End: a time, or until you run
+#       `lane-improve off` (the default). --project (repeatable) limits it to those coordinators (default: all);
+#       --unmetered marks a machine with no usage limits. Each project gets ONE away branch, ever: a new away/<date> cut
+#       from its integration branch (the base of its recent merged PRs, else origin's default). A project that already has
+#       one is refused: --continue carries on with it (it takes no argument; a project with none gets one cut, so a new
+#       project can join; two or more are refused and listed), or the owner adopts it (merges it to the integration branch)
+#       or drops it (deletes it) first. A `--continue` re-run while on keeps what is not given again; without --project it keeps the projects as they were (no branch cut). Nothing is merged.
+#   lane-improve off
+#       Ends the mode. What was running drains: no new cycle, the last PRs can still merge through away-merge, the deny
+#       rules stay until each coordinator has wrapped up.
+#   lane-improve drained <project>... | --all
+#       A coordinator's wrap-up is done (last PR merged, draft PR opened): its deny rules come out and the drain clears.
+#   lane-improve rest <project>
+#       A coordinator's note that nothing within the limits is left: the idle nudges stop for that project for 12 h (or
+#       until the mode is switched on or off again), then one nudge looks for new work. It only quiets; it starts nothing.
+#   lane-improve status
+#       off, on (what runs, its limits, its projects and branches), or draining (what is left to wrap up).
+# Exit: 0, 1 refused or nothing to do, 2 usage.
+set -u
+self=$(readlink -f "$0")
+case ${1:-} in
+  on | off | drained | status | rest) exec python3 "${self%/*}/../improve.py" "$@" ;;
+  -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self" ;;
+  *) echo "usage: lane-improve on [options]|off|drained <project>|rest <project>|status" >&2; exit 2 ;;
+esac

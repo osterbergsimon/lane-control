@@ -4,8 +4,8 @@
 # Limits: presence, then the owner's per-machine file (limits.example.sh documents it), then defaults from cores,
 # memory and presence for whatever the file left unset:
 #   LANE_LIMITS_FILE   the file (default ~/.config/lane-control/limits.sh; absent is fine)
-#   LANE_AWAY_FILE     the owner is away while it is younger than AWAY_HOURS, 14 h by default
-#                      (default ~/.config/lane-control/away; lane-away writes it)
+#   LANE_AWAY_FILE     the owner is away while it is younger than AWAY_HOURS, 14 h by default, or with no limit while it
+#                      holds `until-back` (default ~/.config/lane-control/away; lane-away writes it)
 #   LANE_MACHINE_CONF  the machine config (default ~/.config/lane-control/machine.conf; absent is fine): night is
 #                      NIGHT_START-NIGHT_END there (default 23-07) and the away file lasts AWAY_HOURS. Only plain
 #                      `KEY=<digits>` lines are read; the file is never sourced here.
@@ -55,7 +55,10 @@ elif [ "$lane_hour" -ge "$LANE_NIGHT_START" ] && [ "$lane_hour" -lt "$LANE_NIGHT
   lane_night=1
 fi
 LANE_PRESENCE=day LANE_PRESENCE_WHY=day LANE_OWNER_AWAY=
-if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -$((LANE_AWAY_HOURS * 60)) 2>/dev/null)" ]; then
+# The away file counts for AWAY_HOURS, or with no limit when `lane-away on --until-back` wrote `until-back` in it.
+# Away-improve mode (lane-improve) is a separate switch and never changes presence.
+if [ -n "$(find "$LANE_AWAY_FILE" -maxdepth 0 -mmin -$((LANE_AWAY_HOURS * 60)) 2>/dev/null)" ] ||
+  grep -qx until-back "$LANE_AWAY_FILE" 2>/dev/null; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY="owner away" LANE_OWNER_AWAY=1
 elif [ -n "$lane_night" ]; then
   LANE_PRESENCE=away LANE_PRESENCE_WHY=night LANE_OWNER_AWAY=1

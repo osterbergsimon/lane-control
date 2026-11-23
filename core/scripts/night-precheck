@@ -4,17 +4,34 @@ else = skip the run, which costs nothing.
 
   night-precheck                 what is due now, one line each:
                                    DUE <name> idle=<n>min        a coordinator to check in on
+                                   DUE <name> improve idle=<n>min  improve mode is on for it and it has been idle
+                                                                 IMPROVE_IDLE_MIN (30): resume its cycle
+                                   DUE <name> wrapup idle=<n>min waited=<h>h  the period ended, no `lane-improve drained` yet
                                    OFFLINE <runner,...> repo=<r> self-hosted runners not online
                                    BUDGET push-and-handover (<why>) check-ins ask only to push and hand over
                                    BUDGET unknown (<why>) ...    no budget reading: no check-ins (said once a night)
   night-precheck --checked <name> record that <name> was just checked in on (the night manager runs it after
                                    each check-in), so it is not due again for RECHECK_MIN minutes
+  night-precheck --checked <name> improve|wrapup
+                                   the same for an improve or wrap-up line: not due again for IMPROVE_IDLE_MIN minutes,
+                                   then for as long as it stays idle (the wait doubles, at most 8 h)
 
 Due only while the owner counts as away (LANE_OWNER_AWAY from lane-limits.sh: night, NIGHT_START-NIGHT_END, or the
 away file; a stopped budget never counts, since a check-in spends budget), and then for a coordinator idle at least
 IDLE_MIN minutes and not checked in on for RECHECK_MIN minutes, or a runner of RUNNER_REPOS offline. Idle is the
 newest write of the coordinator's own session (the one started with LANE_ROLE/LANE_PERSONA), read by its harness
 adapter; Orca's terminal output is no idle signal (status-line redraws keep it fresh).
+
+Improve mode (core/improve.py; `lane-improve on`) is separate from presence: it does not make the owner count as away,
+and its nudges go out by day or night whatever presence says (the plain check-ins above wait for the owner to be away).
+For a coordinator it covers, the plain check-in is replaced by `DUE <name> improve`: a fallback nudge for a lost wake, since the
+coordinator starts its next cycle itself. Metered, it follows that project's budget steps (budget-state --project): from
+no-new-work it is the push-and-handover check-in (a BUDGET push-and-handover line first, as for a plain one), at the stop
+step none, and a BUDGET unknown line when the feed gives no reading. Unmetered (improve.json) it is not gated
+by budget and never reports unknown. Night alone never starts improve work. A coordinator that ran `lane-improve rest`
+(nothing within the limits left) is not nudged for 12 h. After the mode ends (`lane-improve off` or its end time) each
+coordinator still to wrap up gets `DUE <name> wrapup` (by day or night, none at the stop step) until it runs
+`lane-improve drained`; `waited=` counts the hours since the end, so a drain nobody wrapped up shows.
 
 Budget gate (budget-state, free), as the machine coordinator's night routine had it: at the no-new-work and
 push-and-handover steps, or with the short window at WINDOW_WARN_PCT (95) or WINDOW_STOP_PCT (98), check-ins still go
@@ -32,6 +49,7 @@ Exit: 0 something is due; 1 nothing is due (a coordinator whose idle time is unk
 read, is named on stderr); 2 it cannot tell (no or a bad machine.conf, an unreadable session folder or store): the
 run is skipped and stderr says why.
 """
+import datetime as dt
 import os
 import sqlite3
 import subprocess
@@ -41,6 +59,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import harnesses  # noqa: E402
+import improve  # noqa: E402
 import machineconf  # noqa: E402
 
 
@@ -54,13 +73,19 @@ def err(msg: str):
     print(f"night-precheck: {msg}", file=sys.stderr)
 
 
-def checked(name: str) -> int:
-    if not machineconf.NAME.fullmatch(name or ""):
-        err(f"--checked takes a coordinator name from machine.conf, got {name!r}")
+def checked(name: str, kind: str = "") -> int:
+    if not machineconf.NAME.fullmatch(name or "") or kind not in ("", "improve", "wrapup"):
+        err("--checked takes a coordinator name from machine.conf, and optionally `improve` or `wrapup`, "
+            f"got {name!r}{' ' + kind if kind else ''}")
         return 2
     d = stamp_dir()
     d.mkdir(parents=True, exist_ok=True)
-    (d / name).touch()
+    (d / (f"{name}.{kind}" if kind else name)).touch()
+    if kind:
+        try:
+            (d / f"{name}.{kind}.pending").replace(d / f"{name}.{kind}.idle")
+        except FileNotFoundError:
+            (d / f"{name}.{kind}.idle").unlink(missing_ok=True)
     return 0
 
 
@@ -68,12 +93,12 @@ UNKNOWN_STAMP = ".budget-unknown"
 UNKNOWN_QUIET_H = 16
 
 
-def budget_gate() -> "tuple[str, str]":
+def budget_gate(project: str = "") -> "tuple[str, str]":
     """('ok', ''), ('push', why) at no-new-work or push-and-handover (or the window at 95 or 98), ('stopped', why) at
     the stop step, or ('unknown', why)."""
     here = Path(__file__).resolve().parent
     try:
-        r = subprocess.run([str(here / "budget-state")], capture_output=True, text=True, timeout=120)
+        r = subprocess.run([str(here / "budget-state"), *(["--project", project] if project else [])], capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as e:
         return "unknown", f"budget-state failed ({e})"
     if r.returncode != 0:
@@ -97,6 +122,106 @@ def budget_gate() -> "tuple[str, str]":
     return ("push", push) if push else ("ok", "")
 
 
+NUDGE_WAIT_CAP_MIN = 480
+REPLY_GRACE_MIN = 10   # a session write this soon after a nudge is the coordinator's reply to it, not work
+
+
+def nudge_state(name: str, kind: str, idle: float, now: float) -> "tuple[float, float | None]":
+    """(idle, wait): how long the coordinator has effectively been idle, and how long to wait after the last nudge
+    (None when there was none). The nudge is delivered into the session and asks for a one-line reply, so the session
+    writes around it, before `--checked` stamps it or after: a write within REPLY_GRACE_MIN either side of the stamp is
+    not work, and the idle time at the last nudge, kept in a sidecar file when the line went out, carries on from
+    there. A write later than that is work: the wait starts over."""
+    stamp = stamp_dir() / f"{name}.{kind}"
+    try:
+        age = (now - stamp.stat().st_mtime) / 60
+    except FileNotFoundError:
+        return idle, None
+    wrote = age - idle   # minutes after the nudge the session last wrote (negative: before it)
+    if wrote < -REPLY_GRACE_MIN or (wrote <= 0 and not (stamp_dir() / f"{name}.{kind}.idle").exists()):
+        return idle, idle - age
+    if wrote <= REPLY_GRACE_MIN:
+        try:
+            before = float((stamp_dir() / f"{name}.{kind}.idle").read_text())
+        except (OSError, ValueError):
+            before = 0.0
+        return before + age, before
+    return idle, 0.0
+
+
+def nudge_due(name: str, kind: str, idle: float, min_idle: int, now: float) -> "tuple[bool, float]":
+    """(due, idle): whether an improve or wrap-up nudge for `name` is due, and the idle time it counts. It has been idle
+    `min_idle` minutes and the last nudge is at least that old; while it stays idle the wait grows to the idle time at
+    the last nudge (30, 60, 120 minutes, at most 8 h), so a coordinator waiting on a long lane is not woken every half
+    hour, and a reply to the nudge does not reset it."""
+    eff, wait = nudge_state(name, kind, idle, now)
+    if eff < min_idle:
+        return False, eff
+    if wait is None:
+        return True, eff
+    age = (now - (stamp_dir() / f"{name}.{kind}").stat().st_mtime) / 60
+    return age >= min_idle and age >= min(max(min_idle, wait), NUDGE_WAIT_CAP_MIN), eff
+
+
+def remember_nudges(lines: list, effective: dict):
+    """Keep the idle time each emitted nudge counted; `--checked` makes it the last nudge's, for the next run's reply
+    check (until then a repeated run computes from the same earlier value)."""
+    for line in lines:
+        f = line.split()
+        if len(f) > 2 and f[0] == "DUE" and f[2] in ("improve", "wrapup") and (f[1], f[2]) in effective:
+            d = stamp_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{f[1]}.{f[2]}.pending").write_text(str(int(effective[(f[1], f[2])])))
+
+
+def wrapup_lines(wrap: list, drain: dict, now: float) -> list:
+    """The `DUE <name> wrapup` lines: the mode has ended but these coordinators have not wrapped up (`lane-improve
+    drained`). Not gated by the budget except at the stop step: a wrap-up is a push, a draft PR and a summary."""
+    waited = int((now - dt.datetime.fromisoformat(drain["ended"]).timestamp()) / 3600)
+    out = []
+    for name, idle in wrap:
+        gate, why = ("ok", "") if drain["unmetered"] else budget_gate(name)
+        if gate == "stopped":
+            err(f"{name}: budget at the stop step ({why}): no wrap-up nudge")
+        else:
+            out.append(f"DUE {name} wrapup idle={idle}min waited={max(waited, 0)}h")
+    return out
+
+
+def improve_lines(nudge: list, istate: dict, now: float) -> list:
+    """The `DUE <name> improve` lines for these (name, idle) pairs, after the budget: unmetered improve is not gated
+    and never unknown; metered follows the project's own steps (no new cycle from no-new-work on, so no nudge)."""
+    out = []
+    for name, idle in nudge:
+        line = f"DUE {name} improve idle={idle}min"
+        if istate["unmetered"]:
+            out.append(line)
+            continue
+        gate, why = budget_gate(name)
+        if gate == "ok":
+            out.append(line)
+        elif gate == "unknown":
+            stamp = stamp_dir() / UNKNOWN_STAMP
+            try:
+                said = now - stamp.stat().st_mtime < UNKNOWN_QUIET_H * 3600
+            except FileNotFoundError:
+                said = False
+            if said:
+                err(f"{name}: budget unknown ({why}): no improve nudge; already said so tonight")
+            else:
+                stamp.parent.mkdir(parents=True, exist_ok=True)
+                stamp.touch()
+                out.insert(0, f"BUDGET unknown ({why}): no improve nudges until the usage feed gives a reading")
+        elif gate == "push":
+            # as for a plain check-in: it asks only to push and write the handover (no new cycle from here on)
+            out.append(line)
+            if not any(x.startswith("BUDGET push-and-handover") for x in out):
+                out.insert(0, f"BUDGET push-and-handover ({why}): check-ins ask only to push and write the handover")
+        else:
+            err(f"{name}: budget at {gate} ({why}): no improve nudge")
+    return out
+
+
 def recently_checked(name: str, recheck_min: int, now: float) -> bool:
     try:
         return now - (stamp_dir() / name).stat().st_mtime < recheck_min * 60
@@ -105,13 +230,13 @@ def recently_checked(name: str, recheck_min: int, now: float) -> bool:
 
 
 def main(argv: list) -> int:
-    if argv[:1] == ["--checked"] and len(argv) == 2:
-        return checked(argv[1])
+    if argv[:1] == ["--checked"] and len(argv) in (2, 3):
+        return checked(*argv[1:])
     if argv[:1] in (["-h"], ["--help"]):
         print(__doc__.strip())
         return 0
     if argv:
-        err("usage: night-precheck [--checked <name>]")
+        err("usage: night-precheck [--checked <name> [improve]]")
         return 2
     try:
         conf = machineconf.load()
@@ -124,10 +249,16 @@ def main(argv: list) -> int:
         return 2
     for w in conf["warnings"]:
         err(w)
-    if not away.get("LANE_OWNER_AWAY"):
+    istate = improve.load()  # None = off; a file that cannot be used says why on stderr
+    drain = None if istate else improve.draining()  # an ended period that has not been wrapped up
+    owner_away = bool(away.get("LANE_OWNER_AWAY"))
+    if not owner_away and not istate and not drain:  # improve mode's nudges do not wait for the owner to be away
         err(f"the owner is not away ({away.get('LANE_PRESENCE_WHY') or 'day'}): nothing is due")
         return 1
     now, due, broken = time.time(), [], False
+    nudge = []  # coordinators improve mode covers that are due its resume check-in
+    wrap = []   # coordinators of an ended period that are due a wrap-up nudge
+    eff = {}    # (name, kind) -> the idle time a nudge counts (see nudge_state)
     if not coords:
         err(f"{machineconf.path()} lists no coordinators (is it still the unfilled example?): nobody to check in on")
     for c in coords:
@@ -148,7 +279,20 @@ def main(argv: list) -> int:
             err(f"{c.name}: no coordinator session recorded for {c.checkout}: it was not started with LANE_ROLE and "
                 "LANE_PERSONA (project-setup starts it so), so its idle time is unknown and it gets no check-in")
             continue
-        if idle >= conf["IDLE_MIN"] and not recently_checked(c.name, conf["RECHECK_MIN"], now):
+        if istate and (istate["projects"] == "all" or c.name in istate["projects"]):
+            # improve covers it: the resume nudge stands in for the plain check-in
+            if improve.rested(c.name):
+                err(f"{c.name}: resting (nothing within the limits left): no improve nudge")
+            else:
+                is_due, eff[(c.name, "improve")] = nudge_due(c.name, "improve", idle, conf["IMPROVE_IDLE_MIN"], now)
+                if is_due:
+                    nudge.append((c.name, idle))
+        elif drain and c.name in drain["pending"]:
+            # the period ended: the wrap-up nudge stands in for the plain check-in
+            is_due, eff[(c.name, "wrapup")] = nudge_due(c.name, "wrapup", idle, conf["IMPROVE_IDLE_MIN"], now)
+            if is_due:
+                wrap.append((c.name, idle))
+        elif owner_away and idle >= conf["IDLE_MIN"] and not recently_checked(c.name, conf["RECHECK_MIN"], now):
             due.append(f"DUE {c.name} idle={idle}min")
     if due:  # coordinators due: the budget decides what, if anything, they get
         gate, why = budget_gate()
@@ -170,11 +314,15 @@ def main(argv: list) -> int:
                 stamp.parent.mkdir(parents=True, exist_ok=True)
                 stamp.touch()
                 due = [f"BUDGET unknown ({why}): no check-ins until the usage feed gives a reading"]
-    elif coords and not broken:
+    elif coords and not broken and not nudge:
         gate, why = budget_gate()
         if gate == "unknown":
             err(f"budget unknown ({why}): no check-ins would go out (nobody is due now)")
-    for repo in machineconf.runner_repos(conf):
+    if nudge:
+        due += improve_lines(nudge, istate, now)
+    if wrap:
+        due += wrapup_lines(wrap, drain, now)
+    for repo in machineconf.runner_repos(conf) if owner_away else []:  # improve's nudges by day do not bring runner lines
         try:
             off = machineconf.offline_runners(repo)
         except machineconf.RunnerError as e:
@@ -184,6 +332,7 @@ def main(argv: list) -> int:
             due.append(f"OFFLINE {','.join(off)} repo={repo}")
     if broken:
         return 2
+    remember_nudges(due, eff)
     for line in due:
         print(line)
     return 0 if due else 1

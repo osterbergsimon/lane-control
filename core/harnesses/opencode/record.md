@@ -69,6 +69,24 @@ must be one the tier rules allow for the project (`core/scripts/lane-tier`).
 - 2026-11-20 UP-6: project-level install (`LANE_OPENCODE_PLUGIN=project`), the persona added once when two copies are
   loaded, and the session record published as a stable interface (`../session-record.md`, `lane-idle`).
 
+- 2026-11-23 away-improve (lc-yzb): the deny rules Claude coordinators get have an OpenCode counterpart, a plugin
+  hook (`lane-away-guard.js`, installed beside `lane-persona.js`). `setup(ctx)` registers
+  `ctx.tool.hook("execute.before", fn)`; throwing from `fn` stops the call and the model gets the message as the tool
+  result (probed live, below). The shell tool is `shell` (`bash` in older builds); the plugin matches both. It acts
+  only in a session started with `LANE_ROLE=coordinator`, and only for a checkout `lane-improve on` recorded
+  (`install_away_denies` writes the project and its integration branch to the state folder; `remove_away_denies`
+  deletes it). On every shell call it reads `improve.json` and `improve-drain.json` (the same validation as
+  `core/improve.py`; unreadable state means no guard, said once on stderr), so it follows `on`, `off` and
+  `lane-improve drained` live, with no restart; a running coordinator needs one restart to load the plugin the first
+  time. It refuses `gh pr merge` (and a gh api call that merges) and a git push to the integration branch, and says to
+  use away-merge. A push is judged by its effective repository (the call's `workdir`, a `cd` earlier in the command,
+  `git -C`), so the coordinator's beads backup, whose branch is also `main`, is never blocked: an explicit push to the
+  integration branch is refused in the project's checkout or when the repository cannot be told, a bare push (no
+  refspec, `--all`, `HEAD`) only in the project's checkout, and a dry run never. **It is a backstop, not a wall**: it
+  reads the command text, so other routes past it exist (a script that pushes, a tool reached through MCP whose id is
+  not `shell`). The real guards are `away-merge`, the persona rule and branch protection where the repo has it. A
+  lane's own session has no guard.
+
 ## Retest when
 - OpenCode changes its plugin API, its `--standalone` flag or its session store: run the live check.
 
@@ -92,3 +110,14 @@ server's API (prompt, compact, prompt).
   won every request.
 - Not checked: the TUI (`opencode2 --standalone` in a terminal) itself; the server, the plugin loader and the hooks
   are the same ones it runs.
+
+### 2026-11-23 live probe of a blocking hook (OpenCode 2.2.1)
+A scratch HOME and XDG folders, the real `opencode2 serve`, a fake model on 127.0.0.1 that answers with a tool call
+(no real provider), and a scratch plugin; driven through the server's API.
+- Hook: pass: `ctx.tool.hook("execute.before", fn)` fires before every tool call with `{ tool, sessionID, input, ... }`.
+- Block: pass: throwing from it left the command unrun (its file never appeared) and the model's next request carried
+  the message as the tool result. The control run with a logging hook ran the same command.
+- Live: pass: on one server a flag file read on each call gave refused, ran, refused, with no restart.
+- Names: the shell tool is `shell`; Code Mode's `execute` tool has no shell in its catalog in 2.2.1, so the only route
+  to a shell call is the `shell` tool.
+- The opt-in `tests.test_opencode_guard.GuardLiveTests` repeats it against the shipped plugin.

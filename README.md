@@ -42,6 +42,8 @@ Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, Python 3, and Cla
 ## The core
 The shared doctrine and scripts are in `core/` (`core/README.md`): roles, model routing, beads doctrine, the reliability log, machine checks, the config, and the machine caps every orchestrator uses: `lane-heavy` (the machine-wide gate for builds and full test suites), `lane-room` (the check before opening a lane), `lane-tier` (looks up a tier in a project's tier table) and `lane-limits.sh` (their shared limits; a machine's own in a copy of `limits.example.sh`). They are installed to `~/.agents/bin` and are reachable at their old paths under `scripts/`.
 
+Away-improve mode lets each project's coordinator keep improving its product on its own `away/<date>` branch while you are away, spending your usage, and hands you a draft PR to review: it is off unless you switch it on with `lane-improve on`. The owner's guide is `docs/away-improve.md`.
+
 The design kit (`docs/superpowers/specs/2026-11-21-design-kit-design.md`) replaces a long-lived design lead: the frontend brief addition (`core/templates/frontend-brief.md`), a project's design file (template `core/templates/DESIGN.md`), the design reviewer (native Orca), the `component-gallery` skill (`core/skills/`) and `design-shots` (headless screenshots at phone and desktop width in both themes, installed with the lane tools). Setup installs the design skills it names for Claude and OpenCode from their upstream repos at pinned commits (`core/design-skills.tsv`); lane-control never copies their content.
 
 ### Commit identity and AI attribution

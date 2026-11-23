@@ -1966,5 +1966,164 @@ class BeadsBackupContentTests(unittest.TestCase):
         self.assertIn("--beads-repo OWNER/NAME", t)
 
 
+# --- away-improve mode (lc-yzb): the skill, its templates and the personas' rules ----------------------------------
+AWAY_SKILL = ROOT / "orchestrators" / "native-orca" / "skills" / "away-improve" / "SKILL.md"
+AWAY_TEMPLATES = ROOT / "core" / "templates"
+PERSONA_DIR = ROOT / "orchestrators" / "native-orca" / "personas"
+
+
+class AwayImproveContentTests(unittest.TestCase):
+    def test_owner_guide_covers_every_command_and_is_linked(self):
+        guide = flat(ROOT / "docs" / "away-improve.md")
+        for cmd in ("lane-improve on", "lane-improve off", "lane-improve status", "lane-improve drained", "lane-improve rest",
+                    "--continue", "--unmetered", "--local-suite-ok", "a backstop, not a wall", "IMPROVE_IDLE_MIN",
+                    "one away branch, ever", "draft PR", "has not been run end to end"):
+            self.assertIn(cmd, guide.replace("**", ""), cmd)
+        self.assertIn("docs/away-improve.md", flat(ROOT / "README.md"))
+        self.assertIn("docs/away-improve.md", flat(ROOT / "core" / "README.md"))
+        for sub in ("rest", "wrapup"):
+            self.assertIn(sub, flat(ROOT / "core" / "README.md"))
+
+    def test_skill_cycle_steps(self):
+        t = flat(AWAY_SKILL)
+        keys, body = frontmatter(AWAY_SKILL)
+        self.assertEqual(keys["name"], "away-improve")
+        order = ["**Queued work first.**", "**Scout lane.**", "**Pick one item", "**Build lane.**", "**Review.**",
+                 "**Merge with `away-merge`.**", "**Next cycle at once.**"]
+        pos = [t.index(s) for s in order]
+        self.assertEqual(pos, sorted(pos), "the steps are out of order")
+        for needle in ("deep tier", "why you picked", "Review: passed <head sha>"):
+            self.assertIn(needle, t, needle)
+        for needle in ("read-only", "3-5", "builds on", "`budget-state --project", "no-new-work", "nothing within the limits",
+                       "draft PR", "away/<date>", "lane-room", "`lane-improve status`",
+                       "`improve: on`", "never polling", "the running lane finishes", "never squash",
+                       "never force-push", "never merge into the integration branch"):
+            self.assertIn(needle.lower(), t.lower(), needle)
+        # the failures the owner named
+        for needle in ("rewritten from scratch", "cannot understand", "duplicates something that already exists"):
+            self.assertIn(needle.lower(), t.lower(), needle)
+
+    def test_skill_never_turns_improve_on(self):
+        t = flat(AWAY_SKILL)
+        self.assertIn("never turn it on yourself", t)
+        for phrase in ("goodnight", "leaving", "relayed"):
+            self.assertIn(phrase, t)
+        self.assertNotIn("lane-improve on", t)
+
+    def test_skill_refuses_other_merge_routes(self):
+        t = flat(AWAY_SKILL)
+        self.assertIn("`away-merge --project", t)
+        for route in ("`gh pr merge`", "a push to the integration branch"):
+            self.assertIn(route, t)
+        self.assertIn("never around", t)
+
+    def test_innovation_prompt_is_strong_and_in_one_place(self):
+        t = flat(AWAY_TEMPLATES / "away-innovation.md")
+        for needle in ("you are expected to improve the product, not only fix bugs", "new features", "better UX",
+                       "performance", "research", "bold ideas are welcome", "bigger changes are allowed when they are "
+                       "clearly better and explain themselves", "check what exists first and build on it"):
+            self.assertIn(needle.lower(), t.lower(), needle)
+        # both briefs are built from it; the skill says to put it in front
+        s = flat(AWAY_SKILL)
+        self.assertIn("away-innovation.md", s)
+        self.assertNotIn("expected to improve the product", flat(AWAY_TEMPLATES / "away-build-brief.md"))
+
+    def test_build_brief_has_innovation_and_duplicate_check(self):
+        t = flat(AWAY_TEMPLATES / "away-build-brief.md")
+        for needle in ("<LIMITS>", "verbatim", "Existing work checked", "duplicate", "AWAY-LOG.md", "how to try",
+                       "how to drop", "rewritten", "justify", "Review: passed", "<AWAY_BRANCH>", "never merge"):
+            self.assertIn(needle.lower(), t.lower(), needle)
+        self.assertIn("`away-innovation.md`", flat(AWAY_SKILL))
+        self.assertLess(flat(AWAY_SKILL).index("away-innovation.md"), flat(AWAY_SKILL).index("away-build-brief.md"))
+
+    def test_scout_brief(self):
+        t = flat(AWAY_TEMPLATES / "away-scout-brief.md")
+        for needle in ("read-only", "never edit", "3-5", "ranked", "what and why", "the gain for the product",
+                       "what already exists nearby", "references", "builds on", "rough size", "clash with the owner's limits",
+                       "research items", "recently closed", "the away log", "<LIMITS>", "open and recently merged PRs"):
+            self.assertIn(needle.lower(), t.lower(), needle)
+
+    def test_log_template_sections(self):
+        t = (AWAY_TEMPLATES / "AWAY-LOG.md").read_text()
+        self.assertIn("## Summary", t)
+        for needle in ("what was done", "worth looking at first", "drop if unsure", "Skipped"):
+            self.assertIn(needle.lower(), t.lower(), needle)
+        item = t[t.index("## Items"):]
+        for field in ("What:", "Why:", "Builds on:", "Existing work checked:", "How to try:", "How to drop:", "Tests:"):
+            self.assertIn(field, item, field)
+        self.assertIn("merge commit", item)
+        self.assertIn("depend", item)
+
+    def test_personas_explicit_only(self):
+        mc = flat(PERSONA_DIR / "machine-coordinator.md")
+        self.assertIn("`lane-improve on`", mc)
+        for needle in ("only when the owner's own message", "explicitly asks for the improve", "goodnight", "leaving",
+                       "relayed", "never from", "`lane-away on --until-back`", "Presence is separate from improve mode"):
+            self.assertIn(needle, mc, needle)
+        co = flat(PERSONA_DIR / "coordinator.md")
+        self.assertIn("away-improve", co)
+        self.assertIn("never turn it on yourself", co)
+        self.assertIn("`improve: on`", co)
+        # nothing else in the personas, the skills or the night manager starts it
+        for path in (*PERSONA_DIR.glob("*.md"), NATIVE_DIR / "night-manager.md",
+                     NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md"):
+            if path.name == "machine-coordinator.md":
+                continue
+            self.assertNotIn("lane-improve on", flat(path), path.name)
+        self.assertIn("never turn improve mode on", flat(NATIVE_DIR / "night-manager.md"))
+
+    def test_skill_review_marker_is_bound_to_the_head_and_written_by_the_coordinator_alone(self):
+        t = flat(AWAY_SKILL)
+        for needle in ("`Review: passed <head sha>`", "a comment, never the PR body", "a push after the review needs a new one",
+                       "a lane never writes it and never runs `away-merge`", "one gh identity", "procedural"):
+            self.assertIn(needle, t, needle)
+        b = flat(AWAY_TEMPLATES / "away-build-brief.md")
+        self.assertIn("never write it yourself", b)
+        self.assertIn("never run `away-merge`", b)
+
+    def test_skill_drain_flow_after_off_or_the_end(self):
+        t = flat(AWAY_SKILL)
+        for needle in ("`improve: draining`", "No new cycle starts", "still merges", "`lane-improve drained <project>`",
+                       "`integration` in `~/.config/lane-control/improve.json`", "draft PR", "deny rules stay until"):
+            self.assertIn(needle, t, needle)
+        self.assertLess(t.index("away-merge` the last PR"), t.index("`lane-improve drained <project>`"))
+
+    def test_skill_and_record_call_the_deny_rules_a_backstop(self):
+        t = flat(AWAY_SKILL)
+        self.assertIn("backstop, not a wall", t)
+        for needle in ("away-merge", "branch protection", "a lane's worktree has no rules"):
+            self.assertIn(needle, t, needle)
+        rec = flat(ROOT / "core" / "harnesses" / "claude" / "record.md")
+        for needle in ("backstop, not a wall", "git -C <checkout> push origin main", "branch protection",
+                       "git -C <beads-repo> push"):
+            self.assertIn(needle, rec, needle)
+
+    def test_the_persona_backup_step_pushes_the_beads_repo_with_dash_c(self):
+        for name in ("coordinator.md",):
+            t = flat(PERSONA_DIR / name)
+            self.assertIn("`git -C <beads-repo> push`", t)
+
+    def test_machine_coordinator_tells_the_coordinators_when_it_runs_off(self):
+        mc = flat(PERSONA_DIR / "machine-coordinator.md")
+        for needle in ("run `lane-improve off`", "tell each named project's coordinator", "wrap up",
+                       "`lane-improve drained <project>`"):
+            self.assertIn(needle, mc, needle)
+
+    def test_build_brief_leaves_the_merge_sha_to_the_coordinator(self):
+        b = flat(AWAY_TEMPLATES / "away-build-brief.md")
+        self.assertIn("the merge titled `away: <item>`", b)
+        self.assertNotIn("the merge commit to revert", b)
+
+    def test_machine_presence_line_keeps_plain_on_plain(self):
+        mc = flat(PERSONA_DIR / "machine-coordinator.md")
+        self.assertIn("never start improve mode", mc)
+
+    def test_skill_installed_for_claude_and_opencode(self):
+        src = (ROOT / "core" / "scripts" / "project-setup").read_text()
+        self.assertIn('"away-improve"', src)
+        for f in ("away-scout-brief.md", "away-build-brief.md", "away-innovation.md", "AWAY-LOG.md"):
+            self.assertIn(f, src, f)
+
+
 if __name__ == "__main__":
     unittest.main()
