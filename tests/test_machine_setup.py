@@ -1158,6 +1158,38 @@ class BudgetStateTests(BudgetTest):
         self.playbook(20, 10)
         self.assertEqual(self.run_script("budget-state", "--project").returncode, 2)
 
+    def improve_file(self, unmetered=True, projects="all", end="until-back"):
+        (self.conf_dir / "improve.json").write_text(json.dumps({
+            "started": "2026-11-23T10:00:00+00:00", "end": end, "limits": "", "deny_paths": [], "projects": projects,
+            "unmetered": unmetered, "branches": {}, "integration": {}}))
+
+    def test_unmetered_improve_is_reported_not_unknown(self):
+        # lc-4nr: with no reading from the feed, a project in unmetered improve mode is `unmetered`, never `unknown`
+        self.playbook(None, None)
+        self.improve_file()
+        r = self.run_script("budget-state", "--project", "lane-control")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"^main unmetered \(improve mode: no usage limits on this machine\)\n$")
+
+    def test_unmetered_needs_the_project_and_the_mode(self):
+        self.playbook(None, None)
+        want = "main unknown (the usage feed gave no reading)\n"
+        self.assertEqual(self.run_script("budget-state", "--project", "lane-control").stdout, want)   # no improve file
+        self.improve_file(unmetered=False)
+        self.assertEqual(self.run_script("budget-state", "--project", "lane-control").stdout, want)   # metered
+        self.improve_file(projects=["other"])
+        self.assertEqual(self.run_script("budget-state", "--project", "lane-control").stdout, want)   # not this project
+        self.improve_file(end="2020-01-01T00:00:00+00:00")
+        self.assertEqual(self.run_script("budget-state", "--project", "lane-control").stdout, want)   # ended
+        self.improve_file()
+        self.assertEqual(self.run_script("budget-state").stdout, want)                                 # no --project
+
+    def test_a_real_reading_still_wins_when_unmetered(self):
+        self.playbook(20, 10)
+        self.improve_file()
+        r = self.run_script("budget-state", "--project", "lane-control")
+        self.assertEqual(r.stdout, "main weekly=20 window=10 ceiling=93 step=0 none window_step=0\n")
+
     def test_no_config(self):
         self.marker().touch()
         self.env["PLAYBOOK_CONFIG"] = str(self.tmp / "none.sh")

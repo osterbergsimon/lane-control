@@ -573,6 +573,12 @@ def cmd_is_on(a) -> int:
     return 0 if load(quiet=True) else 1
 
 
+def cmd_unmetered(a) -> int:
+    """Exit 0 when the mode is on for the project and was started --unmetered (budget-state reads this)."""
+    s = load(quiet=True)
+    return 0 if s and covers(s, a.project) and s["unmetered"] else 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="improve.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -592,11 +598,14 @@ def main(argv=None) -> int:
     dr.add_argument("--all", action="store_true")
     sub.add_parser("status")
     sub.add_parser("is-on")
+    um = sub.add_parser("unmetered")
+    um.add_argument("project")
     try:
         a = ap.parse_args(argv)
     except SystemExit as e:
         return 2 if e.code else 0
-    return {"on": cmd_on, "off": cmd_off, "drained": cmd_drained, "status": cmd_status, "is-on": cmd_is_on}[a.cmd](a)
+    return {"on": cmd_on, "off": cmd_off, "drained": cmd_drained, "status": cmd_status, "is-on": cmd_is_on,
+            "unmetered": cmd_unmetered}[a.cmd](a)
 
 
 if __name__ == "__main__":

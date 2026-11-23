@@ -21,7 +21,9 @@
 # The marker makes lane-limits.sh give CI the night-or-away limits (agents sit idle until the reset, so the machine is
 # CI's); it counts for one hour, so machine-check runs this every 30 minutes and a dead writer cannot leave CI on away
 # limits. It is never a reason to spend budget: the night manager reads LANE_OWNER_AWAY, not this. A feed that gives
-# no reading is unknown, never assumed stopped. Exit: 0; 2 no config (the marker is removed) or usage.
+# no reading is unknown, never assumed stopped; with --project, a project in improve mode started --unmetered reads
+# `<budget> unmetered (...)` instead (a reading, when the feed gives one, still wins).
+# Exit: 0; 2 no config (the marker is removed) or usage.
 set -u
 mark= project=
 while [ $# -gt 0 ]; do
@@ -61,7 +63,12 @@ all_stopped= any_lane= warned=
 for b in $(metered | sort); do
   reading=$(bash -c "${BUDGET_USAGE[$b]}" 2>/dev/null)
   if ! [[ "$reading" =~ ^[0-9]+\ [0-9]+$ ]]; then
-    echo "$b unknown (the usage feed gave no reading)"
+    # no reading is never an unmetered machine's stop: improve mode started --unmetered says so for its projects
+    if [ -n "$project" ] && python3 "$here/../improve.py" unmetered "$project" 2>/dev/null; then
+      echo "$b unmetered (improve mode: no usage limits on this machine)"
+    else
+      echo "$b unknown (the usage feed gave no reading)"
+    fi
     [[ "$lane_budgets" == *" $b "* ]] && { any_lane=1; all_stopped=no; }
     continue
   fi

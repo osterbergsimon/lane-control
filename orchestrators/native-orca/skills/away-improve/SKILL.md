@@ -27,8 +27,9 @@ The design is `docs/superpowers/specs/2026-11-23-away-improve-design.md` in lane
 ## 1. The cycle
 Run cycles back to back, each starting when the last item is merged: a lane's report wakes you, so you wait for nothing: never polling, never looping on `check` (the night manager's `improve` nudge is only a fallback for a lost wake).
 
-Before each cycle: `lane-improve status` still says `improve: on` and its end has not passed; `<lane-control>/core/scripts/budget-state --project <your project>` shows a step below no-new-work (unmetered: no budget
-steps for improve work, but `lane-room` and `lane-heavy` still apply); `~/.agents/bin/lane-room` exits 0. Otherwise
+Before each cycle: `lane-improve status` still says `improve: on` and its end has not passed; `<lane-control>/core/scripts/budget-state --project <your project>` shows a step below no-new-work (unmetered: `budget-state --project` prints
+`unmetered` when the feed gives no reading, which is not a stop, and there are no budget steps for improve work, but
+`lane-room` and `lane-heavy` still apply); `~/.agents/bin/lane-room` exits 0. Otherwise
 stop (section 3).
 
 1. **Queued work first.** Finish the lanes already queued and the owner's open issues that fit the limits; they come
