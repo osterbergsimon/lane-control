@@ -23,7 +23,7 @@ merging nothing, with one line per failed check, unless all of these hold:
              otherwise a built-in scan of the added lines (every one, `++` lines too) for keys, tokens, home paths,
              private addresses and credentials file names
   names      the public-repo rule, for a public repo only (`gh repo view`; a private repo is not checked and the merge
-             says so; one whose visibility cannot be read is a refusal): the added lines and every file path hold no
+             says so; one whose visibility cannot be read is a refusal): the added lines and the path of every added or renamed-to file hold no
              hostname or user name of this machine, no name of another project whose repo is private (a public
              project's name is no secret; the project's own name is allowed; a project whose visibility cannot be read
              counts as private) and no name from the private-names file outside the repo (core/privatenames.py). Runs
@@ -208,6 +208,21 @@ def scan_added(diff: str) -> "str | None":
 NAME_HELP = "(remove the name, or ask the owner; the list is built by lane-control's core/privatenames.py)"
 
 
+def new_paths(diff: str) -> set:
+    """The paths a diff brings into the tree: added files and rename or copy targets. A deleted file, the old side of a
+    rename and an edited file's unchanged path are not new, so cleaning up an old name is never refused for its path."""
+    found = set()
+    for block in re.split(r"^(?=diff --git )", diff, flags=re.M):
+        m = HEADER.match(block)
+        if not m:
+            continue
+        if re.search(r"^(?:new file mode|--- /dev/null)", block, re.M):
+            found.add(_unquote(m.group(3)) if m.group(3) is not None else m.group(4))
+        for t in re.findall(r"^(?:rename|copy) to (.+)$", block, re.M):
+            found.add(_unquote(t[1:-1]) if t.startswith('"') else t)
+    return found
+
+
 def names_scan(diff: str, names: "privatenames.Names") -> "str | None":
     """None when no added line and no file path holds a private name; else where, by kind, file and line: never the name
     itself, and a path that holds one is shown with it masked."""
@@ -217,7 +232,7 @@ def names_scan(diff: str, names: "privatenames.Names") -> "str | None":
         if text not in found:
             found.append(text)
 
-    for f in sorted(diff_paths(diff) or ()):
+    for f in sorted(new_paths(diff)):
         for kind in dict.fromkeys(h[0] for h in names.hits(f)):
             note(f"{kind} in the path {names.mask(f)}")
     for path, line, text in added_lines(diff):

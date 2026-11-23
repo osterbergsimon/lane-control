@@ -51,13 +51,11 @@ class Names(NamedTuple):
         return h[0][0] if h else None
 
     def mask(self, text: str) -> str:
-        """`text` with each name replaced by ***, for showing a path that holds one."""
-        out, at = [], 0
-        for _, s, e in self.hits(text):
-            if s >= at:
-                out += [text[at:s], "***"]
-                at = e
-        return "".join(out) + text[at:]
+        """`text` with every occurrence of any name replaced by ***, whole word or inside a longer one, for showing a path."""
+        if not self.entries:
+            return text
+        names = sorted({n for _, n in self.entries}, key=len, reverse=True)
+        return re.sub("|".join(re.escape(n) for n in names), "***", text, flags=re.I)
 
 
 def default_path() -> Path:

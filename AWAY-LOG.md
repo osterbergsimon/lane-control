@@ -28,10 +28,10 @@ Projects in this period: this project only.
 
 ### lc-1dk: away-merge checks names too
 
-- **What:** `away-merge` has a new check, `names`. For a public repo it refuses a PR whose added lines or file paths hold
+- **What:** `away-merge` has a new check, `names`. For a public repo it refuses a PR whose added lines or new file paths (added files, rename targets) hold
   a hostname or user name of this machine, the name of another project whose repo is private, or a name from an
-  optional file outside the repo. A hit says its kind, file and line (a path that holds the name is shown with it
-  masked), never the name. It runs with or without a `.gitleaks.toml`, after gitleaks.
+  optional file outside the repo. A hit says its kind, file and line (a path that holds the name is shown with every
+  occurrence of it masked), never the name. It runs with or without a `.gitleaks.toml`, after gitleaks.
 - **Why:** the public-repo rule forbids those names, and the scan only knew keys, tokens, home paths and private
   addresses. This branch is public if the repo is.
 - **What it builds on:** `core/scripts/away-merge` and `machine.conf`'s coordinators. New: `core/privatenames.py`, the
@@ -51,4 +51,4 @@ Projects in this period: this project only.
   spellings are not caught. Commit messages, PR titles and `--item` are not scanned.
 - **How to drop it:** revert the merge titled `away: <item>` (filled in by the coordinator once merged). Nothing later
   depends on it yet.
-- **Tests:** `tests/test_privatenames.py` (new) and `tests/test_away_merge.py`; full suite through lane-heavy: 1747 tests, OK (9 skipped).
+- **Tests:** `tests/test_privatenames.py` (new) and `tests/test_away_merge.py`; full suite through lane-heavy: 1755 tests, OK (9 skipped).

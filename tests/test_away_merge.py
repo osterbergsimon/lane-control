@@ -331,6 +331,34 @@ class AwayMergeTests(AwayMergeTest):
                 self.assertIn("***", r.stderr)
                 self.assertNotIn("example-host", r.stderr.lower())
 
+    def test_a_name_inside_a_longer_word_is_masked_in_every_printed_path(self):
+        self.names_file("zebrabox\n")
+        diffs = (
+            "diff --git a/docs/zebraboxnotes.md b/docs/zebraboxnotes.md\n--- a/docs/zebraboxnotes.md\n+++ b/docs/zebraboxnotes.md\n@@ -1 +1 @@\n+ssh zebrabox\n",
+            "diff --git a/zebrabox/myzebrabox.nix b/zebrabox/myzebrabox.nix\nnew file mode 100644\n--- /dev/null\n+++ b/zebrabox/myzebrabox.nix\n@@ -0,0 +1 @@\n+x = 1\n",
+            "diff --git a/hosts/connectToZebrabox.nix b/hosts/connectToZebrabox.nix\n--- a/hosts/connectToZebrabox.nix\n+++ b/hosts/connectToZebrabox.nix\n@@ -1 +1 @@\n+ssh zebrabox\n",
+        )
+        for diff in diffs:
+            with self.subTest(diff=diff[:50]):
+                self.pr(diff=diff, files=[{"path": "x"}])
+                r = self.merge()
+                self.assertRefused(r, "names")
+                self.assertNotIn("zebrabox", r.stderr.lower(), msg="a refusal printed the name")
+                self.assertIn("***", r.stderr)
+
+    def test_only_new_paths_are_checked_not_deleted_old_or_edited_ones(self):
+        self.names_file("example-host\n")
+        diffs = (
+            "diff --git a/hosts/example-host.nix b/hosts/example-host.nix\ndeleted file mode 100644\n--- a/hosts/example-host.nix\n+++ /dev/null\n@@ -1 +0,0 @@\n-x = 1\n",
+            "diff --git a/example-host.md b/notes.md\nsimilarity index 100%\nrename from example-host.md\nrename to notes.md\n",
+            "diff --git a/hosts/example-host.nix b/hosts/example-host.nix\n--- a/hosts/example-host.nix\n+++ b/hosts/example-host.nix\n@@ -1 +1 @@\n+x = 2\n",
+        )
+        for diff in diffs:
+            with self.subTest(diff=diff[:50]):
+                self.pr(diff=diff, files=[{"path": "x"}])
+                r = self.merge()
+                self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_an_added_line_that_starts_with_plus_plus_is_still_scanned(self):
         self.names_file("example-host\n")
         self.pr(diff=CLEAN_DIFF.replace("+print", "@@ -1 +1,2 @@\n+print") + "++ example-host\n+++ example-host\n")

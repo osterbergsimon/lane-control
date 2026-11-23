@@ -64,6 +64,14 @@ class LoadTests(unittest.TestCase):
         self.assertEqual([k for k, _, _ in hits], ["a listed name", "a username"])
         self.assertEqual(n.mask(text), "ssh *** and ***")
 
+    def test_mask_hides_every_occurrence_even_inside_a_longer_word(self):
+        self.file.write_text("zebrabox\n")
+        n = self.load()
+        self.assertEqual(n.mask("docs/zebraboxnotes.md"), "docs/***notes.md")
+        self.assertEqual(n.mask("zebrabox/myzebrabox.nix"), "***/my***.nix")
+        self.assertEqual(n.mask("hosts/connectToZebrabox.nix"), "hosts/connectTo***.nix")
+        self.assertEqual(n.mask("a.md"), "a.md")
+
     def test_a_name_after_an_escape_or_a_url_escape_is_still_found(self):
         self.file.write_text("example-host\n")
         n = self.load()
