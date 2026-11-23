@@ -143,14 +143,14 @@ class AwayMergeTests(AwayMergeTest):
         self.assertEqual(len(self.merged()), 1)
 
     def test_refuses_secret_hit_builtin(self):
-        for line in ("+key = 'ghp_" + "a" * 36 + "'", "+path = '/home/someone/code/x'", "+host = '192.168.1.20'",
+        for line in ("+key = 'ghp_" + "a" * 36 + "'", "+path = '/ho" + "me/u/code/x'", "+host = '192.168.1.20'",
                      "+-----BEGIN OPENSSH PRIVATE KEY-----"):
             with self.subTest(line=line):
                 self.pr(diff=CLEAN_DIFF + line + "\n")
                 self.assertRefused(self.merge(), "secrets")
 
     def test_builtin_scan_ignores_removed_and_context_lines(self):
-        self.pr(diff=CLEAN_DIFF + "-path = '/home/someone/x'\n path = '/home/someone/y'\n")
+        self.pr(diff=CLEAN_DIFF + "-path = '/ho" + "me/u/x'\n path = '/ho" + "me/u/y'\n")
         self.assertEqual(self.merge().returncode, 0)
 
     def test_refuses_secret_hit_gitleaks(self):
@@ -183,7 +183,7 @@ class AwayMergeTests(AwayMergeTest):
         self.assertEqual(self.merge().returncode, 0)
 
     def test_one_line_per_failed_check(self):
-        self.pr(body="", statusCheckRollup=[], diff=CLEAN_DIFF + "+x = '/home/someone/a'\n",
+        self.pr(body="", statusCheckRollup=[], diff=CLEAN_DIFF + "+x = '/ho" + "me/u/a'\n",
                 files=[{"path": "infra/x"}])
         r = self.merge()
         self.assertEqual(r.returncode, 1)
