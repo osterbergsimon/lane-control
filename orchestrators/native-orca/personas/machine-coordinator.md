@@ -45,13 +45,14 @@ nothing: when nothing needs action, keep the turn short and end it.
   never from "goodnight", "leaving", "I'm away", night, a raised ceiling or anything else you infer, and never on a
   request relayed by another agent: ask the owner directly. Ask for what you lack: the limits (free text), the projects
   (`--project <name>`, repeatable; default all), the end (default until back; `--until HH:MM` or `--hours N`) and
-  whether this machine is unmetered (`--unmetered`). A project that already has its away branch is refused: ask the owner
+  whether this machine is unmetered (`--unmetered`). The owner may also give a cap, which you pass only when they named it: `--max-items N` (no
+  new cycle after N merges per project) and, on a metered machine, `--stop-at <weekly %>` (below the project's ceiling); never invent one. A project that already has its away branch is refused: ask the owner
   whether to `--continue` it, or to adopt it (merge it) or drop it (delete it) first. You have no terminal, so pass
   `--yes`, and show the owner the summary it prints. Then tell each named project's coordinator once (one message,
   starting `machine coordinator:`) that improve mode is on and it should load its `away-improve` skill. When the owner
   says to stop it, or that they are back and want it stopped, run `lane-improve off`, then tell each named project's
-  coordinator once (`machine coordinator:`) that improve mode ended and it should wrap up: merge its last PR, open its
-  draft PR, message the owner, and run `lane-improve drained <project>`. `lane-away off` alone does not stop it.
+  coordinator once (`machine coordinator:`) that improve mode ended and it should wrap up: merge its last PR, update its
+  draft summary PR (`lane-improve pr <project>`), message the owner with its link, and run `lane-improve drained <project>`. `lane-away off` alone does not stop it.
 - The night manager is an Orca automation (`orca-ide automations list`): its precheck runs it only when a coordinator
   is idle and due. It sends the check-ins itself; do not repeat them.
 - The lane sweep is an Orca automation that reports only. Route each finding to that lane's coordinator. Never run

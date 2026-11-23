@@ -7,6 +7,8 @@ else = skip the run, which costs nothing.
                                    DUE <name> improve idle=<n>min  improve mode is on for it and it has been idle
                                                                  IMPROVE_IDLE_MIN (30): resume its cycle
                                    DUE <name> wrapup idle=<n>min waited=<h>h  the period ended, no `lane-improve drained` yet
+                                   DUE <name> wrapup idle=<n>min cap=<items|weekly>:<n>/<max>  a cap of the mode (--max-items,
+                                                                 --stop-at) is reached, no `lane-improve drained` yet
                                    OFFLINE <runner,...> repo=<r> self-hosted runners not online
                                    BUDGET push-and-handover (<why>) check-ins ask only to push and hand over
                                    BUDGET unknown (<why>) ...    no budget reading: no check-ins (said once a night)
@@ -32,6 +34,9 @@ by budget and never reports unknown. Night alone never starts improve work. A co
 (nothing within the limits left) is not nudged for 12 h. After the mode ends (`lane-improve off` or its end time) each
 coordinator still to wrap up gets `DUE <name> wrapup` (by day or night, none at the stop step) until it runs
 `lane-improve drained`; `waited=` counts the hours since the end, so a drain nobody wrapped up shows.
+A project whose cap is reached (--max-items: away-merges counted from away-merge's own record; --stop-at: weekly use from
+budget-state --project) is treated like an ended period for that project alone: no improve nudge, a `wrapup ... cap=` line
+instead (not at the stop step), until it runs `lane-improve drained`; a wrapped-up project gets nothing more.
 
 Budget gate (budget-state, free), as the machine coordinator's night routine had it: at the no-new-work and
 push-and-handover steps, or with the short window at WINDOW_WARN_PCT (95) or WINDOW_STOP_PCT (98), check-ins still go
@@ -188,6 +193,19 @@ def wrapup_lines(wrap: list, drain: dict, now: float) -> list:
     return out
 
 
+def cap_wrapup_lines(capwrap: list, istate: dict) -> list:
+    """The `DUE <name> wrapup ... cap=` lines: the project's cap is reached, so it wraps up (a push, a summary PR, a
+    message). Gated only at the stop step, as an ended period's wrap-up is."""
+    out = []
+    for name, idle, hit in capwrap:
+        gate, why = ("ok", "") if istate["unmetered"] else budget_gate(name)
+        if gate == "stopped":
+            err(f"{name}: budget at the stop step ({why}): no wrap-up nudge")
+        else:
+            out.append(f"DUE {name} wrapup idle={idle}min cap={hit}")
+    return out
+
+
 def improve_lines(nudge: list, istate: dict, now: float) -> list:
     """The `DUE <name> improve` lines for these (name, idle) pairs, after the budget: unmetered improve is not gated
     and never unknown; metered follows the project's own steps (no new cycle from no-new-work on, so no nudge)."""
@@ -258,6 +276,7 @@ def main(argv: list) -> int:
     now, due, broken = time.time(), [], False
     nudge = []  # coordinators improve mode covers that are due its resume check-in
     wrap = []   # coordinators of an ended period that are due a wrap-up nudge
+    capwrap = []  # (name, idle, cap) of coordinators whose cap is reached and that are due a wrap-up nudge
     eff = {}    # (name, kind) -> the idle time a nudge counts (see nudge_state)
     if not coords:
         err(f"{machineconf.path()} lists no coordinators (is it still the unfilled example?): nobody to check in on")
@@ -281,7 +300,14 @@ def main(argv: list) -> int:
             continue
         if istate and (istate["projects"] == "all" or c.name in istate["projects"]):
             # improve covers it: the resume nudge stands in for the plain check-in
-            if improve.rested(c.name):
+            hit = None if improve.is_wrapped(istate, c.name) else improve.caps(istate, c.name)[1]
+            if improve.is_wrapped(istate, c.name):
+                err(f"{c.name}: wrapped up at its cap: no nudge")
+            elif hit:  # a cap is reached: like the end time, for this project alone
+                is_due, eff[(c.name, "wrapup")] = nudge_due(c.name, "wrapup", idle, conf["IMPROVE_IDLE_MIN"], now)
+                if is_due:
+                    capwrap.append((c.name, idle, hit))
+            elif improve.rested(c.name):
                 err(f"{c.name}: resting (nothing within the limits left): no improve nudge")
             else:
                 is_due, eff[(c.name, "improve")] = nudge_due(c.name, "improve", idle, conf["IMPROVE_IDLE_MIN"], now)
@@ -322,6 +348,8 @@ def main(argv: list) -> int:
         due += improve_lines(nudge, istate, now)
     if wrap:
         due += wrapup_lines(wrap, drain, now)
+    if capwrap:
+        due += cap_wrapup_lines(capwrap, istate)
     for repo in machineconf.runner_repos(conf) if owner_away else []:  # improve's nudges by day do not bring runner lines
         try:
             off = machineconf.offline_runners(repo)

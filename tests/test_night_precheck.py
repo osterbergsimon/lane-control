@@ -18,10 +18,17 @@ class PrecheckBase(MachineTest):
         lines = "\n".join(f"{n} {self.claude_coordinator(n, idle)} claude {n} coordinator" for n, idle in coordinators)
         self.machine_conf(f'COORDINATORS="\n{lines}\n"\nRUNNER_REPOS=""\n{extra}')
 
-    def improve_on(self, projects="all", unmetered=False, end="until-back"):
+    def improve_on(self, projects="all", unmetered=False, end="until-back", **caps):
         (self.conf_dir / "improve.json").write_text(json.dumps({
             "started": "2026-11-23T10:00:00+00:00", "end": end, "limits": "", "deny_paths": [], "projects": projects,
-            "unmetered": unmetered, "branches": {}, "integration": {}}))
+            "unmetered": unmetered, "branches": {}, "integration": {}, **caps}))
+
+    def period(self, merges=None, wrapped=()):
+        """away-merge's record for the period improve_on started: {project: number of merges}."""
+        (self.conf_dir / "improve-period.json").write_text(json.dumps({
+            "period": "2026-11-23T10:00:00+00:00", "wrapped": list(wrapped),
+            "merges": {p: [{"pr": i, "item": f"i{i}", "sha": "abc", "at": "2026-11-23T11:00:00+00:00"} for i in range(n)]
+                       for p, n in (merges or {}).items()}}))
 
     def pre(self, *args, hour="12"):
         return self.run_script("night-precheck", *args, env={"LANE_HOUR": hour})
@@ -327,6 +334,95 @@ class ImproveWrapUpNudgeTests(PrecheckBase):
         self.assertEqual(self.pre().returncode, 1)
 
 
+class CapPrecheckTests(PrecheckBase):
+    """A cap that is reached ends a project's cycles like the end time: no improve nudge, a wrap-up line instead (lc-2nz)."""
+
+    def test_items_cap_reached_gives_a_wrapup_line_not_an_improve_nudge(self):
+        self.conf(("proj", 31))
+        self.improve_on(max_items=2, stop_at=None)
+        self.period({"proj": 2})
+        r = self.pre()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "DUE proj wrapup idle=31min cap=items:2/2\n")
+
+    def test_items_cap_not_reached_nudges_as_before(self):
+        self.conf(("proj", 31))
+        self.improve_on(max_items=3, stop_at=None)
+        self.period({"proj": 2})
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
+
+    def test_the_count_is_per_project(self):
+        self.conf(("a", 31), ("b", 31))
+        self.improve_on(max_items=2, stop_at=None)
+        self.period({"a": 2, "b": 1})
+        self.assertCountEqual(self.pre().stdout.splitlines(), ["DUE a wrapup idle=31min cap=items:2/2", "DUE b improve idle=31min"])
+
+    def test_a_record_of_an_older_period_does_not_count(self):
+        self.conf(("proj", 31))
+        self.improve_on(max_items=1, stop_at=None)
+        (self.conf_dir / "improve-period.json").write_text(json.dumps({
+            "period": "2026-11-01T10:00:00+00:00", "wrapped": ["proj"], "merges": {"proj": [{"pr": 1, "item": "x", "sha": "a", "at": "t"}]}}))
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
+
+    def test_weekly_cap_reached_gives_a_wrapup_line(self):
+        self.playbook(66, 10)
+        self.conf(("proj", 31))
+        self.improve_on(stop_at=66, max_items=None)
+        self.assertEqual(self.pre().stdout, "DUE proj wrapup idle=31min cap=weekly:66/66\n")
+
+    def test_weekly_cap_not_reached_nudges(self):
+        self.playbook(65, 10)
+        self.conf(("proj", 31))
+        self.improve_on(stop_at=66, max_items=None)
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
+
+    def test_a_wrapped_up_project_gets_nothing(self):
+        self.conf(("proj", 31))
+        self.improve_on(max_items=2, stop_at=None)
+        self.period({"proj": 2}, wrapped=["proj"])
+        r = self.pre()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+
+    def test_a_reached_cap_beats_rest(self):
+        self.conf(("proj", 31))
+        self.improve_on(max_items=1, stop_at=None)
+        self.period({"proj": 1})
+        (self.conf_dir / "improve-rest.json").write_text(json.dumps({"proj": "2999-01-01T00:00:00+00:00"}))
+        self.assertEqual(self.pre().stdout, "DUE proj wrapup idle=31min cap=items:1/1\n")
+
+    def test_checked_wrapup_waits_one_idle_period_for_a_cap_too(self):
+        self.conf(("proj", 31))
+        self.improve_on(max_items=1, stop_at=None)
+        self.period({"proj": 1})
+        self.assertEqual(self.pre("--checked", "proj", "wrapup").returncode, 0)
+        self.assertEqual(self.pre().returncode, 1)
+        age(Path(self.env["HOME"]) / ".cache" / "lane-control" / "night" / "proj.wrapup", 31)
+        self.assertEqual(self.pre().stdout, "DUE proj wrapup idle=31min cap=items:1/1\n")
+
+    def test_no_wrapup_nudge_at_the_stop_step(self):
+        self.playbook(92, 10)
+        self.conf(("proj", 31))
+        self.improve_on(max_items=1, stop_at=None)
+        self.period({"proj": 1})
+        r = self.pre()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("stop step", r.stderr)
+
+    def test_unmetered_items_cap_needs_no_budget(self):
+        self.playbook(None, None)
+        self.conf(("proj", 31))
+        self.improve_on(unmetered=True, max_items=1, stop_at=None)
+        self.period({"proj": 1})
+        self.assertEqual(self.pre().stdout, "DUE proj wrapup idle=31min cap=items:1/1\n")
+
+    def test_the_other_projects_are_not_held_back(self):
+        self.conf(("a", 31), ("b", 31))
+        self.improve_on(projects=["a"], max_items=1, stop_at=None)
+        self.period({"a": 1})
+        self.assertEqual(self.pre().stdout, "DUE a wrapup idle=31min cap=items:1/1\n")
+
+
 class NightManagerImproveDocTests(unittest.TestCase):
     def test_night_manager_knows_the_improve_line(self):
         text = " ".join((Path(__file__).resolve().parent.parent / "orchestrators" / "native-orca" / "night-manager.md")
@@ -335,6 +431,11 @@ class NightManagerImproveDocTests(unittest.TestCase):
         self.assertIn("away-improve", text)
         self.assertIn("night-precheck --checked <name> improve", text)
         self.assertIn("never turn improve mode on", text)
+
+    def test_night_manager_knows_the_cap_wrapup_line(self):
+        text = " ".join((Path(__file__).resolve().parent.parent / "orchestrators" / "native-orca" / "night-manager.md")
+                        .read_text().split())
+        self.assertIn("cap=<items|weekly>:<n>/<max>", text)
 
 
 if __name__ == "__main__":

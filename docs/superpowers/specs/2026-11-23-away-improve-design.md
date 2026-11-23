@@ -208,3 +208,33 @@ Decided while the branch was reviewed; the owner's guide (`docs/away-improve.md`
 - **Unmetered:** `budget-state --project <name>` prints `unmetered` instead of `unknown` for a project in unmetered
   improve mode when the usage feed gives no reading.
 - Not done (bead lc-1dk): feed the built-in secret scan the public-repo name patterns the content test uses.
+
+## Follow-ups after the merged mode (2026-11-23, lc-2nz)
+
+Ordered by the owner on top of the merged mode; the owner's guide describes the result.
+
+- **A summary PR from the start.** `lane-improve on` opens, for each branch it cuts or continues, a draft PR
+  `away/<date>` -> the recorded integration branch, titled `away: <date> (<project>)`, body from the AWAY-LOG.md summary, and
+  records its number in improve.json (`prs`, optional). `away-merge` refreshes the body after every merge (and opens the PR
+  when `on` could not), so the coordinator remembers nothing; `lane-improve pr <project>` is the same by hand and the
+  wrap-up step. The draft PR is never merged, marked ready or closed by an agent: the old "open the draft PR at off" step is
+  now "update it and point the owner at it". gh writes only through these code paths (`pr create --draft`, `pr edit --body`,
+  and away-merge's merge), tested with a stub gh. GitHub refuses a PR for a branch with no commits beyond its base, and a
+  fresh away branch is its base's head, so at `on` the PR usually cannot open yet: that is a warning, not a refusal, and the
+  first away-merge opens it. (Seeding the branch with a first commit so the PR exists from the start was weighed and left
+  out: it would make the branch more than a cut of the integration head, which the one-branch rules and their tests assume.)
+- **Optional caps, off by default** (the owner: a spend cap or limit could optionally be allowed). `--max-items N`: no new
+  cycle for a project after N away-merges in the period, counted from away-merge's own record (`improve-period.json`, keyed
+  to the period's `started`; never from the log's text). `--stop-at <weekly %>`: none once `budget-state --project` gives
+  weekly at or above it (any metered budget reaching it counts); refused with `--unmetered` and when at or above the
+  project's ceiling (below which the budget steps stop first). Each cap is per project, because each coordinator and each
+  ceiling is. A cap behaves like the end time for that project alone: the running lane finishes and merges, the coordinator
+  wraps up and runs `lane-improve drained <project>`, which while the mode is on is accepted only for a project whose cap is
+  reached and then stops further merges for it (recorded in the period record, so `off` drains only the others). `status`
+  shows `items 4/10` and `weekly 66/70`; night-precheck sends `DUE <name> wrapup idle=<n>min cap=<items|weekly>:<n>/<max>`
+  instead of the improve nudge. A `--continue` re-run changes a cap only when given (`none` drops it).
+- **Branch protection report in project-setup.** Read-only, with the integration branch's protection from `gh api`:
+  protected for everyone, partly (what is missing, such as admins exempt), none, a ruleset, not available on the plan (HTTP
+  403) or unknown. It never changes a setting. The guide notes it next to "a backstop, not a wall".
+- Not done: seeding the away branch so the summary PR exists from `on`; a global (not per-project) item cap; a spend cap in
+  money rather than the weekly budget percentage.

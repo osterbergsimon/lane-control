@@ -12,6 +12,9 @@ night and a changed budget never do, and the mode never changes presence. Fields
   unmetered  true on a machine with no usage limits: no budget steps for improve work
   branches   {project: "away/<YYYY-MM-DD>"}
   integration {project: "main" | "develop" | ...}: the branch the project's PRs go to, worked out once, at `on`
+  stop_at    weekly % (a number above 0 and below 100) or null: no new cycle for a project once `budget-state --project`
+             gives weekly >= it; metered periods only (optional, null = off)
+  max_items  whole number or null: no new cycle for a project after this many away-merges in the period (optional)
   prs        {project: number}: the draft summary PR (away/<date> -> the integration branch), opened at `on` or, when gh
              could not then, by away-merge after the first merge; its body is the AWAY-LOG.md summary, refreshed by
              away-merge after every merge. Optional (a file without it is fine); never merged by an agent.
@@ -24,6 +27,10 @@ Ending the mode (`off`, or the end time) leaves a drain state: the running lane'
 away-merge, no new cycle starts, and each coordinator then opens its draft PR and runs `lane-improve drained <project>`.
 After `off` the drain state is improve-drain.json (the same fields, plus `ended` and `pending`); after an end time it is
 the old improve.json, which `drained` turns into improve-drain.json. The deny rules stay until `drained`.
+A cap reached ends the project's cycles like the end time does: the lane that is running finishes and merges, the
+coordinator wraps up (log summary, `lane-improve pr`, its message to the owner) and runs `lane-improve drained <project>`,
+which with the mode on records the wrap-up in improve-period.json (beside the improve file; keyed to the period's `started`,
+holds away-merge's record of its merges and the wrapped-up projects). The mode stays on for the other projects.
 Command line (lane-improve calls it): `improve.py on ...`, `off`, `drained`, `status`.
 """
 import argparse
@@ -93,6 +100,12 @@ def _problem(state, drain: bool = False) -> "str | None":
     i = state["integration"]
     if not (isinstance(i, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in i.items())):
         return "integration is not {project: branch}"
+    sa = state.get("stop_at")
+    if sa is not None and not (isinstance(sa, (int, float)) and not isinstance(sa, bool) and 0 < sa < 100):
+        return "stop_at is not a weekly percentage above 0 and below 100"
+    mx = state.get("max_items")
+    if mx is not None and not (isinstance(mx, int) and not isinstance(mx, bool) and mx >= 1):
+        return "max_items is not a whole number above 0"
     prs = state.get("prs", {})
     if not (isinstance(prs, dict) and all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
                                            for k, v in prs.items())):
@@ -159,12 +172,15 @@ def merge_state(project: str) -> "tuple[dict | None, str]":
     `off` or the end time until `drained`; (None, why) otherwise."""
     s = load()
     if s and covers(s, project):
+        if is_wrapped(s, project):
+            return None, (f"{project} wrapped up its improve period (a cap was reached and it ran `lane-improve drained`): "
+                          "nothing more merges")
         return s, "on"
     d = load_drain()
     if d and project in d["pending"]:
         return d, "draining"
     e = ended_state()
-    if e and covers(e, project):
+    if e and covers(e, project) and not is_wrapped(e, project):
         return e, "draining"
     return None, "improve mode is not on for " + project + (" (and nothing of it is left to wrap up)" if not s else "")
 
@@ -175,7 +191,7 @@ def draining() -> "dict | None":
     d = load_drain(quiet=True)
     if d is None and (e := ended_state()) is not None:
         d = _to_drain(e)
-    return d
+    return d if d is not None and d["pending"] else None
 
 
 def rest_path() -> Path:
@@ -224,6 +240,134 @@ def write_drain(state: dict) -> None:
     tmp = f.with_name(f.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
     tmp.replace(f)
+
+
+# --- the caps: how many items, how much of the weekly budget, per project ------------------------------------------
+
+def period_path() -> Path:
+    return path().with_name("improve-period.json")
+
+
+def _period(state: dict) -> dict:
+    """This period's record: {"period": started, "merges": {project: [{pr, item, sha, at}]}, "wrapped": [project]}. A file
+    of another period (or none, or an unreadable one) is an empty record."""
+    try:
+        d = json.loads(period_path().read_text())
+    except (OSError, ValueError):
+        d = None
+    if not isinstance(d, dict) or d.get("period") != state["started"]:
+        d = {}
+    m, w = d.get("merges"), d.get("wrapped")
+    return {"period": state["started"], "merges": m if isinstance(m, dict) else {}, "wrapped": w if isinstance(w, list) else []}
+
+
+def _write_period(rec: dict) -> None:
+    f = period_path()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n")
+    tmp.replace(f)
+
+
+def record_merge(state: dict, project: str, pr: int, item: str, sha: str) -> None:
+    """away-merge's own record of a merge it made (what --max-items counts; never read from the log's text)."""
+    rec = _period(state)
+    rec["merges"].setdefault(project, [])
+    if not isinstance(rec["merges"][project], list):
+        rec["merges"][project] = []
+    rec["merges"][project].append({"pr": pr, "item": item, "sha": sha, "at": now().isoformat(timespec="seconds")})
+    _write_period(rec)
+
+
+def items_done(state: dict, project: str) -> int:
+    m = _period(state)["merges"].get(project)
+    return len(m) if isinstance(m, list) else 0
+
+
+def is_wrapped(state: dict, project: str) -> bool:
+    """True when the project wrapped up this period while the mode was on (a cap was reached): nothing more merges."""
+    return project in _period(state)["wrapped"]
+
+
+def mark_wrapped(state: dict, projects: list) -> None:
+    rec = _period(state)
+    rec["wrapped"] = list(dict.fromkeys([*rec["wrapped"], *projects]))
+    _write_period(rec)
+
+
+def budget_reading(project: str) -> "tuple[int | None, int | None, str]":
+    """(the highest weekly % and the lowest ceiling over the project's metered budgets, why not): `budget-state
+    --project`, read-only. Both None, with the reason, when it gives no reading."""
+    try:
+        r = subprocess.run([str(HERE / "scripts" / "budget-state"), "--project", project], capture_output=True, text=True,
+                           timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, None, f"budget-state failed ({e})"
+    if r.returncode:
+        return None, None, (r.stderr.strip().splitlines() or ["budget-state failed"])[-1].removeprefix("budget-state: ")
+    weekly, ceil = [], []
+    for line in r.stdout.splitlines():
+        kv = dict(x.split("=", 1) for x in line.split()[1:] if "=" in x)
+        if kv.get("weekly", "").isdigit():
+            weekly.append(int(kv["weekly"]))
+        if kv.get("ceiling", "").isdigit():
+            ceil.append(int(kv["ceiling"]))
+    if not weekly:
+        return None, None, (r.stdout.strip().splitlines() or ["no metered budget in the config"])[0]
+    return max(weekly), min(ceil) if ceil else None, ""
+
+
+def _pct(v) -> str:
+    return str(int(v)) if float(v).is_integer() else str(v)
+
+
+def caps(state: dict, project: str) -> "tuple[list, str | None]":
+    """(parts, hit) for a project: the progress as `status` shows it (["items 4/10", "weekly 66/70"], only the caps that are
+    set; weekly is `?` when the usage feed gives no reading, which is no cap hit) and the first cap reached as `items:10/10` or
+    `weekly:70/70`, else None."""
+    parts, hit = [], None
+    mx = state.get("max_items")
+    if mx:
+        n = items_done(state, project)
+        parts.append(f"items {n}/{mx}")
+        if n >= mx:
+            hit = f"items:{n}/{mx}"
+    sa = state.get("stop_at")
+    if sa is not None:
+        w, _c, _why = budget_reading(project)
+        parts.append(f"weekly {w if w is not None else '?'}/{_pct(sa)}")
+        if w is not None and w >= sa and not hit:
+            hit = f"weekly:{w}/{_pct(sa)}"
+    return parts, hit
+
+
+def cap_text(state: dict) -> str:
+    bits = []
+    if state.get("max_items"):
+        bits.append(f"{state['max_items']} away-merges in the period")
+    if state.get("stop_at") is not None:
+        bits.append(f"weekly budget use at {_pct(state['stop_at'])}%")
+    return "no new cycle for a project after " + " or ".join(bits) if bits else ""
+
+
+CLEAR = object()
+
+
+def parse_cap(flag: str, text: "str | None", whole: bool):
+    """None (not given), CLEAR (`none`) or the value of --stop-at (a percentage above 0 and below 100) / --max-items (a
+    whole number above 0). ValueError says what is wrong."""
+    if text is None:
+        return None
+    if text.strip().lower() == "none":
+        return CLEAR
+    try:
+        v = int(text) if whole else float(text)
+    except ValueError:
+        v = None
+    if v is None or isinstance(v, float) and v != v or (whole and v < 1) or (not whole and not 0 < v < 100):
+        raise ValueError(f"{flag} {text!r}: use " + ("a whole number above 0" if whole else "a weekly percentage above 0 and below 100")
+                         + ", or `none` to drop it")
+    return v if whole or not float(v).is_integer() else int(v)
 
 
 # --- the command line ----------------------------------------------------------------------------------------------
@@ -531,6 +675,8 @@ def describe(s: dict, how: "dict | None" = None) -> list:
         lines.append(f"  never touching: {', '.join(s['deny_paths'])}")
     lines.append("  budget: " + ("unmetered (no budget steps for improve work; machine limits still apply)" if s["unmetered"]
                                  else "metered (follows the project's budget steps)"))
+    if cap_text(s):
+        lines.append(f"  caps: {cap_text(s)}; the lane that is running finishes, then the project wraps up (`lane-improve status` shows each project's progress)")
     return lines
 
 
@@ -549,6 +695,34 @@ def open_summary_prs(cos: list, branches: dict, integs: dict, known: dict) -> "t
     return out, warns
 
 
+def stop_at_refusal(stop_at, projects, prev: "dict | None", cos: list) -> "str | None":
+    """Why --stop-at cannot be accepted for these projects, or None: it must be below each project's ceiling (or the budget
+    steps would stop it first and the cap would never fire), and the ceiling must be readable."""
+    names = ([c.name for c in cos] if projects == "all" or (prev or {}).get("projects") == "all" else
+             list(dict.fromkeys([*((prev or {}).get("projects") or []), *projects])))
+    for name in names:
+        weekly, ceiling, why = budget_reading(name)
+        if ceiling is None:
+            return (f"--stop-at needs {name}'s weekly ceiling, which budget-state could not read ({why}); try again when "
+                    "the usage feed answers")
+        if stop_at >= ceiling:
+            return (f"--stop-at {_pct(stop_at)} is at or above {name}'s ceiling {ceiling}: the budget steps would stop it "
+                    f"first, so the cap would never fire; give a value below {ceiling}")
+    return None
+
+
+def _unfinished_end() -> bool:
+    """A time end that passed with something still to wrap up. One with nothing left (every project wrapped up at its cap)
+    is cleared here."""
+    e = ended_state()
+    if e is None:
+        return False
+    if _to_drain(e)["pending"]:
+        return True
+    clear()
+    return False
+
+
 def cmd_on(a) -> int:
     try:
         if a.hours is not None and (a.until or a.until_back):
@@ -563,6 +737,8 @@ def cmd_on(a) -> int:
             end = parse_until(a.until).isoformat(timespec="seconds")
         else:
             end = UNTIL_BACK if a.until_back else None  # none given: a re-run keeps the current end, a first run has none
+        stop_at = parse_cap("--stop-at", a.stop_at, False)
+        max_items = parse_cap("--max-items", a.max_items, True)
     except ValueError as e:
         print(f"lane-improve: {e}", file=sys.stderr)
         return 2
@@ -577,7 +753,7 @@ def cmd_on(a) -> int:
                   "the open PRs without a home. Use `lane-improve off` first, or `--continue` to carry on with the "
                   "current branches", file=sys.stderr)
             return 1
-    elif load_drain(quiet=True) or ended_state():
+    elif load_drain(quiet=True) or _unfinished_end():
         print("lane-improve: the last improve period is not wrapped up yet; each coordinator runs `lane-improve drained "
               "<project>` after its draft PR (the owner can run `lane-improve drained --all`) before a new period starts",
               file=sys.stderr)
@@ -589,6 +765,11 @@ def cmd_on(a) -> int:
             print(f"lane-improve: cannot check --project names: {e}", file=sys.stderr)
             return 1
         cos = []
+    if stop_at is not CLEAR and (stop_at is not None or (prev or {}).get("stop_at") is not None) and (
+            a.unmetered or (prev or {}).get("unmetered")):
+        print("lane-improve: --stop-at reads the usage budget, and an --unmetered period has none: give one of them "
+              "(--stop-at none drops the cap)", file=sys.stderr)
+        return 2
     known = [c.name for c in cos]
     unknown = [p for p in a.project if p not in known]
     if unknown:
@@ -601,6 +782,11 @@ def cmd_on(a) -> int:
     else:
         projects = list(dict.fromkeys(a.project)) if a.project else "all"
         chosen = cos if projects == "all" else [c for c in cos if c.name in projects]
+    if isinstance(stop_at, (int, float)):
+        why = stop_at_refusal(stop_at, projects, prev, cos)
+        if why:
+            print(f"lane-improve: improve not switched on: {why}", file=sys.stderr)
+            return 1
     try:
         branches, integs, how = resolve_branches(chosen, a.cont, now().date())
     except ValueError as e:
@@ -620,6 +806,8 @@ def cmd_on(a) -> int:
             "branches": {**prev["branches"], **branches},
             "integration": {**prev["integration"], **integs},
             "prs": {**prev.get("prs", {}), **prs},
+            "stop_at": prev.get("stop_at") if stop_at is None else (None if stop_at is CLEAR else stop_at),
+            "max_items": prev.get("max_items") if max_items is None else (None if max_items is CLEAR else max_items),
         }
     else:
         state = {
@@ -632,7 +820,10 @@ def cmd_on(a) -> int:
             "branches": branches,
             "integration": integs,
             "prs": prs,
+            "stop_at": None if stop_at in (None, CLEAR) else stop_at,
+            "max_items": None if max_items in (None, CLEAR) else max_items,
         }
+        period_path().unlink(missing_ok=True)  # a new period counts from nothing
     write(state)
     clear_rest()  # a new instruction from the owner: every coordinator looks for work again
     notes, warns = install_denies(chosen, integs)
@@ -655,6 +846,7 @@ def _to_drain(state: dict) -> dict:
     names = list(state["branches"]) if state["projects"] == "all" else list(state["projects"])
     if state["projects"] == "all":
         names = list(dict.fromkeys([*names, *(c.name for c in _coordinator_list())]))
+    names = [n for n in names if not is_wrapped(state, n)]  # a project that wrapped up at a cap has nothing to wrap up
     ended = state["end"] if state["end"] != UNTIL_BACK else now().isoformat(timespec="seconds")
     if state["end"] != UNTIL_BACK and not _ended(state):
         ended = now().isoformat(timespec="seconds")
@@ -666,11 +858,17 @@ def cmd_off(a) -> int:
     until `drained`. With nothing to drain, leftover deny rules are cleaned up."""
     state = load() or ended_state()
     if state is not None:
-        write_drain(_to_drain(state))
+        d = _to_drain(state)
+        if d["pending"]:
+            write_drain(d)
         clear()
         clear_rest()
-        print("lane-improve: improve mode ended; the running lanes drain: each coordinator merges its last PR with "
-              "away-merge, opens its draft PR, then runs `lane-improve drained <project>` (`lane-improve status` lists them)")
+        if d["pending"]:
+            print("lane-improve: improve mode ended; the running lanes drain: each coordinator merges its last PR with "
+                  "away-merge, brings its summary PR up to date (`lane-improve pr <project>`) and points you at it, then runs "
+                  "`lane-improve drained <project>` (`lane-improve status` lists them)")
+        else:
+            print("lane-improve: improve mode ended; every project had already wrapped up at its cap, so nothing is left to drain")
     elif load_drain(quiet=True) is None:
         for w in remove_denies(_coordinator_list()):
             print(w, file=sys.stderr)
@@ -678,7 +876,11 @@ def cmd_off(a) -> int:
 
 
 def cmd_drained(a) -> int:
-    """`drained <project>...` or `--all`: the project's wrap-up is done; its deny rules come out and the state clears."""
+    """`drained <project>...` or `--all`: the project's wrap-up is done; its deny rules come out and the state clears. While the
+    mode is still on, only a project that has reached a cap can be wrapped up this way (the mode stays on for the rest)."""
+    on_state = load(quiet=True)
+    if on_state is not None:
+        return _drained_capped(on_state, a)
     state = load_drain(quiet=True)
     if state is None:
         e = ended_state()
@@ -735,6 +937,31 @@ def cmd_pr(a) -> int:
     return 0
 
 
+def _drained_capped(s: dict, a) -> int:
+    """`drained` while the mode is on: the projects that have reached a cap wrap up now (their deny rules come out, nothing
+    more merges), and the mode goes on for the others."""
+    hit = {p: caps(s, p)[1] for p in s["branches"] if covers(s, p) and not is_wrapped(s, p)}
+    names = [p for p, h in hit.items() if h] if a.all else list(a.projects)
+    if not names:
+        if not a.all:
+            print("lane-improve: say which project is wrapped up (`lane-improve drained <project>`), or --all", file=sys.stderr)
+            return 2
+        print("lane-improve: nothing is draining, and no project has reached a cap (`lane-improve status` shows each one's "
+              "progress; `lane-improve off` ends the mode)", file=sys.stderr)
+        return 1
+    bad = [n for n in names if not hit.get(n)]
+    if bad:
+        print(f"lane-improve: not wrapped up: {', '.join(bad)}. The mode is on, so a project wraps up only once its cap is "
+              "reached (or after `lane-improve off`)", file=sys.stderr)
+        return 1
+    mark_wrapped(s, names)
+    cos = {c.name: c for c in _coordinator_list()}
+    for w in remove_denies([cos[n] for n in names if n in cos]):
+        print(w, file=sys.stderr)
+    print(f"lane-improve: wrapped up at its cap: {', '.join(names)}; the mode stays on for the other projects")
+    return 0
+
+
 def cmd_rest(a) -> int:
     """A coordinator's note that nothing within the limits is left: its idle nudges stop for REST_HOURS (or until the
     owner switches the mode on or off again), then one nudge looks for new work. Only quiets; starts nothing."""
@@ -763,11 +990,24 @@ def cmd_status(a) -> int:
     if s:
         print(f"improve: on (since {dt.datetime.fromisoformat(s['started']).strftime('%a %d %b %H:%M')})")
         print("\n".join(describe(s)))
+        if s.get("max_items") or s.get("stop_at") is not None:
+            for p in sorted(s["branches"]):
+                if not covers(s, p):
+                    continue
+                parts, hit = caps(s, p)
+                if is_wrapped(s, p):
+                    tail = ", wrapped up (a cap was reached)"
+                elif hit:
+                    tail = (f": cap reached ({hit}): no new cycle; the running lane finishes, then wrap up and run "
+                            f"`lane-improve drained {p}`")
+                else:
+                    tail = ""
+                print(f"  {p}: {', '.join(parts)}{tail}")
         return 0
     d = load_drain(quiet=True)
     if d is None and (e := ended_state()) is not None:
         d = _to_drain(e)
-    if d is not None:
+    if d is not None and d["pending"]:
         when = dt.datetime.fromisoformat(d["ended"]).strftime("%a %d %b %H:%M")
         print(f"improve: draining (ended {when}); no new cycle starts, the running lanes' PRs can still merge")
         print("  to wrap up: " + ", ".join(d["pending"]))
@@ -777,8 +1017,9 @@ def cmd_status(a) -> int:
                   "`lane-improve drained --all` yourself once its last PR is dealt with")
         for p in d["pending"]:
             if p in d["branches"]:
-                print(f"  {p}: away-merge the last PR into {d['branches'][p]}, open a draft PR into "
-                      f"{d['integration'].get(p, '?')}, then run `lane-improve drained {p}`")
+                print(f"  {p}: away-merge the last PR into {d['branches'][p]}, run `lane-improve pr {p}` (the draft PR into "
+                      f"{d['integration'].get(p, '?')} gets the final summary) and point the owner at it, then run "
+                      f"`lane-improve drained {p}`")
         return 0
     print("improve: off")
     return 0
@@ -805,6 +1046,8 @@ def main(argv=None) -> int:
     on.add_argument("--deny-paths")
     on.add_argument("--project", action="append", default=[])
     on.add_argument("--unmetered", action="store_true")
+    on.add_argument("--stop-at", dest="stop_at")
+    on.add_argument("--max-items", dest="max_items")
     on.add_argument("--continue", dest="cont", action="store_true")
     on.add_argument("--yes", action="store_true")
     sub.add_parser("off")

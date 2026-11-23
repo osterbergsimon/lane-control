@@ -5,7 +5,7 @@
 # (limits, check-ins); this says what the machine may spend its time on. Neither starts the other.
 #
 #   lane-improve on [--until HH:MM|--hours N|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."]
-#                   [--project <name>]... [--unmetered] [--continue] [--yes]
+#                   [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]
 #       Switches the mode on, and it is the ONLY way it turns on: plain `lane-away on`, night, "goodnight", a changed budget
 #       never do, and an agent runs it only on the owner's own explicit request for the improve (away-improve) mode.
 #       Prints what it turned on, and without a terminal refuses unless --yes. End: a time, or until you run
@@ -15,11 +15,20 @@
 #       one is refused: --continue carries on with it (it takes no argument; a project with none gets one cut, so a new
 #       project can join; two or more are refused and listed), or the owner adopts it (merges it to the integration branch)
 #       or drops it (deletes it) first. A `--continue` re-run while on keeps what is not given again; without --project it keeps the projects as they were (no branch cut). Nothing is merged.
+#       Draft PR: for each project whose branch it cuts or continues it opens the draft summary PR away/<date> -> the integration
+#       branch (title "away: <date> (<project>)", body = AWAY-LOG.md's summary) and records its number in improve.json; GitHub
+#       opens none for a branch with nothing on it yet, so then away-merge opens it after the first merge (a warning says so).
+#       Caps, both off unless given, both ending a project's cycles like the end time (the running lane finishes and merges,
+#       then it wraps up and runs `drained`; the mode stays on for the others): --max-items N: no new cycle after N away-merges
+#       in this period (away-merge's own record); --stop-at <weekly %>: none once `budget-state --project` gives weekly at or
+#       above it (metered only: refused with --unmetered, or at or above the project's ceiling). A --continue re-run changes
+#       them only when given; `none` drops one. `status` shows "items 4/10" and "weekly 66/70" per project.
 #   lane-improve off
 #       Ends the mode. What was running drains: no new cycle, the last PRs can still merge through away-merge, the deny
 #       rules stay until each coordinator has wrapped up.
 #   lane-improve drained <project>... | --all
-#       A coordinator's wrap-up is done (last PR merged, draft PR opened): its deny rules come out and the drain clears.
+#       A coordinator's wrap-up is done (last PR merged, draft summary PR brought up to date): its deny rules come out and the
+#       drain clears. While the mode is still on it takes only a project whose cap is reached (nothing more merges for it).
 #   lane-improve rest <project>
 #       A coordinator's note that nothing within the limits is left: the idle nudges stop for that project for 12 h (or
 #       until the mode is switched on or off again), then one nudge looks for new work. It only quiets; it starts nothing.

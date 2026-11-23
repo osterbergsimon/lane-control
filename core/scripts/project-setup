@@ -122,7 +122,8 @@ ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop sh
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-shots")  # the library first: a new tool never sees an old one
 OLD_PATH_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # kept as links in scripts/ for machines
-HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "scripts/project-setup",
+HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "core/improve.py", "core/protection.py",
+              "scripts/project-setup",
               *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
               "core/templates/frontend-brief.md", "core/templates/DESIGN.md", "core/templates/away-innovation.md",
               "core/templates/away-scout-brief.md", "core/templates/away-build-brief.md", "core/templates/AWAY-LOG.md",
@@ -641,7 +642,7 @@ def branch_protection_report(repo):
     """Says plainly how the project's integration branch is protected (core/protection.py): protected for everyone,
     partly (what is missing), none, a ruleset, not available on the plan, or unknown. Read-only: no setting is changed,
     and nothing here stops a run."""
-    core = str(Path(__file__).resolve().parent.parent)
+    core = str(HERE / "core")
     if core not in sys.path:
         sys.path.insert(0, core)
     import improve

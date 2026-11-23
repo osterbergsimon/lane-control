@@ -413,5 +413,124 @@ class AwayMergeSummaryTests(AwayMergeTest):
         self.assertIn("Done: the x feature", self.summary_prs(self.shop)[number]["body"])
 
 
+class AwayMergeCapTests(AwayMergeTest):
+    """The caps (lc-2nz): items are counted from away-merge's own record, a cap reached ends the project's cycles like the
+    end time does, and the project then wraps up (`lane-improve drained <project>`) while the mode stays on for the rest."""
+
+    def setUp(self):
+        super().setUp()
+        self.playbook(60, 10, ceiling=70)
+        self.assertEqual(self.on("--continue", "--max-items", "2", "--stop-at", "66").returncode, 0)
+
+    def period(self) -> dict:
+        return json.loads((self.conf_dir / "improve-period.json").read_text())
+
+    def status(self) -> str:
+        return self.run_script("lane-improve", "status").stdout
+
+    def test_a_merge_is_recorded_by_away_merge_not_read_from_the_log(self):
+        self.push_log(self.shop, self.branch, "# log\n\n## Summary\n- Done: nothing, 9 items, items 9/10\n")
+        r = self.merge(item="Add the x feature")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self.period()["merges"]["shop"]
+        self.assertEqual([(m["pr"], m["item"], m["sha"]) for m in rec], [(7, "Add the x feature", "abc1234")])
+        self.assertEqual(self.period()["period"], self.state()["started"])
+        self.assertIn("items 1/2", self.status())
+
+    def test_a_refused_merge_is_not_counted(self):
+        self.pr(comments=[])
+        self.assertRefused(self.merge(), "review")
+        self.assertIn("items 0/2", self.status())
+
+    def test_the_count_survives_a_continue_rerun_and_starts_over_in_a_new_period(self):
+        self.merge()
+        self.assertEqual(self.on("--continue", "--hours", "3").returncode, 0)
+        self.assertIn("items 1/2", self.status())
+        self.run_script("lane-improve", "off")
+        self.run_script("lane-improve", "drained", "--all")
+        self.drop_branches()
+        self.assertEqual(self.on("--project", "shop", "--max-items", "2").returncode, 0)
+        self.assertIn("items 0/2", self.status())
+
+    def test_status_says_when_a_cap_is_reached(self):
+        self.merge(item="one")
+        self.assertNotIn("reached", self.status())
+        self.merge(item="two")
+        line = [l for l in self.status().splitlines() if l.strip().startswith("shop:")][0]
+        self.assertIn("items 2/2", line)
+        self.assertIn("reached", line)
+        self.assertIn("lane-improve drained shop", line)
+
+    def test_a_weekly_cap_is_reached_at_the_value(self):
+        self.playbook(65, 10, ceiling=70)
+        self.assertNotIn("reached", self.status())
+        self.playbook(66, 10, ceiling=70)
+        line = [l for l in self.status().splitlines() if l.strip().startswith("shop:")][0]
+        self.assertIn("weekly 66/66", line)
+        self.assertIn("reached", line)
+
+    def test_an_unreadable_feed_shows_a_question_mark_and_is_no_cap_hit(self):
+        self.playbook(None, None)
+        line = [l for l in self.status().splitlines() if l.strip().startswith("shop:")][0]
+        self.assertIn("weekly ?/66", line)
+        self.assertNotIn("reached", line)
+
+    def test_the_running_lane_still_merges_after_a_cap_is_reached(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        r = self.merge(item="three, the lane that was running")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("items 3/2", self.status())
+
+    def test_drained_needs_a_reached_cap_while_the_mode_is_on(self):
+        r = self.run_script("lane-improve", "drained", "shop")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("cap", r.stderr)
+        self.assertEqual(self.run_script("lane-improve", "drained", "--all").returncode, 1)
+        self.assertIn("improve: on", self.status())
+
+    def test_a_project_that_hit_its_cap_wraps_up_and_the_mode_stays_on(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        r = self.run_script("lane-improve", "drained", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("improve: on", self.status())
+        self.assertIn("shop", self.period()["wrapped"])
+        self.assertIn("wrapped up", [l for l in self.status().splitlines() if l.strip().startswith("shop:")][0])
+        again = self.merge(item="three")  # nothing merges after the wrap-up
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("wrapped up", again.stderr)
+        self.assertEqual(self.run_script("lane-improve", "drained", "shop").returncode, 1)
+
+    def test_off_after_a_wrap_up_leaves_only_the_others_to_drain(self):
+        self.assertEqual(self.on("--continue", "--project", "blog").returncode, 0)
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "drained", "shop")
+        self.run_script("lane-improve", "off")
+        d = json.loads(self.drain_file().read_text())
+        self.assertNotIn("shop", d["pending"])
+        self.assertIn("blog", d["pending"])
+
+    def test_off_when_every_project_has_wrapped_up_closes_the_period(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "drained", "shop")
+        r = self.run_script("lane-improve", "off")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self.drain_file().exists())
+        self.assertFalse(self.improve_file().exists())
+        self.assertIn("improve: off", self.status())
+
+    def test_the_deny_rules_come_out_with_the_wrap_up(self):
+        settings = self.shop / ".claude" / "settings.local.json"
+        self.assertIn("deny", settings.read_text())
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "drained", "shop")
+        text = settings.read_text() if settings.exists() else ""
+        self.assertNotIn("gh pr merge", text)
+
+
 if __name__ == "__main__":
     unittest.main()

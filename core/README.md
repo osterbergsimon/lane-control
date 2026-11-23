@@ -15,9 +15,9 @@ orchestrator to another; everything that does depend on one is in `orchestrators
 | `lane-ledger.tsv` | one row per finished task, used to calibrate routing |
 | `scripts/lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh` | the machine caps: the gate for builds and full test suites, the check before opening a lane, the tier lookup, their shared limits |
 | `scripts/lane-away`, `ci-presence`, `budget-state` | presence (the away file), the CI slice's limits by presence, each budget's step (`budget-state --project <name>` with that project's own ceiling) and the `budget-stopped` marker |
-| `improve.py` | away-improve mode's state (`~/.config/lane-control/improve.json`), written only by `lane-improve on`; every reader treats a missing or bad file as off |
-| `scripts/lane-improve` | away-improve mode's switch: `on`, `off`, `drained`, `rest` (a coordinator has nothing left within the limits: idle nudges stop for 12 h), `status` (separate from `lane-away`, which is presence only); the owner's guide is `docs/away-improve.md` |
-| `scripts/away-merge` | the only merge route into a project's `away/<date>` branch while improve mode is on: checks base, review marker, CI, secret scan and deny paths, then merges as `away: <item>` (`--local-suite-ok` takes the log of a passing full-suite run) |
+| `improve.py` | away-improve mode's state (`~/.config/lane-control/improve.json`), written by `lane-improve on` (and a PR number recorded by `away-merge`, and `pr`); every reader treats a missing or bad file as off |
+| `scripts/lane-improve` | away-improve mode's switch: `on` (also opens each project's draft summary PR; optional caps `--max-items`, `--stop-at`), `off`, `drained`, `pr` (open or refresh that PR from the log summary), `rest` (a coordinator has nothing left within the limits: idle nudges stop for 12 h), `status` (separate from `lane-away`, which is presence only); the owner's guide is `docs/away-improve.md` |
+| `scripts/away-merge` | the only merge route into a project's `away/<date>` branch while improve mode is on: checks base, review marker, CI, secret scan and deny paths, then merges as `away: <item>` (`--local-suite-ok` takes the log of a passing full-suite run), records the merge for `--max-items` and refreshes the draft summary PR |
 | `harnesses/opencode/lane-away-guard.js` | OpenCode's counterpart of Claude's deny rules in away-improve mode: a plugin hook that refuses a PR merge and a push to the integration branch in the coordinator's shell while the mode is on or draining |
 | `templates/away-*.md`, `templates/AWAY-LOG.md` | the innovation prompt, the scout and build briefs and the log format of away-improve mode, installed with the `away-improve` skill (`orchestrators/native-orca/skills/away-improve`) |
 | `scripts/lane-idle`; `harnesses/session-record.md` | how long a marked session has been idle, and waiting for it; the session record both read, a stable interface |
@@ -45,7 +45,7 @@ uses it has been updated.
 | `scripts/lib.sh` | `core/scripts/lib.sh` | sourced by every watch script, wherever it is started from |
 | `scripts/stale-claims.sh`, `park-check.sh` | `core/scripts/` | Rove routines (`bash <repo>/scripts/...`) |
 | `scripts/window-guard-install` | `core/scripts/window-guard-install` | the install steps in the docs |
-| `scripts/project-setup`, `project-pause` | `core/scripts/` (`orchestrators/orca-cotal/scripts/<name>` stays a link too) | rendered personas, `project-setup --host` and the docs |
+| `scripts/project-setup`, `project-pause` | `core/scripts/` (`orchestrators/orca-cotal/scripts/<name>` stays a link too) | rendered personas, `project-setup --host` and the docs; `project-setup` also reports the integration branch's protection (read only, `protection.py`) |
 | `scripts/machine-coordinator-setup`, `orca-host-install`, `orca-cotal-task`, `cotal-agent` | `orchestrators/orca-cotal/scripts/` | the Orca + Cotal docs and the machine coordinator setup |
 | `scripts/machine-night-watch.sh`, `docs-review-launch.sh` | `orchestrators/rove/scripts/` | Rove routines |
 | `scripts/wsp-owner-code.mjs` | `orchestrators/wsp/scripts/` | the wsp notes |

@@ -5,7 +5,8 @@ docs/superpowers/specs/2026-11-23-away-improve-design.md).
   away-merge --project NAME --pr N --item "<title>" [--local-suite-ok LOG]
 
 Merges PR N into the project's active away/<date> branch as a merge commit titled `away: <item>` (never squashed),
-and prints the merge commit. It refuses, merging nothing, with one line per failed check, unless all of these hold:
+and prints the merge commit; it also records the merge (what --max-items counts) and refreshes the draft summary PR. It refuses,
+merging nothing, with one line per failed check, unless all of these hold:
   improve    improve mode is on for NAME (core/improve.py), which names the project's away branch; or it is draining
              (`lane-improve off` or the end time, until `lane-improve drained NAME`): the running lane's last PR still merges
   base       the PR's base is exactly that branch: never main, develop or another project's away branch
@@ -20,6 +21,7 @@ and prints the merge commit. It refuses, merging nothing, with one line per fail
              change; the log's last line is printed, and say so in AWAY-LOG.md
   secrets    the diff is clean: gitleaks when the project has a .gitleaks.toml (no gitleaks to run it is a refusal),
              otherwise a built-in scan of the added lines for keys, tokens, home paths and private addresses
+  wrapped    the project has not wrapped up at a cap (`lane-improve drained` while the mode is on: nothing more merges)
   deny       the PR touches none of improve.json's deny_paths: every old and new path in the `diff --git` headers of
              the PR's diff is checked (gh's file list stops at 100 files and drops a rename's old name); a diff it
              cannot read paths from is a refusal
@@ -288,6 +290,10 @@ def run(a) -> int:
     if why:
         print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
               f"(ends: {suite_line}) (record this in AWAY-LOG.md)")
+    try:
+        improve.record_merge(state, a.project, a.pr, item, sha)
+    except OSError as e:
+        print(f"away-merge: the merge is done, but it could not be recorded for --max-items ({e.strerror or e})", file=sys.stderr)
     refresh_summary_pr(checkout, state, a.project)
     return 0
 

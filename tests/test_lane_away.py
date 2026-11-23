@@ -232,7 +232,7 @@ class ImproveOnTests(ImproveTest):
         self.assertEqual(r.returncode, 0, r.stderr)
         st = self.state()
         self.assertEqual(set(st), {"started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration",
-                                   "prs"})
+                                   "prs", "stop_at", "max_items"})
         self.assertEqual(st["integration"], {"blog": "main", "shop": "main"})
         self.assertEqual(st["end"], "until-back")
         self.assertEqual(st["limits"], "nothing that needs db migrations")
@@ -933,6 +933,115 @@ class SummaryPrTests(ImproveTest):
         r = self.run_script("lane-improve", "status")
         self.assertIn("improve: off", r.stdout)
         self.assertIn("prs", r.stderr)
+
+
+
+class CapOptionTests(ImproveTest):
+    """--stop-at <weekly %> and --max-items N: optional, off by default, refused where they make no sense (lc-2nz)."""
+
+    def setUp(self):
+        super().setUp()
+        self.playbook(60, 10, ceiling=70)
+
+    def test_off_by_default(self):
+        self.assertEqual(self.on("--project", "shop").returncode, 0)
+        st = self.state()
+        self.assertIsNone(st["stop_at"])
+        self.assertIsNone(st["max_items"])
+        out = self.run_script("lane-improve", "status").stdout
+        self.assertNotIn("items", out)
+        self.assertNotIn("weekly", out)
+
+    def test_the_caps_are_recorded_and_shown(self):
+        r = self.on("--project", "shop", "--stop-at", "66", "--max-items", "10")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.state()
+        self.assertEqual((st["stop_at"], st["max_items"]), (66, 10))
+        self.assertIn("66", r.stdout)
+        self.assertIn("10", r.stdout)
+        out = self.run_script("lane-improve", "status").stdout
+        self.assertIn("items 0/10", out)
+        self.assertIn("weekly 60/66", out)
+
+    def test_stop_at_is_refused_unmetered(self):
+        r = self.on("--project", "shop", "--stop-at", "66", "--unmetered")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("unmetered", r.stderr)
+        self.assertFalse(self.improve_file().exists())
+        self.assertEqual(self.remote_branches(self.shop), [])
+
+    def test_max_items_is_fine_unmetered(self):
+        self.assertEqual(self.on("--project", "shop", "--max-items", "5", "--unmetered").returncode, 0)
+        self.assertEqual(self.state()["max_items"], 5)
+
+    def test_stop_at_at_or_above_the_ceiling_is_refused(self):
+        for v in ("70", "71", "90"):
+            r = self.on("--project", "shop", "--stop-at", v)
+            self.assertEqual(r.returncode, 1, (v, r.stderr))
+            self.assertIn("ceiling", r.stderr)
+            self.assertIn("70", r.stderr)
+        self.assertFalse(self.improve_file().exists())
+        self.assertEqual(self.remote_branches(self.shop), [])
+        self.assertEqual(self.on("--project", "shop", "--stop-at", "69").returncode, 0)
+
+    def test_the_projects_own_ceiling_counts(self):
+        import json as j
+        ceil = self.tmp / "ceilings.json"
+        ceil.write_text(j.dumps({"projects": {"shop": {"ceiling": 50}}}))
+        self.playbook(20, 10, ceiling=f"file:{ceil}")
+        self.assertEqual(self.on("--project", "shop", "--stop-at", "60").returncode, 1)
+        self.assertEqual(self.on("--project", "shop", "--stop-at", "49").returncode, 0)
+
+    def test_stop_at_needs_a_ceiling_it_can_read(self):
+        self.playbook(None, None)  # the usage feed gives no reading
+        r = self.on("--project", "shop", "--stop-at", "60")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ceiling", r.stderr)
+        self.assertFalse(self.improve_file().exists())
+
+    def test_bad_values_are_usage_errors(self):
+        for args in (("--stop-at", "0"), ("--stop-at", "-5"), ("--stop-at", "x"), ("--stop-at", "100"),
+                     ("--max-items", "0"), ("--max-items", "-1"), ("--max-items", "x"), ("--max-items", "2.5")):
+            r = self.on("--project", "shop", *args)
+            self.assertEqual(r.returncode, 2, (args, r.stderr))
+        self.assertFalse(self.improve_file().exists())
+
+    def test_a_continue_rerun_keeps_the_caps_unless_given(self):
+        self.on("--project", "shop", "--stop-at", "66", "--max-items", "10")
+        self.assertEqual(self.on("--continue", "--hours", "2").returncode, 0)
+        self.assertEqual((self.state()["stop_at"], self.state()["max_items"]), (66, 10))
+        self.assertEqual(self.on("--continue", "--max-items", "20").returncode, 0)
+        self.assertEqual((self.state()["stop_at"], self.state()["max_items"]), (66, 20))
+        self.assertEqual(self.on("--continue", "--stop-at", "68").returncode, 0)
+        self.assertEqual((self.state()["stop_at"], self.state()["max_items"]), (68, 20))
+
+    def test_a_continue_rerun_can_drop_a_cap_with_none(self):
+        self.on("--project", "shop", "--stop-at", "66", "--max-items", "10")
+        self.assertEqual(self.on("--continue", "--stop-at", "none", "--max-items", "none").returncode, 0)
+        self.assertEqual((self.state()["stop_at"], self.state()["max_items"]), (None, None))
+
+    def test_a_continue_rerun_checks_the_new_stop_at_too(self):
+        self.on("--project", "shop")
+        self.assertEqual(self.on("--continue", "--stop-at", "75").returncode, 1)
+        self.assertIsNone(self.state()["stop_at"])
+        self.assertEqual(self.on("--continue", "--stop-at", "60", "--unmetered").returncode, 2)
+
+    def test_a_continue_rerun_cannot_turn_a_stop_at_period_unmetered(self):
+        self.on("--project", "shop", "--stop-at", "66")
+        r = self.on("--continue", "--unmetered")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIs(self.state()["unmetered"], False)
+
+    def test_a_malformed_cap_makes_the_file_unusable(self):
+        self.on("--project", "shop")
+        for bad in ({"stop_at": "high"}, {"max_items": 2.5}, {"max_items": 0}, {"stop_at": True}, {"stop_at": -1}):
+            self.improve_file().write_text(json.dumps({**self.state(), **bad}))
+            r = self.run_script("lane-improve", "status")
+            self.assertIn("improve: off", r.stdout, bad)
+            self.assertIn("ignored", r.stderr)
+        self.improve_file().write_text(json.dumps({k: v for k, v in self.state().items() if k not in ("stop_at", "max_items")}))
+        self.assertIn("improve: on", self.run_script("lane-improve", "status").stdout)  # an older file without them is fine
+
 
 
 

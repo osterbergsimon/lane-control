@@ -2088,6 +2088,24 @@ class AwayImproveContentTests(unittest.TestCase):
             self.assertIn(needle, t, needle)
         self.assertLess(t.index("away-merge` the last PR"), t.index("`lane-improve drained <project>`"))
 
+    def test_the_summary_pr_the_caps_and_the_protection_report_are_documented(self):
+        guide = flat(ROOT / "docs" / "away-improve.md").replace("**", "")
+        for needle in ("--stop-at", "--max-items", "lane-improve pr <project>", "improve-period.json", "cap reached",
+                       "no agent merges it", "Branch protection report", "admins are exempt", "not available on the repository's plan",
+                       "never changes a setting", "require a PR for everyone, admins included"):
+            self.assertIn(needle, guide, needle)
+        skill = flat(AWAY_SKILL)
+        for needle in ("`lane-improve pr <project>`", "`cap reached`", "`--max-items`", "`--stop-at`",
+                       "you never merge it, mark it ready or close", "`lane-improve drained <your project>`"):
+            self.assertIn(needle, skill.replace("**", ""), needle)
+        self.assertNotIn("open a **draft PR**", skill)  # lane-improve on opens it; the wrap-up updates it
+        spec = flat(ROOT / "docs" / "superpowers" / "specs" / "2026-11-23-away-improve-design.md")
+        for needle in ("Follow-ups after the merged mode", "Optional caps", "Branch protection report", "summary PR"):
+            self.assertIn(needle, spec, needle)
+        help_text = (ROOT / "core" / "scripts" / "lane-improve").read_text()
+        for needle in ("--stop-at <weekly %>", "--max-items N", "lane-improve pr <project>"):
+            self.assertIn(needle, help_text, needle)
+
     def test_skill_and_record_call_the_deny_rules_a_backstop(self):
         t = flat(AWAY_SKILL)
         self.assertIn("backstop, not a wall", t)
