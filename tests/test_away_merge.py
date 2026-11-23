@@ -111,14 +111,9 @@ class AwayMergeTests(AwayMergeTest):
             self.assertRefused(self.merge(), "base")
 
     def test_refuses_other_project_branch(self):
-        self.pr(baseRefName="away/2026-01-01")
+        self.pr(baseRefName="away/2026-01-01")  # another away branch than this project's one
         self.assertRefused(self.merge(), "base")
-        # the other project's own branch is another project's: shop's coordinator may not merge into it
-        self.reset()
-        self.assertEqual(self.on("--project", "shop", "--project", "blog").returncode, 0)
-        self.branch = self.state()["branches"]["shop"]
-        self.assertNotEqual(self.branch, self.state()["branches"]["blog"])
-        self.pr(baseRefName=self.state()["branches"]["blog"])
+        self.pr(baseRefName=f"{self.branch}-2")
         self.assertRefused(self.merge(), "base")
 
     def test_refuses_when_improve_off(self):

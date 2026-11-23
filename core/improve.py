@@ -224,9 +224,6 @@ def known_projects() -> list:
 
 # --- away branches: one per project per away period, on origin, cut from the integration branch -------------------
 
-BRANCH = re.compile(r"away/(\d{4}-\d{2}-\d{2})(?:-(\d+))?")
-
-
 def _git(repo: Path, *args: str, timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=timeout)
 
@@ -261,60 +258,78 @@ def integration_branch(repo: Path) -> str:
 
 
 def _away_branches(repo: Path) -> list:
-    """origin's away/* branches, oldest first (by date, then suffix)."""
+    """Every away/* branch on origin (fetched now), sorted by name."""
     _git_ok(repo, "fetch", "-q", "--prune", "origin")
     names = [l.split("refs/remotes/origin/", 1)[1] for l in
              _git_ok(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/away/").splitlines()]
-    found = [(m.group(1), int(m.group(2) or 1), n) for n in names if (m := BRANCH.fullmatch(n))]
-    return [n for _, _, n in sorted(found)]
+    return sorted(n for n in names if n.startswith("away/"))
+
+
+def _already_merged(repo: Path, branch: str, integration: str) -> bool:
+    """Whether the branch holds nothing the integration branch lacks (adopted, or never given any work)."""
+    return _git(repo, "merge-base", "--is-ancestor", f"refs/remotes/origin/{branch}",
+                f"refs/remotes/origin/{integration}").returncode == 0
+
+
+def _has_one_already(repo: Path, have: list, integration: str) -> str:
+    b = have[0]
+    merged = (f" It is already merged into {integration} (or was never given any work): delete it, or continue it."
+              if _already_merged(repo, b, integration) else "")
+    return (f"it already has its away branch {b}: a project has at most one, ever. Continue it (`--continue`), or adopt it "
+            f"(merge it to {integration}) or drop it (delete it) first.{merged}")
 
 
 def cut_branch(repo: Path, integration: str, today: dt.date) -> str:
-    """Push a new away/<today> (suffix -2, -3 when taken) on origin from origin/<integration>'s head; the checkout
-    and its branches are not touched. Returns the name."""
-    taken = set(_away_branches(repo))
-    name, n = f"away/{today.isoformat()}", 1
-    while name in taken:
-        n += 1
-        name = f"away/{today.isoformat()}-{n}"
+    """Push a new away/<today> on origin from origin/<integration>'s head; the checkout and its branches are not touched.
+    A project has at most one away branch, ever: ValueError when it has one (or when this very name is taken). Returns the
+    name."""
+    have = _away_branches(repo)
+    if have:
+        raise ValueError(_has_one_already(repo, have, integration) if len(have) == 1 else _several(have))
+    name = f"away/{today.isoformat()}"
     _git_ok(repo, "push", "-q", "origin", f"refs/remotes/origin/{integration}:refs/heads/{name}")
     return name
 
 
-def continue_branch(repo: Path, name: "str | None") -> str:
-    """The existing away branch to carry on with: `name`, or the newest. ValueError when there is none."""
+def _several(have: list) -> str:
+    return (f"it has {len(have)} away branches ({', '.join(have)}); a project has at most one. Adopt (merge) or drop "
+            "(delete) all but one first")
+
+
+def continue_branch(repo: Path) -> str:
+    """The project's one away branch, to carry on with. ValueError when there is none, or when there are several (the
+    message lists them)."""
     have = _away_branches(repo)
-    if name:
-        name = name if name.startswith("away/") else f"away/{name}"
-        if name not in have:
-            raise ValueError(f"no away branch {name} on origin" + (f" (have: {', '.join(have)})" if have else ""))
-        return name
     if not have:
-        raise ValueError("no away branch on origin to continue; leave out --continue to cut a new one")
-    return have[-1]
+        raise ValueError("no away branch on origin to continue; leave out --continue to cut one")
+    if len(have) > 1:
+        raise ValueError(_several(have) + "; then --continue takes the one that is left")
+    return have[0]
 
 
-def resolve_branches(cos: list, cont: "str | None", today: dt.date) -> "tuple[dict, dict]":
-    """({project: branch}, {project: integration branch}) for these coordinators: new branches, or with `cont` (not
-    None; "" = the newest) the existing ones. Every repo is checked (fetched, integration branch found, `cont` resolved)
-    before any branch is cut, so a refusal in that phase leaves origin as it was; a push that fails while cutting can
-    leave the branches already cut on origin (harmless: `--continue` reuses them)."""
+def resolve_branches(cos: list, cont: bool, today: dt.date) -> "tuple[dict, dict]":
+    """({project: branch}, {project: integration branch}) for these coordinators: with `cont` each project's one existing
+    away branch, else a newly cut away/<today>. Every repo is checked (fetched, integration branch found, the one-branch
+    rule applied) before any branch is cut, so a refusal in that phase leaves origin as it was; a push that fails while
+    cutting can leave the branches already cut on origin (harmless: `--continue` reuses them)."""
     out, integs, plan = {}, {}, []
     for c in cos:
         try:
             integ = integration_branch(c.checkout)
             integs[c.name] = integ
-            if cont is not None:
-                out[c.name] = continue_branch(c.checkout, cont or None)
+            if cont:
+                out[c.name] = continue_branch(c.checkout)
             else:
-                _away_branches(c.checkout)  # fetch now: a repo that cannot be reached refuses before anything is cut
+                have = _away_branches(c.checkout)  # fetches: a repo that cannot be reached refuses before anything is cut
+                if have:
+                    raise ValueError(_has_one_already(c.checkout, have, integ) if len(have) == 1 else _several(have))
                 plan.append((c, integ))
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             raise ValueError(f"{c.name}: {e}") from None
     for c, integ in plan:
         try:
             out[c.name] = cut_branch(c.checkout, integ, today)
-        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             raise ValueError(f"{c.name}: {e}") from None
     return out, integs
 
@@ -360,6 +375,8 @@ def describe(s: dict) -> list:
     lines = [f"  runs: {end}", f"  projects: {which}"]
     for p, b in sorted(s["branches"].items()):
         lines.append(f"  branch: {p} -> {b} (from {s['integration'].get(p, '?')})")
+    lines.append("  one away branch per project, ever: it stays until the owner adopts it (merges it to the integration "
+                 "branch) or drops it (deletes it); `lane-away on --improve --continue` carries on with it")
     lines.append(f"  limits: {s['limits'] or '(none given)'}")
     if s["deny_paths"]:
         lines.append(f"  never touching: {', '.join(s['deny_paths'])}")
@@ -390,7 +407,7 @@ def cmd_on(a) -> int:
               "--yes (run it yourself, or on your own explicit word)", file=sys.stderr)
         return 2
     if load():
-        if a.cont is None:
+        if not a.cont:
             print("lane-away: improve mode is already on; switching it on again would cut new away branches and leave "
                   "the open PRs without a home. Use `lane-away off` first, or `--continue` to carry on with the "
                   "current branches", file=sys.stderr)
@@ -546,7 +563,7 @@ def main(argv=None) -> int:
     on.add_argument("--deny-paths")
     on.add_argument("--project", action="append", default=[])
     on.add_argument("--unmetered", action="store_true")
-    on.add_argument("--continue", dest="cont", nargs="?", const="", default=None)
+    on.add_argument("--continue", dest="cont", action="store_true")
     on.add_argument("--yes", action="store_true")
     on.add_argument("--away-file")
     sub.add_parser("off")

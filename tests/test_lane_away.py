@@ -78,9 +78,16 @@ class ImproveTest(MachineTest):
         return json.loads(self.improve_file().read_text())
 
     def reset(self):
-        """Back to no improve period at all (a new `on` is refused while one is on or draining)."""
+        """Back to no improve period at all: ended, wrapped up, and the owner has dropped the away branches (a new `on` is
+        refused while a period is on or draining, or a project still has its away branch)."""
         self.run_script("lane-away", "off")
         self.run_script("lane-away", "drained", "--all")
+        self.drop_branches()
+
+    def drop_branches(self):
+        for repo in (self.shop, self.blog):
+            for b in self.remote_branches(repo):
+                git(repo, "push", "-q", "origin", "--delete", b)
 
     def on(self, *args, env=None):
         return self.run_script("lane-away", "on", "--improve", "--yes", *args, env=env)
@@ -179,6 +186,13 @@ class ImproveOnTests(ImproveTest):
         self.assertEqual(self.run_script("lane-away", "off").returncode, 0)  # again: harmless
         self.assertTrue(self.drain_file().exists())
 
+    def test_status_says_the_branch_stays_until_the_owner_adopts_or_drops_it(self):
+        self.on("--project", "shop")
+        s = self.run_script("lane-away", "status").stdout
+        self.assertIn("one away branch per project", s)
+        for word in ("adopt", "drop"):
+            self.assertIn(word, s)
+
     def test_status_shows_improve(self):
         self.on("--project", "shop", "--limits", "no db migrations")
         s = self.run_script("lane-away", "status").stdout
@@ -209,25 +223,31 @@ class ImproveBranchTests(ImproveTest):
         self.assertEqual(git(self.shop, "branch", "--show-current").strip(), "main")
         self.assertNotIn("away/2026-11-24", git(self.shop, "branch", "--list").split())
 
-    def test_name_taken_gets_suffix(self):
-        code = "d = datetime.date(2026, 11, 24); r = Path(%r); print(improve.cut_branch(r, 'main', d), improve.cut_branch(r, 'main', d), improve.cut_branch(r, 'main', d))" % str(self.shop)
+    def test_a_project_never_gets_a_second_away_branch(self):
+        code = (f"d = datetime.date(2026, 11, 24); r = Path({str(self.shop)!r}); print(improve.cut_branch(r, 'main', d)); "
+                "print(improve.cut_branch(r, 'main', datetime.date(2026, 11, 25)))")
         r = self.read(code)
-        self.assertEqual(r.stdout.split(), ["away/2026-11-24", "away/2026-11-24-2", "away/2026-11-24-3"], r.stderr)
+        self.assertEqual(r.stdout.split(), ["away/2026-11-24"], r.stderr)
+        self.assertIn("ValueError", r.stderr)
+        self.assertIn("away/2026-11-24", r.stderr)
+        self.assertEqual(self.remote_branches(self.shop), ["away/2026-11-24"])
 
-    def test_continue_newest(self):
-        for d in ("2026-11-20", "2026-11-24", "2026-11-22"):
-            self.read(f"improve.cut_branch(Path({str(self.shop)!r}), 'main', datetime.date.fromisoformat({d!r}))")
-        self.read(f"improve.cut_branch(Path({str(self.shop)!r}), 'main', datetime.date(2026, 11, 24))")
-        r = self.read(f"print(improve.continue_branch(Path({str(self.shop)!r}), None))")
-        self.assertEqual(r.stdout.strip(), "away/2026-11-24-2", r.stderr)  # newest: later date, then later suffix
-        r = self.read(f"print(improve.continue_branch(Path({str(self.shop)!r}), 'away/2026-11-22'))")
-        self.assertEqual(r.stdout.strip(), "away/2026-11-22", r.stderr)
+    def test_continue_takes_the_one_branch(self):
+        self.read(f"improve.cut_branch(Path({str(self.shop)!r}), 'main', datetime.date(2026, 11, 20))")
+        r = self.read(f"print(improve.continue_branch(Path({str(self.shop)!r})))")
+        self.assertEqual(r.stdout.strip(), "away/2026-11-20", r.stderr)
+
+    def test_continue_with_two_refuses_and_lists_them(self):
+        for d in ("2026-11-20", "2026-11-22"):
+            git(self.shop, "push", "-q", "origin", f"main:refs/heads/away/{d}")  # as if made by hand
+        r = self.read(f"improve.continue_branch(Path({str(self.shop)!r}))")
+        self.assertIn("ValueError", r.stderr)
+        self.assertIn("away/2026-11-20", r.stderr)
+        self.assertIn("away/2026-11-22", r.stderr)
 
     def test_continue_none_refuses(self):
-        r = self.read(f"improve.continue_branch(Path({str(self.shop)!r}), None)")
+        r = self.read(f"improve.continue_branch(Path({str(self.shop)!r}))")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("ValueError", r.stderr)
-        r = self.read(f"improve.continue_branch(Path({str(self.shop)!r}), 'away/2026-01-01')")
         self.assertIn("ValueError", r.stderr)
         self.assertEqual(self.remote_branches(self.shop), [])
 
@@ -239,6 +259,57 @@ class ImproveBranchTests(ImproveTest):
         self.assertEqual(self.remote_branches(self.shop), [])
         self.assertFalse(self.improve_file().exists())
         self.assertFalse(self.away().exists())
+
+    def test_on_is_refused_when_the_project_already_has_its_away_branch(self):
+        self.on("--project", "shop")
+        first = self.state()["branches"]["shop"]
+        self.run_script("lane-away", "off")
+        self.run_script("lane-away", "drained", "--all")
+        r = self.on("--project", "shop")
+        self.assertNotEqual(r.returncode, 0)
+        for word in ("shop", first, "--continue", "adopt", "drop", "main"):
+            self.assertIn(word, r.stderr, word)
+        self.assertEqual(self.remote_branches(self.shop), [first])  # nothing new was cut
+        self.assertFalse(self.improve_file().exists())
+        self.assertFalse(self.away().exists())
+
+    def test_on_all_is_refused_as_a_whole_when_one_project_has_a_branch(self):
+        git(self.blog, "push", "-q", "origin", "main:refs/heads/away/2026-11-01")
+        r = self.on()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("blog", r.stderr)
+        self.assertEqual(self.remote_branches(self.shop), [])  # shop's was not cut either
+        self.assertEqual(self.on("--project", "shop").returncode, 0)
+
+    def test_a_merged_branch_that_was_not_deleted_still_counts_and_is_named_merged(self):
+        git(self.shop, "push", "-q", "origin", "main:refs/heads/away/2026-11-01")  # nothing the integration branch lacks
+        r = self.on("--project", "shop")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already merged", r.stderr)
+        self.assertIn("delete", r.stderr)
+
+    def test_the_same_date_is_fine_once_the_branch_is_gone(self):
+        self.on("--project", "shop")
+        first = self.state()["branches"]["shop"]
+        self.reset()  # off, drained, and the owner deletes the branch
+        self.assertEqual(self.remote_branches(self.shop), [])
+        self.assertEqual(self.on("--project", "shop").returncode, 0)
+        self.assertEqual(self.state()["branches"]["shop"], first)
+
+    def test_continue_with_two_branches_is_refused_by_lane_away_and_lists_them(self):
+        for d in ("2026-11-20", "2026-11-22"):
+            git(self.shop, "push", "-q", "origin", f"main:refs/heads/away/{d}")
+        r = self.on("--project", "shop", "--continue")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("away/2026-11-20", r.stderr)
+        self.assertIn("away/2026-11-22", r.stderr)
+        self.assertFalse(self.improve_file().exists())
+
+    def test_continue_takes_no_branch_argument(self):
+        self.on("--project", "shop")
+        first = self.state()["branches"]["shop"]
+        r = self.on("--project", "shop", "--continue", first)
+        self.assertEqual(r.returncode, 2)
 
     def test_integration_branch_from_pr_bases(self):
         code = f"print(improve.integration_branch(Path({str(self.shop)!r})))"
@@ -270,8 +341,6 @@ class ImproveBranchTests(ImproveTest):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.state()["branches"]["shop"], first)
         self.assertEqual(self.remote_branches(self.shop), [first])
-        r = self.on("--project", "shop", "--continue", first)
-        self.assertEqual(self.state()["branches"]["shop"], first)
 
     def test_gh_only_read_commands(self):
         self.on()
@@ -464,8 +533,7 @@ class ImproveIntegrationBranchTests(ImproveTest):
 
     def test_a_second_period_cuts_from_the_integration_branch_and_denies_it(self):
         self.on("--project", "shop")
-        self.run_script("lane-away", "off")
-        self.run_script("lane-away", "drained", "--all")
+        self.reset()  # the owner dropped the first period's branch
         self.set_bases(["away/2026-11-23"] * 9 + ["main"])  # what the first period left behind
         r = self.on("--project", "shop")
         self.assertEqual(r.returncode, 0, r.stderr)
