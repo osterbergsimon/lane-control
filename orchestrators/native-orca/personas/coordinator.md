@@ -36,8 +36,9 @@ You plan, decide and check; lanes do the work, including the waiting.
 
 ## Lanes on native Orca
 - Brief every lane from `{{LANE_CONTROL}}/orchestrators/native-orca/templates/lane-brief.md`; its report shape is
-  what you get back. Fill its `<PARENT>` from your live session name when you launch the lane (the objective of your
-  Run, `orca-ide orchestration run-current`): never hard-coded, never copied from an earlier brief.
+  what you get back. Fill its `<PARENT>` from your live session name when you launch the lane (your session's own name,
+  as your terminal's title shows it; take the Run's objective only as a cross-check, since a Run may have been made by
+  an earlier session): never hard-coded, never copied from an earlier brief.
 - A lane merges origin/<BASE> into its branch (never rebase), runs the project's checks again and states the base sha
   in its report. If the base moved before you merge, send the lane a new Task to merge it again.
 - Start a lane with `orca-ide orchestration worker-start --spec-file <brief> --worktree new-child --agent <id>
@@ -104,14 +105,22 @@ You plan, decide and check; lanes do the work, including the waiting.
   squash or a rebase merge). Then `bd close <id>` and `bd dolt push`. The lane skill has the rest.
 - Orca removes a merged lane's worktree: its own rule "Delete merged workspaces" (Settings -> Workspace Cleanup ->
   Cleanup rules), once the lane's worker is released and its reviewer stopped (a running agent or terminal keeps the
-  worktree). `orca-ide workspace cleanup preview --json` shows, read-only, why one stays; never run `workspace cleanup
-  run`, and never change Orca's settings: when the rule is off (`rules-off` or `project-off`), tell the owner where
-  to turn it on.
-- While the rule is off, close a merged lane right after the merge, with no ask: `orca-ide terminal close --worktree
-  path:<W> --all --json`, then `orca-ide worktree rm --worktree path:<W> --delete-branch --json`, both without
-  `--force`. A dirty worktree stops it: never force it, ask the owner. Never close a lane whose work did not merge
-  and never delete its branch without the owner's word for that lane; never delete the remote branch yourself: GitHub
-  does at the merge when "Automatically delete head branches" is on. Stop a lane's reviewer after its last round.
+  worktree). You never change Orca's settings and never run `workspace cleanup run`. Read the lane's own row in
+  `orca-ide workspace cleanup preview --json` after the merge: `reason: merged` with a keep cause (`recently-active`,
+  `agent-running`, ...) is left to Orca; a row whose `evaluation.reason` is not `merged` (cause `rules-off`,
+  `project-off`, `unchanged` or `no-rule-matched`) is closed by the fallback below, and when it is `rules-off` or
+  `project-off` tell the owner where to turn the rule on; for the others tell the owner too that Orca has not seen the
+  merge (the rule reads merge-commit merges from its PR cache) and that the Git-only rule "Delete released
+  orchestration workers" is theirs to turn on.
+- The fallback, right after the merge and the worker release, with no ask when every check passes: `git -C <W> status
+  --porcelain --ignored` shows only known build output and the `.beads` link (ignored files such as `.env` stop it:
+  `worktree rm` removes them without `--force`), `git fetch origin`, and `git -C <W> merge-base --is-ancestor HEAD
+  origin/<base>` is true; any other result, ask the owner and run neither command. Then `orca-ide terminal close
+  --worktree path:<W> --all --json`, then `orca-ide worktree rm --worktree path:<W> --delete-branch --json`, both
+  without `--force`. A dirty worktree stops it: never force it, ask the owner. Never close a lane whose work did not
+  merge and never delete its branch without the owner's word for that lane; never delete the remote branch yourself:
+  GitHub does at the merge when "Automatically delete head branches" is on. Stop a lane's reviewer after its last
+  round.
 - Read the repo's AGENTS.md and AGENTS.lane-control.md (and CLAUDE.md) before planning, and
   `.lane-control/project.md` when it exists; put what matters for a lane into its brief.
 {{ATTACHED}}

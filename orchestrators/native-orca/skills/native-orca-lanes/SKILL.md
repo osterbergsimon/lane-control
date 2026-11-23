@@ -39,8 +39,9 @@ Do these in order; any that fails holds the lane, and you tell the owner what it
 Write the brief from `brief.md` next to this skill (the project's copy of lane-control's native lane brief): fill in
 every `<...>`, add what the lane needs from AGENTS.md and `.lane-control/project.md`, and save it outside the repo
 (your scratch folder). `<PARENT>`, the name the lane reports and asks to, is your own live session name, read from
-your session when you launch the lane (the objective of your Run, `orca-ide orchestration run-current`): never
-hard-coded, never copied from an earlier brief. A lane on a failing test, a CI run or a bug report starts its brief
+your session when you launch the lane (your session's own name, as your terminal's title shows it; take the Run's
+objective only as a cross-check, since a Run may have been made by an earlier session): never hard-coded, never
+copied from an earlier brief. A lane on a failing test, a CI run or a bug report starts its brief
 with the debugger persona (`.lane-control/debugger.md`). A lane that changes what a user sees gets `frontend-brief.md`
 next to this skill appended to its brief, and the design reviewer beside its code reviewer (your persona, Frontend
 lanes).
@@ -133,22 +134,32 @@ rebase merge, never `--admin`). If the head moved, gh refuses: review the new co
 Orca removes the worktree, not you. Its own cleanup rule "Delete merged workspaces" (in Orca: Settings -> Workspace
 Cleanup -> Cleanup rules) removes a merged lane's worktree and its merged branch once nothing runs in it, it is clean
 and pushed, and it was not used in the last hour. So release the lane's worker (`orca-ide orchestration
-worker-release`) and stop its reviewer after the last round: a running agent or terminal keeps the worktree.
-`orca-ide workspace cleanup preview --json` is read-only and shows why a worktree stays (`rows[].evaluation.cause`);
-never `orca-ide workspace cleanup run`, which is the owner's. You never change Orca's settings.
+worker-release`) and stop its reviewer after the last round: a running agent or terminal keeps the worktree. You
+never change Orca's settings, and never `orca-ide workspace cleanup run`, which is the owner's.
 
-The rule is off when the lane's row says `rules-off` (no rule on) or `project-off` (cleanup off for this project);
-project-setup said so too (`orca cleanup: off`). Tell the owner once where to turn it on: Settings -> Workspace
-Cleanup -> Cleanup rules -> 'Delete merged workspaces', or, for a project with its own setting, that project's
-'Workspace cleanup' page in Settings. Until it is on, close the lane yourself right after the merge, with no ask, in
-this order:
+Then read the lane's own row in `orca-ide workspace cleanup preview --json` (read-only; the row whose `path` is the
+lane's worktree, `evaluation.reason` and `evaluation.cause`), not the project's setup line:
+- `reason: merged` with a keep cause (`recently-active`, `agent-running`, `terminal-running`, ...): Orca has it and
+  removes it when the cause clears. Leave it to Orca.
+- a row whose `evaluation.reason` is not `merged` (cause `rules-off`, `project-off`, `unchanged` or `no-rule-matched`):
+  Orca will not take it, so close it with the fallback below. `rules-off` and `project-off` mean no rule is on or
+  cleanup is off for the project (project-setup said `orca cleanup: off`): tell the owner once where to turn it on:
+  Settings -> Workspace Cleanup -> Cleanup rules -> 'Delete merged workspaces', or the project's own 'Workspace
+  cleanup' page in Settings. `unchanged` or `no-rule-matched` with the rule on means Orca has not seen the PR as merged
+  (it reads merge-commit merges from its own PR cache, which the app refreshes). The Git-only rule "Delete released
+  orchestration workers" in the same Cleanup rules list does not need that cache and is the owner's to turn on too.
+
+The fallback, right after the merge and the worker release, with no ask when every check passes. Before any
+command that closes or removes: `git -C <W> status --porcelain --ignored` shows only known build output and the
+`.beads` link (a `.env` or local data among the ignored files stops it: `worktree rm` removes ignored files without
+`--force`), `git fetch origin`, and `git -C <W> merge-base --is-ancestor HEAD origin/<base>` is true. Any other result:
+ask the owner, and run neither command. Then, in this order:
 ```
 orca-ide terminal close --worktree path:<W> --all --json
 orca-ide worktree rm --worktree path:<W> --delete-branch --json
 ```
 Both without `--force`: a dirty worktree stops the removal. Never force it; ask the owner. Ask the owner too, never
-automatic, for a lane whose work did not merge (its branch stays: no `--delete-branch`), uncommitted changes and any
-failed check above.
+automatic, for a lane whose work did not merge (its branch stays: no `--delete-branch`) and any failed check above.
 
 The remote branch goes at the merge when the repo has GitHub's "Automatically delete head branches" on (project-setup
 offers it, `github: exists` when it is); when it is off, say so to the owner and never delete the remote branch

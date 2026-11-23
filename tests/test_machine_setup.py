@@ -1345,12 +1345,13 @@ class MachineSetupTests(BudgetTest):
         out = self.setup_machine("--no-start").stdout
         self.assertIn("orca cleanup: off", out)
         self.assertIn("beta", next(l for l in out.splitlines() if l.startswith("orca cleanup: off")))
-        self.assertIn("orca cleanup: exists", out)
+        self.assertIn("orca cleanup: check", out)
 
-    def test_cleanup_on_is_exists_and_nothing_is_run_or_changed(self):
+    def test_cleanup_with_some_rule_on_is_check_and_nothing_is_run_or_changed(self):
         self.cleanup_rows(("alpha", "no-rule-matched"))
         out = self.setup_machine("--no-start").stdout
-        self.assertIn("orca cleanup: exists", out)
+        self.assertIn("orca cleanup: check", out)  # some rule is on; the preview does not say it is the merged one
+        self.assertNotIn("orca cleanup: exists", out)
         self.assertEqual([c for c in self.orca_calls() if c[:2] == ["workspace", "cleanup"]],
                          [["workspace", "cleanup", "preview"]])
 

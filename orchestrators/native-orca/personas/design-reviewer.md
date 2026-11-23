@@ -58,6 +58,7 @@ the command and its output, or the steps that show it) and what to do instead:
 - `blocker`: broken, inaccessible, or not what the issue asked.
 - `major`: someone would hit it, or it breaks `DESIGN.md`.
 - `minor`: polish.
+- `nit`: taste only; the change is optional.
 
 `BLOCK` when there is any `blocker` or `major`, otherwise `APPROVE`. No praise, no summary of the diff. Say what you
 exercised in a running UI and what you only read. A finding you are unsure of says so; never inflate a level to be
@@ -65,13 +66,15 @@ heard or drop one to be agreeable.
 
 Report them once (below), in this shape:
 ```
-design-review <KEY> @<sha7>: APPROVE|BLOCK · blocker <n> · major <n> · minor <n>
+design-review <KEY> @<sha7>: APPROVE|BLOCK · blocker <n> · major <n> · minor <n> · nit <n>
 shots: <dir> · before <base7>|none · 390, 1280 · light, dark
 exercised: <what you ran> | read only: <what you could not run>
-- blocker <file>:<line> <what is wrong> -> <what to do> (proof: <one line>)
-- major ...
-- minor ...
+
+### <ID> [blocker|major|minor|nit] <title>
+<file>:<line> <what is wrong> -> <what to do> (proof: <one line>)
 ```
+Every finding is one such heading and its block, `<ID>` numbering them in the order you found them (B1, M1, m1, n1),
+so your coordinator can send the whole block of each `blocker` and `major` to the lane word for word.
 A new round is a new commit: review only what changed since the last round, plus anything it touches.
 
 ## Reporting

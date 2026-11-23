@@ -20,16 +20,24 @@ help, its bundled `orca-cli` skill and its shipped code, read-only; nothing in O
 
 A workspace has the reason `merged` when either of these holds:
 
-1. **The pull request is merged and contains the workspace's HEAD.** Orca reads the branch's review state from GitHub
-   and compares the PR's head sha with the worktree's HEAD. This is why every lane merge pins `--match-head-commit`:
-   the merged head is exactly the commit the lane's worktree is on.
+1. **The pull request is merged and contains the workspace's HEAD.** Orca reads the branch's review state from its own
+   GitHub cache (written by the app, not read from GitHub at removal time) and compares the PR's head sha with the
+   worktree's HEAD. Every lane merge pins `--match-head-commit`, so the merged head is exactly the commit that was
+   reviewed and the worktree is on it.
 2. **Git proves HEAD is in the default branch** (the base ref, else the repo's default branch) while the branch is
    ahead of it or a merged review exists. Orca checks the commits' content too, so a squash or a rebase merge counts
    as merged even when the PR was never cached. lane-control still merges with `--merge`: a merge commit keeps each
    lane's commits and its head sha is the one reviewed. After a merge commit the worktree is no longer ahead of the
-   default branch, so Orca calls it merged through point 1 (the PR Orca saw merged, with the pinned head); without
-   that PR state it would read the workspace as `unchanged`, a rule that is off. Not exercised live here: the
-   preview of a lane merged this way is the check (`reason: merged` on its row).
+   default branch, so Orca calls it merged only through a merged PR it knows of: the pinned head matches before the
+   base branch is fetched, and any merged PR for the branch counts after it. Detection of a merge commit therefore
+   depends on Orca's PR cache. When that entry is stale or missing, the row reads `unchanged` or `no-rule-matched`
+   even with the merged rule on. Not exercised live here: the preview of a lane merged this way is the check
+   (`reason: merged` on its row).
+
+The companion rule **"Delete released orchestration workers"** ("Workspaces an orchestration worker used, once the
+coordinator has released it") needs no PR cache: it matches a released worker's workspace whose HEAD Git finds in the
+default branch or the coordinator's branch. Turn it on beside the merged rule; it is the owner's to turn on, and
+lane-control only says so.
 
 A workspace with no commits beyond the default branch is `unchanged`, a different rule, not `merged`.
 
@@ -52,8 +60,15 @@ can take the worktree. A merged branch is deleted with its workspace; an unmerge
 - **project-setup** also turns on GitHub's "Automatically delete head branches" (`delete_branch_on_merge`) on the
   owner's yes in a terminal; without a terminal it only says so, and a re-run says `exists`.
 - **The coordinator's lane close** (`native-orca-lanes`, section 7): merge on the owner's word with `--merge
-  --match-head-commit <full head sha>`, then `bd close` and `bd dolt push`. The merged rule removes the worktree. When
-  the rule is off: `orca-ide terminal close --worktree path:<W> --all --json`, then `orca-ide worktree rm --worktree
-  path:<W> --delete-branch --json`, without `--force`; a dirty worktree stops it and the owner is asked. (Run once on a
+  --match-head-commit <full head sha>`, then `bd close` and `bd dolt push`. The merged rule removes the worktree. The
+  trigger for the manual route is the lane's own preview row, not the rule: `reason: merged` with a keep cause is left
+  to Orca; a row whose reason is not `merged` is closed by hand. First `git -C <W> status --porcelain --ignored`
+  (only known build output and the `.beads` link: `worktree rm` removes ignored files such as `.env` without
+  `--force`), `git fetch origin` and `git -C <W> merge-base --is-ancestor HEAD origin/<base>`; then `orca-ide terminal
+  close --worktree path:<W> --all --json` and `orca-ide worktree rm --worktree path:<W> --delete-branch --json`,
+  without `--force`; a dirty worktree stops it and the owner is asked. (Run once on a
   real lane: the terminal close returned ok, `worktree rm --delete-branch` removed the worktree and the merged local
   branch, and GitHub's setting removes the remote one.)
+
+Only the project's own repo is covered by the setup report and the GitHub step; a repo attached with `--with` is not
+(follow-up lc-rq7).

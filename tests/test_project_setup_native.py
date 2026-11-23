@@ -1848,10 +1848,11 @@ class CleanupSetupTests(Case):
         self.assertIn("off for this project", r.stdout + r.stderr)
         self.assertIn("'Use global'", r.stdout + r.stderr)
 
-    def test_a_rule_that_is_on_says_exists(self):
+    def test_a_rule_that_is_on_but_not_shown_to_be_the_merged_one_is_a_note_not_exists(self):
         self.e.set_state(cleanup_cause="no-rule-matched")
         r = self.setup()
-        self.assertIn("orca cleanup: exists", r.stdout)
+        self.assertIn("note: orca cleanup: check", r.stderr)
+        self.assertNotIn("orca cleanup: exists", r.stdout)
         self.assertNotIn("orca cleanup: off", r.stdout + r.stderr)
 
     def test_it_never_runs_a_cleanup_or_changes_orca(self):

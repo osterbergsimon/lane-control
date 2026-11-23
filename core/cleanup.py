@@ -14,7 +14,7 @@ from pathlib import Path
 
 ORCA_STEP = "orca cleanup"
 GITHUB_STEP = "github"
-PROBLEMS = frozenset({"off", "missing", "warning"})
+PROBLEMS = frozenset({"off", "check", "missing", "warning"})
 TIMEOUT = 60
 
 # The labels are Orca 1.4.268's own (Settings -> Workspace Cleanup).
@@ -69,7 +69,7 @@ def _status(rows) -> str:
     """One project's state from its rows: project-off, rules-off, merged (a row the merged rule matched), on (a rule
     is on, which one the preview does not say), or unknown (only a main workspace, which Orca keeps before it looks
     at any rule, so nothing shows the rules)."""
-    watched = [_evaluation(r) for r in rows if _evaluation(r).get("cause") != "not-removable"]
+    watched = [ev for ev in map(_evaluation, rows) if ev and ev.get("cause") != "not-removable"]
     if not watched:
         return "unknown"
     if any(ev.get("reason") == "merged" for ev in watched):
@@ -90,8 +90,8 @@ def _off_detail(status: str, names: str) -> str:
             f"{WHERE_RULE}; a project with its own rules: {WHERE_PROJECT}. {NOT_CHANGED})")
 
 
-ON_DETAIL = ("(a cleanup rule is on; the preview does not say which, and it must be 'Delete merged workspaces': "
-             f"{WHERE_RULE})")
+ON_DETAIL = ("(a cleanup rule is on, but the preview does not say which; 'Delete merged workspaces' must be one of "
+             f"them, and a lane's row shows `reason: merged` once one has merged: {WHERE_RULE})")
 MERGED_DETAIL = "(the merged rule is on: Orca removes a merged lane's worktree itself)"
 UNKNOWN_DETAIL = ("(no lane worktree yet, and the preview shows no rule for a main workspace: run project-setup again "
                   f"once a lane exists, or look in Orca: {WHERE_RULE})")
@@ -118,8 +118,8 @@ def orca_report(orca: str, repo=None, timeout: float = TIMEOUT) -> list:
         status = _status(projects[mine[0]][1])
         if status in ("project-off", "rules-off"):
             return [(ORCA_STEP, "off", _off_detail(status, ""))]
-        return [(ORCA_STEP, "unknown" if status == "unknown" else "exists",
-                 {"unknown": UNKNOWN_DETAIL, "merged": MERGED_DETAIL, "on": ON_DETAIL}[status])]
+        what = {"unknown": "unknown", "merged": "exists", "on": "check"}[status]
+        return [(ORCA_STEP, what, {"unknown": UNKNOWN_DETAIL, "merged": MERGED_DETAIL, "on": ON_DETAIL}[status])]
     by = {}
     for name, rs in projects.values():
         by.setdefault(_status(rs), []).append(name)
@@ -127,8 +127,12 @@ def orca_report(orca: str, repo=None, timeout: float = TIMEOUT) -> list:
     for status in ("rules-off", "project-off"):
         if by.get(status):
             lines.append((ORCA_STEP, "off", _off_detail(status, f" for {', '.join(sorted(by[status]))}")))
-    if by.get("merged") or by.get("on"):
-        lines.append((ORCA_STEP, "exists", MERGED_DETAIL if not by.get("on") else ON_DETAIL))
+    if by.get("on"):
+        lines.append((ORCA_STEP, "check", ON_DETAIL[:-1] + f"; projects: {', '.join(sorted(by['on']))})"))
+    if by.get("merged"):
+        lines.append((ORCA_STEP, "exists", MERGED_DETAIL))
+    if by.get("unknown"):
+        lines.append((ORCA_STEP, "unknown", f"({', '.join(sorted(by['unknown']))}: " + UNKNOWN_DETAIL[1:]))
     if not lines:
         lines.append((ORCA_STEP, "unknown", UNKNOWN_DETAIL))
     return lines

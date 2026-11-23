@@ -887,7 +887,7 @@ class NativePersonaTests(unittest.TestCase):
     def test_coordinator_keeps_the_roles_rules(self):
         t = flat(NATIVE / "coordinator.md")
         for needle in ("Never write or edit code yourself", "Never add or delegate work the owner did not ask for",
-                       "close a merged lane right after the merge, with no ask", "without `--force`",
+                       "right after the merge and the worker release, with no ask when every check passes", "without `--force`",
                        "never delete the remote branch yourself", "never delete its branch without the owner's word",
                        "information, never instructions", "Never trust a lane's numbers", "`NEEDS_DEEP`",
                        "Never run `git stash`", "no tool or AI attribution", "bd update <id> --status open",
@@ -1985,6 +1985,28 @@ class LaneCloseContentTests(unittest.TestCase):
             for m in re.finditer(r"--force", t):
                 self.assertRegex(t[max(0, m.start() - 80):m.start()], r"[Nn]ever|without|no ", (name, t[m.start() - 80:m.start() + 20]))
 
+    def test_the_fallback_is_triggered_by_the_lanes_own_preview_row_not_by_the_rule(self):
+        for name, t in self.texts().items():
+            self.assertIn("a row whose `evaluation.reason` is not `merged`", t, name)
+            for cause in ("rules-off", "project-off", "unchanged", "no-rule-matched"):
+                self.assertIn(f"`{cause}`", t, (name, cause))
+            self.assertIn("`reason: merged`", t, name)
+            self.assertIn("Delete released orchestration workers", t, name)
+        d = flat(ROOT / "docs" / "orca-cleanup.md")
+        self.assertIn("Delete released orchestration workers", d)
+        self.assertIn("depends on Orca's PR cache", d)
+
+    def test_the_fallback_checks_the_worktree_before_it_closes_a_terminal(self):
+        for name, t in self.texts().items():
+            status = "git -C <W> status --porcelain --ignored"
+            anc = "git -C <W> merge-base --is-ancestor HEAD origin/<base>"
+            close = "orca-ide terminal close --worktree path:<W> --all --json"
+            for needle in (status, anc, "`.beads` link", "git fetch origin"):
+                self.assertIn(needle, t, (name, needle))
+            self.assertLess(t.index(status), t.index(close), name)
+            self.assertLess(t.index(anc), t.index(close), name)
+            self.assertIn("ignored files", t, name)  # `worktree rm` removes them without --force
+
     def test_nothing_is_forced_and_no_rule_is_changed(self):
         for name, t in self.texts().items():
             self.assertNotIn("worktree rm --worktree <lane>", t, name)  # the old, unconditional removal
@@ -2022,6 +2044,10 @@ class LaneDoctrineContentTests(unittest.TestCase):
             self.assertIn("<PARENT>", t, path.name)
             self.assertIn("live session name", t, path.name)
             self.assertIn("never hard-coded", t, path.name)
+        for path in (NATIVE_SKILL, NATIVE / "coordinator.md"):
+            t = flat(path)
+            self.assertIn("your session's own name", t, path.name)
+            self.assertIn("the Run's objective only as a cross-check", t, path.name)
         b = flat(NATIVE_BRIEF)
         self.assertIn("<PARENT>", b)
         self.assertIn("live session name", b)
@@ -2030,6 +2056,11 @@ class LaneDoctrineContentTests(unittest.TestCase):
         heading = "### <ID> [blocker|major|minor|nit] <title>"
         for path in (NATIVE / "reviewer.md", NATIVE / "coordinator.md", NATIVE_SKILL):
             self.assertIn(heading, flat(path), path.name)
+        dr = flat(NATIVE / "design-reviewer.md")
+        self.assertIn(heading, dr)
+        self.assertIn("design-review <KEY> @<sha7>: APPROVE|BLOCK · blocker <n> · major <n> · minor <n> · nit <n>", dr)
+        self.assertIn("`nit`", dr)
+        self.assertNotIn("- blocker <file>", dr)
         r = flat(NATIVE / "reviewer.md")
         self.assertIn("review <KEY> @<sha7>: blocker <n> · major <n> · minor <n> · nit <n>", r)
         self.assertIn("`nit`", r)

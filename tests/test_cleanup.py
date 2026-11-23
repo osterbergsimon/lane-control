@@ -82,16 +82,16 @@ class OrcaRulesTests(Stubs):
         self.assertEqual(what, "exists")
         self.assertIn("merged", detail)
 
-    def test_a_rule_that_is_on_but_not_shown_to_be_the_merged_one_says_so(self):
+    def test_a_rule_that_is_on_but_not_shown_to_be_the_merged_one_says_check_not_exists(self):
         (step, what, detail), = self.project([main_row(path=str(self.repo)), row("lane-1", cause="no-rule-matched")])
-        self.assertEqual(what, "exists")
+        self.assertEqual(what, "check")
         self.assertIn("'Delete merged workspaces'", detail)  # the owner is told which one to look for
 
     def test_only_the_projects_own_rows_count(self):
         rows = [main_row(path=str(self.repo)), row("lane-1", cause="no-rule-matched"),
                 row("lane-9", repo="other", repo_id="r-other", cause="rules-off")]
         (step, what, detail), = self.project(rows)
-        self.assertEqual(what, "exists")
+        self.assertEqual(what, "check")
 
     def test_a_project_with_only_its_main_workspace_cannot_be_read(self):
         # Orca keeps a main workspace (cause not-removable) before it looks at any rule
@@ -128,9 +128,14 @@ class OrcaRulesTests(Stubs):
         self.assertEqual(what, "skipped")
         self.assertIn("timed out", detail)
 
-    def test_off_and_unknown_are_the_problems_to_read(self):
-        self.assertTrue({"off"} <= cleanup.PROBLEMS)
-        self.assertFalse({"exists", "skipped"} & cleanup.PROBLEMS)
+    def test_off_and_check_are_the_problems_to_read_unknown_and_skipped_are_not(self):
+        self.assertTrue({"off", "check"} <= cleanup.PROBLEMS)
+        self.assertFalse({"exists", "skipped", "unknown"} & cleanup.PROBLEMS)
+
+    def test_a_row_without_an_evaluation_is_not_a_rule_that_is_on(self):
+        bare = {"repoId": REPO_ID, "repoName": "app", "path": "/w/app/lane-1"}
+        (step, what, detail), = self.project([main_row(path=str(self.repo)), bare])
+        self.assertEqual(what, "unknown")
 
 
 class MachineWideTests(Stubs):
@@ -153,11 +158,21 @@ class MachineWideTests(Stubs):
         self.assertEqual(len(off), 1)
         self.assertIn("b", off[0])
         self.assertIn("'Use global'", off[0])
-        self.assertIn("exists", [w for _, w, _ in lines])
+        self.assertIn("check", [w for _, w, _ in lines])
 
     def test_all_on_is_exists(self):
         lines = self.machine([row("lane-1", action="delete", reason="merged")])
         self.assertEqual([w for _, w, _ in lines], ["exists"])
+
+    def test_a_main_only_project_is_named_beside_the_other_lines(self):
+        rows = [main_row("a", "r-a", "/src/a"), row("lane-1", "a", "r-a", cause="rules-off"),
+                main_row("b", "r-b", "/src/b")]
+        lines = self.machine(rows)
+        unknown = [d for _, w, d in lines if w == "unknown"]
+        self.assertEqual(len(unknown), 1)
+        self.assertIn("b", unknown[0])
+        self.assertNotIn("a,", unknown[0])
+        self.assertEqual([w for _, w, _ in lines].count("off"), 1)
 
     def test_no_lane_worktree_anywhere_is_unknown(self):
         (step, what, detail), = self.machine([main_row()])
