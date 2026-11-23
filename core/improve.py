@@ -464,8 +464,12 @@ def cmd_on(a) -> int:
         print(f"lane-improve: unknown project {', '.join(unknown)}; this machine's coordinators: "
               f"{', '.join(known) or '(none)'}", file=sys.stderr)
         return 1
-    projects = list(dict.fromkeys(a.project)) if a.project else "all"
-    chosen = cos if projects == "all" else [c for c in cos if c.name in projects]
+    if prev and not a.project:
+        # a re-run that names no project keeps the period's own (it never widens it): no branch is cut, no rule installed
+        projects, chosen = prev["projects"], []
+    else:
+        projects = list(dict.fromkeys(a.project)) if a.project else "all"
+        chosen = cos if projects == "all" else [c for c in cos if c.name in projects]
     try:
         branches, integs, how = resolve_branches(chosen, a.cont, now().date())
     except ValueError as e:

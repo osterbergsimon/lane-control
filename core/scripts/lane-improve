@@ -14,7 +14,7 @@
 #       from its integration branch (the base of its recent merged PRs, else origin's default). A project that already has
 #       one is refused: --continue carries on with it (it takes no argument; a project with none gets one cut, so a new
 #       project can join; two or more are refused and listed), or the owner adopts it (merges it to the integration branch)
-#       or drops it (deletes it) first. A `--continue` re-run while on keeps the projects it does not name. Nothing is merged.
+#       or drops it (deletes it) first. A `--continue` re-run while on keeps what is not given again; without --project it keeps the projects as they were (no branch cut). Nothing is merged.
 #   lane-improve off
 #       Ends the mode. What was running drains: no new cycle, the last PRs can still merge through away-merge, the deny
 #       rules stay until each coordinator has wrapped up.

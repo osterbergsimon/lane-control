@@ -648,6 +648,27 @@ class ImproveRerunAndDrainAgeTests(ImproveTest):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("lane-improve on --continue --project blog", r.stderr)
 
+    def test_a_continue_rerun_without_project_keeps_a_limited_period_limited(self):
+        # review M9/M10: "two more hours" must not widen `--project shop` to every coordinator or cut their branches
+        self.assertEqual(self.on("--project", "shop", "--hours", "4").returncode, 0)
+        before = self.state()
+        r = self.on("--continue", "--hours", "2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        after = self.state()
+        self.assertEqual(after["projects"], ["shop"])
+        self.assertEqual(after["branches"], before["branches"])
+        self.assertNotEqual(after["end"], before["end"])
+        self.assertEqual(self.remote_branches(self.blog), [])
+        self.assertFalse((self.blog / ".claude" / "settings.local.json").exists())
+
+    def test_a_continue_rerun_without_project_keeps_all_and_cuts_nothing(self):
+        self.on("--hours", "4")
+        before = self.state()
+        r = self.on("--continue", "--limits", "new")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        after = self.state()
+        self.assertEqual((after["projects"], after["branches"], after["limits"]), ("all", before["branches"], "new"))
+
     def test_a_continue_rerun_with_new_options_replaces_only_those(self):
         self.on("--project", "shop", "--limits", "old")
         r = self.on("--continue", "--project", "blog", "--limits", "new", "--deny-paths", "infra/*")

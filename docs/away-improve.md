@@ -51,9 +51,11 @@ A project that already has an `away/*` branch on origin (merged or not) is refus
 - `lane-improve on --continue`, which carries on with the branch where there is one and cuts one where there is none.
   `--continue` takes no argument. A project with two or more branches is refused, and they are listed.
 
-`--continue` also works while the mode is on: `lane-improve on --continue --project <name>` adds a project that was set
-up after the mode started, and keeps the others as they were. `away-merge` says this when it finds a project without a
-branch.
+`--continue` also works while the mode is on, to change the end, the limits or the deny paths, or to add a project:
+what you do not give again stays as it was. Without `--project` the re-run keeps the period's projects exactly, cuts no
+branch and installs no rule, so "two more hours" (`lane-improve on --continue --hours 2`) never widens a period you
+limited to some projects. `lane-improve on --continue --project <name>` adds a project (one set up after the mode
+started, say) and keeps the others. `away-merge` says this when it finds a project without a branch.
 
 ## Ending it, and what you get back
 
@@ -97,7 +99,9 @@ Be clear about what is enforced and what is a backstop.
 ## Nudges and cost
 
 While the mode is on, the night manager nudges an idle coordinator (`DUE <name> improve`), a fallback for a lost wake.
-A coordinator that stays idle is nudged less and less often (30, 60, 120 minutes, at most every 8 hours), and one that
+A coordinator that stays idle is nudged less and less often (30, 60, 120 minutes, at most every 8 hours). The nudge asks
+for a one-line reply, so a session write within 10 minutes after a nudge counts as that reply, not as work; a write
+later than that starts the wait over. A coordinator that
 runs `lane-improve rest <project>` because nothing within your limits is left is left alone for 12 hours, then nudged
 once to look for new work. Nudges go out by day or night; the plain check-ins still wait for you to be away.
 
@@ -114,8 +118,10 @@ once to look for new work. Nudges go out by day or night; the plain check-ins st
 
 ## What is tested, and what is not
 
-The scripts, the state handling, the merge checks, the nudges and the OpenCode guard (against a real `opencode2`
-serving a fake model on localhost) are covered by the test suite, using temporary repositories and stubs for `gh` and
-`gitleaks`. A real away period (scout and build lanes, reviews, `away-merge` against GitHub, the draft PR on return)
+The scripts, the state handling, the merge checks, the nudges and the OpenCode guard's command checks are covered by the
+test suite, using temporary repositories and stubs for `gh` and `gitleaks`. The OpenCode guard is also checked against a
+real `opencode2` serving a fake model on localhost, but that test is opt-in
+(`LANE_LIVE_OPENCODE=1 python3 -m unittest tests.test_opencode_guard.GuardLiveTests`) and is not run by the
+suite. A real away period (scout and build lanes, reviews, `away-merge` against GitHub, the draft PR on return)
 has not been run end to end; the first one is the real test. Watch `lane-improve status` and the log, and expect to
 adjust the skill from what you see.

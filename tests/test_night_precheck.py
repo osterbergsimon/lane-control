@@ -197,6 +197,35 @@ class ImproveNudgeBackoffTests(PrecheckBase):
         self.stamp(20)
         self.assertEqual(self.pre().returncode, 1)
 
+    def set_idle(self, minutes, name="proj"):
+        f = next((self.home / ".claude" / "projects").glob("*/*.jsonl"))
+        age(f, minutes)
+
+    def test_a_reply_to_the_nudge_is_not_work(self):
+        # review M9: the night manager asks for a one-line reply, so the session writes just after every nudge; the wait
+        # must still double (31, 62, 124 min), not start over each time
+        self.conf(("proj", 31))
+        self.improve_on()
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
+        stamp = Path(self.env["HOME"]) / ".cache" / "lane-control" / "night" / "proj.improve"
+        for wait in (31, 62, 124):
+            self.assertEqual(self.pre("--checked", "proj", "improve").returncode, 0)
+            for minutes, due in ((wait - 1, False), (wait, True)):
+                age(stamp, minutes)
+                self.set_idle(minutes - 1)  # it replied one minute after the nudge and wrote nothing since
+                r = self.pre()
+                self.assertEqual(r.returncode, 0 if due else 1, f"wait {wait}, {minutes} min after: {r.stdout}{r.stderr}")
+            self.assertEqual(self.pre().returncode, 0)
+
+    def test_real_work_after_the_nudge_starts_the_wait_over(self):
+        self.conf(("proj", 31))
+        self.improve_on()
+        self.pre()
+        self.pre("--checked", "proj", "improve")
+        age(Path(self.env["HOME"]) / ".cache" / "lane-control" / "night" / "proj.improve", 100)
+        self.set_idle(50)  # it wrote 50 min after the nudge: work, not a reply
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=50min\n")
+
     def test_the_wait_stops_growing_at_eight_hours(self):
         self.conf(("proj", 3000))
         self.improve_on()

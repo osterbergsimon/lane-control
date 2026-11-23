@@ -81,6 +81,11 @@ def checked(name: str, kind: str = "") -> int:
     d = stamp_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / (f"{name}.{kind}" if kind else name)).touch()
+    if kind:
+        try:
+            (d / f"{name}.{kind}.pending").replace(d / f"{name}.{kind}.idle")
+        except FileNotFoundError:
+            (d / f"{name}.{kind}.idle").unlink(missing_ok=True)
     return 0
 
 
@@ -118,24 +123,54 @@ def budget_gate(project: str = "") -> "tuple[str, str]":
 
 
 NUDGE_WAIT_CAP_MIN = 480
+REPLY_GRACE_MIN = 10   # a session write this soon after a nudge is the coordinator's reply to it, not work
 
 
-def nudge_due(name: str, kind: str, idle: float, min_idle: int, now: float) -> bool:
-    """Whether an improve or wrap-up nudge for `name` is due: it has been idle `min_idle` minutes, and the last nudge is
-    at least that old. While it stays idle the wait grows to the idle time at the last nudge (30, 60, 120 ... minutes,
-    at most 8 h), so a coordinator waiting on a long lane is not woken every half hour; a session that wrote since the
-    nudge starts over."""
-    if idle < min_idle:
-        return False
+def nudge_state(name: str, kind: str, idle: float, now: float) -> "tuple[float, float | None]":
+    """(idle, wait): how long the coordinator has effectively been idle, and how long to wait after the last nudge
+    (None when there was none). The nudge asks for a one-line reply, so the session writes just after it: a write within
+    REPLY_GRACE_MIN of the nudge does not count as work, and the idle time at the last nudge, kept in a sidecar file when
+    the line went out, carries on from there. A write later than that is work: the wait starts over."""
+    stamp = stamp_dir() / f"{name}.{kind}"
     try:
-        age = (now - (stamp_dir() / f"{name}.{kind}").stat().st_mtime) / 60
+        age = (now - stamp.stat().st_mtime) / 60
     except FileNotFoundError:
-        return True
-    if age < min_idle:
-        return False
-    if idle < age:
-        return True
-    return age >= min(max(min_idle, idle - age), NUDGE_WAIT_CAP_MIN)
+        return idle, None
+    wrote = age - idle   # minutes after the nudge the session last wrote (negative: before it)
+    if wrote <= 0:
+        return idle, idle - age
+    if wrote <= REPLY_GRACE_MIN:
+        try:
+            before = float((stamp_dir() / f"{name}.{kind}.idle").read_text())
+        except (OSError, ValueError):
+            before = 0.0
+        return before + age, before
+    return idle, 0.0
+
+
+def nudge_due(name: str, kind: str, idle: float, min_idle: int, now: float) -> "tuple[bool, float]":
+    """(due, idle): whether an improve or wrap-up nudge for `name` is due, and the idle time it counts. It has been idle
+    `min_idle` minutes and the last nudge is at least that old; while it stays idle the wait grows to the idle time at
+    the last nudge (30, 60, 120 minutes, at most 8 h), so a coordinator waiting on a long lane is not woken every half
+    hour, and a reply to the nudge does not reset it."""
+    eff, wait = nudge_state(name, kind, idle, now)
+    if eff < min_idle:
+        return False, eff
+    if wait is None:
+        return True, eff
+    age = (now - (stamp_dir() / f"{name}.{kind}").stat().st_mtime) / 60
+    return age >= min_idle and age >= min(max(min_idle, wait), NUDGE_WAIT_CAP_MIN), eff
+
+
+def remember_nudges(lines: list, effective: dict):
+    """Keep the idle time each emitted nudge counted; `--checked` makes it the last nudge's, for the next run's reply
+    check (until then a repeated run computes from the same earlier value)."""
+    for line in lines:
+        f = line.split()
+        if len(f) > 2 and f[0] == "DUE" and f[2] in ("improve", "wrapup") and (f[1], f[2]) in effective:
+            d = stamp_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{f[1]}.{f[2]}.pending").write_text(str(int(effective[(f[1], f[2])])))
 
 
 def wrapup_lines(wrap: list, drain: dict, now: float) -> list:
@@ -222,6 +257,7 @@ def main(argv: list) -> int:
     now, due, broken = time.time(), [], False
     nudge = []  # coordinators improve mode covers that are due its resume check-in
     wrap = []   # coordinators of an ended period that are due a wrap-up nudge
+    eff = {}    # (name, kind) -> the idle time a nudge counts (see nudge_state)
     if not coords:
         err(f"{machineconf.path()} lists no coordinators (is it still the unfilled example?): nobody to check in on")
     for c in coords:
@@ -246,11 +282,14 @@ def main(argv: list) -> int:
             # improve covers it: the resume nudge stands in for the plain check-in
             if improve.rested(c.name):
                 err(f"{c.name}: resting (nothing within the limits left): no improve nudge")
-            elif nudge_due(c.name, "improve", idle, conf["IMPROVE_IDLE_MIN"], now):
-                nudge.append((c.name, idle))
+            else:
+                is_due, eff[(c.name, "improve")] = nudge_due(c.name, "improve", idle, conf["IMPROVE_IDLE_MIN"], now)
+                if is_due:
+                    nudge.append((c.name, idle))
         elif drain and c.name in drain["pending"]:
             # the period ended: the wrap-up nudge stands in for the plain check-in
-            if nudge_due(c.name, "wrapup", idle, conf["IMPROVE_IDLE_MIN"], now):
+            is_due, eff[(c.name, "wrapup")] = nudge_due(c.name, "wrapup", idle, conf["IMPROVE_IDLE_MIN"], now)
+            if is_due:
                 wrap.append((c.name, idle))
         elif owner_away and idle >= conf["IDLE_MIN"] and not recently_checked(c.name, conf["RECHECK_MIN"], now):
             due.append(f"DUE {c.name} idle={idle}min")
@@ -292,6 +331,7 @@ def main(argv: list) -> int:
             due.append(f"OFFLINE {','.join(off)} repo={repo}")
     if broken:
         return 2
+    remember_nudges(due, eff)
     for line in due:
         print(line)
     return 0 if due else 1
