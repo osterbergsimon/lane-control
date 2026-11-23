@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""away-merge: the only way a project coordinator merges into its away branch (away-improve mode; design:
+docs/superpowers/specs/2026-11-23-away-improve-design.md).
+
+  away-merge --project NAME --pr N --item "<title>" [--local-suite-ok RUN_REF]
+
+Merges PR N into the project's active away/<date> branch as a merge commit titled `away: <item>` (never squashed),
+and prints the merge commit. It refuses, merging nothing, with one line per failed check, unless all of these hold:
+  improve    improve mode is on for NAME (core/improve.py), which names the project's away branch
+  base       the PR's base is exactly that branch: never main, develop or another project's away branch
+  open       the PR is open
+  review     the PR body or a comment has a line `Review: passed` (the coordinator writes it after the reviewer's
+             clean round)
+  ci         every check on the PR passed, or --local-suite-ok names the lane-heavy run of the full suite (use it only
+             when CI itself is failing or unavailable for reasons outside the change; say so in AWAY-LOG.md)
+  secrets    the diff is clean: gitleaks when the project has a .gitleaks.toml (no gitleaks to run it is a refusal),
+             otherwise a built-in scan of the added lines for keys, tokens, home paths and private addresses
+  deny       the PR touches none of improve.json's deny_paths
+The project's checkout is its coordinator's, from machine.conf. gh is called read-only except for the merge itself.
+Exit: 0 merged; 1 refused or could not be checked; 2 usage.
+"""
+import argparse
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import improve  # noqa: E402
+import machineconf  # noqa: E402
+
+REVIEW = re.compile(r"^\s*Review: passed\s*$", re.M)
+GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+# The built-in scan, for a project without a gitleaks config: what must never reach a public branch.
+PRIVATE = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "a private key"),
+    (re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}"), "a GitHub token"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b"), "an API key or token"),
+    (re.compile(r"/home/[a-z_][a-z0-9_-]*/|/Users/[A-Za-z][A-Za-z0-9._-]*/|/root/"), "a home path"),
+    (re.compile(r"\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b"), "a private address"),
+    (re.compile(r"(?i)\b(?:auth\.json|\.credentials\.json|id_(?:rsa|ed25519))\b"), "a credentials file name"),
+]
+
+
+class Refuse(Exception):
+    pass
+
+
+def gh(args: list, cwd: Path) -> str:
+    try:
+        r = subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Refuse(f"gh {args[0]} {args[1]} failed ({e})") from None
+    if r.returncode:
+        raise Refuse(f"gh {args[0]} {args[1]} failed ({(r.stderr.strip() or 'no output').splitlines()[-1]})")
+    return r.stdout
+
+
+def glob_re(glob: str) -> "re.Pattern":
+    """`**` crosses directories (`**/` also matches none), `*` and `?` stay within one name."""
+    out, i = "", 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out += "(?:.*/)?"
+            i += 3
+        elif glob.startswith("**", i):
+            out += ".*"
+            i += 2
+        elif glob[i] == "*":
+            out += "[^/]*"
+            i += 1
+        elif glob[i] == "?":
+            out += "[^/]"
+            i += 1
+        else:
+            out += re.escape(glob[i])
+            i += 1
+    return re.compile(out)
+
+
+def ci_green(rollup: list) -> "str | None":
+    """None when every check passed; else why not."""
+    if not rollup:
+        return "no checks are reported on the PR"
+    bad = []
+    for c in rollup:
+        verdict = c.get("conclusion") or c.get("state") or c.get("status") or ""
+        if str(verdict).upper() not in GREEN:
+            bad.append(f"{c.get('name') or c.get('context') or 'a check'}: {str(verdict).lower() or 'not finished'}")
+    return "; ".join(bad) or None
+
+
+def scan_added(diff: str) -> "str | None":
+    for line in diff.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            for rx, what in PRIVATE:
+                if rx.search(line):
+                    return what
+    return None
+
+
+def secret_scan(checkout: Path, diff: str) -> "str | None":
+    """None when clean; else why not."""
+    if (checkout / ".gitleaks.toml").is_file():
+        with tempfile.TemporaryDirectory(prefix="away-merge-") as d:
+            (Path(d) / "pr.diff").write_text(diff)
+            try:
+                r = subprocess.run(["gitleaks", "detect", "--no-git", "--no-banner", "--redact", "-c",
+                                    str(checkout / ".gitleaks.toml"), "--source", d], cwd=checkout,
+                                   capture_output=True, text=True, timeout=300)
+            except FileNotFoundError:
+                return "the project has a .gitleaks.toml but gitleaks is not installed, so the diff cannot be checked"
+            except (OSError, subprocess.TimeoutExpired) as e:
+                return f"gitleaks could not run ({e})"
+        if r.returncode:
+            return "gitleaks found a secret in the diff" if r.returncode == 1 else f"gitleaks failed (exit {r.returncode})"
+        return None
+    what = scan_added(diff)
+    return f"the diff adds {what}" if what else None
+
+
+def run(a) -> int:
+    item = " ".join(a.item.split())
+    if not item:
+        print("away-merge: --item needs a title", file=sys.stderr)
+        return 2
+    failed = []
+
+    def refuse(check: str, why: str):
+        failed.append(f"away-merge: refused ({check}): {why}")
+
+    state = improve.load()
+    branch = None
+    if not state:
+        refuse("improve", "improve mode is not on (or its file cannot be used)")
+    elif not improve.active_for(a.project):
+        refuse("improve", f"improve mode is not on for {a.project}")
+    else:
+        branch = state["branches"].get(a.project)
+        if not branch:
+            refuse("improve", f"{a.project} has no away branch recorded in the improve file")
+    try:
+        cos = {c.name: c for c in machineconf.coordinators(machineconf.load())}
+    except machineconf.ConfError as e:
+        print(f"away-merge: refused: {e}", file=sys.stderr)
+        return 1
+    if a.project not in cos:
+        print(f"away-merge: refused: {a.project} is not a coordinator in machine.conf "
+              f"({', '.join(cos) or 'none'})", file=sys.stderr)
+        return 1
+    checkout = cos[a.project].checkout
+    if not branch:
+        print("\n".join(failed), file=sys.stderr)
+        return 1
+    try:
+        pr = json.loads(gh(["pr", "view", str(a.pr), "--json", "baseRefName,state,body,comments,statusCheckRollup,files"],
+                           checkout))
+        diff = gh(["pr", "diff", str(a.pr)], checkout)
+    except (Refuse, ValueError) as e:
+        print(f"away-merge: refused: PR {a.pr} cannot be read ({e})", file=sys.stderr)
+        return 1
+    if pr.get("baseRefName") != branch:
+        refuse("base", f"PR {a.pr} goes into {pr.get('baseRefName')!r}, not {a.project}'s away branch {branch!r}; "
+                       "away-merge never merges anywhere else")
+    if str(pr.get("state", "")).upper() != "OPEN":
+        refuse("open", f"PR {a.pr} is {str(pr.get('state')).lower()}, not open")
+    texts = [pr.get("body") or ""] + [c.get("body") or "" for c in pr.get("comments") or []]
+    if not any(REVIEW.search(t) for t in texts):
+        refuse("review", f"PR {a.pr} has no `Review: passed` line (the coordinator writes it after the reviewer's clean round)")
+    why = ci_green(pr.get("statusCheckRollup") or [])
+    if why and not a.local_suite_ok:
+        refuse("ci", f"{why} (CI must be green; or, when CI itself is failing for reasons outside the change, "
+                     "pass --local-suite-ok <lane-heavy run> and note it in the log)")
+    hit = secret_scan(checkout, diff)
+    if hit:
+        refuse("secrets", hit)
+    globs = [(g, glob_re(g)) for g in state["deny_paths"]]
+    for f in pr.get("files") or []:
+        for g, rx in globs:
+            if rx.fullmatch(f.get("path", "")):
+                refuse("deny", f"{f['path']} matches the owner's deny path {g}")
+    if failed:
+        print("\n".join(failed), file=sys.stderr)
+        return 1
+    try:
+        gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}"], checkout)
+        sha = gh(["pr", "view", str(a.pr), "--json", "mergeCommit", "-q", ".mergeCommit.oid"], checkout).strip()
+    except Refuse as e:
+        print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
+        return 1
+    print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}")
+    if why:
+        print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
+              "(record this in AWAY-LOG.md)")
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="away-merge", description="merge a PR into the project's away branch")
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--pr", required=True, type=int)
+    ap.add_argument("--item", required=True)
+    ap.add_argument("--local-suite-ok", metavar="RUN_REF")
+    try:
+        a = ap.parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    return run(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
