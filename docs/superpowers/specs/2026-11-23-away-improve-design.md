@@ -237,6 +237,13 @@ Ordered by the owner on top of the merged mode; the owner's guide describes the 
   reached and then stops further merges for it (recorded in the period record, so `off` drains only the others). `status`
   shows `items 4/10` and `weekly 66/70`; night-precheck sends `DUE <name> wrapup idle=<n>min cap=<items|weekly>:<n>/<max>`
   instead of the improve nudge. A `--continue` re-run changes a cap only when given (`none` drops it).
+  After review: `--max-items` is also a hard stop in away-merge (the Nth merge is the last; `--stop-at` is not, because the
+  lane that is running when the weekly use reaches it should still land, and the budget steps back it up). The period record is
+  written under a lock with unique temp files, and a missing or unreadable one while a cap is set fails closed (merges refused,
+  nothing nudged, `status` says why) rather than counting from 0; `lane-improve on --continue` makes it again and puts the
+  deny rules back. A wrapped-up project resumes only when named again with its cap raised. The summary PR is looked up only
+  among PRs from this repository into the integration branch (`gh pr list --head` matches the branch name alone, forks'
+  included), and a recorded number is checked to be that branch's own before it is edited.
 - **Branch protection report in project-setup.** Read-only, with the integration branch's protection from `gh api`:
   protected for everyone, partly (what is missing, such as admins exempt), none, a ruleset, not available on the plan (HTTP
   403) or unknown. It never changes a setting. The guide notes it next to "a backstop, not a wall".

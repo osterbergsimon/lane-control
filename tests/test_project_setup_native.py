@@ -1680,6 +1680,8 @@ if a[:1] == ["api"] and a[1].endswith("/protection"):
         print(json.dumps(r["body"])); sys.exit(0)
     print(f"gh: {r['message']} (HTTP {r['status']})", file=sys.stderr); sys.exit(1)
 if a[:1] == ["api"] and "/rules/branches/" in a[1]:
+    if os.environ.get("GH_RULES_FAIL"):
+        print("gh: " + os.environ["GH_RULES_FAIL"] + " (HTTP 403)", file=sys.stderr); sys.exit(1)
     print(os.environ.get("GH_RULES", "[]")); sys.exit(0)
 print("gh stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 """
@@ -1752,6 +1754,28 @@ class BranchProtectionTests(Case):
         self.assertIn("ruleset", line)
         self.assertIn("pull_request", line)
         self.assertNotIn("none", line)
+
+    def test_rulesets_that_could_not_be_read_are_not_reported_as_none(self):
+        self.protection(status=404, message="Branch not protected")
+        self.e.env["GH_RULES_FAIL"] = "Resource not accessible"
+        line = self.report()
+        self.assertIn("unknown", line)
+        self.assertIn("rulesets", line)
+        self.assertNotIn("none", line)
+        self.assertNotIn("push straight", line)
+
+    def test_classic_protection_with_a_ruleset_on_top_says_both(self):
+        self.protection(body={**FULL, "enforce_admins": {"enabled": False}},
+                        rules=[{"type": "pull_request"}, {"type": "non_fast_forward"}])
+        line = self.report()
+        self.assertIn("partly", line)
+        self.assertIn("admins are exempt", line)
+        self.assertIn("ruleset also applies", line)
+        self.assertIn("pull_request", line)
+
+    def test_a_fully_protected_branch_is_labelled_everyone(self):
+        self.protection(body=FULL)
+        self.assertTrue(self.report().startswith("branch-protection: everyone "))
 
     def test_a_plan_without_protection_says_so(self):
         self.protection(status=403, message="Upgrade to GitHub Pro or make this repository public to enable this feature.")

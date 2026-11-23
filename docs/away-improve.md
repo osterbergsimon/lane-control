@@ -56,11 +56,23 @@ Both are off unless you give them (an old `--continue` re-run keeps what is set;
 
 A cap behaves like the end time, for that project alone: the lane that is running finishes and merges, the coordinator wraps
 up (steps below) and runs `lane-improve drained <project>`, which while the mode is on is accepted only once its cap is
-reached. Nothing more merges for the project after that, and the mode goes on for the others (`lane-improve off` then
+reached. `--max-items` is also a hard stop in `away-merge`: the Nth merge is the last, and a further one is refused whatever
+the coordinator does (a lane that is running finishes as that Nth merge). `--stop-at` is not: the lane that is running when
+the weekly use reaches it still lands, and the budget's own steps are the backstop. Nothing more merges for the project once
+it has wrapped up, and the mode goes on for the others (`lane-improve off` then
 drains only the projects still running). `lane-improve status` shows `items 4/10` and `weekly 66/70` for each project and says
 `cap reached` when one is hit (`weekly ?/70` when the usage feed gave no reading: not a cap hit). The night manager sends no
 improve nudge to a project whose cap is reached, a `DUE <name> wrapup ... cap=items:10/10` line instead (not at the budget's
 stop step) until it has wrapped up.
+
+A wrap-up is final for the period. To resume a project after you raise its cap, name it again:
+`lane-improve on --continue --project <name> --max-items <more>` (or `--stop-at`). It is refused while the cap is still
+reached, and a re-run that does not name the project leaves it wrapped up and says so.
+
+The period record (`improve-period.json`, with a lock file beside it) is written under a lock, so coordinators merging at the
+same moment are all counted. If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
+every merge, nothing is nudged and `status` says why, instead of the counts starting again from 0. `lane-improve on
+--continue` starts the record again from nothing and puts the deny rules back on every project the period covers.
 
 ### One branch per project
 
@@ -137,8 +149,9 @@ Be clear about what is enforced and what is a backstop.
 - **Branch protection report.** `project-setup` reads the project's integration branch's protection (`gh api
   repos/{owner}/{repo}/branches/<branch>/protection`, read only; it never changes a setting) and says one of: protected
   for everyone (a pull request is required, admins included, no force pushes); partly, naming what is missing (for example
-  "admins are exempt", so an agent running as an admin is not stopped); none; a ruleset applies (the rules are named; who
-  may bypass is not read); not available on the repository's plan (HTTP 403, a private repository on a free plan); or
+  "admins are exempt", so an agent running as an admin is not stopped; a ruleset that also applies is named, but who may
+  bypass it is not read); none; a ruleset applies (the rules are named; who may bypass is not read); unknown when the
+  rulesets cannot be read either; not available on the repository's plan (HTTP 403, a private repository on a free plan); or
   unknown (no gh, no remote, no permission, offline). Notes follow: approvals required, deletion allowed, CI required, or CI
   that exists but is not required. Your wish is a PR for all with 0 approvals, CI where it exists and no force pushes or
   deletion.

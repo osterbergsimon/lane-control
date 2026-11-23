@@ -34,7 +34,9 @@ holds away-merge's record of its merges and the wrapped-up projects). The mode s
 Command line (lane-improve calls it): `improve.py on ...`, `off`, `drained`, `status`.
 """
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -168,22 +170,29 @@ def covers(state: dict, project: str) -> bool:
     return state["projects"] == "all" or project in state["projects"]
 
 
-def merge_state(project: str) -> "tuple[dict | None, str]":
-    """(state, mode) away-merge may merge under for `project`: mode "on" while the mode is on for it, "draining" after
-    `off` or the end time until `drained`; (None, why) otherwise."""
+def mode_state(project: str) -> "tuple[dict | None, str]":
+    """(state, mode) for `project` from the state files alone: mode "on" while the mode is on for it, "draining" after `off`
+    or the end time until `drained`; (None, why) otherwise. No cap or period record is consulted (see merge_state)."""
     s = load()
     if s and covers(s, project):
-        if is_wrapped(s, project):
-            return None, (f"{project} wrapped up its improve period (a cap was reached and it ran `lane-improve drained`): "
-                          "nothing more merges")
         return s, "on"
     d = load_drain()
     if d and project in d["pending"]:
         return d, "draining"
     e = ended_state()
-    if e and covers(e, project) and not is_wrapped(e, project):
+    if e and covers(e, project):
         return e, "draining"
     return None, "improve mode is not on for " + project + (" (and nothing of it is left to wrap up)" if not s else "")
+
+
+def merge_state(project: str) -> "tuple[dict | None, str]":
+    """(state, mode) away-merge may merge under for `project`: mode_state, unless a hard stop applies (hard_stop: the period's
+    record is unreadable, the project wrapped up at its cap, or --max-items is reached); then (None, why)."""
+    st, mode = mode_state(project)
+    if st is None:
+        return None, mode
+    stop = hard_stop(st, project)
+    return (None, stop) if stop else (st, mode)
 
 
 def draining() -> "dict | None":
@@ -221,11 +230,19 @@ def write(state: dict) -> None:
     why = _problem(state)
     if why:
         raise ValueError(f"improve state: {why}")
-    f = path()
+    _atomic(path(), json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
+def _atomic(f: Path, text: str) -> None:
     f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_name(f.name + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
-    tmp.replace(f)
+    fd, tmp = tempfile.mkstemp(prefix=f.name + ".", suffix=".tmp", dir=f.parent)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, f)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def clear() -> None:
@@ -236,11 +253,7 @@ def write_drain(state: dict) -> None:
     why = _problem(state, True)
     if why:
         raise ValueError(f"improve drain state: {why}")
-    f = drain_path()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_name(f.name + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
-    tmp.replace(f)
+    _atomic(drain_path(), json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 # --- the caps: how many items, how much of the weekly budget, per project ------------------------------------------
@@ -249,51 +262,147 @@ def period_path() -> Path:
     return path().with_name("improve-period.json")
 
 
-def _period(state: dict) -> dict:
-    """This period's record: {"period": started, "merges": {project: [{pr, item, sha, at}]}, "wrapped": [project]}. A file
-    of another period (or none, or an unreadable one) is an empty record."""
+def lock_path() -> Path:
+    return path().with_name("improve.lock")
+
+
+@contextlib.contextmanager
+def _locked():
+    """An exclusive lock on the improve state's lock file, around every read-modify-write of the period record and of the
+    state file (away-merge runs in every coordinator at once, `lane-improve` beside them)."""
+    f = lock_path()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
+def _has_caps(state: dict) -> bool:
+    return bool(state.get("max_items")) or state.get("stop_at") is not None
+
+
+def _fresh_period(state: dict) -> dict:
+    return {"period": state["started"], "merges": {}, "wrapped": []}
+
+
+def _read_period(state: dict) -> "tuple[dict | None, str | None]":
+    """(record, None) for this period's record, or (None, why) when it cannot be trusted. A file of another period is no
+    record of this one. A missing file is an empty record only while no cap is set: with a cap, `lane-improve on` made
+    it, so a missing or unreadable one is a LOST record (merge counts and wrap-ups gone), never a reset."""
+    f = period_path()
     try:
-        d = json.loads(period_path().read_text())
-    except (OSError, ValueError):
-        d = None
-    if not isinstance(d, dict) or d.get("period") != state["started"]:
-        d = {}
-    m, w = d.get("merges"), d.get("wrapped")
-    return {"period": state["started"], "merges": m if isinstance(m, dict) else {}, "wrapped": w if isinstance(w, list) else []}
+        text = f.read_text()
+    except FileNotFoundError:
+        if _has_caps(state):
+            return None, f"{f.name} is missing (it holds the merge counts and wrap-ups of the period)"
+        return _fresh_period(state), None
+    except OSError as e:
+        return None, f"{f.name} cannot be read ({e.strerror or e})"
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return None, f"{f.name} is not valid JSON"
+    if not (isinstance(d, dict) and isinstance(d.get("merges"), dict) and isinstance(d.get("wrapped"), list)
+            and all(isinstance(x, str) for x in d["wrapped"])):
+        return None, f"{f.name} is not a period record"
+    if d.get("period") != state["started"]:
+        return _fresh_period(state), None  # an older period's file
+    return {"period": d["period"], "merges": d["merges"], "wrapped": d["wrapped"]}, None
+
+
+def period_problem(state: dict) -> "str | None":
+    """Why this period's record cannot be trusted, or None. While it cannot, every merge is refused and nothing is nudged:
+    the caps fail closed."""
+    return _read_period(state)[1]
+
+
+FIX_PERIOD = ("`lane-improve on --continue` starts the record again from nothing, and puts the deny rules back on every "
+              "project the period covers")
+
+
+class PeriodError(OSError):
+    pass
 
 
 def _write_period(rec: dict) -> None:
+    """Atomically, through a temp file of its own (two writers never share one)."""
     f = period_path()
     f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_name(f.name + ".tmp")
-    tmp.write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n")
-    tmp.replace(f)
+    fd, tmp = tempfile.mkstemp(prefix=f.name + ".", suffix=".tmp", dir=f.parent)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(rec, indent=2, sort_keys=True) + "\n")
+        os.replace(tmp, f)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def start_period(state: dict) -> None:
+    """The record of a new period (or a lost one started again): empty."""
+    with _locked():
+        _write_period(_fresh_period(state))
+
+
+def _modify_period(state: dict, fn) -> None:
+    with _locked():
+        rec, why = _read_period(state)
+        if rec is None:
+            raise PeriodError(why)
+        fn(rec)
+        _write_period(rec)
 
 
 def record_merge(state: dict, project: str, pr: int, item: str, sha: str) -> None:
-    """away-merge's own record of a merge it made (what --max-items counts; never read from the log's text)."""
-    rec = _period(state)
-    rec["merges"].setdefault(project, [])
-    if not isinstance(rec["merges"][project], list):
-        rec["merges"][project] = []
-    rec["merges"][project].append({"pr": pr, "item": item, "sha": sha, "at": now().isoformat(timespec="seconds")})
-    _write_period(rec)
+    """away-merge's own record of a merge it made (what --max-items counts; never read from the log's text). Refuses to write
+    over a record that cannot be read (PeriodError): the next merge is refused for it too."""
+    def add(rec):
+        m = rec["merges"].setdefault(project, [])
+        if not isinstance(m, list):
+            m = rec["merges"][project] = []
+        m.append({"pr": pr, "item": item, "sha": sha, "at": now().isoformat(timespec="seconds")})
+    _modify_period(state, add)
 
 
 def items_done(state: dict, project: str) -> int:
-    m = _period(state)["merges"].get(project)
+    rec, _ = _read_period(state)
+    m = (rec or {"merges": {}})["merges"].get(project)
     return len(m) if isinstance(m, list) else 0
 
 
 def is_wrapped(state: dict, project: str) -> bool:
-    """True when the project wrapped up this period while the mode was on (a cap was reached): nothing more merges."""
-    return project in _period(state)["wrapped"]
+    """True when the project wrapped up this period while the mode was on (a cap was reached): nothing more merges. A record
+    that cannot be read counts as wrapped for everyone (fail closed)."""
+    rec, why = _read_period(state)
+    return why is not None or project in rec["wrapped"]
 
 
 def mark_wrapped(state: dict, projects: list) -> None:
-    rec = _period(state)
-    rec["wrapped"] = list(dict.fromkeys([*rec["wrapped"], *projects]))
-    _write_period(rec)
+    _modify_period(state, lambda rec: rec.__setitem__("wrapped", list(dict.fromkeys([*rec["wrapped"], *projects]))))
+
+
+def unmark_wrapped(state: dict, projects: list) -> None:
+    _modify_period(state, lambda rec: rec.__setitem__("wrapped", [p for p in rec["wrapped"] if p not in projects]))
+
+
+def hard_stop(state: dict, project: str) -> "str | None":
+    """Why away-merge refuses a merge for this project at all, or None. `--max-items N` is enforced here: the Nth merge is
+    the last, whatever the coordinator reads or does (a lane that is running finishes as that Nth merge); a record that
+    cannot be read stops everything; a project that wrapped up at its cap merges nothing more. `--stop-at` is not a hard
+    stop (the lane that is running when it is reached still lands): the budget's own steps are its backstop."""
+    why = period_problem(state)
+    if why:
+        return f"{why}, so merges and caps cannot be trusted; merges are refused until it is made again: {FIX_PERIOD}"
+    if is_wrapped(state, project):
+        return (f"{project} wrapped up its improve period (a cap was reached and it ran `lane-improve drained`): nothing more "
+                "merges; raising a cap and naming it (`lane-improve on --continue --project "
+                f"{project} --max-items <more>`) resumes it")
+    mx = state.get("max_items")
+    if mx and items_done(state, project) >= mx:
+        return (f"--max-items {mx} is reached for {project} ({items_done(state, project)} merged this period): nothing more "
+                f"merges; wrap up (`lane-improve pr {project}`, tell the owner, `lane-improve drained {project}`), or the "
+                "owner raises the cap")
+    return None
 
 
 def budget_reading(project: str) -> "tuple[int | None, int | None, str]":
@@ -617,10 +726,15 @@ def pr_body(project: str, branch: str, integration: str, log: "str | None") -> s
 
 
 def read_log(repo: Path, branch: str) -> "str | None":
-    """AWAY-LOG.md as it is on origin's `branch` (fetched now), or None when the branch has none yet or cannot be read."""
-    if _git(repo, "fetch", "-q", "origin", branch).returncode:
+    """AWAY-LOG.md as it is on origin's `branch` (fetched now, into that branch's own remote-tracking ref, so a fetch another
+    process runs in the same checkout cannot change what is read), or None when the branch has none or cannot be read."""
+    ref = f"refs/remotes/origin/{branch}"
+    try:
+        if _git(repo, "fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}").returncode:
+            return None
+        r = _git(repo, "show", f"{ref}:{LOG_FILE}")
+    except (OSError, subprocess.SubprocessError):
         return None
-    r = _git(repo, "show", f"FETCH_HEAD:{LOG_FILE}")
     return r.stdout if r.returncode == 0 else None
 
 
@@ -634,47 +748,69 @@ def _gh(repo: Path, *args: str) -> str:
     return r.stdout
 
 
+def _gh_json(repo: Path, kind: type, *args: str):
+    """gh's answer as JSON of the expected kind (a list or a dict); PrError otherwise, so a changed gh never crashes a caller."""
+    try:
+        v = json.loads(_gh(repo, *args) or "[]")
+    except ValueError:
+        raise PrError(f"gh {args[0]} {args[1]} gave an answer that is not JSON") from None
+    if not isinstance(v, kind):
+        raise PrError(f"gh {args[0]} {args[1]} gave an answer of an unexpected shape")
+    return v
+
+
+class ClosedPr(PrError):
+    """The recorded summary PR was closed or merged: it is left alone (the owner's call)."""
+
+
 def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, number: "int | None") -> "tuple[int, str, str]":
     """(number, url, what) of the project's draft summary PR with its body brought up to the log's summary. With a
-    recorded `number` that PR is read and edited (a closed or merged one is left alone: PrError, the owner's call);
-    without, the open PR of the branch is found, or a draft one is opened. The only gh writes in the whole mode besides
-    away-merge's merge: `pr create --draft` and `pr edit --body`. PrError says why it could not be done."""
+    recorded `number` that PR is read, checked to be this branch's own (same repository, head `branch`, base the integration
+    branch: a number that points elsewhere is never edited) and edited; a closed or merged one is left alone (ClosedPr, the
+    owner's call). Without a number the open PR of the branch is looked for, and only a PR from this repository into the
+    integration branch counts (`gh pr list --head` matches the branch NAME, forks' PRs included), else a draft one is
+    opened. The only gh writes in the whole mode besides away-merge's merge: `pr create --draft` and `pr edit --body`.
+    PrError says why it could not be done."""
     body = pr_body(project, branch, integration, read_log(repo, branch))
     if number is None:
-        try:
-            found = json.loads(_gh(repo, "pr", "list", "--head", branch, "--state", "open", "--json", "number,url") or "[]")
-        except ValueError:
-            raise PrError("gh pr list gave an answer that is not JSON") from None
-        if found:
-            number, url, what = int(found[0]["number"]), str(found[0].get("url", "")), "refreshed"
+        found = _gh_json(repo, list, "pr", "list", "--head", branch, "--state", "open", "--json",
+                         "number,url,isCrossRepository,baseRefName,isDraft")
+        mine = [x for x in found if isinstance(x, dict) and x.get("isCrossRepository") is False
+                and x.get("baseRefName") == integration and isinstance(x.get("number"), int)]
+        if mine:
+            number, url, what = mine[0]["number"], str(mine[0].get("url", "")), "refreshed"
         else:
             url = _gh(repo, "pr", "create", "--draft", "--base", integration, "--head", branch, "--title",
-                      pr_title(project, branch), "--body", body).strip().splitlines()[-1]
+                      pr_title(project, branch), "--body", body).strip().splitlines()[-1:] or [""]
+            url = url[0]
             m = re.search(r"/pull/(\d+)\s*$", url)
             if not m:
                 raise PrError(f"gh pr create did not print a pull request link ({url[:80]})")
             return int(m.group(1)), url, "opened"
     else:
-        try:
-            info = json.loads(_gh(repo, "pr", "view", str(number), "--json", "state,url"))
-        except ValueError:
-            raise PrError(f"PR #{number} cannot be read") from None
+        info = _gh_json(repo, dict, "pr", "view", str(number), "--json", "state,url,headRefName,baseRefName,isCrossRepository")
+        if info.get("headRefName") != branch or info.get("baseRefName") != integration or info.get("isCrossRepository") is not False:
+            raise PrError(f"PR #{number} is not {project}'s summary PR ({info.get('headRefName')} into {info.get('baseRefName')}"
+                          f"{', from a fork' if info.get('isCrossRepository') else ''}, not {branch} into {integration}): it is "
+                          "left alone; fix `prs` in the improve file or remove the entry")
         if str(info.get("state", "")).upper() != "OPEN":
-            raise PrError(f"summary PR #{number} is {str(info.get('state')).lower()}, so it is left alone: "
-                          "what happens to it is the owner's call")
+            raise ClosedPr(f"summary PR #{number} is {str(info.get('state')).lower()}, so it is left alone: what happens to "
+                           "it is the owner's call")
         url, what = str(info.get("url", "")), "refreshed"
     _gh(repo, "pr", "edit", str(number), "--body", body)
     return number, url, what
 
 
 def _update(fn) -> bool:
-    """Apply `fn` to the state file that holds the period (the improve file, else the drain file) and write it back."""
-    for f, drain, writer in ((path(), False, write), (drain_path(), True, write_drain)):
-        st = _read(f, drain, True)
-        if st is not None:
-            fn(st)
-            writer(st)
-            return True
+    """Apply `fn` to the state file that holds the period (the improve file, else the drain file) and write it back, under the
+    lock (a second writer waits, so a PR number recorded here is never lost to another process's write)."""
+    with _locked():
+        for f, drain, writer in ((path(), False, write), (drain_path(), True, write_drain)):
+            st = _read(f, drain, True)
+            if st is not None:
+                fn(st)
+                writer(st)
+                return True
     return False
 
 
@@ -749,32 +885,35 @@ def describe(s: dict, how: "dict | None" = None) -> list:
 
 def open_summary_prs(cos: list, branches: dict, integs: dict, known: dict) -> "tuple[dict, list]":
     """({project: PR number}, warnings) for the chosen coordinators' draft summary PRs, found or opened now. A PR gh cannot
-    open (offline, no login, no commits between the branches yet: GitHub opens none for a branch with nothing on it)
-    is a warning, never a refusal: away-merge opens it after the first merged item."""
+    open or read (offline, no login, a changed answer) is a warning, never a refusal, and nothing here may raise: the branches
+    are pushed already, and a crash before the state is written would strand them. away-merge opens it after the first merged
+    item. A recorded PR the owner closed stays as it is."""
     out, warns = {}, []
     for c in cos:
         try:
             n, _url, _what = sync_summary_pr(c.checkout, c.name, branches[c.name], integs[c.name], known.get(c.name))
             out[c.name] = n
-        except (PrError, OSError) as e:
+        except ClosedPr as e:
+            out[c.name] = known[c.name]
+            warns.append(f"lane-improve: {c.name}: {e}")
+        except Exception as e:  # best effort after the real work: any failure is a warning
             warns.append(f"lane-improve: {c.name}: the draft summary PR is not open yet ({e}); away-merge opens it after "
                          f"the first merged item, or run `lane-improve pr {c.name}`")
     return out, warns
 
 
-def stop_at_refusal(stop_at, projects, prev: "dict | None", cos: list) -> "str | None":
-    """Why --stop-at cannot be accepted for these projects, or None: it must be below each project's ceiling (or the budget
-    steps would stop it first and the cap would never fire), and the ceiling must be readable."""
-    names = ([c.name for c in cos] if projects == "all" or (prev or {}).get("projects") == "all" else
-             list(dict.fromkeys([*((prev or {}).get("projects") or []), *projects])))
+def stop_at_refusal(stop_at, names: list) -> "str | None":
+    """Why --stop-at cannot be accepted for these projects, or None: it must be below each project's ceiling (new work stops
+    at the budget's no-new-work step, a little below it, so a cap at or above the ceiling would never fire), and the ceiling
+    must be readable."""
     for name in names:
         weekly, ceiling, why = budget_reading(name)
         if ceiling is None:
             return (f"--stop-at needs {name}'s weekly ceiling, which budget-state could not read ({why}); try again when "
                     "the usage feed answers")
         if stop_at >= ceiling:
-            return (f"--stop-at {_pct(stop_at)} is at or above {name}'s ceiling {ceiling}: the budget steps would stop it "
-                    f"first, so the cap would never fire; give a value below {ceiling}")
+            return (f"--stop-at {_pct(stop_at)} is at or above {name}'s ceiling {ceiling}: the budget's no-new-work step, "
+                    f"below the ceiling, stops new cycles first, so the cap would never fire; give a value below {ceiling}")
     return None
 
 
@@ -849,35 +988,62 @@ def cmd_on(a) -> int:
     else:
         projects = list(dict.fromkeys(a.project)) if a.project else "all"
         chosen = cos if projects == "all" else [c for c in cos if c.name in projects]
+    if prev:  # what a re-run leaves as it was, and what it changes
+        eff_stop = prev.get("stop_at") if stop_at is None else (None if stop_at is CLEAR else stop_at)
+        eff_max = prev.get("max_items") if max_items is None else (None if max_items is CLEAR else max_items)
+        keep = prev["projects"] == "all" or projects == "all"
+        period_projects = "all" if keep else list(dict.fromkeys([*prev["projects"], *projects]))
+    else:
+        eff_stop = None if stop_at in (None, CLEAR) else stop_at
+        eff_max = None if max_items in (None, CLEAR) else max_items
+        period_projects = projects
+    # a project that wrapped up at its cap stays wrapped up (a wrap-up is final for the period) unless the owner names it
+    # again with the cap raised: then it resumes. Named with the cap still reached, it is refused, before anything is cut.
+    resumes, still_wrapped = [], []
+    if prev:
+        wrapped_now = [p for p in prev["branches"] if covers(prev, p) and is_wrapped(prev, p)]
+        later = {**prev, "stop_at": eff_stop, "max_items": eff_max}
+        for p in wrapped_now:
+            if p in [c.name for c in chosen]:
+                hit = caps(later, p)[1]
+                if hit:
+                    print(f"lane-improve: improve not switched on: {p} wrapped up at its cap and the cap is still reached "
+                          f"({hit}): raise it (--max-items or --stop-at) to resume {p}, or leave {p} wrapped up",
+                          file=sys.stderr)
+                    return 1
+                resumes.append(p)
+            else:
+                still_wrapped.append(p)
     cut_warns: list = []
-    if isinstance(stop_at, (int, float)):
-        why = stop_at_refusal(stop_at, projects, prev, cos)
+    added = [c.name for c in chosen if prev is None or c.name not in prev["branches"]]
+    if eff_stop is not None and (stop_at is not None or added):
+        names = ([c.name for c in cos] if period_projects == "all" else list(period_projects)) if stop_at is not None else added
+        why = stop_at_refusal(eff_stop, names)
         if why:
             print(f"lane-improve: improve not switched on: {why}", file=sys.stderr)
             return 1
     try:
         limits_now = a.limits if a.limits is not None else (prev["limits"] if prev else "")
         branches, integs, how = resolve_branches(
-            chosen, a.cont, now().date(), limits_now, projects, cut_warns)
+            chosen, a.cont, now().date(), limits_now, period_projects, cut_warns)
     except ValueError as e:
         print(f"lane-improve: improve not switched on: {e}", file=sys.stderr)
         return 1
     deny = None if a.deny_paths is None else [g.strip() for g in a.deny_paths.split(",") if g.strip()]
     prs, pr_warns = open_summary_prs(chosen, branches, integs, (prev or {}).get("prs", {}))
     if prev:  # a `--continue` re-run while on: what is not named or not given again stays as it was
-        keep = prev["projects"] == "all" or projects == "all"
         state = {
             "started": prev["started"],
             "end": end or prev["end"],
             "limits": prev["limits"] if a.limits is None else a.limits,
             "deny_paths": prev["deny_paths"] if deny is None else deny,
-            "projects": "all" if keep else list(dict.fromkeys([*prev["projects"], *projects])),
+            "projects": period_projects,
             "unmetered": bool(a.unmetered) or prev["unmetered"],
             "branches": {**prev["branches"], **branches},
             "integration": {**prev["integration"], **integs},
             "prs": {**prev.get("prs", {}), **prs},
-            "stop_at": prev.get("stop_at") if stop_at is None else (None if stop_at is CLEAR else stop_at),
-            "max_items": prev.get("max_items") if max_items is None else (None if max_items is CLEAR else max_items),
+            "stop_at": eff_stop,
+            "max_items": eff_max,
         }
     else:
         state = {
@@ -890,15 +1056,31 @@ def cmd_on(a) -> int:
             "branches": branches,
             "integration": integs,
             "prs": prs,
-            "stop_at": None if stop_at in (None, CLEAR) else stop_at,
-            "max_items": None if max_items in (None, CLEAR) else max_items,
+            "stop_at": eff_stop,
+            "max_items": eff_max,
         }
-        period_path().unlink(missing_ok=True)  # a new period counts from nothing
+    lost = period_problem(state) if prev else None  # the period's record cannot be trusted: this run makes it again
     write(state)
+    if not prev or lost:
+        start_period(state)  # a new period counts from nothing
+    elif resumes:
+        unmark_wrapped(state, resumes)
     clear_rest()  # a new instruction from the owner: every coordinator looks for work again
-    notes, warns = install_denies(chosen, integs)
+    targets, tinteg = chosen, integs
+    if lost:  # nothing is known about who wrapped up: every project the period covers is active again, rules included
+        targets = [c for c in cos if covers(state, c.name) and c.name in state["integration"]]
+        tinteg = state["integration"]
+    notes, warns = install_denies(targets, tinteg)
     print("lane-improve: improve mode on")
     print("\n".join(describe(state, how) + notes))
+    for p in resumes:
+        print(f"lane-improve: {p} resumes (its cap is no longer reached; its deny rules are back)")
+    if still_wrapped:
+        print(f"  still wrapped up: {', '.join(still_wrapped)} (a wrap-up is final for the period; raise a cap and name the "
+              f"project, `lane-improve on --continue --project {still_wrapped[0]} --max-items <more>`, to resume it)")
+    if lost:
+        warns.append(f"lane-improve: the period record was unusable ({lost}); it is made again from nothing, so merge counts "
+                     "are 0 and no project counts as wrapped up (their deny rules are back)")
     for w in [*warns, *cut_warns, *pr_warns]:
         print(w, file=sys.stderr)
     return 0
@@ -916,7 +1098,8 @@ def _to_drain(state: dict) -> dict:
     names = list(state["branches"]) if state["projects"] == "all" else list(state["projects"])
     if state["projects"] == "all":
         names = list(dict.fromkeys([*names, *(c.name for c in _coordinator_list())]))
-    names = [n for n in names if not is_wrapped(state, n)]  # a project that wrapped up at a cap has nothing to wrap up
+    done = (_read_period(state)[0] or {"wrapped": []})["wrapped"]  # an unreadable record: everyone is asked to wrap up
+    names = [n for n in names if n not in done]  # a project that wrapped up at a cap has nothing to wrap up
     ended = state["end"] if state["end"] != UNTIL_BACK else now().isoformat(timespec="seconds")
     if state["end"] != UNTIL_BACK and not _ended(state):
         ended = now().isoformat(timespec="seconds")
@@ -933,6 +1116,9 @@ def cmd_off(a) -> int:
             write_drain(d)
         clear()
         clear_rest()
+        if not d["pending"]:  # everything wrapped up at its cap: no `drained` will follow, so no rule may be left behind
+            for w in remove_denies(_coordinator_list()):
+                print(w, file=sys.stderr)
         if d["pending"]:
             print("lane-improve: improve mode ended; the running lanes drain: each coordinator merges its last PR with "
                   "away-merge, brings its summary PR up to date (`lane-improve pr <project>`) and points you at it, then runs "
@@ -1000,7 +1186,7 @@ def cmd_pr(a) -> int:
         return 1
     try:
         n, url, what = sync_and_record(cos[a.project].checkout, s, a.project)
-    except (PrError, OSError) as e:
+    except Exception as e:  # PrError, or a changed gh/git answer: say it, never a traceback
         print(f"lane-improve: {a.project}: {e}", file=sys.stderr)
         return 1
     print(f"lane-improve: summary PR #{n} of {a.project} {what} (a draft; only the owner merges it): {url}")
@@ -1010,6 +1196,10 @@ def cmd_pr(a) -> int:
 def _drained_capped(s: dict, a) -> int:
     """`drained` while the mode is on: the projects that have reached a cap wrap up now (their deny rules come out, nothing
     more merges), and the mode goes on for the others."""
+    why = period_problem(s)
+    if why:
+        print(f"lane-improve: {why}, so nothing can be wrapped up by cap; {FIX_PERIOD}", file=sys.stderr)
+        return 1
     hit = {p: caps(s, p)[1] for p in s["branches"] if covers(s, p) and not is_wrapped(s, p)}
     names = [p for p, h in hit.items() if h] if a.all else list(a.projects)
     if not names:
@@ -1060,13 +1250,17 @@ def cmd_status(a) -> int:
     if s:
         print(f"improve: on (since {dt.datetime.fromisoformat(s['started']).strftime('%a %d %b %H:%M')})")
         print("\n".join(describe(s)))
-        if s.get("max_items") or s.get("stop_at") is not None:
+        why = period_problem(s)
+        if why:
+            print(f"  period record: {why}; counts and wrap-ups are unknown and merges are refused. {FIX_PERIOD}")
+        elif s.get("max_items") or s.get("stop_at") is not None:
             for p in sorted(s["branches"]):
                 if not covers(s, p):
                     continue
                 parts, hit = caps(s, p)
                 if is_wrapped(s, p):
-                    tail = ", wrapped up (a cap was reached)"
+                    tail = (", wrapped up (a cap was reached); raise a cap and name it with `lane-improve on --continue "
+                            f"--project {p}` to resume it")
                 elif hit:
                     tail = (f": cap reached ({hit}): no new cycle; the running lane finishes, then wrap up and run "
                             f"`lane-improve drained {p}`")

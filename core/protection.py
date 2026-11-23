@@ -62,8 +62,22 @@ def classify(branch: str, body: dict, ci_exists: bool) -> "tuple[str, str]":
         notes.append("CI exists but is not required")
     tail = ("; " + "; ".join(notes)) if notes else ""
     if missing:
-        return "partly", f"{branch}: " + "; ".join(missing) + tail
-    return "protected", f"{branch}: for everyone (a pull request is required, admins included, no force pushes)" + tail
+        return "partly", f"{branch}: classic protection, but " + "; ".join(missing) + tail
+    return "everyone", f"{branch}: protected for everyone (a pull request is required, admins included, no force pushes)" + tail
+
+
+def _rules(repo: Path, branch: str) -> "tuple[list | None, str]":
+    """(the rule types of the rulesets that apply to `branch`, why not): None with the reason when they cannot be read."""
+    code, out, err = _api(repo, f"repos/{{owner}}/{{repo}}/rules/branches/{quote(branch, safe='/')}")
+    if code != 0:
+        return None, _last_line(err)
+    try:
+        rules = json.loads(out)
+    except ValueError:
+        return None, "gh gave an answer that is not JSON"
+    if not isinstance(rules, list):
+        return None, "gh gave an answer of an unexpected shape"
+    return sorted({r.get("type") for r in rules if isinstance(r, dict) and r.get("type")}), ""
 
 
 def report(repo: Path, branch: str) -> "tuple[str, str]":
@@ -77,14 +91,16 @@ def report(repo: Path, branch: str) -> "tuple[str, str]":
             body = None
         if not isinstance(body, dict):
             return "unknown", f"{branch}: gh gave an answer that is not protection settings"
-        return classify(branch, body, _ci_exists(repo))
+        what, detail = classify(branch, body, _ci_exists(repo))
+        types, _ = _rules(repo, branch)
+        if types:  # rulesets are separate from classic protection: say so, and claim no more than was read
+            detail += f"; a ruleset also applies ({', '.join(types)}), and who may bypass it is not read here"
+        return what, detail
     if "HTTP 404" in err and "not protected" in err.lower():
-        code, out, _ = _api(repo, f"repos/{{owner}}/{{repo}}/rules/branches/{quote(branch, safe='/')}")
-        try:
-            rules = json.loads(out) if code == 0 else []
-        except ValueError:
-            rules = []
-        types = sorted({r.get("type") for r in rules if isinstance(r, dict) and r.get("type")}) if isinstance(rules, list) else []
+        types, why = _rules(repo, branch)
+        if types is None:
+            return "unknown", (f"{branch}: classic protection is off, but the rulesets could not be read ({why}), so whether "
+                               "anything protects it is not known")
         if types:
             return "ruleset", (f"{branch}: no classic branch protection, but a ruleset applies ({', '.join(types)}); who may "
                                "bypass it is not read here")

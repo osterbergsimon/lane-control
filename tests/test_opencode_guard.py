@@ -244,7 +244,7 @@ class GuardTests(HomeTest):
             wrong = []
             for name, text in cases:
                 self.improve.write_text(text)
-                py = improve.merge_state("shop")[0] is not None
+                py = improve.mode_state("shop")[0] is not None
                 out, _ = self.run_guard([{"command": "gh pr merge 5"}])
                 js = not out["results"][0]["ok"]
                 if py != js:

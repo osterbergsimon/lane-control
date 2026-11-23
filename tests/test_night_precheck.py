@@ -22,6 +22,8 @@ class PrecheckBase(MachineTest):
         (self.conf_dir / "improve.json").write_text(json.dumps({
             "started": "2026-11-23T10:00:00+00:00", "end": end, "limits": "", "deny_paths": [], "projects": projects,
             "unmetered": unmetered, "branches": {}, "integration": {}, **caps}))
+        if caps.get("stop_at") is not None or caps.get("max_items"):
+            self.period()  # `lane-improve on` starts the period's record; a period with caps and none is a lost one
 
     def period(self, merges=None, wrapped=()):
         """away-merge's record for the period improve_on started: {project: number of merges}."""

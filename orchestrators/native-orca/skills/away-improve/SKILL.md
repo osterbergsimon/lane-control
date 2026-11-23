@@ -94,10 +94,12 @@ on a long lane need do nothing: its nudges back off by themselves (30, 60, 120 m
 **Caps (optional, off unless the owner gave them).** `--max-items N` stops new cycles after N merges through `away-merge`
 in this period (its own record, not the log); `--stop-at <weekly %>` stops them once `budget-state --project` gives weekly at
 or above it. `lane-improve status` shows `items 4/10` and `weekly 66/70` for your project and says `cap reached` when one is hit. A cap
-works like the end time, for your project alone: the lane that is running finishes and merges through `away-merge`, you start no
+works like the end time, for your project alone: the lane that is running finishes and merges through `away-merge` (with `--max-items`
+the Nth merge is the last: `away-merge` refuses a further one, so the lane you start must be the one that brings it to N), you start no
 new cycle, and you wrap up as below (steps 1 to 3), then run `lane-improve drained <your project>`, which with the mode still on
 is accepted only for a project whose cap is reached; afterwards nothing more merges for it, and the mode goes on for the others.
-The night manager sends a `wrapup ... cap=` nudge instead of the improve nudge until you have.
+The night manager sends a `wrapup ... cap=` nudge instead of the improve nudge until you have. If `away-merge` or `status` says the
+period record is unreadable, tell the owner: it refuses every merge until they run the improve command again with `--continue` (`lane-improve --help`).
 
 **After `off` or the end time the mode is draining**: `lane-improve status` says `improve: draining` and lists your
 project, and the machine coordinator tells you when it ran `off`. No new cycle starts, but the running lane finishes

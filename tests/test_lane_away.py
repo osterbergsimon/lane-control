@@ -23,7 +23,14 @@ if sf and a[:1] == ["pr"]:
     def val(flag):
         return a[a.index(flag) + 1] if flag in a else None
     if a[:2] == ["pr", "list"] and "--head" in a:
-        print(json.dumps([{"number": int(n), "url": p["url"]} for n, p in db["prs"].items()
+        if os.environ.get("GH_LIST_SHAPE") == "object":
+            print("{}"); sys.exit(0)
+        if os.environ.get("GH_LIST_SHAPE") == "junk":
+            print("not json at all"); sys.exit(0)
+        # like gh: --head matches the branch NAME only, a fork's PR with that name included
+        print(json.dumps([{"number": int(n), "url": p["url"], "isCrossRepository": p.get("cross", False),
+                           "baseRefName": p["base"], "isDraft": p["draft"], "headRepositoryOwner": {"login": "someone" if p.get("cross") else "acme"}}
+                          for n, p in db["prs"].items()
                           if p["head"] == val("--head") and p["cwd"] == os.getcwd() and p["state"] == "OPEN"])); sys.exit(0)
     if a[:2] == ["pr", "create"]:
         if os.environ.get("GH_CREATE_FAIL"):
@@ -40,9 +47,11 @@ if sf and a[:1] == ["pr"]:
             print(os.environ["GH_EDIT_FAIL"], file=sys.stderr); sys.exit(1)
         db["prs"][a[2]]["body"] = val("--body"); save(); sys.exit(0)
     if a[:2] == ["pr", "view"] and len(a) > 2 and a[2] in db["prs"]:
+        if os.environ.get("GH_VIEW_SHAPE") == "list":
+            print("[]"); sys.exit(0)
         p = db["prs"][a[2]]
         print(json.dumps({"state": p["state"], "url": p["url"], "baseRefName": p["base"], "headRefName": p["head"],
-                          "isDraft": p["draft"]})); sys.exit(0)
+                          "isDraft": p["draft"], "isCrossRepository": p.get("cross", False)})); sys.exit(0)
 '''
 
 GH_BASES_STUB = """
@@ -214,6 +223,17 @@ class ImproveTest(MachineTest):
         self.assertEqual(git(repo, "rev-parse", f"{b}^").strip(), git(repo, "rev-parse", i).strip())
         self.assertEqual(git(repo, "diff", "--name-status", i, b).split(), ["A", "AWAY-LOG.md"])
         self.assertEqual(git(repo, "log", "-1", "--format=%s", b).strip(), f"away: start {date or branch.split('/')[1]}")
+
+    def add_pr(self, repo: Path, head: str, base: str = "main", cross: bool = False, draft: bool = True) -> str:
+        """A PR the stub already has (someone else's, or the owner's) for `repo`: returns its number."""
+        f = self.tmp / "gh-summary.json"
+        db = json.loads(f.read_text()) if f.exists() else {"next": 100, "prs": {}}
+        n = db["next"]
+        db["next"] = n + 1
+        db["prs"][str(n)] = {"head": head, "base": base, "title": "theirs", "body": "THEIR BODY", "draft": draft,
+                             "state": "OPEN", "url": f"https://github.com/acme/shop/pull/{n}", "cwd": str(repo), "cross": cross}
+        f.write_text(json.dumps(db))
+        return str(n)
 
     def summary_prs(self, repo: Path) -> dict:
         return {n: p for n, p in self.db().items() if p["cwd"] == str(repo)}
@@ -860,6 +880,19 @@ class SummaryPrTests(ImproveTest):
         self.assertEqual(self.db(), before)
         self.assertEqual([c for c in self.gh_log() if c.startswith("pr create") or c.startswith("pr edit")], [])
 
+    def test_a_closed_recorded_pr_is_said_to_be_closed_not_to_be_opened_later(self):
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        db = json.loads((self.tmp / "gh-summary.json").read_text())
+        db["prs"][n]["state"] = "CLOSED"
+        (self.tmp / "gh-summary.json").write_text(json.dumps(db))
+        r = self.on("--continue", "--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("closed", r.stderr)
+        self.assertIn("left alone", r.stderr)
+        self.assertNotIn("away-merge opens it", r.stderr)
+        self.assertEqual(self.state()["prs"]["shop"], int(n))
+
     def test_status_names_the_pr(self):
         self.on("--project", "shop")
         out = self.run_script("lane-improve", "status").stdout
@@ -917,6 +950,64 @@ class SummaryPrTests(ImproveTest):
         self.assertIn("closed", r.stderr)
         self.assertEqual(self.summary_prs(self.shop)[n]["body"], before)
         self.assertEqual([c for c in self.gh_log() if c.startswith(("pr create", "pr edit"))], [])
+
+    def test_a_pr_from_a_fork_with_the_same_branch_name_is_never_adopted(self):
+        """B1: `gh pr list --head` matches the branch name only, a fork's PR included."""
+        import datetime
+        branch = f"away/{datetime.date.today().isoformat()}"
+        theirs = self.add_pr(self.shop, branch, "main", cross=True)
+        self.assertEqual(self.on("--project", "shop").returncode, 0)
+        mine = str(self.state()["prs"]["shop"])
+        self.assertNotEqual(mine, theirs)
+        db = self.db()
+        self.assertEqual(db[theirs]["body"], "THEIR BODY")  # not overwritten
+        self.assertFalse(db[mine].get("cross", False))
+        self.assertEqual(db[mine]["base"], "main")
+
+    def test_a_pr_of_the_same_name_into_another_base_is_not_adopted(self):
+        import datetime
+        branch = f"away/{datetime.date.today().isoformat()}"
+        other = self.add_pr(self.shop, branch, "release")
+        self.assertEqual(self.on("--project", "shop").returncode, 0)
+        self.assertNotEqual(str(self.state()["prs"]["shop"]), other)
+        self.assertEqual(self.db()[other]["body"], "THEIR BODY")
+
+    def test_the_owners_own_ready_pr_of_the_branch_is_still_found(self):
+        import datetime
+        branch = f"away/{datetime.date.today().isoformat()}"
+        mine = self.add_pr(self.shop, branch, "main", draft=False)  # the owner marked it ready: still this branch's PR
+        self.assertEqual(self.on("--project", "shop").returncode, 0)
+        self.assertEqual(str(self.state()["prs"]["shop"]), mine)
+
+    def test_a_recorded_number_that_is_not_this_branchs_pr_is_left_alone(self):
+        self.on("--project", "shop")
+        foreign = self.add_pr(self.shop, "someone-elses-branch", "main")
+        st = self.state()
+        st["prs"]["shop"] = int(foreign)
+        self.improve_file().write_text(json.dumps(st))
+        r = self.run_script("lane-improve", "pr", "shop")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not", r.stderr)
+        self.assertEqual(self.db()[foreign]["body"], "THEIR BODY")
+
+    def test_a_recorded_number_that_is_a_fork_pr_is_left_alone(self):
+        self.on("--project", "shop")
+        foreign = self.add_pr(self.shop, self.state()["branches"]["shop"], "main", cross=True)
+        st = self.state()
+        st["prs"]["shop"] = int(foreign)
+        self.improve_file().write_text(json.dumps(st))
+        self.assertEqual(self.run_script("lane-improve", "pr", "shop").returncode, 1)
+        self.assertEqual(self.db()[foreign]["body"], "THEIR BODY")
+
+    def test_a_malformed_gh_answer_never_stops_on(self):
+        """M1: `on` pushed the branches already; a crash before the state is written would strand them."""
+        for shape in ("object", "junk"):
+            r = self.on("--project", "shop", env={"GH_LIST_SHAPE": shape})
+            self.assertEqual(r.returncode, 0, (shape, r.stderr))
+            self.assertIn("improve: on", self.run_script("lane-improve", "status").stdout)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("shop", r.stderr)
+            self.reset()
 
     def test_gh_writes_are_only_draft_create_and_edit_of_the_summary_pr(self):
         self.on()
@@ -1010,6 +1101,23 @@ class CapOptionTests(ImproveTest):
         self.assertIn("ceiling", r.stderr)
         self.assertFalse(self.improve_file().exists())
 
+    def test_the_ceiling_message_says_the_steps_stop_it_first(self):
+        r = self.on("--project", "shop", "--stop-at", "75")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no-new-work", r.stderr)
+
+    def test_a_project_added_later_is_checked_against_the_periods_stop_at(self):
+        ceil = self.tmp / "ceilings.json"
+        ceil.write_text(json.dumps({"projects": {"shop": {"ceiling": 80}, "blog": {"ceiling": 50}}}))
+        self.playbook(20, 10, ceiling=f"file:{ceil}")
+        self.assertEqual(self.on("--project", "shop", "--stop-at", "60").returncode, 0)
+        r = self.on("--continue", "--project", "blog")  # no --stop-at given: the period's 60 still applies to it
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("blog", r.stderr)
+        self.assertIn("50", r.stderr)
+        self.assertEqual(list(self.state()["branches"]), ["shop"])
+        self.assertEqual(self.remote_branches(self.blog), [])
+
     def test_bad_values_are_usage_errors(self):
         for args in (("--stop-at", "0"), ("--stop-at", "-5"), ("--stop-at", "x"), ("--stop-at", "100"),
                      ("--max-items", "0"), ("--max-items", "-1"), ("--max-items", "x"), ("--max-items", "2.5")):
@@ -1073,7 +1181,11 @@ class StartLogTests(ImproveTest):
                          "Away Tester <away@example.invalid>")  # the configured identity, no attribution line
         self.assertEqual(git(self.shop, "log", "-1", "--format=%b", f"origin/{b}").strip(), "")
         self.assertEqual(git(self.shop, "branch", "--show-current").strip(), "main")  # the checkout was left alone
-        self.assertEqual(git(self.shop, "status", "--porcelain").strip(), "")
+        # the work tree and index are untouched: no tracked change, and the log is not in the checkout (the deny rules `on`
+        # installs under .claude/ are untracked, and a runner without a global ignore shows them)
+        self.assertEqual(git(self.shop, "status", "--porcelain", "--untracked-files=no").strip(), "")
+        self.assertFalse((self.shop / "AWAY-LOG.md").exists())
+        self.assertNotIn("AWAY-LOG.md", git(self.shop, "ls-files"))
 
     def test_the_log_has_the_header_limits_projects_and_an_empty_summary(self):
         self.on("--project", "shop", "--limits", "nothing that needs db migrations")
@@ -1124,6 +1236,13 @@ class StartLogTests(ImproveTest):
         self.on("--project", "shop")
         self.assertEqual(self.on("--continue", "--project", "blog").returncode, 0)
         self.assert_cut_from(self.blog, self.state()["branches"]["blog"])
+
+    def test_a_project_added_later_is_counted_in_the_period_not_just_in_the_run(self):
+        self.on("--project", "shop")
+        self.assertEqual(self.on("--continue", "--project", "blog").returncode, 0)
+        text = self.log(self.blog, self.state()["branches"]["blog"])
+        self.assertIn("Projects in this period: this project and 1 other.", text)
+        self.assertNotIn("shop", text)
 
     def test_a_branch_that_only_has_the_start_commit_is_named_as_never_given_work(self):
         self.on("--project", "shop")
@@ -1222,6 +1341,24 @@ class ReaderAgreementTests(ImproveTest):
         yield "branches a list", json.dumps({**g, "branches": []})
         yield "integration a list", json.dumps({**g, "integration": []})
         yield "extra keys", json.dumps({**g, "note": 1})
+        yield "prs good", json.dumps({**g, "prs": {"shop": 12}})
+        yield "prs a list", json.dumps({**g, "prs": []})
+        yield "prs a number as text", json.dumps({**g, "prs": {"shop": "12"}})
+        yield "prs a bool", json.dumps({**g, "prs": {"shop": True}})
+        yield "prs a float", json.dumps({**g, "prs": {"shop": 1.5}})
+        yield "stop_at good", json.dumps({**g, "stop_at": 66})
+        yield "stop_at fraction", json.dumps({**g, "stop_at": 66.5})
+        yield "stop_at null", json.dumps({**g, "stop_at": None})
+        yield "stop_at zero", json.dumps({**g, "stop_at": 0})
+        yield "stop_at 100", json.dumps({**g, "stop_at": 100})
+        yield "stop_at text", json.dumps({**g, "stop_at": "66"})
+        yield "stop_at true", json.dumps({**g, "stop_at": True})
+        yield "max_items good", json.dumps({**g, "max_items": 10})
+        yield "max_items null", json.dumps({**g, "max_items": None})
+        yield "max_items zero", json.dumps({**g, "max_items": 0})
+        yield "max_items fraction", json.dumps({**g, "max_items": 2.5})
+        yield "max_items true", json.dumps({**g, "max_items": True})
+        yield "max_items text", json.dumps({**g, "max_items": "3"})
         yield "empty", ""
         yield "spaces", "  \n"
         yield "list", "[]"
@@ -1229,7 +1366,8 @@ class ReaderAgreementTests(ImproveTest):
         yield "text", "hello"
 
     ON = {"canonical", "one line", "future end", "naive future end", "ended", "branch named end, until back",
-          "limits text with end", "extra keys", "projects a list", "project named end"}
+          "limits text with end", "extra keys", "projects a list", "project named end",
+          "prs good", "stop_at good", "stop_at fraction", "stop_at null", "max_items good", "max_items null"}
 
     def python_says(self, text: str) -> bool:
         self.improve_file().write_text(text)

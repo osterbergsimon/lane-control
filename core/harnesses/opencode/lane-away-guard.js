@@ -59,6 +59,10 @@ function problem(s, drain) {
   if (typeof s.unmetered !== "boolean") return "unmetered is not true or false";
   if (!strMap(s.branches)) return "branches is not {project: branch}";
   if (!strMap(s.integration)) return "integration is not {project: branch}";
+  // the optional fields improve.py validates too (a file with a bad one is off there, so it must be off here)
+  if ("prs" in s && !(plain(s.prs) && Object.values(s.prs).every((v) => Number.isInteger(v)))) return "prs is not {project: number}";
+  if (s.stop_at != null && !(typeof s.stop_at === "number" && s.stop_at > 0 && s.stop_at < 100)) return "stop_at is not a weekly percentage";
+  if (s.max_items != null && !(Number.isInteger(s.max_items) && s.max_items >= 1)) return "max_items is not a whole number above 0";
   if (drain) {
     if (!timeOk(s.ended)) return "ended is not a time";
     if (!strList(s.pending)) return "pending is not a list of names";

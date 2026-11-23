@@ -300,8 +300,11 @@ def main(argv: list) -> int:
             continue
         if istate and (istate["projects"] == "all" or c.name in istate["projects"]):
             # improve covers it: the resume nudge stands in for the plain check-in
-            hit = None if improve.is_wrapped(istate, c.name) else improve.caps(istate, c.name)[1]
-            if improve.is_wrapped(istate, c.name):
+            broken = improve.period_problem(istate)
+            hit = None if broken or improve.is_wrapped(istate, c.name) else improve.caps(istate, c.name)[1]
+            if broken:  # the caps fail closed: nothing can be known about wrap-ups, so nothing is nudged
+                err(f"{c.name}: {broken}: no improve nudge (`lane-improve on --continue` starts the record again)")
+            elif improve.is_wrapped(istate, c.name):
                 err(f"{c.name}: wrapped up at its cap: no nudge")
             elif hit:  # a cap is reached: like the end time, for this project alone
                 is_due, eff[(c.name, "wrapup")] = nudge_due(c.name, "wrapup", idle, conf["IMPROVE_IDLE_MIN"], now)

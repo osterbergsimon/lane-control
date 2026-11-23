@@ -25,7 +25,10 @@
 #       then it wraps up and runs `drained`; the mode stays on for the others): --max-items N: no new cycle after N away-merges
 #       in this period (away-merge's own record); --stop-at <weekly %>: none once `budget-state --project` gives weekly at or
 #       above it (metered only: refused with --unmetered, or at or above the project's ceiling). A --continue re-run changes
-#       them only when given; `none` drops one. `status` shows "items 4/10" and "weekly 66/70" per project.
+#       them only when given; `none` drops one. `status` shows "items 4/10" and "weekly 66/70" per project. --max-items is
+#       also a hard stop in away-merge (the Nth merge is the last); a wrapped-up project resumes only when named again with
+#       its cap raised (`on --continue --project <name> --max-items <more>`). The period's record (improve-period.json) fails
+#       closed if it is lost or unreadable (merges refused, `status` says why): `on --continue` makes it again.
 #   lane-improve off
 #       Ends the mode. What was running drains: no new cycle, the last PRs can still merge through away-merge, the deny
 #       rules stay until each coordinator has wrapped up.

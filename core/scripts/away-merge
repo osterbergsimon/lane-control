@@ -21,7 +21,9 @@ merging nothing, with one line per failed check, unless all of these hold:
              change; the log's last line is printed, and say so in AWAY-LOG.md
   secrets    the diff is clean: gitleaks when the project has a .gitleaks.toml (no gitleaks to run it is a refusal),
              otherwise a built-in scan of the added lines for keys, tokens, home paths and private addresses
-  wrapped    the project has not wrapped up at a cap (`lane-improve drained` while the mode is on: nothing more merges)
+  caps       the project has not wrapped up at a cap (`lane-improve drained` while the mode is on: nothing more merges), --max-items
+             is not yet reached (the Nth merge is the last), and the period's record (improve-period.json) can be read (a lost
+             or unreadable one refuses every merge: `lane-improve on --continue` makes it again)
   deny       the PR touches none of improve.json's deny_paths: every old and new path in the `diff --git` headers of
              the PR's diff is checked (gh's file list stops at 100 files and drops a rename's old name); a diff it
              cannot read paths from is a refusal
@@ -304,7 +306,7 @@ def refresh_summary_pr(checkout: Path, state: dict, project: str) -> None:
     is said on stderr with the command to run by hand."""
     try:
         n, url, what = improve.sync_and_record(checkout, state, project)
-    except (improve.PrError, OSError) as e:
+    except Exception as e:  # the merge happened: nothing after it may turn into a refusal or a traceback
         print(f"away-merge: the merge is done, but the summary PR was not refreshed ({e}); run `lane-improve pr {project}`",
               file=sys.stderr)
         return

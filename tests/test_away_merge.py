@@ -475,12 +475,24 @@ class AwayMergeCapTests(AwayMergeTest):
         self.assertIn("weekly ?/66", line)
         self.assertNotIn("reached", line)
 
-    def test_the_running_lane_still_merges_after_a_cap_is_reached(self):
+    def test_items_cap_is_a_hard_stop_in_away_merge(self):
         self.merge(item="one")
         self.merge(item="two")
-        r = self.merge(item="three, the lane that was running")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("items 3/2", self.status())
+        r = self.merge(item="three")
+        self.assertRefused(r, "improve")
+        self.assertIn("--max-items 2", r.stderr)
+        self.assertIn("wrap up", r.stderr)
+        self.assertIn("items 2/2", self.status())  # the refused merge is not counted
+
+    def test_the_weekly_cap_does_not_refuse_the_lane_that_is_running(self):
+        self.playbook(66, 10, ceiling=70)  # weekly at the cap: the lane that was running when it was reached still lands
+        self.assertEqual(self.merge(item="one").returncode, 0)
+
+    def test_a_cap_reached_while_draining_is_a_hard_stop_too(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "off")
+        self.assertRefused(self.merge(item="three"), "improve")
 
     def test_drained_needs_a_reached_cap_while_the_mode_is_on(self):
         r = self.run_script("lane-improve", "drained", "shop")
@@ -530,6 +542,170 @@ class AwayMergeCapTests(AwayMergeTest):
         self.run_script("lane-improve", "drained", "shop")
         text = settings.read_text() if settings.exists() else ""
         self.assertNotIn("gh pr merge", text)
+
+    def test_a_continue_rerun_naming_a_wrapped_project_whose_cap_is_still_reached_is_refused(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "drained", "shop")
+        settings = self.shop / ".claude" / "settings.local.json"
+        r = self.on("--continue", "--project", "shop")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("wrapped up", r.stderr)
+        self.assertIn("raise", r.stderr)
+        text = settings.read_text() if settings.exists() else ""
+        self.assertNotIn("gh pr merge", text)  # no rules came back for a project that cannot merge
+        self.assertIn("shop", self.period()["wrapped"])
+
+    def test_raising_the_cap_and_naming_the_project_resumes_it(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "drained", "shop")
+        r = self.on("--continue", "--project", "shop", "--max-items", "5")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("resumes", r.stdout)
+        self.assertEqual(self.period()["wrapped"], [])
+        self.assertIn("gh pr merge", (self.shop / ".claude" / "settings.local.json").read_text())  # its rules are back
+        self.assertEqual(self.merge(item="three").returncode, 0)
+        self.assertIn("items 3/5", self.status())
+
+    def test_raising_the_cap_without_naming_the_project_leaves_it_wrapped_and_says_so(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "drained", "shop")
+        r = self.on("--continue", "--max-items", "5")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("still wrapped up", r.stdout)
+        self.assertIn("--project shop", r.stdout)
+        self.assertIn("wrapped up", [l for l in self.status().splitlines() if l.strip().startswith("shop:")][0])
+        settings = self.shop / ".claude" / "settings.local.json"
+        self.assertNotIn("gh pr merge", settings.read_text() if settings.exists() else "")
+
+    def test_off_with_everything_wrapped_up_still_takes_leftover_rules_out(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "drained", "shop")
+        settings = self.shop / ".claude" / "settings.local.json"
+        # a rule installed by hand through the adapter after the wrap-up (what a stray re-add would leave behind)
+        code = (f"import sys; sys.path.insert(0, {str(ROOT / 'core')!r}); import harnesses; from pathlib import Path; "
+                f"harnesses.load_harness('claude').install_away_denies(Path({str(self.shop)!r}), 'main', 'shop')")
+        self.assertEqual(subprocess.run([sys.executable, "-c", code], env=self.env).returncode, 0)
+        self.assertIn("gh pr merge", settings.read_text())
+        self.assertEqual(self.run_script("lane-improve", "off").returncode, 0)
+        self.assertNotIn("gh pr merge", settings.read_text() if settings.exists() else "")
+
+    # --- the period record: locked, never reset by an unreadable file
+
+    def test_many_away_merges_at_once_are_all_counted(self):
+        code = ("import sys; sys.path.insert(0, %r); import improve; s = improve.load(); "
+                "[improve.record_merge(s, sys.argv[1], i, 'x', 'abc') for i in range(6)]" % str(ROOT / "core"))
+        procs = [subprocess.Popen([sys.executable, "-c", code, name], env=self.env) for name in ("shop", "blog") * 4]
+        for pr in procs:
+            self.assertEqual(pr.wait(), 0)
+        self.assertEqual({k: len(v) for k, v in self.period()["merges"].items()}, {"shop": 24, "blog": 24})
+        self.assertEqual([f.name for f in self.conf_dir.glob("improve-period*") if f.name != "improve-period.json"
+                          and f.suffix != ".lock"], [])  # no stray temp files
+
+    def test_an_unreadable_period_record_stops_merges_instead_of_resetting_the_caps(self):
+        self.merge(item="one")
+        self.merge(item="two")
+        self.run_script("lane-improve", "drained", "shop")
+        (self.conf_dir / "improve-period.json").write_text("{not json")
+        r = self.merge(item="three")
+        self.assertRefused(r, "improve")
+        self.assertIn("improve-period.json", r.stderr)
+        self.assertIn("--continue", r.stderr)  # the way out is named
+        st = self.status()
+        self.assertNotIn("items 0/2", st)
+        self.assertIn("improve-period.json", st)
+        self.assertEqual(self.run_script("lane-improve", "drained", "shop").returncode, 1)
+
+    def test_a_lost_period_record_is_not_an_empty_one(self):
+        self.merge(item="one")
+        (self.conf_dir / "improve-period.json").unlink()
+        self.assertRefused(self.merge(item="two"), "improve")
+        self.assertNotIn("items 0/2", self.status())
+
+    def test_a_continue_rerun_makes_a_fresh_period_record_and_says_so(self):
+        self.merge(item="one")
+        (self.conf_dir / "improve-period.json").write_text("{not json")
+        r = self.on("--continue", "--hours", "5")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("record", r.stderr + r.stdout)
+        self.assertIn("items 0/2", self.status())
+        self.assertEqual(self.merge(item="again").returncode, 0)
+
+    def test_on_starts_the_period_record(self):
+        self.reset()
+        self.assertEqual(self.on("--project", "shop", "--max-items", "3").returncode, 0)
+        self.assertEqual(self.period()["period"], self.state()["started"])
+        self.assertEqual(self.period()["merges"], {})
+
+    def test_nothing_is_nudged_when_the_record_is_unreadable(self):
+        (self.conf_dir / "improve-period.json").write_text("garbage")
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "12"})
+        self.assertNotIn("improve", r.stdout)
+
+    # --- M1: nothing after the merge may turn it into a refusal
+
+    def test_a_malformed_gh_answer_after_the_merge_still_exits_0(self):
+        st = self.state()
+        st["prs"].pop("shop")  # the lookup path
+        self.improve_file().write_text(json.dumps(st))
+        for shape in ("object", "junk"):
+            r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "x",
+                                env={"GH_LIST_SHAPE": shape})
+            self.assertEqual(r.returncode, 0, (shape, r.stderr))
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("lane-improve pr shop", r.stderr)
+
+    def test_a_malformed_view_answer_for_the_recorded_pr_still_exits_0(self):
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "x", env={"GH_VIEW_SHAPE": "list"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("lane-improve pr shop", r.stderr)
+
+    def test_whatever_breaks_after_the_merge_is_a_warning(self):
+        import contextlib
+        import importlib.machinery
+        import importlib.util
+        import io
+        loader = importlib.machinery.SourceFileLoader("away_merge_t", str(ROOT / "core" / "scripts" / "away-merge"))
+        spec = importlib.util.spec_from_loader("away_merge_t", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        for exc in (subprocess.TimeoutExpired("git", 120), KeyError(0), AttributeError("list"),
+                    ValueError("improve state: x"), MemoryError()):
+            def boom(*a, _e=exc, **k):
+                raise _e
+            err = io.StringIO()
+            orig = mod.improve.sync_and_record
+            mod.improve.sync_and_record = boom
+            try:
+                with contextlib.redirect_stderr(err):
+                    mod.refresh_summary_pr(Path("."), {}, "shop")
+            finally:
+                mod.improve.sync_and_record = orig
+            self.assertIn("lane-improve pr shop", err.getvalue(), repr(exc))
+
+    def test_a_git_that_hangs_reading_the_log_is_no_log(self):
+        code = (f"import sys, subprocess; sys.path.insert(0, {str(ROOT / 'core')!r}); import improve\n"
+                "def boom(*a, **k):\n    raise subprocess.TimeoutExpired('git', 120)\n"
+                "improve._git = boom\n"
+                "from pathlib import Path\nprint(improve.read_log(Path('.'), 'away/2026-11-23'))\n")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "None"), r.stderr)
+
+    def test_the_log_is_read_from_its_own_ref_not_from_fetch_head(self):
+        code = (f"import sys, subprocess; sys.path.insert(0, {str(ROOT / 'core')!r}); import improve\n"
+                "calls = []\n"
+                "def fake(repo, *args, **k):\n    calls.append(args)\n"
+                "    return subprocess.CompletedProcess(args, 0, 'log text', '')\n"
+                "improve._git = fake\n"
+                "from pathlib import Path\nimprove.read_log(Path('.'), 'away/2026-11-23')\nprint(calls)\n")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True).stdout
+        self.assertNotIn("FETCH_HEAD", out)
+        self.assertIn("+refs/heads/away/2026-11-23:refs/remotes/origin/away/2026-11-23", out)
+        self.assertIn("refs/remotes/origin/away/2026-11-23:AWAY-LOG.md", out)
 
 
 if __name__ == "__main__":
