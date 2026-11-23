@@ -185,19 +185,30 @@ def bd_prime_command(cwd: Path | None = None) -> str | None:
     return None
 
 
-def _hook_commands(settings: Path) -> list[str]:
+def _read_hooks(settings: Path) -> tuple[list[tuple[str, str, str]], str | None]:
+    """(event, matcher, command) of every command hook in a Claude settings file, whatever the event or matcher, and why
+    the file could not be read (None when it was read, or is simply not there). Reads only."""
     try:
         data = json.loads(settings.read_text())
-    except (OSError, ValueError):
-        return []
-    out: list[str] = []
+    except FileNotFoundError:
+        return [], None
+    except ValueError:
+        return [], "is not valid JSON"
+    except OSError as e:
+        return [], f"could not be read ({e.strerror or e})"
+    out: list[tuple[str, str, str]] = []
     hooks = data.get("hooks") if isinstance(data, dict) else None
-    for entries in (hooks.values() if isinstance(hooks, dict) else ()):
+    for event, entries in (hooks.items() if isinstance(hooks, dict) else ()):
         for e in entries if isinstance(entries, list) else ():
+            matcher = e.get("matcher") if isinstance(e, dict) and isinstance(e.get("matcher"), str) else ""
             for h in (e.get("hooks") if isinstance(e, dict) and isinstance(e.get("hooks"), list) else ()):
                 if isinstance(h, dict) and isinstance(h.get("command"), str):
-                    out.append(h["command"])
-    return out
+                    out.append((event, matcher, h["command"]))
+    return out, None
+
+
+def _hook_commands(settings: Path) -> list[str]:
+    return [command for _, _, command in _read_hooks(settings)[0]]
 
 
 def _bd_words(command: str) -> list[str] | None:
@@ -208,16 +219,19 @@ def _bd_words(command: str) -> list[str] | None:
     return words if len(words) >= 2 and words[0] == "bd" else None
 
 
-def committed_bd_hooks(repo: Path) -> list[tuple[str, bool]]:
+def committed_bd_hooks(repo: Path, include_prime: bool = True) -> list[tuple[str, bool]]:
     """Each `bd ...` command in the project's committed `.claude/settings.json` hooks, and whether bd accepts it. Only
     `bd prime` is run, with its own flags and no shell; any other bd command is probed with `bd <subcommand> --help`
-    (never the command itself). Nothing in the file is changed."""
+    (never the command itself); `include_prime=False` leaves `bd prime` commands out (prime_hooks judges those). Nothing
+    in the file is changed."""
     out = []
     for command in _hook_commands(repo / ".claude" / "settings.json"):
         words = _bd_words(command)
         if not words or re.search(r"[|&;<>$`()\\]", command):  # a shell command line: not probed, not judged
             continue
         if words[1] == "prime":
+            if not include_prime:
+                continue
             probe = words
         elif re.fullmatch(r"[a-z][a-z-]*", words[1]):
             probe = ["bd", words[1], "--help"]
@@ -227,27 +241,201 @@ def committed_bd_hooks(repo: Path) -> list[tuple[str, bool]]:
     return out
 
 
+# a command line that runs `bd prime`: at the start or after a shell operator, optionally behind wrappers (`then`, `exec`,
+# `timeout 10`, `nice`, `sh -c "`, `VAR=1`), with bd's global flags allowed; `echo "bd prime"` and `bd primer` are not it
+_WRAPPERS = (r"(?:(?:then|do|else|elif|exec|command|nice|time|nohup|env|\w+=\S*)\s+|timeout(?:\s+-\S+)*\s+\d\S*\s+"
+             r"|(?:ba|z|da)?sh\s+-\w*c\s+)*")
+_RUNS_PRIME = re.compile(r"(?:^|[;&|({!`\n]|\$\()\s*" + _WRAPPERS + r"[\"']?(?:\S*/)?bd\s+(?:-\S+\s+)*prime(?![\w.-])")
+OUR_HOOK_MATCHER = "startup|resume|clear|compact"  # the matcher of lane-control's SessionStart hooks (persona and bd prime)
+_SHELL_C = re.compile(r"(?:ba|z|da)?sh\s+-\w*c\s+$")
+_SIMPLE_MATCHER = re.compile(r"[\w|-]+")
+UNCHECKED = ("Not checked: managed settings, plugin hooks and hook scripts (a second `bd prime` there would run it twice).")
+
+
+def _open_quote(command: str, pos: int) -> int | None:
+    """The index of the quote that is still open at `pos` in a shell command line, or None (backslash escapes outside
+    single quotes are skipped)."""
+    quote, start, i = None, None, 0
+    while i < pos:
+        c = command[i]
+        if quote is None:
+            if c == "\\":
+                i += 1
+            elif c in "\"'":
+                quote, start = c, i
+        elif c == quote:
+            quote = None
+        elif c == "\\" and quote == '"':
+            i += 1
+        i += 1
+    return start if quote else None
+
+
+def runs_bd_prime(command: str) -> bool:
+    """Whether a hook command line runs `bd prime`: at the start or after a shell operator (see _RUNS_PRIME), and not as
+    text inside a quoted string (`echo "tip: bd ready; bd prime"`), unless that string is the argument of `sh -c`."""
+    pos = 0
+    while (m := _RUNS_PRIME.search(command, pos)):
+        q = _open_quote(command, m.start())
+        if q is None or _SHELL_C.search(command[:q]):
+            return True
+        pos = m.start() + 1
+    return False
+
+
+def _matcher_covers_startup(matcher: str) -> bool:
+    if matcher in ("", "*"):
+        return True
+    try:
+        return re.fullmatch(matcher, "startup") is not None
+    except re.error:
+        return False
+
+
+def _matchers_overlap(a: str, b: str) -> bool:
+    if a in ("", "*") or b in ("", "*"):
+        return True
+    if _SIMPLE_MATCHER.fullmatch(a) and _SIMPLE_MATCHER.fullmatch(b):
+        return bool(set(a.split("|")) & set(b.split("|")))
+    return True  # a regex: assume the two can match the same start
+
+
+@dataclass
+class PrimeHook:
+    layer: str  # "user" | "committed" | "local"
+    path: Path
+    event: str  # the hook event it is under: SessionStart, PreCompact, ...
+    matcher: str  # the entry's matcher ("" matches everything)
+    command: str
+    runs: bool | None  # a plain `bd prime ...` command: whether bd accepts it; None when it was not judged (a shell line,
+    # no bd to ask, or bd timed out)
+
+    @property
+    def covers_start(self) -> bool:
+        """Whether it runs when a new session starts: a SessionStart hook whose matcher matches `startup`."""
+        return self.event == "SessionStart" and _matcher_covers_startup(self.matcher)
+
+
+def claude_user_settings() -> Path:
+    """The user's Claude settings file: $CLAUDE_CONFIG_DIR/settings.json when that is set (absolute), else
+    ~/.claude/settings.json (the same rule as the harness adapter's). That is project-setup's environment, not
+    necessarily a session's: one started with another config folder (an Orca profile) reads that folder's file."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(base) if base and os.path.isabs(base) else Path.home() / ".claude") / "settings.json"
+
+
+def _scan_prime(repo: Path) -> tuple[list[PrimeHook], list[tuple[str, Path, str]]]:
+    out: list[PrimeHook] = []
+    problems: list[tuple[str, Path, str]] = []
+    probed: dict[str, bool | None] = {}  # one probe per distinct command per scan
+    have_bd = shutil.which("bd") is not None
+    layers = (("user", claude_user_settings()), ("committed", repo / ".claude" / "settings.json"),
+              ("local", repo / ".claude" / "settings.local.json"))
+    for layer, path in layers:
+        entries, why = _read_hooks(path)
+        if why:
+            problems.append((layer, path, why))
+        for event, matcher, command in entries:
+            if not runs_bd_prime(command):
+                continue
+            words = _bd_words(command)
+            plain = words is not None and words[1] == "prime" and not re.search(r"[|&;<>$`()\\]", command)
+            runs = None
+            if plain and have_bd:
+                if command not in probed:
+                    rc = _run(words, cwd=repo, timeout=30).returncode
+                    probed[command] = None if rc in (124, 127) else rc == 0  # a timeout or no start is not a rejection
+                runs = probed[command]
+            out.append(PrimeHook(layer, path, event, matcher, command, runs))
+    return out, problems
+
+
+def prime_hooks(repo: Path) -> list[PrimeHook]:
+    """Every hook that runs `bd prime`, in each Claude settings layer that applies to a session in `repo`: the user's
+    settings (where `bd setup claude --global` puts it), the project's committed .claude/settings.json and the
+    checkout's uncommitted .claude/settings.local.json; any event, any matcher (`covers_start` says which ones run when
+    a session starts), a plain command or a shell line such as `bd prime 2>/dev/null || true`. Only a plain `bd prime
+    ...` command is probed (run once, no shell); a shell line is present but not judged. Not scanned (UNCHECKED):
+    managed settings, plugin hooks, hook scripts. Reads only."""
+    return _scan_prime(repo)[0]
+
+
+def _is_ours(h: PrimeHook) -> bool:
+    """lane-control's own entry: `bd prime` under its matcher, in the checkout's uncommitted settings."""
+    return h.layer == "local" and h.event == "SessionStart" and h.matcher == OUR_HOOK_MATCHER and h.command == "bd prime"
+
+
+def _where(h: PrimeHook) -> str:
+    return f"{h.path} ({h.event}{f', matcher `{h.matcher}`' if h.matcher else ''})"
+
+
 def hook_notes(repo: Path) -> list[tuple[str, str, str]]:
-    """What the committed and local Claude settings say about the beads hook, as `say` triples: a committed hook bd
-    rejects (named, with the fix; it is the project's file, so it is never edited), a working one (lane-control adds
-    none of its own), and a duplicate (a committed working one plus one in the uncommitted settings)."""
+    """What the Claude settings layers say about the beads hook, as `say` triples: a settings file that is not valid JSON
+    (named, not checked), a hook that runs `bd prime` and that bd rejects (named, with the fix; never edited), a hook
+    on an event or matcher that does not cover a session's start (noted; it does not stop lane-control's own), a working
+    one already covering the start in the user's or the committed settings (lane-control adds none of its own), and a
+    duplicate: overlapping entries on one event. Says what is not scanned. No settings file is changed."""
     step = "beads-hook"
     out: list[tuple[str, str, str]] = []
-    committed = committed_bd_hooks(repo)
-    for command, runs in committed:
+    for command, runs in committed_bd_hooks(repo, include_prime=False):
         if not runs:
             out.append((step, "broken", f"{repo}/.claude/settings.json (committed) runs `{command}`, which this bd "
                                         "rejects, so every session start shows an error. It is the project's committed "
                                         "file, so setup does not edit it: change the command to `bd prime` in a lane."))
-    working = [c for c, ok in committed if ok and (_bd_words(c) or [""] * 2)[1] == "prime"]
-    if working:
-        out.append((step, "exists", f"committed settings.json already runs `{working[0]}` at session start; "
-                                    "lane-control adds no second one"))
-        mine = [c for c in _hook_commands(repo / ".claude" / "settings.local.json") if _bd_words(c)
-                and _bd_words(c)[1] == "prime"]
-        if mine:
-            out.append((step, "warning", f"`{mine[0]}` is also in {repo}/.claude/settings.local.json, so bd prime runs "
-                                         "twice at session start; remove the local one."))
+    hooks, problems = _scan_prime(repo)
+    for layer, path, why in problems:
+        out.append((step, "warning", f"{path} {why}, so it was not checked for a bd prime hook."))
+    for h in hooks:
+        if h.runs is not False:
+            continue
+        if h.layer == "committed":
+            out.append((step, "broken", f"{h.path} (committed) runs `{h.command}`, which this bd rejects, so every "
+                                        "session start shows an error. It is the project's committed file, so setup does "
+                                        "not edit it: change the command to `bd prime` in a lane."))
+        elif h.layer == "user":
+            out.append((step, "broken", f"{h.path} (your Claude settings) runs `{h.command}` ({h.event}), which this bd "
+                                        "rejects, so every session start shows an error. Setup does not edit your file: "
+                                        "change the command to `bd prime`."))
+        else:
+            out.append((step, "broken", f"{h.path} (the checkout's uncommitted settings) runs `{h.command}` "
+                                        f"({h.event}), which this bd rejects, so every session start shows an error. Setup "
+                                        "does not rewrite an entry it did not write: change the command to `bd prime`."))
+    live = [h for h in hooks if h.runs is not False]
+    for h in live:
+        if not h.covers_start and h.event != "PreCompact":  # bd's own layout pairs SessionStart with PreCompact: no noise
+            out.append((step, "noted", f"`{h.command}` also runs from {_where(h)}; that does not cover a new session's "
+                                       "start, so it does not count as the session hook."))
+    covering = [h for h in live if h.covers_start]
+    elsewhere = [h for h in covering if h.layer != "local"]
+    checked = (f"Checked: your Claude settings ({claude_user_settings()}; a session started with another "
+               "CLAUDE_CONFIG_DIR, such as an Orca profile, reads another folder), the committed .claude/settings.json "
+               f"and the uncommitted settings.local.json. {UNCHECKED}")
+    if elsewhere:
+        h = elsewhere[0]
+        more = len({x.path for x in elsewhere} - {h.path})
+        out.append((step, "exists", f"{h.path} already runs `{h.command}` ({h.event}) at session start; lane-control adds "
+                                    f"no second one" + (f" ({more} more file(s) run it too)" if more else "") + f". {checked}"))
+    elif covering:
+        h = covering[0]
+        whose = " (lane-control's hook)" if _is_ours(h) else ""
+        out.append((step, "exists", f"bd prime runs at session start from {h.path}{whose}. {checked}"))
+    # duplicates: entries on one event whose matchers overlap. Lane-control's own entry is left out of the comparison
+    # unless another entry still covers session start (then it is the redundant one): an overlap with an entry that
+    # does not cover the start (bd's `compact`, a hand-added `resume`) is not a duplicate, and removing ours would leave
+    # a session starting with no bd prime
+    others_cover_start = any(h.covers_start for h in live if not _is_ours(h))
+    pool = live if others_cover_start else [h for h in live if not _is_ours(h)]
+    for event in dict.fromkeys(h.event for h in pool):
+        same = [h for h in pool if h.event == event]
+        dup = [h for h in same if any(g is not h and _matchers_overlap(h.matcher, g.matcher) for g in same)]
+        if dup:
+            ours = next((h for h in dup if _is_ours(h)), None)
+            out.append((step, "warning", f"bd prime runs more than once at {event}, from "
+                                         + "; ".join(f"{_where(h)}: `{h.command}`" for h in dup)
+                                         + ". Remove all but one; setup edits none of these files."
+                                         + (f" To fix it, remove the entry in {ours.path} with matcher `{ours.matcher}` "
+                                            "(lane-control's own; it is not added again while another one covers session "
+                                            "start)." if ours else "")))
     return out
 
 
@@ -379,12 +567,14 @@ def adopt_layout(repo: Path, state: BeadsState, slug: tuple[str, str], yes) -> l
         return stop(f"this database runs in {mode} mode, so its data is not in the .beads folder (or a running server owns "
                     "it); only embedded databases are moved. Nothing was changed.")
     if dest.exists() or dest.is_symlink():
-        return stop(f"{dest} already exists, so it was not touched (never overwritten). If it is what an earlier move left "
-                    f"behind, delete it and the GitHub repo {full} (if it is empty), then re-run.")
+        return stop(f"{dest} already exists, so it was not touched (never overwritten). If it is what an earlier move of "
+                    f"this folder left behind, delete it and the GitHub repo {full}, then re-run. The earlier "
+                    f"move may already have pushed its git copy there, so look at that repo's last commit first.")
     if _run(["gh", "repo", "view", full], timeout=30).returncode == 0:
-        return stop(f"the GitHub repo {full} already exists. If it holds this project's beads, restore from it on a new "
-                    "machine instead; if an earlier move left it empty, delete it (and the beads folder it made) and "
-                    "re-run; or pass --beads-repo OWNER/NAME for another name.")
+        return stop(f"the GitHub repo {full} already exists. Look at its last commit. If it holds this project's beads "
+                    "and is current, restore from it on a new machine instead. If it is what an earlier move of this folder "
+                    "left (that move may have pushed its git copy, or only part of it), delete it and the beads folder that "
+                    "move made, then re-run. Or pass --beads-repo OWNER/NAME for another name.")
     if not yes(f"Move {repo}/.beads to a private repo {full} (copy to {dest}, push, link it)? Stop agents and lanes that "
                "write to beads first. [y/N] "):
         return [_line("skipped", "not moved at your answer; nothing was changed")]
@@ -469,6 +659,13 @@ SIGN_IN = ("gh is not signed in here: run `gh auth login` yourself and accept it
            "place by you; setup never reads or copies a token.")
 
 
+def _same_github_repo(origin: str | None, owner: str, name: str) -> bool:
+    """Whether a git origin URL is this GitHub repo, over https or ssh (`git@github.com:owner/name(.git)`); GitHub names
+    are not case-sensitive."""
+    m = _GITHUB.fullmatch(origin) if origin else None
+    return bool(m) and (m["owner"].lower(), m["name"].lower()) == (owner.lower(), name.lower())
+
+
 def _config_has_dolt_remote(beads_dir: Path) -> bool:
     try:
         return re.search(r"^\s*sync\.remote\s*:\s*\S", (beads_dir / "config.yaml").read_text(), re.M) is not None
@@ -514,9 +711,16 @@ def restore(repo: Path, slug: tuple[str, str], yes) -> list[tuple[str, str, str]
     if ls is None or ls.returncode != 0:
         return stop(f"gh can see {full} but git cannot read {url} without asking for a password. {_credentials_hint()}")
     reuse = dest.is_dir() and (dest / ".git").exists() and (dest / ".beads").is_dir() and \
-        _git_out(dest, "config", "--get", "remote.origin.url") in (url, url[:-4])
+        _same_github_repo(_git_out(dest, "config", "--get", "remote.origin.url"), owner, name)
     if (dest.exists() or dest.is_symlink()) and not reuse:
-        return stop(f"{dest} already exists and is not a checkout of {full}, so it was not touched; move it away.")
+        origin = _git_out(dest, "config", "--get", "remote.origin.url") if (dest / ".git").exists() else None
+        shown = re.sub(r"(?<=://)[^/@]*@", "", origin) if origin else None  # never print a token held in a URL
+        if _same_github_repo(origin, owner, name):
+            return stop(f"{dest} is a checkout of {full} but has no .beads folder (or it is not a folder), so there is "
+                        "nothing to link or restore and it was not touched; move it away.")
+        why = (f" (its origin is {shown}, which is not recognised as {full})" if shown
+               else " (it has no origin I can read)" if (dest / ".git").exists() else "")
+        return stop(f"{dest} already exists and is not a checkout of {full}{why}, so it was not touched; move it away.")
     if yes is None:  # no terminal: the read-only checks above have said what is in the way; nothing is changed
         return [_line("would", f"{plan}. Run project-setup in a terminal to do it on your yes; nothing was changed.")]
     if not yes(f"Restore beads: {plan}? [y/N] "):

@@ -12,9 +12,21 @@ Adapter: `adapter.py`. Orca agent id `claude`; Orca passes `--model` and `--effo
 - Beads session hook: `install_beads_hook` adds `bd prime` as its own `SessionStart` entry (same matchers) to the same
   uncommitted file, once; `bd prime --hook-json` does not exist in bd 1.0.4, and `--memories-only` is for hooks that
   fire at compaction only, so the plain command is used. Not added when bd is missing or `bd prime` fails, nor when
-  the committed `.claude/settings.json` already has a working `bd prime` hook (two would run it twice). A committed
-  `bd` hook that fails is named with the fix and never edited (`core/beads.py` `hook_notes`). Note that `bd init`
-  itself writes a `bd prime` hook into the `.claude/settings.json` of the folder it runs in.
+  a settings layer already runs `bd prime` as a `SessionStart` hook whose matcher covers `startup` (`core/beads.py`
+  `prime_hooks`: the user's `settings.json`, where `bd setup claude --global` puts it, the committed
+  `.claude/settings.json` and the uncommitted `settings.local.json`; a plain command or a shell line such as
+  `bd prime 2>/dev/null || true`; `bd prime` quoted inside other text, such as `echo "tip: bd prime"`, does not
+  count): two would run it twice. A `bd prime` on another event (`Stop`) or for other matchers only (`compact`,
+  `resume`) is noted and does not stop ours, since a new session would start with no beads context; bd's own
+  `PreCompact` one is not noted. Overlapping entries on one event are reported as a duplicate, naming each. The advice
+  points at ours (by its matcher) only while another entry still covers the start; an overlap with one that does not
+  is not a duplicate.
+  A `bd prime` hook that fails is named with the fix; no settings file but the uncommitted one is ever written.
+  What is not scanned, and said in the setup output: managed settings, plugin hooks and hook scripts (one of those
+  running `bd prime` too runs it twice), and the user's file is the one under project-setup's `CLAUDE_CONFIG_DIR`
+  (else `~/.claude`), so a session started with another folder, such as an Orca profile, reads that folder instead.
+  A settings file that is not valid JSON is named and not checked. Note that `bd init` itself writes a `bd prime`
+  hook into the `.claude/settings.json` of the folder it runs in.
 - Size: Claude keeps at most 10,000 characters of a hook's output (over that it shows a 2,000-character preview and
   does not ask the session to read the rest). A persona over about 9,800 bytes is printed as a first line telling
   the session to read the whole file now, by path, then as much of it as fits, cut at a line end.

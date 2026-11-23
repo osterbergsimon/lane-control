@@ -21,7 +21,7 @@ NAME = "claude"
 STATUS = "in use"
 ORCA_AGENT_ID = "claude"
 MODEL_FLAGS = frozenset({"model", "effort"})
-MATCHER = "startup|resume|clear|compact"
+MATCHER = beads.OUR_HOOK_MATCHER  # one place, so beads.hook_notes can tell our own entry from another
 HOOK_TAIL = ("core", "harnesses", "persona-hook.sh")
 
 
@@ -92,10 +92,13 @@ def install_persona_hook(checkout: Path) -> list:
 def install_beads_hook(checkout: Path) -> list:
     """Add `bd prime` as a SessionStart hook (same matchers as the persona hook) to <checkout>/.claude/settings.local.json
     once, as its own entry; nothing else in the file changes. Nothing is added when bd is missing or has no working
-    `bd prime`, or when the committed .claude/settings.json already has a working `bd prime` hook (two would run it
-    twice: core/beads.py hook_notes says so). The committed file is never touched. Returns change lines."""
+    `bd prime`, or when any settings layer (the user's, the committed .claude/settings.json, this file) already runs
+    `bd prime` as a SessionStart hook whose matcher covers `startup`, as a plain command or a shell line (two would
+    run it twice: core/beads.py hook_notes says so). A `bd prime` on another event (PreCompact, Stop) or for other
+    matchers only (`compact`, `resume`) does not stop it: a session would start with no beads context. Only this file is
+    ever written. Returns change lines."""
     checkout = Path(checkout)
-    if any(runs and (command.split() + [""])[1] == "prime" for command, runs in beads.committed_bd_hooks(checkout)):
+    if any(h.covers_start and h.runs is not False for h in beads.prime_hooks(checkout)):
         return []
     command = beads.bd_prime_command(checkout)
     if command is None:
