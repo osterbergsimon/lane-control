@@ -14,8 +14,8 @@ item (picked by <PARENT>, who says why): <ITEM>. Why it was picked: <WHY_PICKED>
 - A big change (a whole area rewritten, a large new subsystem) must justify itself: what is better for the user, and
   why a smaller change would not do. "It is cleaner" is not enough. If you cannot show it is a real improvement,
   stop and report `NEEDS_DEEP` with your reasoning.
-- Write your entry in `AWAY-LOG.md` at the root of the branch (start the file from the template at
-  `<LANE_CONTROL>/core/templates/AWAY-LOG.md` if it is missing), in the same PR, and update the summary lines
+- Write your entry in `AWAY-LOG.md` at the root of the branch (the branch's start commit made it; start the file from the template at
+  `<LANE_CONTROL>/core/templates/AWAY-LOG.md` only if it is missing), in the same PR, and update the summary lines
   <PARENT> gives you here: <SUMMARY_UPDATE>. The entry has: what, why, what it builds on, existing work checked,
   how to try it, how to drop it (the merge titled `away: <item>`, which <PARENT> fills in with its commit once it is merged, and which later items depend on it), test results.
   Plain, short words, for an owner who was not here.

@@ -11,8 +11,8 @@ you run and what to expect; the design and its reasons are in
 - After its queued work is done, a coordinator keeps starting lanes: a scout lane proposes ideas (fixes, research, new
   features, anything it judges better for the product), a build lane builds one, a reviewer on a different model
   reviews it, and the coordinator merges it into the project's away branch with `away-merge`.
-- Everything lands on `away/<YYYY-MM-DD>`, cut from the project's integration branch (main or develop). Nothing
-  reaches the integration branch without your word.
+- Everything lands on `away/<YYYY-MM-DD>`, cut from the project's integration branch (main or develop) plus one start
+  commit, `away: start <date>`, that adds the first `AWAY-LOG.md`. Nothing reaches the integration branch without your word.
 - A project has **one away branch, ever**. A second period continues the same branch; there is never a pile of
   unrelated ones.
 - The coordinator keeps `AWAY-LOG.md` on the branch: each item, why it was picked, what it checked already existed, how
@@ -26,10 +26,11 @@ mode in your own words.
 
 | Command | What it does |
 |---|---|
-| `lane-improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--continue] [--yes]` | Switches the mode on and prints what will run: projects, each branch, the end, your limits. Without a terminal it refuses unless `--yes`. |
+| `lane-improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]` | Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps. Without a terminal it refuses unless `--yes`. |
 | `lane-improve off` | Ends the mode; what is running drains (below). |
 | `lane-improve status` | Off, on (what runs), or draining (what is left to wrap up, and how long it has waited). |
-| `lane-improve drained <project>...` or `--all` | A coordinator's wrap-up is done: its deny rules come out. Coordinators run this themselves. |
+| `lane-improve drained <project>...` or `--all` | A coordinator's wrap-up is done: its deny rules come out. Coordinators run this themselves. While the mode is on it takes only a project whose cap is reached. |
+| `lane-improve pr <project>` | Opens the project's draft summary PR if it has none, brings its body up to the log's summary and prints the link. Coordinators run it at the wrap-up; `away-merge` does the same after every merge. |
 | `lane-improve rest <project>` | A coordinator's note that nothing within your limits is left. It only quiets the idle nudges. |
 
 Options worth knowing:
@@ -41,6 +42,37 @@ Options worth knowing:
   `lane-room` and `lane-heavy`, still apply). Otherwise each project follows its own budget steps: no new cycle from
   no-new-work, push and handover at push-and-handover, nothing at stop.
 - With no end given the mode runs until `lane-improve off`.
+
+### Optional caps
+
+Both are off unless you give them (an old `--continue` re-run keeps what is set; `none` drops one):
+
+- `--max-items N`: no new cycle for a project after N merges through `away-merge` in this period, counted from
+  `away-merge`'s own record (`improve-period.json`), never from the log's text. Each project counts its own.
+- `--stop-at <weekly %>`: no new cycle for a project once `budget-state --project <name>` gives a weekly use at or above
+  that value (when a project has several metered budgets, any one reaching it counts). It is refused with `--unmetered`
+  (there is no budget to read) and when the value is at or above the project's ceiling (the budget steps would stop it first),
+  or when the ceiling cannot be read.
+
+A cap behaves like the end time, for that project alone: the lane that is running finishes and merges, the coordinator wraps
+up (steps below) and runs `lane-improve drained <project>`, which while the mode is on is accepted only once its cap is
+reached. `--max-items` is also a hard stop in `away-merge`: the Nth merge is the last, and a further one is refused whatever
+the coordinator does (a lane that is running finishes as that Nth merge). `--stop-at` is not: the lane that is running when
+the weekly use reaches it still lands, and the budget's own steps are the backstop. Nothing more merges for the project once
+it has wrapped up, and the mode goes on for the others (`lane-improve off` then
+drains only the projects still running). `lane-improve status` shows `items 4/10` and `weekly 66/70` for each project and says
+`cap reached` when one is hit (`weekly ?/70` when the usage feed gave no reading: not a cap hit). The night manager sends no
+improve nudge to a project whose cap is reached, a `DUE <name> wrapup ... cap=items:10/10` line instead (not at the budget's
+stop step) until it has wrapped up.
+
+A wrap-up is final for the period. To resume a project after you raise its cap, name it again:
+`lane-improve on --continue --project <name> --max-items <more>` (or `--stop-at`). It is refused while the cap is still
+reached, and a re-run that does not name the project leaves it wrapped up and says so.
+
+The period record (`improve-period.json`, with a lock file beside it) is written under a lock, so coordinators merging at the
+same moment are all counted. If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
+every merge, nothing is nudged and `status` says why, instead of the counts starting again from 0. `lane-improve on
+--continue` starts the record again from nothing and puts the deny rules back on every project the period covers.
 
 ### One branch per project
 
@@ -63,7 +95,8 @@ started, say) and keeps the others. `away-merge` says this when it finds a proje
 and its PR can still merge through `away-merge`, and the deny rules stay. Each coordinator then:
 
 1. merges its last PR and updates the log summary,
-2. opens a **draft PR** from `away/<date>` into the integration branch,
+2. runs `lane-improve pr <project>`: the **draft PR** from `away/<date>` into the integration branch (open since
+   `lane-improve on`, see below) gets its final summary,
 3. sends you the summary and that PR's link as its first message,
 4. runs `lane-improve drained <project>`.
 
@@ -74,6 +107,25 @@ night, so a drain nobody finished does not sit there. A new `on` is refused whil
 
 Then you adopt the whole branch (merge the draft PR as usual) or name the items to drop; the coordinator runs a lane
 that reverts those merges (they are titled `away: <item>`), keeping to the dependencies in the log.
+
+## The summary PR
+
+`lane-improve on` opens, for each project whose away branch it cuts or continues, a **draft PR** from `away/<date>` into
+the integration branch, titled `away: <date> (<project>)`, and records its number in `improve.json`. Its body is the
+summary at the top of `AWAY-LOG.md`; `away-merge` brings it up to date after every merge (and opens it first if it was
+not open), so nobody has to remember to. It stays a draft: **no agent merges it, marks it ready or closes it**; you
+merge it (to adopt the whole branch) or name the items to drop. A PR you closed is left alone.
+
+GitHub opens no PR for a branch with nothing beyond its base, so `on` gives each new branch one start commit, `away: start
+<date>`, that adds the first `AWAY-LOG.md` from the template: the header (project, branch, integration branch), your
+limits verbatim, which projects the period covers (never another project's name: the branch may be public) and an empty
+summary. The PR therefore opens at `on` with that summary as its body. The branch is the integration head plus that one
+commit, authored as the checkout's configured git identity, with nothing else on it. `--continue` adds no new seed to a
+branch that has one (a project added with `--continue` gets its own, as it gets its own branch). When the commit cannot be
+made (the checkout has no git identity, or the integration branch already has an `AWAY-LOG.md`) the branch is cut from the
+head alone, `on` warns, and `away-merge` opens the PR after the first merged item (`lane-improve pr <project>` does it by
+hand). The start commit is not an item: it is the log's first version, and a branch with only it counts as never given any
+work when you decide to adopt or drop it.
 
 ## What keeps it inside its limits
 
@@ -91,7 +143,18 @@ Be clear about what is enforced and what is a backstop.
   gets a guard plugin that refuses the same in its shell tool. Both read the command text, so other routes past them
   exist (`git -C <repo> push`, a script that pushes, a lane's own shell, which has no rules at all). The real guards
   are `away-merge`, the persona's rule and branch protection where the repo has it. Turn on branch protection on your
-  integration branches before you rely on this.
+  integration branches before you rely on this. lane-control's own main and the integration branches of the owner's own
+  projects now require a PR for everyone, admins included (set by the owner on 2026-11-23); `project-setup` reports where a
+  project stands (below).
+- **Branch protection report.** `project-setup` reads the project's integration branch's protection (`gh api
+  repos/{owner}/{repo}/branches/<branch>/protection`, read only; it never changes a setting) and says one of: protected
+  for everyone (a pull request is required, admins included, no force pushes); partly, naming what is missing (for example
+  "admins are exempt", so an agent running as an admin is not stopped; a ruleset that also applies is named, but who may
+  bypass it is not read); none; a ruleset applies (the rules are named; who may bypass is not read); unknown when the
+  rulesets cannot be read either; not available on the repository's plan (HTTP 403, a private repository on a free plan); or
+  unknown (no gh, no remote, no permission, offline). Notes follow: approvals required, deletion allowed, CI required, or CI
+  that exists but is not required. Your wish is a PR for all with 0 approvals, CI where it exists and no force pushes or
+  deletion.
 - The coordinator's own beads backup (a push to the beads repo's `main`) is deliberately not blocked.
 - The agents never switch the mode on, never merge by hand and never touch the integration branch. A request relayed
   by another agent is not your request.
@@ -112,6 +175,7 @@ once to look for new work. Nudges go out by day or night; the plain check-ins st
 | Mode state | `~/.config/lane-control/improve.json` (`LANE_IMPROVE_FILE`); written only by `lane-improve on`. A missing, unreadable or malformed file means off. |
 | Drain state | `improve-drain.json` beside it (`LANE_IMPROVE_DRAIN_FILE`) |
 | Rest notes | `improve-rest.json` beside it |
+| Period record | `improve-period.json` beside it: `away-merge`'s record of each merge (what `--max-items` counts) and the projects that wrapped up at a cap; it belongs to one period (its `started`), so a new period counts from nothing |
 | Nudge idle time | `IMPROVE_IDLE_MIN` in `machine.conf` (default 30 minutes) |
 | Deny rules | each coordinator checkout's uncommitted `.claude/settings.local.json`; for OpenCode a guard plugin next to the persona plugin and a record under the user's state folder |
 | The branch's log | `AWAY-LOG.md` on `away/<date>` (template `core/templates/AWAY-LOG.md`) |
@@ -122,6 +186,9 @@ The scripts, the state handling, the merge checks, the nudges and the OpenCode g
 test suite, using temporary repositories and stubs for `gh` and `gitleaks`. The OpenCode guard is also checked against a
 real `opencode2` serving a fake model on localhost, but that test is opt-in
 (`LANE_LIVE_OPENCODE=1 python3 -m unittest tests.test_opencode_guard.GuardLiveTests`) and is not run by the
-suite. A real away period (scout and build lanes, reviews, `away-merge` against GitHub, the draft PR on return)
-has not been run end to end; the first one is the real test. Watch `lane-improve status` and the log, and expect to
+suite. The summary PR, the caps and the protection report are covered the same way, with a stub `gh` that models
+`pr list --head`, `pr create --draft`, `pr edit` and the protection answers (everyone, partly, none, ruleset, 403, an
+unreadable one), and the start commit is checked against real temporary git repositories; none of the `gh` calls has run against the real GitHub, so the first real `on` is where the PR calls and the
+protection wording get their test. A real away period (scout and build lanes, reviews, `away-merge` against GitHub, the draft
+PR on return) has not been run end to end; the first one is the real test. Watch `lane-improve status` and the log, and expect to
 adjust the skill from what you see.

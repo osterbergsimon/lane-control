@@ -122,7 +122,8 @@ ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop sh
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-shots")  # the library first: a new tool never sees an old one
 OLD_PATH_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # kept as links in scripts/ for machines
-HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "scripts/project-setup",
+HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "core/improve.py", "core/protection.py",
+              "scripts/project-setup",
               *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
               "core/templates/frontend-brief.md", "core/templates/DESIGN.md", "core/templates/away-innovation.md",
               "core/templates/away-scout-brief.md", "core/templates/away-build-brief.md", "core/templates/AWAY-LOG.md",
@@ -635,6 +636,26 @@ def load_beads():
         sys.path.insert(0, core)
     import beads
     return beads
+
+
+def branch_protection_report(repo):
+    """Says plainly how the project's integration branch is protected (core/protection.py): protected for everyone,
+    partly (what is missing), none, a ruleset, not available on the plan, or unknown. Read-only: no setting is changed,
+    and nothing here stops a run."""
+    core = str(HERE / "core")
+    if core not in sys.path:
+        sys.path.insert(0, core)
+    import improve
+    import protection
+    if not shutil.which("gh"):
+        return say("branch-protection", "unknown", "gh is not installed, so the integration branch's protection is not read")
+    if run(["git", "remote", "get-url", "origin"], cwd=repo, check=False).returncode != 0:
+        return say("branch-protection", "unknown", "the project has no origin remote, so there is no branch to read")
+    try:
+        branch = improve.integration_branch(repo)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        return say("branch-protection", "unknown", f"the integration branch is not known ({e})")
+    say("branch-protection", *protection.report(repo, branch))
 
 
 def beads_report(repo, override=None):
@@ -3386,6 +3407,7 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
         elif why:
             raise Fail(f"{why}. Nothing was changed")
         beads_report(repo, a.beads_repo)
+        branch_protection_report(repo)
         validate_settings(repo, settings(repo))
         drop_design_lead_settings(repo)
         if a.desktop_environment:  # this box is paired with that machine (direction 2); the coordinator reads it
