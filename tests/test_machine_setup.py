@@ -456,6 +456,23 @@ class NightPrecheckTests(MachineTest):
         r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
         self.assertEqual(r.stdout, "OFFLINE r1 repo=o/r\n")  # a runner down still counts
 
+    def test_a_machine_with_only_unmetered_budgets_is_never_unknown(self):
+        # lc-48m: no usage feed at all (e.g. only a self-hosted gateway): caps are the limit, check-ins go on
+        co = self.claude_coordinator("proj", 90)
+        self.conf(f"proj {co} claude proj coordinator")
+        self.playbook(None, None, extra='BUDGET_USAGE=( [main]="" [cheap]="" )')
+        s = self.run_script("budget-state", "--project", "proj")
+        self.assertEqual((s.returncode, s.stdout), (0, ""), s.stderr)
+        self.assertIn("no metered budget", s.stderr)
+        self.assertNotIn("unknown", s.stderr)
+        r = self.run_script("night-precheck", env={"LANE_HOUR": "2"})
+        self.assertEqual((r.returncode, r.stdout), (0, "DUE proj idle=90min\n"), r.stderr)
+        self.assertNotIn("unknown", r.stdout + r.stderr)
+        self.assertFalse((self.home / ".cache" / "lane-control" / "night" / ".budget-unknown").exists())
+        m = self.run_script("machine-check")
+        self.assertNotIn("unknown", m.stdout + m.stderr)
+        self.assertFalse(self.marker().exists())
+
     def test_unknown_budget_said_once_per_night(self):
         co = self.claude_coordinator("proj", 90)
         self.conf(f"proj {co} claude proj coordinator")
@@ -1447,6 +1464,7 @@ class MachineSetupTests(BudgetTest):
         self.assertIn("usage feed: missing", r.stdout)
         self.assertIn("status line", r.stdout)
         self.assertIn("night check-ins stay off", r.stdout)
+        self.assertIn("a machine with no metered budget needs none", r.stdout)
 
     def test_starts_claude_machine_coordinator(self):
         r = self.setup_machine()
@@ -1484,11 +1502,18 @@ class MachineSetupTests(BudgetTest):
         (create,) = self.creates(["terminal", "create"])
         self.assertIn("opencode2 --standalone --auto", create[create.index("--command") + 1])
         self.assertTrue((self.home / ".config" / "opencode" / "plugins" / "lane-persona.js").is_file())
-        for bad in ("opencode/opencode-go/deepseek-v4.1-flash", "opencode/opencode/big-pickle", "pi/x", "claude/"):
+        for bad in ("pi/x", "claude/", "nosuch/x"):
             with self.subTest(bad=bad):
                 r = self.setup_machine("--machine-coordinator", bad)
                 self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("lane-tier", self.setup_machine("--machine-coordinator", "opencode/opencode-go/x").stderr)
+
+    def test_any_opencode_provider_is_taken_for_the_machine_coordinator(self):
+        # owner 2026-11-24: no refusal by model or provider, OpenCode's hosted ones included
+        for spec in ("opencode/opencode-go/deepseek-v4.1-flash", "opencode/opencode/big-pickle", "opencode/litellm/chat"):
+            with self.subTest(spec=spec):
+                r = self.setup_machine("--machine-coordinator", spec, "--no-start")
+                self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+                self.assertNotIn("refused", r.stderr)
 
     def test_running_coordinator_not_restarted(self):
         self.orca({"terminals": [{"handle": "term_1", "title": "machine coordinator", "worktreePath": str(self.folder)}]})
@@ -1527,6 +1552,32 @@ class MachineSetupTests(BudgetTest):
                 self.assertIn("--enabled", c)
                 self.assertNotIn("--apply", opt("--prompt"))
         self.assertIn("night-manager.md", a["night manager"][a["night manager"].index("--prompt") + 1])
+
+    def test_automations_take_the_opencode_form_on_a_machine_without_claude(self):
+        # lc-mrz: Orca takes no extra agent args for OpenCode, so the model is OpenCode's own default
+        for args in (["--automation-provider", "opencode"], ["--machine-coordinator", "opencode/litellm/chat"]):
+            with self.subTest(args=args):
+                self.orca({})
+                r = self.setup_machine("--no-start", *args)
+                self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+                a = self.automations()
+                self.assertEqual(set(a), {"night manager", "lane sweep", "machine check"})
+                for name, c in a.items():
+                    self.assertEqual(c[c.index("--provider") + 1], "opencode2", name)
+                    self.assertFalse([x for x in c if x.startswith("--extra-agent-args")], name)
+                self.assertIn("OpenCode's own default model", r.stdout)
+                if "--machine-coordinator" in args:
+                    self.assertIn("litellm/chat", r.stdout)  # named, so the owner can make it OpenCode's default
+
+    def test_the_automation_provider_flag_wins_and_is_checked(self):
+        r = self.setup_machine("--no-start", "--machine-coordinator", "opencode/litellm/chat",
+                               "--automation-provider", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        for c in self.automations().values():
+            self.assertEqual(c[c.index("--provider") + 1], "claude")
+            self.assertIn("--extra-agent-args=--model sonnet", c)
+        r = self.setup_machine("--automation-provider", "pi")
+        self.assertEqual(r.returncode, 2)
 
     def test_rerun_is_idempotent(self):
         self.setup_machine()
