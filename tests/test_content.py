@@ -1991,9 +1991,18 @@ class LaneCloseContentTests(unittest.TestCase):
             for cause in ("rules-off", "project-off", "unchanged", "no-rule-matched"):
                 self.assertIn(f"`{cause}`", t, (name, cause))
             self.assertIn("`reason: merged`", t, name)
-            self.assertIn("Delete released orchestration workers", t, name)
+            self.assertIn("Delete released orchestration worker workspaces", t, name)
+            self.assertIn("recommended", t, name)
+            self.assertIn("only once Git finds its HEAD in the default branch or a merged review", t, name)
+            self.assertIn("an unmerged lane's worktree stays", t, name)
+            self.assertNotIn("released only after", t, name)
+            self.assertNotIn("is the owner's to turn on too", t, name)
         d = flat(ROOT / "docs" / "orca-cleanup.md")
-        self.assertIn("Delete released orchestration workers", d)
+        self.assertIn("Delete released orchestration worker workspaces", d)
+        self.assertIn("**recommended**", d)
+        self.assertIn("only once Git finds its HEAD in the default branch or a merged review", d)
+        self.assertNotIn("released only after", d)
+        self.assertNotIn("Delete released orchestration workers", d)
         self.assertIn("depends on Orca's PR cache", d)
 
     def test_the_fallback_checks_the_worktree_before_it_closes_a_terminal(self):
@@ -2309,6 +2318,50 @@ class AwayImproveContentTests(unittest.TestCase):
         self.assertIn('"away-improve"', src)
         for f in ("away-scout-brief.md", "away-build-brief.md", "away-innovation.md", "away-entry.md"):
             self.assertIn(f, src, f)
+
+
+class ScratchHomeAndMachineConfContentTests(unittest.TestCase):
+    """lc-7x8: a scratch HOME alone, never with XDG dirs; lc-cfo: an older machine creates machine.conf."""
+
+    def test_reviewer_and_debugger_override_home_alone(self):
+        for name in ("reviewer.md", "debugger.md"):
+            t = flat(NATIVE / name)
+            self.assertIn("scratch `HOME`", t, name)
+            self.assertIn("override `HOME` alone", t, name)
+            self.assertIn("do not also set `XDG_STATE_HOME` or another `XDG_*` dir", t, name)
+            self.assertIn("`test_project_pause`", t, name)
+
+    def test_setup_says_an_older_machine_creates_machine_conf(self):
+        t = flat(NATIVE_DIR / "setup.md")
+        for needle in ("before `machine-setup` existed", "has no `machine.conf`",
+                       "`machine-setup`", "from the example", "`lane-improve`", "`night-precheck`"):
+            self.assertIn(needle, t, needle)
+
+    def test_setup_names_the_file_not_its_columns(self):
+        i = flat(NATIVE_DIR / "setup.md")
+        note = i[i.index("has no `machine.conf`"):][:260]
+        self.assertNotIn("COORDINATORS", note)
+
+    def test_no_text_tells_an_agent_to_release_a_worker_when_done(self):
+        """Review round 1 (M1): a worker is released after its merge, never at its worker_done; the one earlier release
+        (a dispatch that can no longer report) says Orca keeps an unmerged lane's worktree."""
+        files = [*NATIVE.glob("*.md"), NATIVE_DIR / "setup.md", NATIVE_DIR / "templates" / "agents-section.md", NATIVE_SKILL]
+        for path in files:
+            t = flat(path)
+            self.assertNotRegex(t, r"(?i)\brelease[^.]{0,60}\bwhen (their task is |it is |they are )?done", path.name)
+        self.assertIn("release a worker after its merge", flat(NATIVE_DIR / "setup.md"))
+        self.assertIn("Release a worker after its merge", flat(NATIVE_DIR / "templates" / "agents-section.md"))
+        c = flat(NATIVE / "coordinator.md")
+        i = c.index("`worker_identity_changed`")
+        seg = c[i:i + 700]
+        self.assertIn("orchestration worker-abandon", seg)
+        self.assertIn("orchestration worker-release", seg)
+        self.assertIn("Orca keeps an unmerged lane's worktree", seg)
+
+    def test_setup_says_it_reports_the_released_workers_rule(self):
+        t = flat(NATIVE_DIR / "setup.md")
+        self.assertIn('the recommended rule "Delete released orchestration worker workspaces"', t)
+        self.assertIn('"cannot tell"', t)
 
 
 if __name__ == "__main__":

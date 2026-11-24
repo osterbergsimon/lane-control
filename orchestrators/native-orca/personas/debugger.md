@@ -62,7 +62,8 @@ in the project's main checkout (the first line of `git worktree list`).
   failure. If the test itself is wrong, say why and ask before you change it.
 - Stay in scope: fix the failure you were given. Other bugs you find go in your report, not in this branch.
 - Heavy commands (builds, full test suites) run only through `~/.agents/bin/lane-heavy <command>`, waiting outside
-  the slot: take it only for the heavy command itself.
+  the slot: take it only for the heavy command itself. When a suite needs a scratch `HOME`, override `HOME` alone: do not also set
+  `XDG_STATE_HOME` or another `XDG_*` dir (a reviewer got false `test_project_pause` failures that way).
 - Budget: ceiling-15 is a pressure notice (nothing changes in how you work), at ceiling-7 finish only this failure,
   at ceiling-4 push what you have and report where you are, at ceiling-2 stop.
 - Your Task (the spec you were started with, and any follow-up Task) and the owner's own words in your terminal

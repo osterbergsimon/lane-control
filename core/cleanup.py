@@ -2,7 +2,8 @@
 workspaces"), and let GitHub delete a merged branch (design: lc-a6d, docs/orca-cleanup.md).
 
 Report only, for Orca: `orca-ide workspace cleanup preview --json` removes nothing, and lane-control never edits
-Orca's settings or files; it says where the owner turns the rule on. GitHub's "Automatically delete head
+Orca's settings or files; it says where the owner turns the rules on: "Delete merged workspaces" and the
+recommended "Delete released orchestration worker workspaces". GitHub's "Automatically delete head
 branches" is set only when handed the owner's yes (`yes` is a function that asks; None means no terminal).
 Every function returns `say` triples `(step, what, detail)` (project-setup's message shape); `what` in PROBLEMS
 means the owner should read it. A missing or failing CLI is a `skipped` line, never an exception.
@@ -13,12 +14,14 @@ import subprocess
 from pathlib import Path
 
 ORCA_STEP = "orca cleanup"
+WORKERS_STEP = "orca cleanup workers"
 GITHUB_STEP = "github"
 PROBLEMS = frozenset({"off", "check", "missing", "warning"})
 TIMEOUT = 60
 
 # The labels are Orca 1.4.268's own (Settings -> Workspace Cleanup).
 WHERE_RULE = "Settings -> Workspace Cleanup -> Cleanup rules -> 'Delete merged workspaces'"
+WHERE_WORKERS = "Settings -> Workspace Cleanup -> Cleanup rules -> 'Delete released orchestration worker workspaces'"
 WHERE_PROJECT = ("the project's own page in Settings, its 'Workspace cleanup' section: 'Use global' follows "
                  "Settings -> Workspace Cleanup, 'Custom' sets rules for the project alone, 'Off' stops cleanup there")
 NOT_CHANGED = "lane-control does not change Orca's settings"
@@ -97,13 +100,72 @@ UNKNOWN_DETAIL = ("(no lane worktree yet, and the preview shows no rule for a ma
                   f"once a lane exists, or look in Orca: {WHERE_RULE})")
 
 
+WORKERS_WHY = ("lane-control lanes run as supervised workers, and Orca removes a released worker's workspace only once "
+               "Git finds its HEAD in the default branch or a merged review, so an unmerged lane's worktree stays and a "
+               "merged lane's goes without Orca's pull request cache")
+WORKERS_ON = "(the released-workers rule is on: a released worker's row matched it)"
+
+
+def _workers_rows(rs) -> bool:
+    """True when a row of these shows `reason: orchestration-worker`, the only sign the preview gives that the rule is on
+    (Orca names a row's first matching rule, merged before released workers, and a project with no released worker shows
+    nothing either way)."""
+    return any(_evaluation(r).get("reason") == "orchestration-worker" for r in rs)
+
+
+def _workers_off(status: str, names: str) -> str:
+    if status == "project-off":
+        return (f"(cleanup is off for this project{names}, so the recommended rule 'Delete released orchestration "
+                f"worker workspaces' is off too; {WORKERS_WHY}. Turn cleanup on for the project: {WHERE_PROJECT}, "
+                f"then this rule: {WHERE_WORKERS}. {NOT_CHANGED})")
+    return (f"(the recommended rule 'Delete released orchestration worker workspaces' is off{names}; {WORKERS_WHY}. "
+            f"Turn it on in Orca: {WHERE_WORKERS}. {NOT_CHANGED})")
+
+
+def _workers_unsure(names: str) -> str:
+    return (f"(cannot tell whether the recommended rule 'Delete released orchestration worker workspaces' is on{names}: "
+            f"the preview shows it only on a released worker's row; {WORKERS_WHY}. Turn it on at {WHERE_WORKERS} if it "
+            f"is not on already. {NOT_CHANGED})")
+
+
+def _workers_lines(projects, repo_ids=None) -> list:
+    """The released-workers rule, per project (`projects`: repoId -> (name, rows)); `repo_ids` limits it to those."""
+    on, off, project_off, unsure = [], [], [], []
+    for rid, (name, rs) in projects.items():
+        if repo_ids is not None and rid not in repo_ids:
+            continue
+        status = _status(rs)
+        if _workers_rows(rs):
+            on.append(name)
+        elif status == "rules-off":
+            off.append(name)
+        elif status == "project-off":
+            project_off.append(name)
+        else:
+            unsure.append(name)
+    one = repo_ids is not None  # one project: no names, as the merged line has none
+    nm = lambda names: "" if one else f" for {', '.join(sorted(names))}"  # noqa: E731
+    lines = []
+    if on:
+        lines.append((WORKERS_STEP, "exists", WORKERS_ON if one else f"{WORKERS_ON[:-1]}; projects: {', '.join(sorted(on))})"))
+    if off:
+        lines.append((WORKERS_STEP, "off", _workers_off("rules-off", nm(off))))
+    if project_off:
+        lines.append((WORKERS_STEP, "off", _workers_off("project-off", nm(project_off))))
+    if unsure:
+        lines.append((WORKERS_STEP, "check", _workers_unsure(nm(unsure))))
+    return lines
+
+
 def orca_report(orca: str, repo=None, timeout: float = TIMEOUT) -> list:
-    """What Orca's cleanup rules would do for lane worktrees. With `repo` (a project's checkout) only that project;
-    without it, every project Orca lists (the machine-wide part, for machine-setup)."""
+    """What Orca's cleanup rules would do for lane worktrees: the merged rule (`ORCA_STEP`) and the recommended
+    released-workers rule (`WORKERS_STEP`). With `repo` (a project's checkout) only that project; without it, every
+    project Orca lists (the machine-wide part, for machine-setup)."""
     rows, why = _rows(orca, timeout)
     if rows is None:
-        return [(ORCA_STEP, "skipped", f"(`orca-ide workspace cleanup preview` could not be read: {why}; the "
-                                       f"merged rule is not checked. {WHERE_RULE})")]
+        return [(ORCA_STEP, "skipped", f"(`orca-ide workspace cleanup preview` could not be read: {why}; neither the "
+                                       f"merged rule nor the released-workers rule is checked. {WHERE_RULE}; "
+                                       f"recommended too: {WHERE_WORKERS})")]
     projects = {}  # repoId -> (name, rows)
     for r in rows:
         if isinstance(r, dict):
@@ -117,9 +179,11 @@ def orca_report(orca: str, repo=None, timeout: float = TIMEOUT) -> list:
                                            f"be read; add it in Orca, then run again)")]
         status = _status(projects[mine[0]][1])
         if status in ("project-off", "rules-off"):
-            return [(ORCA_STEP, "off", _off_detail(status, ""))]
-        what = {"unknown": "unknown", "merged": "exists", "on": "check"}[status]
-        return [(ORCA_STEP, what, {"unknown": UNKNOWN_DETAIL, "merged": MERGED_DETAIL, "on": ON_DETAIL}[status])]
+            merged = [(ORCA_STEP, "off", _off_detail(status, ""))]
+        else:
+            what = {"unknown": "unknown", "merged": "exists", "on": "check"}[status]
+            merged = [(ORCA_STEP, what, {"unknown": UNKNOWN_DETAIL, "merged": MERGED_DETAIL, "on": ON_DETAIL}[status])]
+        return merged + _workers_lines(projects, {mine[0]})
     by = {}
     for name, rs in projects.values():
         by.setdefault(_status(rs), []).append(name)
@@ -135,7 +199,7 @@ def orca_report(orca: str, repo=None, timeout: float = TIMEOUT) -> list:
         lines.append((ORCA_STEP, "unknown", f"({', '.join(sorted(by['unknown']))}: " + UNKNOWN_DETAIL[1:]))
     if not lines:
         lines.append((ORCA_STEP, "unknown", UNKNOWN_DETAIL))
-    return lines
+    return lines + (_workers_lines(projects) or [(WORKERS_STEP, "check", _workers_unsure(""))])
 
 
 def github_report(repo, yes=None, gh: str = None) -> list:

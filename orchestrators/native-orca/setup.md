@@ -33,7 +33,10 @@ when `gh` needs a sign-in (a fine-grained token limited to the beads repos) and 
 A merged lane's worktree is removed by Orca's own cleanup rule "Delete merged workspaces", not by a script of ours
 (`docs/orca-cleanup.md`). `project-setup` and `machine-setup` read `orca-ide workspace cleanup preview` and say
 plainly when no rule is on or the project has cleanup off, with where to turn it on in Orca (Settings -> Workspace
-Cleanup -> Cleanup rules); they never change Orca's settings. `project-setup` also turns on GitHub's "Automatically
+Cleanup -> Cleanup rules); they also report the recommended rule "Delete released orchestration worker workspaces"
+(lane-control lanes run as supervised workers; Orca removes a released worker's workspace only once Git finds its HEAD
+in the default branch or a merged review, so an unmerged lane's worktree stays), and say "cannot tell" when the preview
+shows no row it matched; they never change Orca's settings. `project-setup` also turns on GitHub's "Automatically
 delete head branches" in a terminal (recommended: Enter, y or yes turns it on, anything else leaves it off; without a
 terminal it only says so; a re-run says `exists`).
 
@@ -41,8 +44,8 @@ terminal it only says so; a re-run says `exists`).
 - **Run and tasks:** the coordinator makes a run and its tasks (with dependencies), then starts every ready task
   itself: a run never schedules work.
 - **Workers:** `orca-ide orchestration worker-start` starts a worker in its own worktree and branch, with its brief as
-  the first message. Reusing a kept-open terminal is much faster than a fresh one; release kept-open terminals when
-  done.
+  the first message. Reusing a kept-open terminal is much faster than a fresh one; release a worker after its
+  merge.
 - **Messages:** `send`, `ask`, `reply` and `check` (a coordinator never uses `check --wait`: waits are lane work).
   A message reaches the agent as a one-line prompt in its composer telling it to run `check`; the content shows only
   after it does. If a worker that also coordinates its own run seems not to get a reply, nudge it to run `check`
@@ -75,7 +78,9 @@ the box's coordinator run lanes here with the desktop's share link (`remote.md`)
 every step says `exists` on a re-run):
 - `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators
   (name, checkout, harness, terminal title), the runner repos it watches, night hours, idle and recheck minutes, and
-  how long `lane-away on` lasts. Fill it in by hand; no value from it goes in a repo.
+  how long `lane-away on` lasts. Fill it in by hand; no value from it goes in a repo. A machine set up before
+  `machine-setup` existed has no `machine.conf`: create it (run `machine-setup`, which writes it from the example, or
+  copy the example there by hand), since `lane-improve` and `night-precheck` need the file.
 - The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an
   Orca terminal titled `machine coordinator` with its persona and hook.
 - Three Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
