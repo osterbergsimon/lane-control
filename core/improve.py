@@ -191,7 +191,7 @@ def merge_state(project: str) -> "tuple[dict | None, str]":
     st, mode = mode_state(project)
     if st is None:
         return None, mode
-    stop = hard_stop(st, project)
+    stop = hard_stop(st, project, draining=(mode == "draining"))
     return (None, stop) if stop else (st, mode)
 
 
@@ -266,15 +266,31 @@ def lock_path() -> Path:
     return path().with_name("improve.lock")
 
 
+_lock_depth = 0
+
+
 @contextlib.contextmanager
 def _locked():
     """An exclusive lock on the improve state's lock file, around every read-modify-write of the period record and of the
-    state file (away-merge runs in every coordinator at once, `lane-improve` beside them)."""
+    state file (away-merge runs in every coordinator at once, `lane-improve` beside them). Re-entrant in one process, so
+    away-merge can hold it from the --max-items check through record_merge (which takes it again) without waiting on itself."""
+    global _lock_depth
+    if _lock_depth:
+        _lock_depth += 1
+        try:
+            yield
+        finally:
+            _lock_depth -= 1
+        return
     f = lock_path()
     f.parent.mkdir(parents=True, exist_ok=True)
     with open(f, "a") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        yield
+        _lock_depth = 1
+        try:
+            yield
+        finally:
+            _lock_depth = 0
 
 
 def _has_caps(state: dict) -> bool:
@@ -318,6 +334,10 @@ def period_problem(state: dict) -> "str | None":
 
 FIX_PERIOD = ("`lane-improve on --continue` starts the record again from nothing, and puts the deny rules back on every "
               "project the period covers")
+
+
+FIX_DRAINING_PERIOD = ("wrap it up with `lane-improve drained <project>` (the owner can run `lane-improve drained --all`), then "
+                       "`lane-improve on --continue` starts a new period on the same away branch (its last PR can merge there)")
 
 
 class PeriodError(OSError):
@@ -385,12 +405,15 @@ def unmark_wrapped(state: dict, projects: list) -> None:
     _modify_period(state, lambda rec: rec.__setitem__("wrapped", [p for p in rec["wrapped"] if p not in projects]))
 
 
-def hard_stop(state: dict, project: str) -> "str | None":
+def hard_stop(state: dict, project: str, draining: bool = False) -> "str | None":
     """Why away-merge refuses a merge for this project at all, or None. `--max-items N` is enforced here: the Nth merge is
     the last, whatever the coordinator reads or does (a lane that is running finishes as that Nth merge); a record that
     cannot be read stops everything; a project that wrapped up at its cap merges nothing more. `--stop-at` is not a hard
     stop (the lane that is running when it is reached still lands): the budget's own steps are its backstop."""
     why = period_problem(state)
+    if why and draining:  # a drain refuses `on --continue` (the period is not wrapped up yet): name what does work
+        return (f"{why}, so merges and caps cannot be trusted; the period is draining, so nothing more merges in it: "
+                f"{FIX_DRAINING_PERIOD}")
     if why:
         return f"{why}, so merges and caps cannot be trusted; merges are refused until it is made again: {FIX_PERIOD}"
     if is_wrapped(state, project):
@@ -717,12 +740,56 @@ def log_summary(text: "str | None") -> "str | None":
     return body or None
 
 
-def pr_body(project: str, branch: str, integration: str, log: "str | None") -> str:
+def pr_body(project: str, branch: str, integration: str, log: "str | None", items: "list | None") -> str:
+    """The summary PR's text: the log's summary, then the merged items (`merged_items`: a list, or None when git could not be read)."""
     summary = log_summary(log) or ("No summary yet: the log has none until the first item is merged into the branch.")
     return (f"Away-improve branch for {project}: `{branch}` into `{integration}`. A draft, never merged by an agent: merge "
             f"this PR yourself to adopt the whole branch, or name the items to drop first.\n\n{summary}\n\n"
+            f"{items_text(items)}\n\n"
             f"The full log is `{LOG_FILE}` on the branch. This text is refreshed from its summary after every "
-            "`away-merge`.\n")
+            "`away-merge` (the summary and the branch's merges, read from git).\n")
+
+
+def items_text(items: "list | None") -> str:
+    """The "Items merged" part of the PR body: one line per item with its revert command (oldest merge first)."""
+    if items is None:
+        return f"Items merged: could not be read from git just now; they are in `{LOG_FILE}`. The next `away-merge` tries again."
+    if not items:
+        return "Items merged: none yet."
+    lines = ["Items merged, oldest first. To drop one, run its command on the away branch and push, or name it to the "
+             "coordinator (latest first if later items build on it):"]
+    for title, pr, sha, reverted in items:
+        what = "already reverted" if reverted else f"`git revert -m 1 {sha}`"
+        lines.append(f"- {title} ({f'PR #{pr}, ' if pr else ''}{sha}): {what}")
+    return "\n".join(lines)
+
+
+def merged_items(repo: Path, branch: str, integration: str) -> "list | None":
+    """The items merged into origin's `branch` so far, oldest first, as (title, PR number or None, short sha, reverted): the
+    first-parent merge commits on the branch that the integration branch does not have, whose subject is `away: <title>`
+    (the start commit has one parent, so it is not a merge). The PR number is the `Pull request #<n>` line `away-merge`
+    puts in the merge message (None for a merge made without it). `reverted` is true when a commit on the branch says
+    `This reverts commit <the merge's sha>` (a plain `git revert`, alone or inside a merged lane PR). Reading git, not the
+    period record, keeps this right across periods and after a lost record. None when git cannot be read."""
+    ref, base = f"refs/remotes/origin/{branch}", f"refs/remotes/origin/{integration}"
+    try:
+        if _git(repo, "fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}", f"+refs/heads/{integration}:{base}").returncode:
+            return None
+        r = _git(repo, "log", "--first-parent", "--merges", "--reverse", "--format=%H%x1f%h%x1f%s%x1f%b%x1e", ref, "--not", base)
+        every = _git(repo, "log", "--format=%B%x1e", ref, "--not", base)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode or every.returncode:
+        return None
+    undone = set(re.findall(r"^This reverts commit ([0-9a-f]{40})", every.stdout, re.M))
+    items = []
+    for rec in r.stdout.split("\x1e"):
+        parts = rec.strip("\n").split("\x1f")
+        if len(parts) != 4 or not parts[2].startswith("away: "):
+            continue
+        m = re.search(r"^Pull request #(\d+)[ \t]*$", parts[3], re.M)
+        items.append((parts[2][len("away: "):].strip(), int(m.group(1)) if m else None, parts[1].strip(), parts[0].strip() in undone))
+    return items
 
 
 def read_log(repo: Path, branch: str) -> "str | None":
@@ -771,7 +838,7 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
     integration branch counts (`gh pr list --head` matches the branch NAME, forks' PRs included), else a draft one is
     opened. The only gh writes in the whole mode besides away-merge's merge: `pr create --draft` and `pr edit --body`.
     PrError says why it could not be done."""
-    body = pr_body(project, branch, integration, read_log(repo, branch))
+    body = pr_body(project, branch, integration, read_log(repo, branch), merged_items(repo, branch, integration))
     if number is None:
         found = _gh_json(repo, list, "pr", "list", "--head", branch, "--state", "open", "--json",
                          "number,url,isCrossRepository,baseRefName,isDraft")
@@ -949,8 +1016,9 @@ def cmd_on(a) -> int:
         print(f"lane-improve: {e}", file=sys.stderr)
         return 2
     if not a.yes and not (sys.stdin.isatty() and sys.stdout.isatty()):
-        print("lane-improve: improve mode spends tokens until it is switched off; there is no terminal here, so it needs "
-              "--yes (run it yourself, or on your own explicit word)", file=sys.stderr)
+        print("lane-improve: improve mode spends tokens until it is switched off; there is no terminal here (Claude Code's "
+              "`!` prefix has none either), so it needs --yes: the owner adds it under `!` (`! lane-improve on --yes ...`); "
+              "an agent adds it only on the owner's own explicit word", file=sys.stderr)
         return 2
     prev = load()
     if prev:
@@ -1275,12 +1343,15 @@ def cmd_status(a) -> int:
         when = dt.datetime.fromisoformat(d["ended"]).strftime("%a %d %b %H:%M")
         print(f"improve: draining (ended {when}); no new cycle starts, the running lanes' PRs can still merge")
         print("  to wrap up: " + ", ".join(d["pending"]))
+        lost = period_problem(d)
+        if lost:  # away-merge and `lane-improve pr` are refused: only the wrap-up and a new period remain
+            print(f"  period record: {lost}; nothing more merges in this period. {FIX_DRAINING_PERIOD}")
         waited = (now() - dt.datetime.fromisoformat(d["ended"]).astimezone()).total_seconds() / 3600
         if waited >= DRAIN_NOTICE_HOURS:
             print(f"  it has waited {int(waited)} h: nobody has run `lane-improve drained` for it; ask the coordinator, or run "
                   "`lane-improve drained --all` yourself once its last PR is dealt with")
         for p in d["pending"]:
-            if p in d["branches"]:
+            if p in d["branches"] and not lost:
                 print(f"  {p}: away-merge the last PR into {d['branches'][p]}, run `lane-improve pr {p}` (the draft PR into "
                       f"{d['integration'].get(p, '?')} gets the final summary) and point the owner at it, then run "
                       f"`lane-improve drained {p}`")

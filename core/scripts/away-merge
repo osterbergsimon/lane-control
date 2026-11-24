@@ -20,10 +20,19 @@ merging nothing, with one line per failed check, unless all of these hold:
              failing end is refused). Use it only when CI itself is failing or unavailable for reasons outside the
              change; the log's last line is printed, and say so in AWAY-LOG.md
   secrets    the diff is clean: gitleaks when the project has a .gitleaks.toml (no gitleaks to run it is a refusal),
-             otherwise a built-in scan of the added lines for keys, tokens, home paths and private addresses
+             otherwise a built-in scan of the added lines (every one, `++` lines too) for keys, tokens, home paths,
+             private addresses and credentials file names
+  names      the public-repo rule, for a public repo only (`gh repo view`; a private repo is not checked and the merge
+             says so; one whose visibility cannot be read is a refusal): the added lines and the path of every added or renamed-to file hold no
+             hostname or user name of this machine, no name of another project whose repo is private (a public
+             project's name is no secret; the project's own name is allowed; a project whose visibility cannot be read
+             counts as private) and no name from the private-names file outside the repo (core/privatenames.py). Runs
+             with or without a .gitleaks.toml. A hit says its kind, file and line, never the name; a names file that
+             cannot be read, or no name to check at all, is a refusal; a merge prints what the scan checked
   caps       the project has not wrapped up at a cap (`lane-improve drained` while the mode is on: nothing more merges), --max-items
              is not yet reached (the Nth merge is the last), and the period's record (improve-period.json) can be read (a lost
-             or unreadable one refuses every merge: `lane-improve on --continue` makes it again)
+             or unreadable one refuses every merge: `lane-improve on --continue` makes it again; while draining,
+             `lane-improve drained`, then `on --continue`)
   deny       the PR touches none of improve.json's deny_paths: every old and new path in the `diff --git` headers of
              the PR's diff is checked (gh's file list stops at 100 files and drops a rename's old name); a diff it
              cannot read paths from is a refusal
@@ -45,6 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import improve  # noqa: E402
 import machineconf  # noqa: E402
+import privatenames  # noqa: E402
 
 AWAY_BRANCH = re.compile(r"away/\d{4}-\d{2}-\d{2}")
 MARKER = re.compile(r"^\s*Review: passed ([0-9a-f]{40})\s*$", re.M)
@@ -166,17 +176,109 @@ def ci_green(rollup: list) -> "str | None":
     return "; ".join(bad) or None
 
 
+def added_lines(diff: str):
+    """(path, new-side line number or None, text) for every added line of a diff. Only the `---`/`+++` file headers are
+    skipped (before a file's first hunk); inside a hunk a line that starts with `++` is an added line like any other."""
+    path, line, in_hunk = "", None, False
+    for raw in diff.splitlines():
+        if raw.startswith("diff --git "):
+            m = HEADER.match(raw)
+            path = (_unquote(m.group(3)) if m.group(3) is not None else m.group(4)) if m else ""
+            line, in_hunk = None, False
+        elif raw.startswith("@@"):
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", raw)
+            line, in_hunk = (int(m.group(1)) if m else None), True
+        elif not in_hunk and raw.startswith(("--- ", "+++ ")):
+            continue
+        elif raw.startswith("+"):
+            yield path, line, raw[1:]
+            line = line + 1 if line is not None else None
+        elif raw.startswith(" ") and line is not None:
+            line += 1
+
+
 def scan_added(diff: str) -> "str | None":
-    for line in diff.splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
-            for rx, what in PRIVATE:
-                if rx.search(line):
-                    return what
+    for _, _, text in added_lines(diff):
+        for rx, what in PRIVATE:
+            if rx.search(text):
+                return what
     return None
 
 
+NAME_HELP = "(remove the name, or ask the owner; the list is built by lane-control's core/privatenames.py)"
+
+
+def new_paths(diff: str) -> set:
+    """The paths a diff brings into the tree: added files and rename or copy targets. A deleted file, the old side of a
+    rename and an edited file's unchanged path are not new, so cleaning up an old name is never refused for its path."""
+    found = set()
+    for block in re.split(r"^(?=diff --git )", diff, flags=re.M):
+        m = HEADER.match(block)
+        if not m:
+            continue
+        if re.search(r"^(?:new file mode|--- /dev/null)", block, re.M):
+            found.add(_unquote(m.group(3)) if m.group(3) is not None else m.group(4))
+        for t in re.findall(r"^(?:rename|copy) to (.+)$", block, re.M):
+            found.add(_unquote(t[1:-1]) if t.startswith('"') else t)
+    return found
+
+
+def names_scan(diff: str, names: "privatenames.Names") -> "str | None":
+    """None when no added line and no file path holds a private name; else where, by kind, file and line: never the name
+    itself, and a path that holds one is shown with it masked."""
+    found = []
+
+    def note(text):
+        if text not in found:
+            found.append(text)
+
+    for f in sorted(new_paths(diff)):
+        for kind in dict.fromkeys(h[0] for h in names.hits(f)):
+            note(f"{kind} in the path {names.mask(f)}")
+    for path, line, text in added_lines(diff):
+        for kind in dict.fromkeys(h[0] for h in names.hits(text)):
+            note(f"{kind} at {names.mask(path)}" + (f":{line}" if line else ""))
+    if not found:
+        return None
+    more = f"; and {len(found) - 5} more" if len(found) > 5 else ""
+    return f"the diff adds {'; '.join(found[:5])}{more} {NAME_HELP}"
+
+
+def is_public(checkout: Path) -> bool:
+    """Whether the repo at `checkout` is public (internal counts as private); Refuse when gh cannot say."""
+    return gh(["repo", "view", "--json", "visibility", "-q", ".visibility"], checkout).strip().upper() == "PUBLIC"
+
+
+def name_check(project: str, cos: dict, diff: str) -> "tuple[str | None, str]":
+    """(why not clean or None, a line for the merge output). The public-repo rule is for public repos: a private one is
+    not checked, and one whose visibility cannot be read is refused. Only private projects' names count as private."""
+    try:
+        public = is_public(cos[project].checkout)
+    except Refuse as e:
+        return f"the repo's visibility cannot be read ({e}), so it is not known whether names must be checked", ""
+    if not public:
+        return None, f"name scan skipped: {project} is a private repo, where the public-repo rule does not apply"
+    private, unread = [], 0
+    for n, c in cos.items():
+        if n == project:
+            continue
+        try:
+            if not is_public(c.checkout):
+                private.append(n)
+        except Refuse:
+            unread += 1
+            private.append(n)
+    try:
+        names = privatenames.load(projects=private, own=project)
+    except privatenames.NamesError as e:
+        return str(e), ""
+    line = "name scan: " + names.note + (f"; {unread} other project(s)' visibility could not be read, counted as private"
+                                         if unread else "")
+    return names_scan(diff, names), line
+
+
 def secret_scan(checkout: Path, diff: str) -> "str | None":
-    """None when clean; else why not."""
+    """None when clean; else why not. Names are a separate check (name_check), with or without gitleaks."""
     if (checkout / ".gitleaks.toml").is_file():
         with tempfile.TemporaryDirectory(prefix="away-merge-") as d:
             (Path(d) / "pr.diff").write_text(diff)
@@ -271,6 +373,9 @@ def run(a) -> int:
     hit = secret_scan(checkout, diff)
     if hit:
         refuse("secrets", hit)
+    hit, name_line = name_check(a.project, cos, diff)
+    if hit:
+        refuse("names", hit)
     paths = diff_paths(diff)
     if paths is None or (pr.get("files") and not paths):
         refuse("deny", "the PR's diff has no `diff --git` headers to read paths from, so the deny paths cannot be checked")
@@ -282,20 +387,46 @@ def run(a) -> int:
     if failed:
         print("\n".join(failed), file=sys.stderr)
         return 1
-    try:
-        gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--match-head-commit", head], checkout)
-        sha = gh(["pr", "view", str(a.pr), "--json", "mergeCommit", "-q", ".mergeCommit.oid"], checkout).strip()
-    except Refuse as e:
-        print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
-        return 1
-    print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}")
-    if why:
-        print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
-              f"(ends: {suite_line}) (record this in AWAY-LOG.md)")
-    try:
-        improve.record_merge(state, a.project, a.pr, item, sha)
-    except OSError as e:
-        print(f"away-merge: the merge is done, but it could not be recorded for --max-items ({e.strerror or e})", file=sys.stderr)
+    # The cap is counted, the merge made and the merge recorded under one hold of the improve lock (lc-jpg): two merges at
+    # once cannot both see the last free slot. The state is read again under the lock, so a cap reached while the checks
+    # above ran refuses this merge.
+    with improve._locked():
+        state, mode = improve.merge_state(a.project)
+        if state is None:
+            print(f"away-merge: refused (improve): {mode}", file=sys.stderr)
+            return 1
+        sha = None
+        try:
+            gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--body", f"Pull request #{a.pr}", "--match-head-commit", head], checkout)
+        except Refuse as e:
+            # gh can fail after GitHub merged (a timeout, a 5xx): look once, and count the merge when it happened
+            try:
+                seen = json.loads(gh(["pr", "view", str(a.pr), "--json", "state,mergeCommit"], checkout))
+                merged = str(seen.get("state", "")).upper() == "MERGED"
+                sha = ((seen.get("mergeCommit") or {}).get("oid") or "") if merged else None
+            except (Refuse, ValueError, AttributeError):
+                sha = None
+            if sha is None:
+                print(f"away-merge: the merge did not go through: {e}", file=sys.stderr)
+                return 1
+            print(f"away-merge: gh reported a failure ({e}) but PR {a.pr} is merged on GitHub; counting it", file=sys.stderr)
+        if sha is None:
+            try:
+                sha = gh(["pr", "view", str(a.pr), "--json", "mergeCommit", "-q", ".mergeCommit.oid"], checkout).strip()
+            except Refuse as e:  # merged, so it is counted; only its commit is unknown
+                sha = ""
+                print(f"away-merge: the merge commit could not be read ({e}); recording the merge without it", file=sys.stderr)
+        print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}")
+        if name_line:
+            print(f"away-merge: {name_line}")
+        if why:
+            print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
+                  f"(ends: {suite_line}) (record this in AWAY-LOG.md)")
+        try:
+            improve.record_merge(state, a.project, a.pr, item, sha)
+        except OSError as e:
+            print(f"away-merge: the merge is done, but it could not be recorded for --max-items ({e.strerror or e})",
+                  file=sys.stderr)
     refresh_summary_pr(checkout, state, a.project)
     return 0
 

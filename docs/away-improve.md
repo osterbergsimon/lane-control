@@ -26,7 +26,7 @@ mode in your own words.
 
 | Command | What it does |
 |---|---|
-| `lane-improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]` | Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps. Without a terminal it refuses unless `--yes`. |
+| `lane-improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]` | Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps. Without a terminal it refuses unless `--yes`; Claude Code's `!` prefix has no terminal, so there add `--yes` (`! lane-improve on --yes ...`). |
 | `lane-improve off` | Ends the mode; what is running drains (below). |
 | `lane-improve status` | Off, on (what runs), or draining (what is left to wrap up, and how long it has waited). |
 | `lane-improve drained <project>...` or `--all` | A coordinator's wrap-up is done: its deny rules come out. Coordinators run this themselves. While the mode is on it takes only a project whose cap is reached. |
@@ -70,9 +70,13 @@ A wrap-up is final for the period. To resume a project after you raise its cap, 
 reached, and a re-run that does not name the project leaves it wrapped up and says so.
 
 The period record (`improve-period.json`, with a lock file beside it) is written under a lock, so coordinators merging at the
-same moment are all counted. If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
+same moment are all counted. `away-merge` holds that lock from the `--max-items` check through the merge and its record, and
+checks the cap again once it has it, so two merges at once cannot both take the last slot (the second is refused). A merge that GitHub made but whose reply gh failed (a timeout, a 5xx) is still counted: `away-merge` looks the PR up once and records it. If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
 every merge, nothing is nudged and `status` says why, instead of the counts starting again from 0. `lane-improve on
---continue` starts the record again from nothing and puts the deny rules back on every project the period covers.
+--continue` starts the record again from nothing and puts the deny rules back on every project the period covers. While the
+period is draining (after `off`), `on --continue` is refused; there the refusal says to wrap up with `lane-improve drained
+<project>` (or `--all`) and then run `lane-improve on --continue`, which starts a new period on the same away branch (a plain
+`on` is refused while the project has its branch); the last PR can merge there.
 
 ### One branch per project
 
@@ -112,8 +116,10 @@ that reverts those merges (they are titled `away: <item>`), keeping to the depen
 
 `lane-improve on` opens, for each project whose away branch it cuts or continues, a **draft PR** from `away/<date>` into
 the integration branch, titled `away: <date> (<project>)`, and records its number in `improve.json`. Its body is the
-summary at the top of `AWAY-LOG.md`; `away-merge` brings it up to date after every merge (and opens it first if it was
-not open), so nobody has to remember to. It stays a draft: **no agent merges it, marks it ready or closes it**; you
+summary at the top of `AWAY-LOG.md`, then **Items merged**: one line per merged item (title, PR number, short sha) with its
+`git revert -m 1 <sha>` (or "already reverted" when a later commit reverts it), read from git (the first-parent merges titled `away: <item>`, not the period record), oldest first;
+revert the latest first when later items build on it. `away-merge` brings it up to date after every merge (and opens it
+first if it was not open), so nobody has to remember to. It stays a draft: **no agent merges it, marks it ready or closes it**; you
 merge it (to adopt the whole branch) or name the items to drop. A PR you closed is left alone.
 
 GitHub opens no PR for a branch with nothing beyond its base, so `on` gives each new branch one start commit, `away: start
@@ -137,7 +143,13 @@ Be clear about what is enforced and what is a backstop.
   counts); CI is green, or `--local-suite-ok <log of the full suite run through lane-heavy>` (the log must end in a pass
   and its last line is printed; use it only when CI itself is failing for reasons outside the change); a secret scan
   (gitleaks if the project has a `.gitleaks.toml`, else a built-in scan for keys, tokens, home paths and private
-  addresses); and your deny paths. It merges pinned to the head it checked.
+  addresses); for a public repo, the names it must not carry (hostnames, usernames, project names) in the added lines and
+  in the paths of added and renamed-to files, with or without gitleaks: this machine's hostname and user name, the names of the other projects
+  whose repo is private, and the names in `$LANE_PRIVATE_NAMES` or `~/.config/lane-control/private-names.txt` (one per
+  line, kept outside every repo). A private repo is not name-checked and the merge says so; one whose visibility
+  `gh` cannot read is refused. A hit says its kind, file and line, never the name. The machine's own names are skipped
+  when under 4 letters or on the common-word list (`root`, `main`, `nixos`...; the merge says so); camelCase spellings
+  of a name are not caught; and your deny paths. It merges pinned to the head it checked.
 - **Deny rules are a backstop, not a wall.** A Claude coordinator's session gets deny rules (uncommitted, in the
   checkout's `settings.local.json`) for merging a PR and for pushing to the integration branch; an OpenCode coordinator
   gets a guard plugin that refuses the same in its shell tool. Both read the command text, so other routes past them

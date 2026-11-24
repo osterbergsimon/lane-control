@@ -14,11 +14,16 @@ from test_machine_setup import write_exec  # noqa: E402
 GH_PR_STUB = """
 #!/usr/bin/env python3
 # gh stand-in for away-merge: `pr view N --json ...`, `pr diff N`, `pr merge N ...` from $GH_PRS (JSON {N: {...}}).
-import json, os, sys
+import json, os, sys, time
 a = sys.argv[1:]
 open(os.environ["GH_LOG"], "a").write(" ".join(a).replace("\\n", " / ") + "\\n")
 """ + GH_SUMMARY_BLOCK + """
 prs = json.load(open(os.environ["GH_PRS"]))
+if a[:2] == ["repo", "view"]:
+    here = os.path.basename(os.getcwd())
+    if here in os.environ.get("GH_VIS_FAIL", "").split(","):
+        print("gh: could not resolve repository", file=sys.stderr); sys.exit(1)
+    print("PRIVATE" if here in os.environ.get("GH_PRIVATE", "").split(",") else "PUBLIC"); sys.exit(0)
 if a[:2] == ["api", "user"]:
     login = os.environ.get("GH_LOGIN", "")
     if not login:
@@ -31,13 +36,20 @@ if pr is None:
     print("gh stub: no such PR / not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 if a[:2] == ["pr", "diff"]:
     print(pr.get("diff", "")); sys.exit(0)
+if a[:2] == ["pr", "view"] and "state,mergeCommit" in a:  # the one look after a failed `pr merge`
+    print(json.dumps({"state": os.environ.get("GH_STATE_AFTER", "MERGED"), "mergeCommit": {"oid": pr.get("merge_oid", "")}})); sys.exit(0)
 if a[:2] == ["pr", "view"] and "mergeCommit" in a:
+    if os.environ.get("GH_SHA_FAIL"):
+        print("gh: " + os.environ["GH_SHA_FAIL"], file=sys.stderr); sys.exit(1)
     print(pr.get("merge_oid", "")); sys.exit(0)
 if a[:2] == ["pr", "view"] and a[a.index("--json") + 1] == "headRefOid":
     print(json.dumps({"headRefOid": pr.get("head_after", pr["headRefOid"])})); sys.exit(0)
 if a[:2] == ["pr", "view"]:
     print(json.dumps({k: pr[k] for k in ("baseRefName", "headRefOid", "state", "body", "comments", "statusCheckRollup", "files")})); sys.exit(0)
 if a[:2] == ["pr", "merge"]:
+    time.sleep(float(os.environ.get("GH_MERGE_SLEEP", "0")))  # a slow merge: lets a second away-merge run beside it
+    if os.environ.get("GH_MERGE_FAIL"):  # gh itself failed (a timeout, a 5xx); GH_STATE_AFTER says what GitHub did
+        print("gh: " + os.environ["GH_MERGE_FAIL"], file=sys.stderr); sys.exit(1)
     sys.exit(0)
 print("gh stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 """
@@ -101,7 +113,7 @@ class AwayMergeTests(AwayMergeTest):
     def test_merges_with_subject(self):
         r = self.merge()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --match-head-commit {OID}"])
+        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --body Pull request #7 --match-head-commit {OID}"])
         self.assertIn("abc1234", r.stdout)
         self.assertNotIn("--squash", " ".join(self.gh_calls()))
         self.assertNotIn("--rebase", " ".join(self.gh_calls()))
@@ -254,6 +266,169 @@ class AwayMergeTests(AwayMergeTest):
         self.pr(diff=CLEAN_DIFF + "-path = '/ho" + "me/u/x'\n path = '/ho" + "me/u/y'\n")
         self.assertEqual(self.merge().returncode, 0)
 
+    # --- public-repo names (lc-1dk): hostnames, usernames and project names, from the machine and a file outside the repo ---
+    def names_file(self, text, name="private-names.txt"):
+        f = self.conf_dir / name
+        f.write_text(text)
+        return f
+
+    def test_a_listed_name_in_an_added_line_refuses_with_file_and_line_but_without_the_name(self):
+        self.names_file("example-host\n")
+        self.pr(diff=CLEAN_DIFF.replace("+print", "@@ -1,2 +10,3 @@\n keep\n+print") + "+ssh Example-Host\n")
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("a listed name at x.py:12", r.stderr)
+        self.assertNotIn("example-host", r.stderr.lower())
+        self.assertIn("ask the owner", r.stderr)
+
+    def test_only_private_projects_names_count_and_the_own_name_never_does(self):
+        self.pr(diff=CLEAN_DIFF + "+# copied from blog, see the shop docs\n")
+        self.assertEqual(self.merge().returncode, 0)  # blog is a public repo
+        self.env["GH_PRIVATE"] = "blog"
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("a project name", r.stderr)
+        self.pr(diff=CLEAN_DIFF + "+# see the shop docs\n")
+        self.assertEqual(self.merge().returncode, 0)
+        self.names_file("shop\n")  # the own name in the names file is no secret either
+        self.assertEqual(self.merge().returncode, 0)
+
+    def test_the_machines_own_hostname_and_username_refuse(self):
+        import getpass
+        import socket
+        sys.path.insert(0, str(ROOT / "core"))
+        import privatenames
+        hit = False
+        for kind, name in (("a hostname", socket.gethostname().split(".")[0]), ("a username", getpass.getuser())):
+            if name.lower() in privatenames.GENERIC or len(name) < privatenames.MIN_MACHINE_LEN:
+                continue
+            hit = True
+            with self.subTest(kind=kind):
+                self.pr(diff=CLEAN_DIFF + f"+ssh {name}\n")
+                r = self.merge()
+                self.assertRefused(r, "names")
+                self.assertIn(kind, r.stderr)
+                self.assertNotIn(name, r.stderr, msg=f"the refusal printed {kind}")
+        if not hit:
+            self.skipTest("this machine's hostname and user are both short or common words")
+
+    def test_names_in_removed_and_context_lines_and_longer_words_pass(self):
+        self.names_file("example-host\n")
+        self.pr(diff=CLEAN_DIFF.replace("+print", "@@ -1,2 +1,3 @@\n+print") +
+                "-ssh example-host\n ssh example-host\n+example-hosting and blogger\n")
+        self.assertEqual(self.merge().returncode, 0)
+
+    def test_a_name_in_a_file_path_or_a_rename_refuses_and_the_path_is_masked(self):
+        self.names_file("example-host\n")
+        new = "diff --git a/hosts/example-host.nix b/hosts/example-host.nix\nnew file mode 100644\n--- /dev/null\n+++ b/hosts/example-host.nix\n+x = 1\n"
+        ren = ("diff --git a/a.md b/example-host.md\nsimilarity index 100%\nrename from a.md\nrename to example-host.md\n")
+        for diff in (new, ren):
+            with self.subTest(diff=diff[:40]):
+                self.pr(diff=diff, files=[{"path": "x"}])
+                r = self.merge()
+                self.assertRefused(r, "names")
+                self.assertIn("a listed name in the path ", r.stderr)
+                self.assertIn("***", r.stderr)
+                self.assertNotIn("example-host", r.stderr.lower())
+
+    def test_a_name_inside_a_longer_word_is_masked_in_every_printed_path(self):
+        self.names_file("zebrabox\n")
+        diffs = (
+            "diff --git a/docs/zebraboxnotes.md b/docs/zebraboxnotes.md\n--- a/docs/zebraboxnotes.md\n+++ b/docs/zebraboxnotes.md\n@@ -1 +1 @@\n+ssh zebrabox\n",
+            "diff --git a/zebrabox/myzebrabox.nix b/zebrabox/myzebrabox.nix\nnew file mode 100644\n--- /dev/null\n+++ b/zebrabox/myzebrabox.nix\n@@ -0,0 +1 @@\n+x = 1\n",
+            "diff --git a/hosts/connectToZebrabox.nix b/hosts/connectToZebrabox.nix\n--- a/hosts/connectToZebrabox.nix\n+++ b/hosts/connectToZebrabox.nix\n@@ -1 +1 @@\n+ssh zebrabox\n",
+        )
+        for diff in diffs:
+            with self.subTest(diff=diff[:50]):
+                self.pr(diff=diff, files=[{"path": "x"}])
+                r = self.merge()
+                self.assertRefused(r, "names")
+                self.assertNotIn("zebrabox", r.stderr.lower(), msg="a refusal printed the name")
+                self.assertIn("***", r.stderr)
+
+    def test_only_new_paths_are_checked_not_deleted_old_or_edited_ones(self):
+        self.names_file("example-host\n")
+        diffs = (
+            "diff --git a/hosts/example-host.nix b/hosts/example-host.nix\ndeleted file mode 100644\n--- a/hosts/example-host.nix\n+++ /dev/null\n@@ -1 +0,0 @@\n-x = 1\n",
+            "diff --git a/example-host.md b/notes.md\nsimilarity index 100%\nrename from example-host.md\nrename to notes.md\n",
+            "diff --git a/hosts/example-host.nix b/hosts/example-host.nix\n--- a/hosts/example-host.nix\n+++ b/hosts/example-host.nix\n@@ -1 +1 @@\n+x = 2\n",
+        )
+        for diff in diffs:
+            with self.subTest(diff=diff[:50]):
+                self.pr(diff=diff, files=[{"path": "x"}])
+                r = self.merge()
+                self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_added_line_that_starts_with_plus_plus_is_still_scanned(self):
+        self.names_file("example-host\n")
+        self.pr(diff=CLEAN_DIFF.replace("+print", "@@ -1 +1,2 @@\n+print") + "++ example-host\n+++ example-host\n")
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("x.py:2", r.stderr)
+        self.assertIn("x.py:3", r.stderr)
+
+    def test_the_merge_says_what_the_name_scan_checked(self):
+        self.pr()
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("name scan", r.stdout)
+        self.assertIn("no private-names file", r.stdout)
+        self.names_file("example-host\nsecond-name\n")
+        self.pr()
+        r = self.merge()
+        self.assertIn("2 from the private-names file", r.stdout)
+
+    def test_a_private_repo_is_not_name_checked_and_the_merge_says_so(self):
+        self.names_file("example-host\n")
+        self.env["GH_PRIVATE"] = "shop"
+        self.pr(diff=CLEAN_DIFF + "+ssh example-host\n")
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("name scan skipped", r.stdout)
+        self.assertIn("private", r.stdout)
+
+    def test_a_repo_whose_visibility_cannot_be_read_refuses(self):
+        self.env["GH_VIS_FAIL"] = "shop"
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("visibility", r.stderr)
+
+    def test_another_project_whose_visibility_cannot_be_read_counts_as_private_and_is_said(self):
+        self.env["GH_VIS_FAIL"] = "blog"
+        self.pr(diff=CLEAN_DIFF + "+# copied from blog\n")
+        self.assertRefused(self.merge(), "names")
+        self.pr()
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("could not be read", r.stdout)
+
+    def test_the_env_var_names_the_file_and_a_missing_one_refuses(self):
+        other = self.names_file("elsewhere-host\n", "other.txt")
+        self.env["LANE_PRIVATE_NAMES"] = str(other)
+        self.pr(diff=CLEAN_DIFF + "+elsewhere-host\n")
+        self.assertRefused(self.merge(), "names")
+        self.env["LANE_PRIVATE_NAMES"] = str(self.conf_dir / "gone.txt")
+        self.pr()
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("cannot be read", r.stderr)
+
+    def test_a_gitleaks_project_gets_the_name_check_after_gitleaks(self):
+        (self.shop / ".gitleaks.toml").write_text("title = 'x'\n")
+        self.names_file("example-host\n")
+        self.pr(diff=CLEAN_DIFF + "+ssh example-host\n")
+        r = self.merge()
+        self.assertRefused(r, "names")
+        self.assertIn("detect", (self.tmp / "gitleaks.log").read_text())
+        self.pr(diff=CLEAN_DIFF + "+LEAKME example-host\n")
+        r = self.merge()
+        self.assertIn("refused (secrets)", r.stderr)
+        self.assertIn("refused (names)", r.stderr)
+        self.pr()
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("name scan", r.stdout)
+
     def test_refuses_secret_hit_gitleaks(self):
         (self.shop / ".gitleaks.toml").write_text("title = 'x'\n")
         self.pr(diff=CLEAN_DIFF + "+LEAKME\n")
@@ -338,7 +513,7 @@ class AwayMergeTests(AwayMergeTest):
     def test_only_read_commands_besides_the_merge(self):
         self.merge()
         for c in self.gh_calls():
-            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "api user -q", "pr list --head", "pr edit",
+            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "repo view", "api user -q", "pr list --head", "pr edit",
                                           "pr create --draft")), c)
 
 
@@ -362,7 +537,7 @@ class AwayMergeSummaryTests(AwayMergeTest):
 
     def test_the_summary_pr_is_never_merged_and_stays_a_draft(self):
         self.merge()
-        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --match-head-commit {OID}"])
+        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --body Pull request #7 --match-head-commit {OID}"])
         self.assertTrue(self.summary_prs(self.shop)[self.number()]["draft"])
         self.assertNotRegex(" ".join(self.gh_calls()), r"pr (ready|close)")
 
@@ -460,6 +635,51 @@ class AwayMergeCapTests(AwayMergeTest):
         self.assertIn("items 2/2", line)
         self.assertIn("reached", line)
         self.assertIn("lane-improve drained shop", line)
+
+    def test_two_merges_at_once_cannot_overshoot_max_items(self):
+        """lc-jpg: the count is read and the merge recorded under one lock, so with one slot left only one of two
+        simultaneous away-merges lands (the other waits, reads the new count, and is refused)."""
+        self.merge(item="one")  # 1 of 2 used: one slot left
+        self.pr(8)
+        (self.tmp / "gh.log").write_text("")
+        env = dict(self.env, GH_MERGE_SLEEP="1.5")
+        procs = [subprocess.Popen([str(ROOT / "core" / "scripts" / "away-merge"), "--project", "shop", "--pr", n, "--item",
+                                   f"item {n}"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for n in ("7", "8")]
+        outs = [p.communicate(timeout=60) for p in procs]
+        codes = sorted(p.returncode for p in procs)
+        self.assertEqual(codes, [0, 1], outs)
+        self.assertEqual(len(self.merged()), 1, self.merged())
+        refused = [err for _, err in outs if "refused" in err]
+        self.assertEqual(len(refused), 1, outs)
+        self.assertIn("--max-items 2", refused[0])
+        self.assertEqual(len(self.period()["merges"]["shop"]), 2)
+        self.assertIn("items 2/2", self.status())
+
+    # --- M2: a gh failure after the merge must not leave the merge uncounted
+
+    def test_a_failed_sha_lookup_after_the_merge_still_counts_it(self):
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "one", env={"GH_SHA_FAIL": "HTTP 502"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("did not go through", r.stderr)
+        self.assertIn("commit", r.stderr)  # says the merge commit is unknown
+        self.assertEqual([(m["pr"], m["sha"]) for m in self.period()["merges"]["shop"]], [(7, "")])
+        self.assertIn("items 1/2", self.status())
+
+    def test_a_merge_call_that_failed_after_github_merged_is_counted(self):
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "one",
+                            env={"GH_MERGE_FAIL": "timeout", "GH_STATE_AFTER": "MERGED"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("merged", r.stdout + r.stderr)
+        self.assertEqual([m["pr"] for m in self.period()["merges"]["shop"]], [7])
+        self.assertIn("items 1/2", self.status())
+
+    def test_a_merge_call_that_failed_and_did_not_merge_is_not_counted(self):
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "one",
+                            env={"GH_MERGE_FAIL": "HTTP 502", "GH_STATE_AFTER": "OPEN"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("did not go through", r.stderr)
+        self.assertIn("items 0/2", self.status())
 
     def test_a_weekly_cap_is_reached_at_the_value(self):
         self.playbook(65, 10, ceiling=70)
@@ -624,6 +844,28 @@ class AwayMergeCapTests(AwayMergeTest):
         (self.conf_dir / "improve-period.json").unlink()
         self.assertRefused(self.merge(item="two"), "improve")
         self.assertNotIn("items 0/2", self.status())
+
+    def test_a_lost_record_while_draining_names_what_works(self):
+        """lc-kbb: a drain refuses `on --continue`, so the message must not send the owner there."""
+        self.merge(item="one")
+        self.run_script("lane-improve", "off")
+        (self.conf_dir / "improve-period.json").unlink()
+        r = self.merge(item="two")
+        self.assertRefused(r, "improve")
+        self.assertIn("improve-period.json", r.stderr)
+        self.assertIn("lane-improve drained", r.stderr)
+        self.assertIn("draining", r.stderr)
+        self.assertIn("`lane-improve on --continue` starts a new period on the same away branch", r.stderr)
+        # status says it too, and the last PR is not told to be merged by away-merge meanwhile
+        st = self.status()
+        self.assertIn("improve-period.json", st)
+        self.assertNotIn("away-merge the last PR", st)
+        # and what it names works, in the order it names: the drain closes, then `on --continue` (a plain `on` is refused
+        # while the project has its away branch) starts a new period on the same branch, where the last PR can merge
+        self.assertEqual(self.run_script("lane-improve", "drained", "--all").returncode, 0)
+        self.assertNotEqual(self.on("--project", "shop").returncode, 0)
+        self.assertEqual(self.on("--continue", "--project", "shop").returncode, 0)
+        self.assertEqual(self.merge(item="two").returncode, 0)
 
     def test_a_continue_rerun_makes_a_fresh_period_record_and_says_so(self):
         self.merge(item="one")

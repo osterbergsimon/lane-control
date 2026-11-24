@@ -310,6 +310,8 @@ class ImproveOnTests(ImproveTest):
         r = self.run_script("lane-improve", "on")
         self.assertEqual(r.returncode, 2)
         self.assertIn("--yes", r.stderr)
+        self.assertIn("the owner adds it", r.stderr)  # an agent is not told to add it; it needs the owner's word
+        self.assertIn("`!` prefix", r.stderr)  # lc-7xh: Claude Code's ! prefix has no terminal either; the fix is --yes
         self.assertFalse(self.improve_file().exists())
         self.assertFalse(self.away().exists())
 
@@ -910,6 +912,31 @@ class SummaryPrTests(ImproveTest):
         self.assertIn("Worth looking at first: x", body)
         self.assertNotIn("### 1. Add x", body)  # the items stay in the log
         self.assertIn(f"/pull/{n}", r.stdout)
+
+    def test_pr_command_lists_the_merged_items_with_their_revert_commands(self):
+        self.on("--project", "shop")
+        b, n = self.state()["branches"]["shop"], str(self.state()["prs"]["shop"])
+        self.push_log(self.shop, b)
+        work = self.tmp / f"work-{self.shop.name}"
+        git(work, "checkout", "-q", "-b", "item", b)
+        (work / "x.txt").write_text("x\n")
+        git(work, "add", "x.txt")
+        git(work, "commit", "-qm", "the x feature")
+        git(work, "checkout", "-q", b)
+        git(work, "merge", "-q", "--no-ff", "-m", "away: Add the x feature\n\nPull request #12", "item")
+        git(work, "push", "-q", "origin", b)
+        sha = git(work, "rev-parse", "--short", "HEAD").strip()
+        r = self.run_script("lane-improve", "pr", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = self.summary_prs(self.shop)[n]["body"]
+        self.assertIn(f"- Add the x feature (PR #12, {sha}): `git revert -m 1 {sha}`", body)
+
+    def test_pr_command_with_no_merged_item_says_none_yet(self):
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        self.push_log(self.shop, self.state()["branches"]["shop"])
+        self.assertEqual(self.run_script("lane-improve", "pr", "shop").returncode, 0)
+        self.assertIn("Items merged: none yet", self.summary_prs(self.shop)[n]["body"])
 
     def test_pr_command_opens_a_missing_pr_and_records_it(self):
         self.on("--project", "shop", env={"GH_CREATE_FAIL": "boom"})

@@ -78,7 +78,7 @@ stop (section 3).
 skill. Starting the mode committed its first version as the branch's start commit, `away: start <date>` (header, the
 owner's limits, an empty summary, no items); lanes fill it in. A summary at the top, kept current: what was done, what is worth looking at first, what to drop if unsure,
 what was skipped. Then one entry per item: what, why, what it builds on, existing work checked, how to try it, how to
-drop it (the merge commit to revert and which later items depend on it), test results. A dependency between items is
+drop it (the merge titled `away: <item>`, whose revert command the summary PR lists, and which later items depend on it), test results. A dependency between items is
 recorded so a revert never surprises the owner. Lanes write entries; summary changes ride in the build lane's PR, or
 in a small docs lane when nothing else is open. Plain, short words, like the owner's answer card.
 
