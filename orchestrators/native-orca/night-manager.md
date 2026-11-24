@@ -33,8 +33,8 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    'running' in one line." Then run `<lc>/core/scripts/night-precheck --checked <name> improve`, so it is not due
    again for the idle time. You never turn improve mode on or off and never decide what it works on.
    For a `DUE <name> wrapup` line send: "night manager: the improve period has ended and you have not wrapped up (<h>
-   h ago). Finish as the away-improve skill says (section 3): last PR through away-merge, the summary PR brought up to date
-   (`lane-improve pr <project>`), the log summary and that PR's link to the owner, then `lane-improve drained <project>`. If you are waiting on a lane, reply
+   h ago). Finish as the away-improve skill says (section 3): last PR through away-merge, the summary written
+   (`lane-improve pr <project> --summary-file <path>`), the summary and that PR's link to the owner, then `lane-improve drained <project>`. If you are waiting on a lane, reply
    'waiting' in one line." For a `cap=` line say "the cap (<cap>) is reached" in place of the hours. Then run `<lc>/core/scripts/night-precheck --checked <name> wrapup`.
    When `waited` is 12 or more, add that line to what you tell the machine coordinator once: the owner should know.
 4. **Runners.** Send each `OFFLINE` line to the machine coordinator. Never restart a runner yourself.

@@ -2187,9 +2187,18 @@ class AwayImproveContentTests(unittest.TestCase):
         self.assertIn("away-merge refuses", t)
 
     def test_nothing_the_agents_read_names_the_old_log_file(self):
-        for f in (AWAY_SKILL, *AWAY_TEMPLATES.glob("away-*.md"), ROOT / "docs" / "away-improve.md",
-                  ROOT / "core" / "scripts" / "lane-improve", ROOT / "core" / "scripts" / "away-merge"):
+        for f in (AWAY_SKILL, *AWAY_TEMPLATES.glob("away-*.md"), ROOT / "core" / "scripts" / "lane-improve",
+                  ROOT / "core" / "scripts" / "away-merge", ROOT / "orchestrators" / "native-orca" / "night-manager.md"):
             self.assertNotIn("AWAY-LOG", f.read_text(), f.name)
+        # the guide names it once, as a limit: a branch from before the change still has one to remove
+        guide = (ROOT / "docs" / "away-improve.md").read_text()
+        self.assertEqual(guide.count("AWAY-LOG"), 1)
+        self.assertIn("remove it\nbefore you adopt", guide)
+
+    def test_the_night_nudge_for_a_wrap_up_names_the_summary_file(self):  # R1-10
+        t = flat(ROOT / "orchestrators" / "native-orca" / "night-manager.md")
+        self.assertIn("`lane-improve pr <project> --summary-file <path>`", t)
+        self.assertNotIn("the log summary", t)
 
     def test_the_skill_says_where_the_log_and_the_summary_live(self):
         s = flat(AWAY_SKILL)

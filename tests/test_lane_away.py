@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "core"))
+import improve  # noqa: E402
 from test_machine_setup import MachineTest, write_exec  # noqa: E402
 
 
@@ -21,7 +22,11 @@ if sf and a[:1] == ["pr"]:
     def save():
         json.dump(db, open(sf, "w"))
     def val(flag):
+        if flag == "--body" and "--body-file" in a:  # a body goes through a file, never argv
+            return open(a[a.index("--body-file") + 1], encoding="utf-8").read()
         return a[a.index(flag) + 1] if flag in a else None
+    if "--body" in a:
+        print("gh stub: a body must go through --body-file", file=sys.stderr); sys.exit(1)
     if a[:2] == ["pr", "list"] and "--head" in a:
         if os.environ.get("GH_LIST_SHAPE") == "object":
             print("{}"); sys.exit(0)
@@ -62,6 +67,8 @@ import json, os, sys
 a = sys.argv[1:]
 open(os.environ["GH_LOG"], "a").write(" ".join(a).replace("\\n", " / ") + "\\n")
 """ + GH_SUMMARY_BLOCK + """
+if a[:2] == ["repo", "view"]:
+    print("PUBLIC"); sys.exit(0)
 if a[:2] == ["pr", "list"] and "baseRefName" in a:
     bases = json.load(open(os.environ["GH_BASES"])) if os.path.exists(os.environ["GH_BASES"]) else None
     if bases is None:
@@ -950,6 +957,107 @@ class SummaryPrTests(ImproveTest):
             self.assertIn(why, r.stderr)
             self.assertEqual(len(r.stderr.strip().splitlines()), 1)
         self.assertEqual(self.summary_prs(self.shop)[n]["body"], before)
+
+    def set_body(self, n, text):
+        db = json.loads((self.tmp / "gh-summary.json").read_text())
+        db["prs"][n]["body"] = text
+        (self.tmp / "gh-summary.json").write_text(json.dumps(db))
+
+    def edits(self):
+        return [c for c in self.gh_log() if c.startswith("pr edit")]
+
+    def test_a_body_saved_with_crlf_keeps_its_summary_on_the_next_refresh(self):  # R1-04
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        self.run_script("lane-improve", "pr", "shop", "--summary-file", self.summary_file())
+        self.set_body(n, self.summary_prs(self.shop)[n]["body"].replace("\n", "\r\n"))
+        self.assertEqual(self.run_script("lane-improve", "pr", "shop").returncode, 0)
+        self.assertIn("Done: the x feature", self.summary_prs(self.shop)[n]["body"])
+
+    def test_a_summary_edited_by_hand_inside_the_markers_is_kept(self):
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        self.run_script("lane-improve", "pr", "shop", "--summary-file", self.summary_file())
+        self.set_body(n, self.summary_prs(self.shop)[n]["body"].replace("the x feature", "the x feature, fixed by the owner"))
+        self.assertEqual(self.run_script("lane-improve", "pr", "shop").returncode, 0)
+        self.assertIn("fixed by the owner", self.summary_prs(self.shop)[n]["body"])
+
+    def test_text_added_outside_the_markers_is_never_rewritten_away(self):
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        self.run_script("lane-improve", "pr", "shop", "--summary-file", self.summary_file())
+        edited = "OWNER: drop item 2\n\n" + self.summary_prs(self.shop)[n]["body"]
+        self.set_body(n, edited)
+        (self.tmp / "gh.log").write_text("")
+        for extra in ((), ("--summary-file", self.summary_file("- Done: new\n", "new.md"))):
+            r = self.run_script("lane-improve", "pr", "shop", *extra)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+            self.assertIn("left as it is", r.stderr)
+            self.assertIn("outside the generated parts", r.stderr)
+            self.assertIn("lane-improve pr shop", r.stderr)  # how to fix it
+        self.assertEqual(self.summary_prs(self.shop)[n]["body"], edited)
+        self.assertEqual(self.edits(), [])
+
+    def test_removed_or_repeated_markers_leave_the_body_alone(self):
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        good = self.summary_prs(self.shop)[n]["body"]
+        for bad in (good.replace(improve.SUMMARY_END, ""), good + improve.ITEMS_START, "A body written by hand\n"):
+            self.set_body(n, bad)
+            r = self.run_script("lane-improve", "pr", "shop")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("markers are missing", r.stderr)
+            self.assertEqual(self.summary_prs(self.shop)[n]["body"], bad)
+
+    def test_an_empty_body_is_written(self):
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        self.set_body(n, "")
+        self.assertEqual(self.run_script("lane-improve", "pr", "shop").returncode, 0)
+        self.assertIn("Items merged", self.summary_prs(self.shop)[n]["body"])
+
+    def test_a_pr_the_owner_opened_with_its_own_text_is_adopted_but_not_rewritten(self):
+        import datetime
+        branch = f"away/{datetime.date.today().isoformat()}"
+        mine = self.add_pr(self.shop, branch, "main")
+        r = self.on("--project", "shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(str(self.state()["prs"]["shop"]), mine)  # recorded
+        self.assertEqual(self.db()[mine]["body"], "THEIR BODY")  # untouched
+        self.assertIn("left as it is", r.stderr)
+
+    def test_the_refresh_runs_under_the_improve_lock(self):
+        code = (f"import sys; sys.path.insert(0, {str(ROOT / 'core')!r}); import improve\n"
+                "seen = []\n"
+                "def fake(*a, **k):\n    seen.append(improve._lock_depth); return (5, 'u', 'refreshed')\n"
+                "improve.sync_summary_pr = fake\n"
+                "improve.record_pr = lambda *a: seen.append('rec')\n"
+                "improve.sync_and_record(None, {'branches': {'shop': 'away/2026-11-24'}, 'integration': {}, 'prs': {}}, 'shop')\n"
+                "print(seen)\n")
+        r = subprocess.run([sys.executable, "-c", code], env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "[1, 'rec']", r.stderr)
+
+    def test_a_summary_with_a_secret_or_a_name_is_refused_and_nothing_is_changed(self):  # R1-01
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        before = self.summary_prs(self.shop)[n]["body"]
+        (self.conf_dir / "private-names.txt").write_text("example-host\n")
+        for text, what in (("- Done: key ghp_" + "a" * 36, "token"), ("- Done: see /ho" + "me/u/code", "home path"),
+                           ("- Done: ssh Example-Host", "listed name")):
+            r = self.run_script("lane-improve", "pr", "shop", "--summary-file", self.summary_file(text, "bad.md"))
+            self.assertEqual(r.returncode, 1, text)
+            self.assertIn(what, r.stderr)
+            self.assertIn("summary adds", r.stderr)
+            self.assertNotIn("ghp_", r.stderr)
+        self.assertEqual(self.summary_prs(self.shop)[n]["body"], before)
+        self.assertEqual(self.edits(), [])
+
+    def test_a_body_goes_through_a_file_not_argv(self):
+        self.on("--project", "shop")
+        calls = " ".join(self.gh_log())
+        self.assertIn("--body-file", calls)
+        self.assertNotIn("--body ", calls)
 
     def test_pr_command_edits_no_file_in_the_project(self):
         self.on("--project", "shop")

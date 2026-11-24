@@ -587,6 +587,17 @@ class NativeSkillTests(Case):
             self.assertEqual(link.resolve(), skill.resolve())
         self.assertIn("away-improve", r.stdout)
 
+    def test_a_file_an_older_install_left_in_the_skill_folder_is_removed(self):  # R1-09
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        stale = self.skill().parent / "away-improve" / "AWAY-LOG.md"
+        stale.write_text("an old template that says the log lives at the root of the branch\n")
+        (self.skill().parent / "away-improve" / "sub").mkdir()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse(stale.exists())
+        self.assertTrue((self.skill().parent / "away-improve" / "away-entry.md").exists())
+        self.assertTrue((self.skill().parent / "away-improve" / "sub").is_dir())  # only files go
+
     def test_refresh_puts_back_a_changed_or_missing_skill_file(self):
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
         (self.skill() / "brief.md").unlink()

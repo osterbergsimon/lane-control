@@ -31,6 +31,11 @@ if a[:2] == ["api", "user"]:
     print(login); sys.exit(0)
 if a[:2] == ["pr", "list"]:
     print("[]"); sys.exit(0)
+if a[:2] == ["api", "graphql"]:
+    n = [x.split("=", 1)[1] for x in a if x.startswith("number=")][0]
+    if os.environ.get("GH_EDITED_FAIL"):
+        print("gh: " + os.environ["GH_EDITED_FAIL"], file=sys.stderr); sys.exit(1)
+    print(json.dumps({"data": {"repository": {"pullRequest": {"lastEditedAt": prs[n].get("lastEditedAt")}}}})); sys.exit(0)
 pr = prs.get(a[2]) if a[:1] == ["pr"] and len(a) > 2 else None
 if pr is None:
     print("gh stub: no such PR / not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
@@ -54,7 +59,10 @@ if a[:2] == ["pr", "ready"]:
     prs[a[2]] = pr
     json.dump(prs, open(os.environ["GH_PRS"], "w")); sys.exit(0)
 if a[:2] == ["pr", "merge"]:
-    json.dump(a, open(os.environ["GH_PRS"] + ".merge", "w"))
+    if "--body" in a:
+        print("gh stub: a body must go through --body-file", file=sys.stderr); sys.exit(1)
+    msg = open(a[a.index("--body-file") + 1], encoding="utf-8").read() if "--body-file" in a else None
+    json.dump(a + ["--body", msg], open(os.environ["GH_PRS"] + ".merge", "w"))
     if pr.get("isDraft"):  # GitHub refuses to merge a draft
         print("gh: Pull request is still a draft", file=sys.stderr); sys.exit(1)
     time.sleep(float(os.environ.get("GH_MERGE_SLEEP", "0")))  # a slow merge: lets a second away-merge run beside it
@@ -126,7 +134,7 @@ class AwayMergeTests(AwayMergeTest):
     def test_merges_with_subject(self):
         r = self.merge()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual([c.split(" --body ")[0] for c in self.merged()], ["pr merge 7 --merge --subject away: Add the x feature"])
+        self.assertEqual([c.split(" --body-file ")[0] for c in self.merged()], ["pr merge 7 --merge --subject away: Add the x feature"])
         self.assertTrue(self.merged()[0].endswith(f"--match-head-commit {OID}"))
         self.assertIn("abc1234", r.stdout)
         self.assertNotIn("--squash", " ".join(self.gh_calls()))
@@ -527,7 +535,7 @@ class AwayMergeTests(AwayMergeTest):
     def test_only_read_commands_besides_the_merge(self):
         self.merge()
         for c in self.gh_calls():
-            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "pr ready", "repo view", "api user -q", "pr list --head", "pr edit",
+            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "pr ready", "repo view", "api user -q", "api graphql", "pr list --head", "pr edit",
                                           "pr create --draft")), c)
 
 
@@ -592,6 +600,130 @@ class AwayMergeEntryTests(AwayMergeTest):
         self.assertIn("Suite green.", body)
 
 
+class AwayMergeEntryScanTests(AwayMergeTest):
+    """R1-01: what away-merge publishes itself (the entry in the merge message, the --item title) goes through the same scans
+    as the diff, before anything is merged; and the body is pinned to the review."""
+
+    def entry_with(self, section, text):
+        return ENTRY.replace({"Tests": "Suite green.", "How to try it": "Run `x --help`."}[section], text)
+
+    def test_a_home_path_in_the_entry_refuses(self):
+        self.pr(body=self.entry_with("How to try it", "cd /ho" + "me/u/code/x && run"))
+        r = self.merge()
+        self.assertRefused(r, "entry")
+        self.assertIn("the --item title or the PR body entry adds a home path", r.stderr)
+
+    def test_a_token_in_the_entry_refuses_and_is_not_printed(self):
+        tok = "ghp_" + "a" * 36
+        self.pr(body=self.entry_with("Tests", f"ran with {tok}"))
+        r = self.merge()
+        self.assertRefused(r, "entry")
+        self.assertIn("token", r.stderr)
+        self.assertNotIn(tok, r.stderr)
+
+    def test_a_listed_name_in_the_entry_refuses_without_printing_it(self):
+        self.names_file("example-host\n")
+        self.pr(body=self.entry_with("Tests", "ssh Example-Host"))
+        r = self.merge()
+        self.assertRefused(r, "entry")
+        self.assertIn("a listed name", r.stderr)
+        self.assertNotIn("example-host", r.stderr.lower())
+
+    def test_a_private_project_name_in_the_item_title_refuses(self):
+        self.env["GH_PRIVATE"] = "blog"
+        r = self.merge(item="Port the blog importer")
+        self.assertRefused(r, "entry")
+        self.assertIn("item-title", r.stderr)
+
+    def test_a_secret_in_the_item_title_refuses(self):
+        r = self.merge(item="Use key AKIA" + "A" * 16)
+        self.assertRefused(r, "entry")
+
+    def test_text_in_a_comment_or_outside_the_entry_is_neither_scanned_nor_published(self):
+        self.pr(body=ENTRY + "\n## Also noticed\ncd /ho" + "me/u/x\n<!-- ssh /ho" + "me/u/y -->\n")
+        self.assertEqual(self.merge().returncode, 0)
+        self.assertNotIn("/ho" + "me/", (self.tmp / "prs.json.merge").read_text())
+
+    def test_a_clean_entry_still_merges(self):
+        self.assertEqual(self.merge().returncode, 0)
+
+    def stamped(self, edited, review_at="2026-11-24T10:00:00Z", **extra):
+        c = self.marker()
+        c["createdAt"] = review_at
+        self.pr(comments=[c], lastEditedAt=edited, **extra)
+
+    def test_a_body_never_edited_merges(self):
+        self.stamped(None)
+        self.assertEqual(self.merge().returncode, 0)
+
+    def test_a_body_edited_before_the_review_merges(self):
+        self.stamped("2026-11-24T09:59:59Z")
+        self.assertEqual(self.merge().returncode, 0)
+
+    def test_a_body_edited_after_the_review_refuses_and_says_so(self):
+        self.stamped("2026-11-24T10:00:01Z")
+        r = self.merge()
+        self.assertRefused(r, "entry")
+        self.assertIn("edited at 2026-11-24T10:00:01Z", r.stderr)
+        self.assertIn("new `Review: passed", r.stderr)
+
+    def test_a_new_review_after_the_edit_lets_it_merge(self):
+        old, new = self.marker(), self.marker()
+        old["createdAt"], new["createdAt"] = "2026-11-24T09:00:00Z", "2026-11-24T11:00:00Z"
+        self.pr(comments=[old, new], lastEditedAt="2026-11-24T10:00:00Z")
+        self.assertEqual(self.merge().returncode, 0)
+
+    def test_an_edit_time_that_cannot_be_read_refuses(self):
+        self.stamped(None)
+        (self.tmp / "gh.log").write_text("")
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "Add the x feature",
+                            env={"GH_EDITED_FAIL": "HTTP 502"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("cannot be read", r.stderr)
+        self.assertEqual(self.merged(), [])
+
+    def test_an_edit_with_no_readable_review_time_refuses(self):
+        self.pr(lastEditedAt="2026-11-24T10:00:00Z")  # the marker has no createdAt
+        self.assertRefused(self.merge(), "entry")
+
+    def test_a_large_non_ascii_entry_goes_through_a_file_not_argv(self):
+        big = ENTRY.replace("Adds x.", "Adds " + "\u00e9" * 70000)
+        self.pr(body=big)
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("--body ", " ".join(self.merged()))
+        a = json.loads((self.tmp / "prs.json.merge").read_text())
+        self.assertIn("\u00e9" * 70000, a[a.index("--body") + 1])
+
+    def test_a_nul_in_the_body_is_dropped_not_a_traceback(self):
+        self.pr(body=ENTRY.replace("Adds x.", "Adds\x00 x."))
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_the_unfilled_template_refuses_and_says_placeholder(self):
+        self.pr(body=(ROOT / "core" / "templates" / "away-entry.md").read_text())
+        r = self.merge()
+        self.assertRefused(r, "entry")
+        self.assertIn("placeholder", r.stderr)
+
+    def test_a_missing_and_an_empty_heading_are_told_apart(self):
+        self.pr(body=ENTRY.replace("## Why\nUsers asked.\n\n", "").replace("Suite green.", ""))
+        r = self.merge()
+        self.assertRefused(r, "entry")
+        self.assertIn("no such heading: Why", r.stderr)
+        self.assertIn("empty, or still the template's placeholder: Tests", r.stderr)
+        self.assertIn("`#` heading at the start of a line", r.stderr)
+
+    def test_a_fenced_shell_comment_does_not_cut_the_entry_in_the_merge_message(self):
+        self.pr(body=ENTRY.replace("Run `x --help`.", "```bash\n# scratch first\nx --help\n```"))
+        self.assertEqual(self.merge().returncode, 0)
+        a = json.loads((self.tmp / "prs.json.merge").read_text())
+        self.assertIn("# scratch first\nx --help\n```\n\n## How to drop it", a[a.index("--body") + 1])
+
+    names_file = AwayMergeTests.names_file
+
+
 class AwayMergeDraftTests(AwayMergeTest):
     """lc-509: GitHub refuses to merge a draft, so away-merge marks the item PR ready first; never the summary PR."""
 
@@ -614,6 +746,20 @@ class AwayMergeDraftTests(AwayMergeTest):
         self.pr(isDraft=True, comments=[])
         self.assertRefused(self.merge(), "review")
         self.assertEqual(self.calls(), [])
+
+    def test_a_merge_that_fails_after_ready_says_the_pr_stays_ready(self):
+        self.pr(isDraft=True)
+        (self.tmp / "gh.log").write_text("")
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "Add the x feature",
+                            env={"GH_MERGE_FAIL": "HTTP 405", "GH_STATE_AFTER": "OPEN"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("was marked ready before and stays ready", r.stderr)
+        self.assertIn("ready", r.stdout)
+        # a PR that was not a draft says nothing of the kind
+        self.pr(isDraft=False)
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "Add the x feature",
+                            env={"GH_MERGE_FAIL": "HTTP 405", "GH_STATE_AFTER": "OPEN"})
+        self.assertNotIn("stays ready", r.stderr)
 
     def test_a_ready_that_fails_refuses_the_merge(self):
         self.pr(isDraft=True)
@@ -828,6 +974,7 @@ class AwayMergeCapTests(AwayMergeTest):
         self.assertRefused(r, "improve")
         self.assertIn("--max-items 2", r.stderr)
         self.assertIn("wrap up", r.stderr)
+        self.assertIn("--summary-file", r.stderr)  # the step the refusal names carries the summary
         self.assertIn("items 2/2", self.status())  # the refused merge is not counted
 
     def test_the_weekly_cap_does_not_refuse_the_lane_that_is_running(self):

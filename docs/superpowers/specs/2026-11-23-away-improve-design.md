@@ -275,3 +275,9 @@ follow-ups above; everything else there stands.
   after `--max-items` is reached and while draining, as the refusal and the wrap-up steps tell the coordinator; merges stay
   refused.
 - Scouts read the merged away items (the merge commits) and the summary PR, not a log file.
+- **Review round 1 (same day).** The entry and the `--item` title are scanned (secrets, names) before anything is merged, and
+  `--summary-file` the same before it is written: they reach public history without being in the diff. The body is pinned to the
+  review by `lastEditedAt`. Entry parsing ignores headings inside code fences, HTML comments and unfilled `<...>` placeholder
+  lines. The summary PR body has marked generated regions (summary, items); a body edited outside them, or with markers missing
+  or repeated, is left as it is with a warning, never rewritten; the refresh runs under the improve lock. Bodies go through
+  `--body-file`. A branch from before this change is not converted (a stated limit, no such branch exists).

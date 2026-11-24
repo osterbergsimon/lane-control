@@ -972,6 +972,11 @@ def install_skill(home: Path, name: str, want: dict, also: tuple = ()) -> bool:
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(text)
             changed = True
+    if (root / name).is_dir() and not (root / name).is_symlink():
+        for old in (root / name).iterdir():  # a file an older version installed (the away log template, say) goes
+            if old.name not in want and old.is_file() and not old.is_symlink():
+                old.unlink()
+                changed = True
     for agent_dir in (home / ".claude" / "skills", home / ".config" / "opencode" / "skills"):
         for n in (name, *also):
             link = agent_dir / n

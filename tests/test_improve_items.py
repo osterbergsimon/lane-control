@@ -171,7 +171,7 @@ class PrBodyItemsTests(unittest.TestCase):
     def test_no_summary_says_none_yet(self):
         b = improve.pr_body("shop", BRANCH, "main", None, [])
         self.assertIn("No summary yet", b)
-        self.assertNotIn(improve.SUMMARY_START, b)
+        self.assertIsNone(improve.existing_summary(b))
 
     def test_the_list_follows_the_summary(self):
         b = self.body([("A", 1, "aaaaaaa", False, "")])
@@ -288,6 +288,169 @@ class SummaryMarkerTests(unittest.TestCase):
         self.assertIsNone(improve.existing_summary("THEIR BODY"))
         self.assertIsNone(improve.existing_summary(None))
         self.assertIsNone(improve.existing_summary(improve.pr_body("shop", BRANCH, "main", None, [])))
+
+    def test_a_summary_saved_by_a_browser_with_crlf_is_still_read(self):
+        b = improve.pr_body("shop", BRANCH, "main", "- Done: x\n- Skipped: y", [])
+        self.assertEqual(improve.existing_summary(b.replace("\n", "\r\n")), "- Done: x\n- Skipped: y")
+        self.assertEqual(improve.read_body(b.replace("\n", "\r\n"), "shop", BRANCH, "main"), ("- Done: x\n- Skipped: y", None))
+
+
+def body_problem(body):
+    return improve.read_body(body, "shop", BRANCH, "main")[1]
+
+
+class EntryFenceAndPlaceholderTests(unittest.TestCase):
+    """R1-02, R1-03, R1-11, R1-12."""
+
+    def test_a_hash_comment_in_a_code_fence_is_not_a_heading(self):
+        body = ENTRY.replace("Run `x --help`.", "```bash\n# scratch home first\nHOME=$(mktemp -d) lane-improve status\n```")
+        entry, missing = improve.parse_entry(body)
+        self.assertEqual(missing, [])
+        self.assertIn("# scratch home first\nHOME=$(mktemp -d) lane-improve status\n```", entry)
+        self.assertEqual(improve._open_fence(entry), "")
+        self.assertIn("## How to drop it", entry)  # the section after it is still found
+
+    def test_an_entry_quoted_inside_a_fence_is_not_the_entry(self):
+        body = "Example of the format:\n\n```markdown\n" + ENTRY + "```\n"
+        self.assertEqual(improve.parse_entry(body)[1], list(improve.ENTRY_HEADINGS))
+
+    def test_a_tilde_fence_and_a_longer_closing_fence_work(self):
+        body = ENTRY.replace("Run `x --help`.", "~~~sh\n# comment\nx\n~~~~")
+        self.assertEqual(improve.parse_entry(body)[1], [])
+        self.assertIn("# comment", improve.parse_entry(body)[0])
+
+    def test_an_unterminated_fence_in_the_last_section_is_closed_in_the_copy(self):
+        entry, missing = improve.parse_entry(ENTRY.rstrip() + "\n```\nmore\n")
+        self.assertEqual(missing, [])
+        self.assertEqual(improve._open_fence(entry), "")
+        self.assertTrue(entry.endswith("```"))
+
+    def test_an_unterminated_fence_that_swallows_later_headings_leaves_them_missing(self):
+        body = ENTRY.replace("Run `x --help`.", "```\nRun x")
+        absent = improve.entry_problems(body)[1]
+        self.assertEqual(absent, ["How to drop it", "Tests"])
+
+    def test_the_unfilled_template_is_every_section_empty(self):
+        template = (ROOT / "core" / "templates" / "away-entry.md").read_text()
+        entry, absent, empty = improve.entry_problems(template)
+        self.assertEqual((entry, absent), ("", []))
+        self.assertEqual(empty, list(improve.ENTRY_HEADINGS))
+
+    def test_a_section_with_only_a_comment_or_a_placeholder_is_empty(self):
+        body = ENTRY.replace("Users asked.", "<!-- fill in -->").replace("Suite green.", "<what ran and passed; with the run>")
+        self.assertEqual(improve.entry_problems(body)[2], ["Why", "Tests"])
+        multi = ENTRY.replace("Users asked.", "<!-- one\ntwo\n-->")
+        self.assertEqual(improve.entry_problems(multi)[2], ["Why"])
+
+    def test_a_comment_is_not_copied_and_html_in_a_fence_is_kept(self):
+        body = ENTRY.replace("Adds x.", "Adds x. <!-- note to self -->").replace("Suite green.", "```html\n<!-- kept -->\n```")
+        entry, _ = improve.parse_entry(body)
+        self.assertNotIn("note to self", entry)
+        self.assertIn("<!-- kept -->", entry)
+
+    def test_real_html_and_prose_in_angle_brackets_still_count(self):
+        body = ENTRY.replace("Users asked.", "<details>\n<summary>more</summary>\n</details>").replace("Suite green.", "<b>green</b>")
+        self.assertEqual(improve.entry_problems(body)[1:], ([], []))
+
+    def test_the_copy_comes_in_the_canonical_order(self):  # R1-11
+        heads = ENTRY.strip().split("\n\n")
+        entry, _ = improve.parse_entry("\n\n".join(reversed(heads)))
+        self.assertLess(entry.index("## What"), entry.index("## Tests"))
+
+    def test_absent_and_empty_are_told_apart(self):  # R1-12
+        body = ENTRY.replace("## Why\nUsers asked.\n\n", "").replace("Suite green.", "")
+        entry, absent, empty = improve.entry_problems(body)
+        self.assertEqual((absent, empty), (["Why"], ["Tests"]))
+
+    def test_a_nul_and_old_mac_line_ends_do_not_break_parsing(self):
+        entry, missing = improve.parse_entry(ENTRY.replace("\n", "\r").replace("Adds x.", "Adds\x00 x."))
+        self.assertEqual(missing, [])
+        self.assertNotIn("\x00", entry)
+
+
+class SummaryBodySafetyTests(unittest.TestCase):
+    """R1-04, R1-05."""
+
+    def good(self, summary="- Done: x", items=()):
+        return improve.pr_body("shop", BRANCH, "main", summary, list(items))
+
+    def test_a_body_the_module_wrote_has_no_problem(self):
+        self.assertIsNone(body_problem(self.good()))
+        self.assertIsNone(body_problem(self.good(items=[("A", 1, "aaaaaaa", False, ENTRY.strip())])))
+        self.assertIsNone(body_problem(""))  # nothing there to lose
+        self.assertIsNone(body_problem(None))
+
+    def test_a_crlf_body_is_not_a_problem(self):
+        self.assertIsNone(body_problem(self.good().replace("\n", "\r\n")))
+
+    def test_text_the_owner_added_outside_the_markers_is_a_problem_not_lost(self):
+        for body in ("OWNER: drop item 2\n\n" + self.good(), self.good() + "\nOWNER: drop item 2\n",
+                     self.good().replace(improve.ITEMS_START, "OWNER: drop item 2\n" + improve.ITEMS_START)):
+            why = body_problem(body)
+            self.assertIn("outside the generated parts", why)
+
+    def test_removed_or_repeated_markers_are_a_problem(self):
+        for m in (improve.SUMMARY_START, improve.SUMMARY_END, improve.ITEMS_START, improve.ITEMS_END):
+            self.assertIn("markers are missing", body_problem(self.good().replace(m, "")), m)
+            self.assertIn("missing, repeated", body_problem(self.good() + m), m)
+        self.assertIn("missing", body_problem("THEIR BODY"))
+        # a body from before the log moved into PRs: a summary, no markers
+        self.assertIn("missing", body_problem("Away-improve branch\n\n- Done: the old summary\n"))
+
+    def test_an_edited_summary_inside_the_markers_is_kept(self):
+        edited = self.good().replace("- Done: x", "- Done: x, edited on the web\r\n- Also: y")
+        self.assertEqual(improve.read_body(edited, "shop", BRANCH, "main"), ("- Done: x, edited on the web\n- Also: y", None))
+
+    def test_an_entry_that_holds_the_markers_is_never_the_summary(self):
+        evil = ENTRY.replace("Adds x.", f"{improve.SUMMARY_START}\nI am the summary now\n{improve.SUMMARY_END}")
+        entry, _ = improve.parse_entry(evil)  # the comment lines are dropped, and a fenced one is neutralised in the body
+        fenced = ENTRY.replace("Adds x.", f"```\n{improve.SUMMARY_START}\nI am the summary now\n{improve.SUMMARY_END}\n```")
+        entry, _ = improve.parse_entry(fenced)
+        b = self.good(summary=None, items=[("A <!-- away-summary -->", 1, "aaaaaaa", False, entry)])
+        self.assertIsNone(improve.existing_summary(b))
+        self.assertIsNone(body_problem(b))
+        self.assertEqual(b.count(improve.SUMMARY_START), 1)
+
+    def test_a_summary_that_holds_markers_cannot_break_the_body(self):
+        b = self.good(summary=f"x {improve.ITEMS_END} y {improve.SUMMARY_START}")
+        self.assertIsNone(body_problem(b))
+
+    def test_the_end_markers_survive_the_cut_of_a_huge_list(self):
+        items = [(f"Item {i} " + "w" * 300, i, f"{i:07d}", False, "") for i in range(400)]
+        b = improve.pr_body("shop", BRANCH, "main", "- Done: x", items)
+        self.assertLessEqual(len(b), improve.BODY_LIMIT)
+        self.assertIsNone(body_problem(b))
+        self.assertEqual(improve.existing_summary(b), "- Done: x")
+
+    def test_a_body_that_fits_with_its_notice_is_never_cut_mid_entry(self):
+        for n in range(30, 90):
+            items = [(f"Item {i}", i, f"{i:07d}", False, ENTRY.strip().replace("Adds x.", "Adds x. " + "word " * 180)) for i in range(n)]
+            b = improve.pr_body("shop", BRANCH, "main", "s" * 7000, items)
+            self.assertLessEqual(len(b), improve.BODY_LIMIT, n)
+            self.assertEqual(b.count("<details>"), b.count("</details>"), n)
+            self.assertEqual(b.count("```") % 2, 0, n)
+            if "The list is cut here" in b:
+                self.assertEqual(b.count("<details>"), 0, n)  # a cut list never sits beside entries
+
+    def test_a_long_one_line_section_is_cut_at_a_word_not_dropped(self):
+        long = ENTRY.strip().replace("Adds x.", "Adds " + "thing " * 400)
+        items = [(f"Item {i}", i, f"{i:07d}", False, long) for i in range(40)]
+        b = improve.pr_body("shop", BRANCH, "main", "- Done: x", items)
+        self.assertIn("shortened", b)
+        self.assertIn("Adds thing thing", b)  # the content of the first section is there, cut at a word
+        self.assertNotRegex(b, r"thin\n|thin \(shortened")
+
+    def test_a_cut_inside_a_fence_closes_it(self):
+        text = "## What\n```\n" + "line\n" * 300 + "```\n"
+        cut = improve._cut(text, 100)
+        self.assertEqual(improve._open_fence(cut), "")
+        self.assertTrue(cut.endswith("(shortened)"))
+
+    def test_headings_in_a_fence_are_not_demoted(self):
+        b = improve.pr_body("shop", BRANCH, "main", "- Done: x",
+                            [("A", 1, "aaaaaaa", False, "## What\n```\n## not a heading\n```")])
+        self.assertIn("\n## not a heading\n", b)
+        self.assertIn("#### What", b)
 
 
 if __name__ == "__main__":

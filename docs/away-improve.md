@@ -130,7 +130,14 @@ the branch, not from a file on it:
   not fit they are shortened to their first lines, then left out, and the body says so (the whole entry stays in the
   merge commit, `git show <sha>`, and in the item's PR).
 
-`away-merge` rebuilds it after every merge (and opens it first if it was not open), so nobody has to remember to. It stays a
+The generated parts of the body sit between markers (HTML comments, invisible on the page): the summary between
+`<!-- away-summary -->` markers and the items and entries between `<!-- away-items -->` markers. `away-merge` rebuilds it after
+every merge (and opens it first if it was not open), under the improve lock, so nobody has to remember to. **To change the
+summary by hand, edit it between its markers**: it is kept, line endings and all. **A body with text outside the generated
+parts, or with a marker missing or repeated, is not rewritten**: the refresh leaves it, prints one warning line (`away-merge`
+after the merge, which stays done; `lane-improve pr` exits 1) and says how to fix it: clear the body, or move your text
+inside the summary markers, then run `lane-improve pr <project>`. A summary of more than 8000 characters is refused the same way.
+An empty body is written. A summary PR opened by hand with its own text is recorded by `on` but not rewritten. It stays a
 draft: **no agent merges it, marks it ready or closes it**; you merge it (to adopt the whole branch) or name the items to
 drop. A PR you closed is left alone.
 
@@ -146,9 +153,29 @@ hand). The start commit is not an item: a branch with only it counts as never gi
 
 Each build lane opens its PR into the away branch with the entry in its body, under these headings (template
 `core/templates/away-entry.md`): What, Why, Builds on, Existing work checked, How to try it, How to drop it, Tests.
-`away-merge` refuses a PR whose body lacks one (one line naming what is missing), copies the entry into the merge commit's
-message body after the `Pull request #<n>` line (the subject stays `away: <item>`), and, when the PR is still a draft
-(lane PRs open as drafts and GitHub will not merge a draft), marks it ready first. It never touches the summary PR.
+`away-merge` refuses a PR whose body lacks one (one line saying which heading is absent and which is empty), copies the
+entry into the merge commit's message body after the `Pull request #<n>` line (the subject stays `away: <item>`), and, when
+the PR is still a draft (lane PRs open as drafts and GitHub will not merge a draft), marks it ready first. It never touches
+the summary PR. If the merge then fails, the PR stays ready, and the refusal says so.
+
+How the entry is read: a heading is a `#` heading at the start of a line (any level, any case, an optional colon), and
+headings inside a code fence (` ``` ` or `~~~`) are not headings, so a shell comment in a snippet is safe, and an entry quoted
+inside a fence is not the entry. HTML comments and lines that are only a `<...>` placeholder (the unfilled template) count as
+empty. The copy keeps every code fence closed. Text outside the seven sections is not copied.
+
+What is published is checked first: the entry and the `--item` title go through the same secret scan and the same names scan
+as the diff (an entry with a home path, a token or a private name is refused, naming the kind and never the text), and
+`lane-improve pr --summary-file` runs both on the summary before it writes anything. The entry is also pinned to the review:
+if the PR body was edited after the newest `Review: passed <head sha>` comment (GitHub's `lastEditedAt` against the
+comment's time), the merge is refused until the reviewer has looked again and a new comment is written; a time that cannot be
+read refuses too. Bodies go to `gh` through files, not the command line, so a long or non-English body is fine.
+
+## Limits of this change
+
+A branch or summary PR made before the log moved into PRs is not converted. Its `AWAY-LOG.md` stays on the branch (remove it
+before you adopt the branch, or it reaches the integration branch), and its PR body has no markers, so a refresh leaves it
+with a warning until you clear it. No such branch exists today. The installed skill folder loses the old log
+template the next time `project-setup` runs.
 
 ## What keeps it inside its limits
 
@@ -157,7 +184,7 @@ Be clear about what is enforced and what is a backstop.
 - **`away-merge` is the only merge route and it checks**: improve mode is on (or draining) for the project; the PR's
   base is exactly the project's recorded away branch (never main, develop or another project's branch); a review
   comment by the gh login running the script says `Review: passed <head sha>` for the current head (the PR body never
-  counts); the PR body holds the log entry (all seven headings); CI is green, or `--local-suite-ok <log of the full suite run through lane-heavy>` (the log must end in a pass
+  counts); the PR body holds the log entry (all seven headings, filled in), which is scanned like the diff and was not edited after the review; CI is green, or `--local-suite-ok <log of the full suite run through lane-heavy>` (the log must end in a pass
   and its last line is printed; use it only when CI itself is failing for reasons outside the change); a secret scan
   (gitleaks if the project has a `.gitleaks.toml`, else a built-in scan for keys, tokens, home paths and private
   addresses); for a public repo, the names it must not carry (hostnames, usernames, project names) in the added lines and

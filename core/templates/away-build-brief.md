@@ -20,6 +20,8 @@ item (picked by <PARENT>, who says why): <ITEM>. Why it was picked: <WHY_PICKED>
   so write no commit hash; say which later items depend on it), Tests. `away-merge` refuses a PR whose body lacks one
   of them, and copies the entry into the merge commit's message; keep it up to date if you push again. Add no log file
   to the branch, and leave the summary to <PARENT>. Plain, short words, for an owner who was not here.
+  The entry is scanned like the diff (no secrets, private names or home paths in it), an unfilled `<...>` template line
+  counts as empty, and a body edited after <PARENT>'s review needs a new review: push no late edits to it.
   Open the PR as a draft if you like: `away-merge` marks it ready before it merges.
 - Tests green before you report (through `lane-heavy` for the full suite). Nothing private in anything you commit
   (hostnames, usernames, private paths, keys): the branch is public if the repository is.

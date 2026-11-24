@@ -60,7 +60,7 @@ stop (section 3).
    keep, not something the script can enforce.
 6. **Merge with `away-merge`.** `away-merge --project <your project> --pr <n> --item "<item title>"` (in `core/scripts/` of the lane-control
    checkout your persona names). It checks improve is on for you (or draining, section 3), the PR's base is exactly
-   your away branch, the review comment, the log entry in the PR body, CI green, a secret and private-data scan, and the deny paths from the diff; then it marks the PR ready when it is still a draft (lane PRs open as drafts and GitHub will not merge one; it never touches the summary PR) and merges with a merge commit titled `away: <item>`
+   your away branch, the review comment, the log entry in the PR body (filled in, scanned for secrets and private names like the diff, and not edited since the review), CI green, a secret and private-data scan, and the deny paths from the diff; then it marks the PR ready when it is still a draft (lane PRs open as drafts and GitHub will not merge one; it never touches the summary PR) and merges with a merge commit titled `away: <item>`
    (never squashed), whose message body is `Pull request #<n>` and the item's log entry, pinned to the head it checked, and prints the commit. When CI itself is failing or unavailable for reasons outside the change,
    run the full suite through a lane and `lane-heavy`, pass `--local-suite-ok <the log file of that run>` (its last line must show a pass; any other string is refused), and have the PR body's Tests section say so. After the merge it records the merge (that is what `--max-items` counts) and rebuilds the **draft summary PR**
    (`away/<date>` into the integration branch, opened when the mode started): its body is built from the branch's merge commits (each item's entry) plus the summary you wrote (section 2, it keeps it), and the PR is opened first if it could not be opened at the start. You have nothing to remember; if it says the PR was not
@@ -83,7 +83,7 @@ The one thing you write is the **summary** of the whole period: what was done, w
 drop if unsure, what was skipped, in a few plain lines. Write it to a file outside the project (the scratchpad or a temp
 file; never a file in the repo), at the wrap-up (section 3) or any time before, and run
 `lane-improve pr <your project> --summary-file <path>`: the summary PR keeps it, and every `away-merge` after it keeps it
-too. You edit no file in the project for this.
+too. You edit no file in the project for this. The summary is scanned like a diff; if the owner edits the summary PR by hand, their text lives between the summary markers, and a body edited elsewhere is left as it is with a warning (the fix is in the warning).
 
 ## 3. Stopping and the owner's return
 Stop starting cycles at: the end time or `lane-improve off`; no-new-work on a metered budget (`budget-state --project`;

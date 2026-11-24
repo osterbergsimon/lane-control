@@ -29,7 +29,7 @@ away-merge, no new cycle starts, and each coordinator then opens its draft PR an
 After `off` the drain state is improve-drain.json (the same fields, plus `ended` and `pending`); after an end time it is
 the old improve.json, which `drained` turns into improve-drain.json. The deny rules stay until `drained`.
 A cap reached ends the project's cycles like the end time does: the lane that is running finishes and merges, the
-coordinator wraps up (log summary, `lane-improve pr`, its message to the owner) and runs `lane-improve drained <project>`,
+coordinator wraps up (the summary, `lane-improve pr <project> --summary-file <path>`, its message to the owner) and runs `lane-improve drained <project>`,
 which with the mode on records the wrap-up in improve-period.json (beside the improve file; keyed to the period's `started`,
 holds away-merge's record of its merges and the wrapped-up projects). The mode stays on for the other projects.
 Command line (lane-improve calls it): `improve.py on ...`, `off`, `drained`, `status`.
@@ -425,7 +425,7 @@ def hard_stop(state: dict, project: str, draining: bool = False) -> "str | None"
     mx = state.get("max_items")
     if mx and items_done(state, project) >= mx:
         return (f"--max-items {mx} is reached for {project} ({items_done(state, project)} merged this period): nothing more "
-                f"merges; wrap up (`lane-improve pr {project}`, tell the owner, `lane-improve drained {project}`), or the "
+                f"merges; wrap up (write the summary, `lane-improve pr {project} --summary-file <path>`, tell the owner, `lane-improve drained {project}`), or the "
                 "owner raises the cap")
     return None
 
@@ -585,11 +585,11 @@ def _already_merged(repo: Path, branch: str, integration: str) -> bool:
                 f"refs/remotes/origin/{integration}").returncode == 0
 
 
-START_PREFIX = "away: start "  # the subject of the one commit `on` adds to a new away branch (the start log)
+START_PREFIX = "away: start "  # the subject of the one commit `on` adds to a new away branch (the start commit)
 
 
 def _unworked(repo: Path, branch: str, integration: str) -> bool:
-    """Whether the branch holds at most the start log commit `on` made: no item was ever merged into it."""
+    """Whether the branch holds at most the start commit `on` made: no item was ever merged into it."""
     r = _git(repo, "log", "--format=%s", f"refs/remotes/origin/{integration}..refs/remotes/origin/{branch}")
     return r.returncode == 0 and all(l.startswith(START_PREFIX) for l in r.stdout.splitlines())
 
@@ -695,6 +695,8 @@ BODY_LIMIT = 60000        # GitHub refuses a PR body of more than 65536 characte
 SUMMARY_LIMIT = 8000      # the coordinator's summary is short; a longer one is refused, not cut
 SUMMARY_START = "<!-- away-summary -->"
 SUMMARY_END = "<!-- /away-summary -->"
+ITEMS_START = "<!-- away-items -->"
+ITEMS_END = "<!-- /away-items -->"
 NO_SUMMARY = ("No summary yet: the coordinator writes one at wrap-up (`lane-improve pr <project> --summary-file <path>`).")
 # The headings every item PR's body must have; away-merge copies them into the merge commit's message.
 ENTRY_HEADINGS = ("What", "Why", "Builds on", "Existing work checked", "How to try it", "How to drop it", "Tests")
@@ -716,14 +718,52 @@ def _heading(line: str) -> "tuple[int, str] | None":
     return len(m.group(1)), re.sub(r"[*_`]", "", m.group(2)).strip().rstrip(":").strip().lower()
 
 
-def parse_entry(body: "str | None") -> "tuple[str, list]":
-    """(entry, missing) for an item PR's body: the log entry is the sections whose headings are ENTRY_HEADINGS (any heading
-    level, any case, an optional colon). `entry` is those sections in the body's order under canonical `## <Name>` headings;
-    `missing` lists the headings with no section or an empty one. A section ends at the next heading of its own level or
-    above; deeper headings stay inside it."""
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_TAGS = {"a", "b", "br", "code", "details", "div", "em", "hr", "i", "img", "kbd", "li", "ol", "p", "pre", "span", "strong",
+         "sub", "summary", "sup", "table", "td", "th", "tr", "ul", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+def _placeholder(line: str) -> bool:
+    """A line that is only a `<...>` placeholder of the entry template (several words in angle brackets, not an HTML tag)."""
+    t = line.strip()
+    m = re.match(r"^<([A-Za-z][\w-]*)[ ,;:].*>$", t)
+    return bool(m) and m.group(1).lower() not in _TAGS
+
+
+def _fence_close(open_fence: str, line: str) -> bool:
+    m = _FENCE.match(line)
+    return bool(m) and m.group(1)[0] == open_fence[0] and len(m.group(1)) >= len(open_fence) and not line.strip().strip(open_fence[0]).strip()
+
+
+def entry_problems(body: "str | None") -> "tuple[str, list, list]":
+    """(entry, absent, empty) for an item PR's body. The log entry is the sections whose headings are ENTRY_HEADINGS (a `#`
+    heading at the start of a line, any level, any case, an optional colon). Headings inside a code fence are not headings;
+    HTML comments and `<...>` placeholder lines (the unfilled template) count as nothing. `entry` is the sections that have
+    text, in canonical order under `## <Name>` headings, with every code fence closed; `absent` lists the headings with no
+    section, `empty` those whose section has no text. A section ends at the next heading of its own level or above (outside
+    a fence); deeper headings stay inside it."""
     wanted = {h.lower(): h for h in ENTRY_HEADINGS}
-    found, cur, level = {}, None, 0
-    for line in (body or "").replace("\r\n", "\n").split("\n"):
+    found, cur, level, fence, in_comment = {}, None, 0, None, False
+    for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").split("\n"):
+        if fence:
+            if _fence_close(fence, line):
+                fence = None
+            if cur:
+                found[cur].append(line)
+            continue
+        m = _FENCE.match(line)
+        if m and not in_comment:
+            fence = m.group(1)
+            if cur:
+                found[cur].append(line)
+            continue
+        if in_comment:
+            if "-->" not in line:
+                continue
+            line, in_comment = line.split("-->", 1)[1], False
+        line = re.sub(r"<!--.*?-->", "", line)
+        if "<!--" in line:
+            line, in_comment = line.split("<!--", 1)[0], True
         h = _heading(line)
         if h and h[1] in wanted:
             cur, level = wanted[h[1]], h[0]
@@ -732,64 +772,169 @@ def parse_entry(body: "str | None") -> "tuple[str, list]":
         if h and (cur is None or h[0] <= level):
             cur = None
             continue
-        if cur:
+        if cur and not _placeholder(line):
             found[cur].append(line)
-    parts, missing = [], []
+    parts, absent, empty = [], [], []
+    for name in ENTRY_HEADINGS:
+        if name not in found:
+            absent.append(name)
+        elif not "\n".join(found[name]).strip():
+            empty.append(name)
     for name in ENTRY_HEADINGS:
         text = "\n".join(found.get(name, [])).strip()
-        if not text:
-            missing.append(name)
-    order = [h for h in ENTRY_HEADINGS if "\n".join(found.get(h, [])).strip()]
-    for name in order:
-        parts.append(f"## {name}\n" + "\n".join(found[name]).strip())
-    return "\n\n".join(parts), missing
+        if text:
+            if _open_fence(text):
+                text += "\n" + _open_fence(text)
+            parts.append(f"## {name}\n{text}")
+    return "\n\n".join(parts), absent, empty
+
+
+def _open_fence(text: str) -> str:
+    """The fence that is still open at the end of `text` ("" when every fence is closed)."""
+    fence = None
+    for line in text.split("\n"):
+        if fence:
+            if _fence_close(fence, line):
+                fence = None
+        else:
+            m = _FENCE.match(line)
+            if m:
+                fence = m.group(1)
+    return fence or ""
+
+
+def parse_entry(body: "str | None") -> "tuple[str, list]":
+    """(entry, missing): entry_problems with the absent and the empty headings together, in the order of ENTRY_HEADINGS."""
+    entry, absent, empty = entry_problems(body)
+    return entry, [h for h in ENTRY_HEADINGS if h in absent or h in empty]
+
+
+def _neutral(text: str) -> str:
+    """Text that came from a PR (a title, an entry) with the body's own markers made harmless: an entry's text never counts as
+    a marker."""
+    return text.replace("<!--", "&lt;!--")
+
+
+def generated_parts(project: str, branch: str, integration: str) -> "tuple[str, str]":
+    """(head, foot): the fixed text before and after the generated regions of a summary PR's body."""
+    head = (f"Away-improve branch for {project}: `{branch}` into `{integration}`. A draft, never merged by an agent: merge "
+            f"this PR yourself to adopt the whole branch, or name the items to drop first.")
+    foot = ("Each item's log entry is in its merge commit message on the branch (and in its PR's body). This text is "
+            "refreshed after every `away-merge` from the branch's merges, read from git, and keeps the coordinator's summary.")
+    return head, foot
+
+
+class BodyKept(PrError):
+    """The summary PR's body was changed by hand in a way a refresh would lose: it is left as it is (the message says how to
+    fix it). `number` and `url` are the PR's."""
+
+    def __init__(self, msg: str, number: "int | None" = None, url: str = ""):
+        super().__init__(msg)
+        self.number, self.url = number, url
+
+
+def read_body(body: "str | None", project: str, branch: str, integration: str) -> "tuple[str | None, str | None]":
+    """(summary, problem) from a summary PR's current body. An empty body is fine (nothing there to lose). Otherwise it must be
+    the body this module writes: each marker once, in order, nothing but the fixed head and foot outside the regions
+    (the coordinator's summary is inside its markers and is kept, however it was edited). `problem` says what is wrong and how
+    to fix it; the body is then not to be rewritten. Line endings are normalised first: a browser saves CRLF."""
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return None, None
+    marks = [SUMMARY_START, SUMMARY_END, ITEMS_START, ITEMS_END]
+    pos = [text.find(m) for m in marks]
+    if any(text.count(m) != 1 for m in marks) or pos != sorted(pos):
+        return None, ("its markers are missing, repeated or out of order (a body from before the log moved into PRs, or one "
+                      "edited by hand)")
+    head, foot = generated_parts(project, branch, integration)
+    outside = (text[:pos[0]], text[pos[1] + len(SUMMARY_END):pos[2]], text[pos[3] + len(ITEMS_END):])
+    norm = lambda t: " ".join(t.split())  # noqa: E731
+    if norm(outside[0]) != norm(head) or norm(outside[1]) or norm(outside[2]) != norm(foot):
+        return None, "it has text outside the generated parts (put your own text inside the summary markers to keep it)"
+    summary = text[pos[0] + len(SUMMARY_START):pos[1]].strip()
+    if not summary or summary == NO_SUMMARY.replace("<project>", project):
+        return None, None
+    return summary, None
 
 
 def existing_summary(body: "str | None") -> "str | None":
-    """The coordinator's summary as it stands in a summary PR's body (between the markers), or None."""
-    m = re.search(re.escape(SUMMARY_START) + r"\n(.*?)\n" + re.escape(SUMMARY_END), body or "", re.S)
-    return (m.group(1).strip() or None) if m else None
+    """The coordinator's summary as it stands in a summary PR's body (between the markers; line endings normalised), or None."""
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    m = re.search(re.escape(SUMMARY_START) + r"\n(.*?)\n" + re.escape(SUMMARY_END), text, re.S)
+    got = (m.group(1).strip() or None) if m else None
+    return None if got and got.startswith("No summary yet:") else got
 
 
 def pr_body(project: str, branch: str, integration: str, summary: "str | None", items: "list | None") -> str:
-    """The summary PR's text: the coordinator's summary, the merged items (`merged_items`: a list, or None when git could not
-    be read) and each item's log entry. Never longer than BODY_LIMIT: entries are shortened first (and it says so), then
-    the list is cut."""
+    """The summary PR's text: the coordinator's summary (between markers), the merged items (`merged_items`: a list, or None
+    when git could not be read) and each item's log entry (between markers). Never longer than BODY_LIMIT: entries are
+    shortened first (and it says so), then the list is cut."""
     summary = (summary or "").strip()
-    head = (f"Away-improve branch for {project}: `{branch}` into `{integration}`. A draft, never merged by an agent: merge "
-            f"this PR yourself to adopt the whole branch, or name the items to drop first.\n\n")
-    middle = (f"{SUMMARY_START}\n{summary}\n{SUMMARY_END}" if summary else NO_SUMMARY.replace("<project>", project)) + "\n\n"
-    foot = ("\n\nEach item's log entry is in its merge commit message on the branch (and in its PR's body). This text is "
-            "refreshed after every `away-merge` from the branch's merges, read from git, and keeps the coordinator's summary.\n")
+    for m in (SUMMARY_START, SUMMARY_END, ITEMS_START, ITEMS_END):
+        summary = summary.replace(m, "")
+    head, foot = generated_parts(project, branch, integration)
+    top = (f"{head}\n\n{SUMMARY_START}\n{summary or NO_SUMMARY.replace('<project>', project)}\n{SUMMARY_END}\n\n{ITEMS_START}\n")
+    bottom = f"\n{ITEMS_END}\n\n{foot}\n"
+    room = BODY_LIMIT - len(top) - len(bottom)
     listing = items_text(items)
-    with_entries = [(t, e) for t, _pr, _sha, _rev, e in items or [] if e]
-    notice = ""
+    entries = [(t, e) for t, _pr, _sha, _rev, e in items or [] if e]
     for cap in (None, 700, 200, 0):
-        text = _entries_text(with_entries, cap)
-        if len(head + middle + listing + text + foot) <= BODY_LIMIT:
-            break
-    if with_entries and cap is not None:
-        notice = (f"\n\nThe entries are {'left out' if cap == 0 else 'shortened (to their first lines)'} to fit GitHub's "
-                  "65536-character limit on a PR body; the whole entry is in each merge commit message (`git show <sha>`) "
-                  "and in the item's PR.")
-    body = head + middle + listing + notice + (("\n\n" + text) if text else "") + foot
-    if len(body) > BODY_LIMIT:
-        cut = ("\n\n(The list is cut here to fit GitHub's 65536-character limit on a PR body: the rest of the items are the "
-               "branch's merge commits, `git log --first-parent --merges`.)")
-        body = body[:BODY_LIMIT - len(cut) - len(foot)].rstrip() + cut + foot
-    return body
+        text = _entries_text(entries, cap)
+        notice = ""
+        if entries and cap is not None:
+            notice = (f"\n\nThe entries are {'left out' if cap == 0 else 'shortened (to their first lines)'} to fit GitHub's "
+                      "65536-character limit on a PR body; the whole entry is in each merge commit message (`git show <sha>`) "
+                      "and in the item's PR.")
+        inner = listing + notice + (("\n\n" + text) if text else "")
+        if len(inner) <= room:
+            return top + inner + bottom
+    cut = ("\n\n(The list is cut here to fit GitHub's 65536-character limit on a PR body: the rest of the items are the "
+           "branch's merge commits, `git log --first-parent --merges`.)")
+    return top + listing[:max(room - len(cut), 0)].rstrip() + cut + bottom
+
+
+def _cut(text: str, cap: int) -> str:
+    """`text` cut to about `cap` characters at a line end, else at a word end; every code fence it opened is closed."""
+    if len(text) <= cap:
+        return text
+    head = text[:cap]
+    by_line = head.rsplit("\n", 1)[0] if "\n" in head else ""
+    if len(by_line) >= cap // 2:  # a line end that keeps at least half of what fits; else a long line is cut at a word
+        head = by_line
+    elif " " in head:
+        head = head.rsplit(" ", 1)[0]
+    head = head.rstrip()
+    fence = _open_fence(head)
+    return head + (f"\n{fence}" if fence else "") + "\n\n(shortened)"
+
+
+def _demote(text: str) -> str:
+    """The entry's `## ` headings one outline level down (`#### `), outside code fences."""
+    out, fence = [], None
+    for line in text.split("\n"):
+        if fence:
+            if _fence_close(fence, line):
+                fence = None
+        else:
+            m = _FENCE.match(line)
+            if m:
+                fence = m.group(1)
+            elif line.startswith("## "):
+                line = "#### " + line[3:]
+        out.append(line)
+    return "\n".join(out)
 
 
 def _entries_text(entries: list, cap: "int | None") -> str:
-    """The items' entries as collapsed blocks, each cut to `cap` characters (at a line end) when `cap` is given; cap 0 leaves them out."""
+    """The items' entries as collapsed blocks, each cut to `cap` characters when `cap` is given; cap 0 leaves them out."""
     if cap == 0 or not entries:
         return ""
     out = []
     for title, entry in entries:
-        text = re.sub(r"(?m)^## ", "#### ", entry.strip())
-        if cap is not None and len(text) > cap:
-            text = text[:cap].rsplit("\n", 1)[0].rstrip() + "\n\n(shortened)"
-        out.append(f"<details>\n<summary>{html.escape(title)}</summary>\n\n{text}\n\n</details>")
+        text = _demote(entry.strip())
+        if cap is not None:
+            text = _cut(text, cap)
+        out.append(f"<details>\n<summary>{html.escape(_neutral(title))}</summary>\n\n{_neutral(text)}\n\n</details>")
     return "\n\n".join(out)
 
 
@@ -803,7 +948,7 @@ def items_text(items: "list | None") -> str:
              "coordinator (latest first if later items build on it):"]
     for title, pr, sha, reverted, _entry in items:
         what = "already reverted" if reverted else f"`git revert -m 1 {sha}`"
-        lines.append(f"- {title} ({f'PR #{pr}, ' if pr else ''}{sha}): {what}")
+        lines.append(f"- {_neutral(title)} ({f'PR #{pr}, ' if pr else ''}{sha}): {what}")
     return "\n".join(lines)
 
 
@@ -841,11 +986,22 @@ def merged_items(repo: Path, branch: str, integration: str) -> "list | None":
 def _gh(repo: Path, *args: str) -> str:
     try:
         r = subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True, timeout=GH_WRITE_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         raise PrError(f"gh {args[0]} {args[1]} failed ({e})") from None
     if r.returncode:
         raise PrError(f"gh {args[0]} {args[1]} failed ({(r.stderr.strip() or r.stdout.strip() or 'no output').splitlines()[-1]})")
     return r.stdout
+
+
+def _gh_body(repo: Path, args: list, body: str) -> str:
+    """`gh <args> --body-file <file holding body>`: a body goes through a file, never argv (a long or non-ASCII body would hit
+    the argument size limit)."""
+    with tempfile.NamedTemporaryFile("w", prefix="away-body-", suffix=".md", delete=False, encoding="utf-8") as fh:
+        fh.write(body.replace("\x00", ""))
+    try:
+        return _gh(repo, *args, "--body-file", fh.name)
+    finally:
+        Path(fh.name).unlink(missing_ok=True)
 
 
 def _gh_json(repo: Path, kind: type, *args: str):
@@ -885,8 +1041,8 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
             old_body = mine[0].get("body")
         else:
             body = pr_body(project, branch, integration, summary, items)
-            url = _gh(repo, "pr", "create", "--draft", "--base", integration, "--head", branch, "--title",
-                      pr_title(project, branch), "--body", body).strip().splitlines()[-1:] or [""]
+            url = _gh_body(repo, ["pr", "create", "--draft", "--base", integration, "--head", branch, "--title",
+                                  pr_title(project, branch)], body).strip().splitlines()[-1:] or [""]
             url = url[0]
             m = re.search(r"/pull/(\d+)\s*$", url)
             if not m:
@@ -903,8 +1059,15 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
                            "it is the owner's call")
         url, what = str(info.get("url", "")), "refreshed"
         old_body = info.get("body")
-    body = pr_body(project, branch, integration, summary or existing_summary(old_body if isinstance(old_body, str) else None), items)
-    _gh(repo, "pr", "edit", str(number), "--body", body)
+    kept, problem = read_body(old_body if isinstance(old_body, str) else None, project, branch, integration)
+    if problem:
+        raise BodyKept(f"summary PR #{number}'s body is left as it is: {problem}. To let lane-improve write it again, clear the "
+                       f"body (keep your own text somewhere else), then run `lane-improve pr {project}`", number, url)
+    summary = summary or kept
+    if summary and len(summary) > SUMMARY_LIMIT:
+        raise BodyKept(f"summary PR #{number}'s body is left as it is: its summary is {len(summary)} characters, over the "
+                       f"limit of {SUMMARY_LIMIT}; shorten it", number, url)
+    _gh_body(repo, ["pr", "edit", str(number)], pr_body(project, branch, integration, summary, items))
     return number, url, what
 
 
@@ -926,11 +1089,19 @@ def record_pr(project: str, number: int) -> bool:
 
 
 def sync_and_record(repo: Path, state: dict, project: str, summary: "str | None" = None) -> "tuple[int, str, str]":
-    n, url, what = sync_summary_pr(repo, project, state["branches"][project], state["integration"].get(project, "main"),
-                                   state.get("prs", {}).get(project), summary)
-    if state.get("prs", {}).get(project) != n:
-        record_pr(project, n)
-    return n, url, what
+    """sync_summary_pr, and the PR's number recorded. Under the improve lock, so a refresh that read the body before
+    `lane-improve pr --summary-file` wrote its summary cannot overwrite it."""
+    with _locked():
+        try:
+            n, url, what = sync_summary_pr(repo, project, state["branches"][project],
+                                           state["integration"].get(project, "main"), state.get("prs", {}).get(project), summary)
+        except BodyKept as e:
+            if e.number and state.get("prs", {}).get(project) != e.number:
+                record_pr(project, e.number)
+            raise
+        if state.get("prs", {}).get(project) != n:
+            record_pr(project, n)
+        return n, url, what
 
 
 # --- deny rules: a backstop for away-merge while the mode is on ---------------------------------------------------
@@ -1002,6 +1173,10 @@ def open_summary_prs(cos: list, branches: dict, integs: dict, known: dict) -> "t
             out[c.name] = n
         except ClosedPr as e:
             out[c.name] = known[c.name]
+            warns.append(f"lane-improve: {c.name}: {e}")
+        except BodyKept as e:
+            if e.number:
+                out[c.name] = e.number
             warns.append(f"lane-improve: {c.name}: {e}")
         except Exception as e:  # best effort after the real work: any failure is a warning
             warns.append(f"lane-improve: {c.name}: the draft summary PR is not open yet ({e}); away-merge opens it after "
@@ -1227,7 +1402,7 @@ def cmd_off(a) -> int:
                 print(w, file=sys.stderr)
         if d["pending"]:
             print("lane-improve: improve mode ended; the running lanes drain: each coordinator merges its last PR with "
-                  "away-merge, brings its summary PR up to date (`lane-improve pr <project>`) and points you at it, then runs "
+                  "away-merge, writes its summary (`lane-improve pr <project> --summary-file <path>`) and points you at it, then runs "
                   "`lane-improve drained <project>` (`lane-improve status` lists them)")
         else:
             print("lane-improve: improve mode ended; every project had already wrapped up at its cap, so nothing is left to drain")
@@ -1314,6 +1489,15 @@ def cmd_pr(a) -> int:
     if a.project not in cos:
         print(f"lane-improve: {a.project} is not a coordinator in machine.conf", file=sys.stderr)
         return 1
+    if summary:  # the summary goes into a public PR: the same secret and names scans as a merge's diff
+        import textscan
+        published = textscan.as_diff({"summary": summary})
+        hit = textscan.secret_scan(cos[a.project].checkout, published) or textscan.name_check(
+            a.project, cos, published)[0]
+        if hit:
+            print(f"lane-improve: --summary-file {a.summary_file} is refused, nothing was changed: "
+                  + hit.replace("the diff adds", "the summary adds"), file=sys.stderr)
+            return 1
     try:
         n, url, what = sync_and_record(cos[a.project].checkout, s, a.project, summary)
     except Exception as e:  # PrError, or a changed gh/git answer: say it, never a traceback
@@ -1406,15 +1590,16 @@ def cmd_status(a) -> int:
         print(f"improve: draining (ended {when}); no new cycle starts, the running lanes' PRs can still merge")
         print("  to wrap up: " + ", ".join(d["pending"]))
         lost = period_problem(d)
-        if lost:  # away-merge and `lane-improve pr` are refused: only the wrap-up and a new period remain
+        if lost:  # away-merge is refused (`lane-improve pr` is not): only the wrap-up and a new period remain
             print(f"  period record: {lost}; nothing more merges in this period. {FIX_DRAINING_PERIOD}")
         waited = (now() - dt.datetime.fromisoformat(d["ended"]).astimezone()).total_seconds() / 3600
         if waited >= DRAIN_NOTICE_HOURS:
             print(f"  it has waited {int(waited)} h: nobody has run `lane-improve drained` for it; ask the coordinator, or run "
                   "`lane-improve drained --all` yourself once its last PR is dealt with")
         for p in d["pending"]:
-            if p in d["branches"] and not lost:
-                print(f"  {p}: away-merge the last PR into {d['branches'][p]}, run `lane-improve pr {p}` (the draft PR into "
+            if p in d["branches"]:
+                first = "" if lost else f"away-merge the last PR into {d['branches'][p]}, "
+                print(f"  {p}: {first}run `lane-improve pr {p} --summary-file <path>` (the draft PR into "
                       f"{d['integration'].get(p, '?')} gets the final summary) and point the owner at it, then run "
                       f"`lane-improve drained {p}`")
         return 0
