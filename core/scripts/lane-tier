@@ -3,185 +3,39 @@
 #
 #   lane-tier <table> <tier>     prints harness=<h> model=<m> permission=<p>
 #   lane-tier --check <table>    prints "<tier> <harness> <model>" per row (- for no model); nothing else is decided
-#   lane-tier --restricted <table> [--project <checkout>]
-#                                prints the tiers whose model is restricted for that project (see below); nothing when
-#                                the owner set no restriction or the project is the allowed one. project-setup warns
-#   lane-tier --model <model> [--harness <h>]
-#                                exit 0 when the model may run as a standing role, 4 when it is refused; project-setup
-#                                asks this for its standing roles
+#   lane-tier --model <model>    exit 0 when the model may run, 4 when it is refused (an opencode/ or opencode-go/
+#                                model, whatever the harness); project-setup asks this for its standing roles
 #
 # Exit: 0 the tier may be started; 2 usage, a bad table or an unknown tier; 3 the tier's harness is none (skip it, one
-# tier up); 4 refused, because the model is restricted.
-#
-# Open by default: with no restriction set, every model in a tier table runs. The one restriction is about where code
-# is sent: the owner may set CHINA_REGION_MODELS_PROJECT=<name> in machine.conf (by hand; nothing here or in
-# project-setup writes it). While it is set, a hosted China-region route (CHINA below: OpenCode's hosted opencode/ and
-# opencode-go/ names, and the vendors' own APIs such as deepseek/, moonshot/, kimi, zhipu/, glm, qwen/, dashscope,
-# minimax; on every harness spelling) runs only as a lane tier in that one project, started by its Orca coordinator and
-# never by cotal_spawn. Not set, an empty name or a name nobody has: no restriction, or (a name nobody has) nobody
-# gets them. An unreadable machine.conf that sets the key counts as set to nobody. A model reached through the owner's
-# own gateway (OWN_GATEWAY in machine.conf: the provider prefix(es) its model ids use, whatever model is behind it)
-# is self-hosted and never restricted. The project is told apart by its own settings store: the table must be the
-# lanes.tsv in the store folder of that project's checkout, and the caller must be in that checkout (or a worktree of
-# it); a settings.json beside a table proves nothing. --model (a standing role) refuses a hosted opencode/ or
-# opencode-go/ model always, and any other restricted route while the restriction is set, whatever a project says
-# (model-routing.md, "Sandbox per tier"). Columns other than tier, harness, model and permission are ignored (a table
-# from before may still have a sandbox column). The check is what the orca-cotal-lanes skill runs before cotal_spawn;
-# --check only lists the rows.
+# tier up); 4 refused: an OpenCode tier (harness opencode, or an opencode/ or opencode-go/ model whatever the harness
+# cell says). Swift on OpenCode is started by a project's own Orca coordinator from its own table, never through
+# lane-tier; there are no OpenCode lanes through lane-tier until the sandbox is back (model-routing.md, "Sandbox per
+# tier"). Columns other than tier, harness, model and permission are ignored (a table from before may still have a
+# sandbox column). The check is what the orca-cotal-lanes skill runs before cotal_spawn; --check only lists the rows.
 set -u
 
 die() { echo "lane-tier: $*" >&2; exit 2; }
 
-# The one text a refusal gives: it never names what would change it.
-refuse() {
-  echo "lane-tier: refused: $1: this model may run only in the one project the owner allows; ask the owner. $2" >&2
-  exit 4
-}
-
-# Policy that reads machine.conf and the filesystem. `restricted` answers 0 (restricted) or 1 (free); the rest answer yes/no
-# and any failure is "no". The list of China-region routes is here, once.
-POLICY_PY='
-import hashlib, os, re, subprocess, sys
-from pathlib import Path
-
-HOSTED = ("opencode", "opencode-go")  # OpenCode-hosted names: where they are served is unknown, so they count as China-region
-CHINA = r"(?:deepseek|kimi|moonshot(?:ai)?|glm|zhipu(?:ai)?|z-ai|qwen|dashscope|minimax)"  # a vendor, as a path segment
-KEY = "CHINA_REGION_MODELS_PROJECT"
-
-def config():
-    cfg = Path(os.environ.get("XDG_CONFIG_HOME") or Path(os.environ.get("HOME") or Path.home()) / ".config")
-    return cfg, Path(os.environ.get("LANE_MACHINE_CONF") or cfg / "lane-control" / "machine.conf")
-
-def source(p, names):
-    dump = "for k in \"$@\"; do printf \"%s\\0%s\\0\" \"$k\" \"${!k-}\"; done"
-    r = subprocess.run(["bash", "-c", "set -e; . \"$0\" >/dev/null; " + dump, str(p), *names], capture_output=True,
-                       text=True, timeout=20, env={**os.environ, "BASH_ENV": ""})
-    if r.returncode:
-        raise SystemExit(1)
-    parts = r.stdout.split("\0")
-    return dict(zip(parts[0::2], parts[1::2]))
-
-def conf(*names):
-    cfg, p = config()
-    return cfg, source(p, names)
-
-def allowed_checkout(vals):
-    name = vals[KEY].strip()
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
-        raise SystemExit(1)
-    for line in vals["COORDINATORS"].splitlines():
-        f = line.split(None, 3)
-        if len(f) >= 2 and f[0] == name and not line.lstrip().startswith("#"):
-            return Path(os.path.expanduser(f[1])).resolve()
-    raise SystemExit(1)
-
-def china_route(m):
-    segs = m.lower().split("/")
-    return segs[0] in HOSTED or any(re.fullmatch(CHINA + r"[-_.:0-9a-z]*", s) for s in segs)
-
-def restricted(h, m):
-    """0 when the owner set the restriction and this model is a China-region route (not through the own gateway)."""
-    _, p = config()
-    if not p.exists():
-        return 1  # no machine.conf: nothing is restricted
-    try:
-        text = p.read_text()
-        vals = source(p, (KEY, "OWN_GATEWAY"))
-    except (OSError, UnicodeDecodeError):
-        vals = {KEY: "nobody", "OWN_GATEWAY": ""}  # cannot be read: it may set the key, so it counts as set to nobody
-    except SystemExit:  # it does not run: restricted only when it says the key, and then to nobody
-        if not re.search(r"^[ \t]*(?:export[ \t]+)?" + KEY + "=", text, re.M):
-            return 1
-        vals = {KEY: "nobody", "OWN_GATEWAY": ""}
-    if not vals[KEY].strip():
-        return 1
-    if m.lower().startswith(tuple(g.lower() + "/" for g in vals["OWN_GATEWAY"].split()
-                                  if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", g) and g.lower() not in HOSTED)):
-        return 1  # the owner'"'"'s own gateway: self-hosted, whatever model is behind it
-    if china_route(m):
-        return 0
-    return 0 if (m in ("", "-") and h != "claude") else 1  # an unnamed model on another harness may default to anything
-
-def main(argv):
-    cmd = argv[0]
-    if cmd == "restricted":
-        try:
-            raise SystemExit(restricted(argv[1], argv[2]))
-        except SystemExit:
-            raise
-        except Exception:
-            raise SystemExit(0)
-    if cmd != "allowed-project":
-        raise SystemExit(1)
-    opts = dict(zip(argv[1::2], argv[2::2]))
-    cfg, v = conf(KEY, "COORDINATORS")
-    want = allowed_checkout(v)
-    if not opts:
-        raise SystemExit(1)
-    if "--checkout" in opts and Path(opts["--checkout"]).resolve() != want:
-        raise SystemExit(1)
-    if "--table" in opts:
-        key = f"{want.name}-{hashlib.sha256(str(want).encode()).hexdigest()[:10]}"
-        t = Path(opts["--table"]).resolve()
-        if t.name != "lanes.tsv" or t.parent.name != key or t.parent.parent != (cfg / "lane-control" / "projects").resolve():
-            raise SystemExit(1)
-    if "--cwd" in opts:
-        r = subprocess.run(["git", "-C", opts["--cwd"], "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                           capture_output=True, text=True, timeout=20)
-        if r.returncode or Path(r.stdout.strip()).resolve() != (want / ".git").resolve():
-            raise SystemExit(1)
-    raise SystemExit(0)
-
-try:
-    main(sys.argv[1:])
-except SystemExit:
-    raise
-except Exception:
-    raise SystemExit(1)
-'
-policy() { python3 -I -c "$POLICY_PY" "$@" 2>/dev/null; }
-
-# Whether the model is a restricted route for this caller (see the top). Not 0 or 1 (no python3, a crash): restricted.
-restricted_model() {
-  policy restricted "$1" "$2"
-  [ $? -eq 1 ] && return 1
-  return 0
-}
-
 if [ "${1:-}" = "--model" ]; then
-  shift
-  model=${1:-} harness=claude
-  [ -n "$model" ] || die "usage: lane-tier --model <model> [--harness <h>]"
-  shift
-  while [ $# -gt 0 ]; do
-    case $1 in
-      --harness) [ $# -ge 2 ] || die "usage: lane-tier --model <model> [--harness <h>]"; harness=$2; shift 2 ;;
-      *) die "usage: lane-tier --model <model> [--harness <h>]" ;;
-    esac
-  done
-  case $model in
-    opencode/*|opencode-go/*) refuse "$model is a hosted OpenCode model (opencode/ or opencode-go/)" "It never runs as a standing role or through project-setup (model-routing.md, \"Sandbox per tier\")." ;;
+  [ $# -eq 2 ] && [ -n "$2" ] || die "usage: lane-tier --model <model>"
+  case $2 in
+    opencode/*|opencode-go/*)
+      cat >&2 <<MSG
+lane-tier: refused: $2 is a hosted OpenCode model (opencode/ or opencode-go/). It is started, where a project's
+own tier table lists it, by that project's Orca coordinator, never through lane-tier or project-setup (model-routing.md,
+"Sandbox per tier").
+MSG
+      exit 4 ;;
   esac
-  if restricted_model "$harness" "$model"; then
-    refuse "$model on the $harness harness" "It never runs as a standing role or through project-setup (model-routing.md, \"Sandbox per tier\")."
-  fi
-  echo "model=$model ok"
+  echo "model=$2 ok"
   exit 0
 fi
 
-check="" restricted="" project=""
+check=""
 if [ "${1:-}" = "--check" ]; then
   check=1
   [ $# -eq 2 ] || die "usage: lane-tier --check <table>"
   table=$2 tier=""
-elif [ "${1:-}" = "--restricted" ]; then
-  check=1 restricted=1
-  case $# in
-    2) table=$2 ;;
-    4) [ "$3" = "--project" ] || die "usage: lane-tier --restricted <table> [--project <checkout>]"; table=$2 project=$4 ;;
-    *) die "usage: lane-tier --restricted <table> [--project <checkout>]" ;;
-  esac
-  tier=""
 else
   [ $# -eq 2 ] || die "usage: lane-tier <table> <tier>"
   table=$1 tier=$2
@@ -222,15 +76,6 @@ out=$(awk -F'\t' -v want="$tier" -v check="$check" '
 ' "$table")
 rc=$?
 [ "$rc" -eq 0 ] || die "$table: $out"
-if [ -n "$restricted" ]; then
-  if [ -n "$project" ] && policy allowed-project --checkout "$project"; then exit 0; fi
-  while read -r t h m; do
-    [ "$h" = none ] && continue
-    [ "$m" = "-" ] && m=
-    if restricted_model "$h" "$m"; then printf '%s\n' "$t"; fi
-  done <<<"$out"
-  exit 0
-fi
 if [ -n "$check" ]; then
   printf '%s\n' "$out"
   exit 0
@@ -241,11 +86,16 @@ if [ "$harness" = none ]; then
   echo "lane-tier: tier $tier has harness none: skip it and go one tier up" >&2
   exit 3
 fi
-if restricted_model "$harness" "$model"; then
-  if policy allowed-project --table "$table" --cwd "$PWD"; then
-    echo "lane-tier: note: tier $tier runs a model the owner restricted to this one project: only its Orca coordinator starts it (worker-start), never cotal_spawn." >&2
-  else
-    refuse "tier $tier (harness $harness, model $model)" "Do not start it with cotal_spawn: go one tier up, and tell the owner that $table still has this row."
-  fi
+opencode_tier=
+[ "$harness" = opencode ] && opencode_tier=1
+case $model in opencode/*|opencode-go/*) opencode_tier=1 ;; esac
+if [ -n "$opencode_tier" ]; then
+  cat >&2 <<MSG
+lane-tier: refused: tier $tier is an OpenCode tier (harness $harness, model $model).
+Swift on OpenCode is started by a project's own Orca coordinator as an Orca worker, from its own table;
+lane-tier never starts it, and no hosted global-region model runs bare through it (model-routing.md, "Sandbox per
+tier"). Do not start it with cotal_spawn: go one tier up, and tell the owner that $table still has this row.
+MSG
+  exit 4
 fi
 printf 'harness=%s model=%s permission=%s\n' "$harness" "$model" "$permission"

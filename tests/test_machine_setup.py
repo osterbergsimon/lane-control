@@ -1489,15 +1489,6 @@ class MachineSetupTests(BudgetTest):
                 r = self.setup_machine("--machine-coordinator", bad)
                 self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("lane-tier", self.setup_machine("--machine-coordinator", "opencode/opencode-go/x").stderr)
-        # open by default: a vendor model is allowed; while the owner restricts China-region routes it is not, unless it
-        # goes through the owner's own gateway
-        self.assertEqual(self.setup_machine("--machine-coordinator", "opencode/deepseek/deepseek-chat").returncode, 0)
-        (self.conf_dir / "machine.conf").write_text('CHINA_REGION_MODELS_PROJECT=nobody\nOWN_GATEWAY="gw"\n')
-        for spec in ("opencode/deepseek/deepseek-chat", "opencode/moonshot/kimi-k2", "claude/qwen-max"):
-            r = self.setup_machine("--machine-coordinator", spec)
-            self.assertEqual(r.returncode, 2, spec)
-            self.assertIn("this model may run only in the one project the owner allows", r.stderr, spec)
-        self.assertEqual(self.setup_machine("--machine-coordinator", "opencode/gw/deepseek-v3").returncode, 0)
 
     def test_running_coordinator_not_restarted(self):
         self.orca({"terminals": [{"handle": "term_1", "title": "machine coordinator", "worktreePath": str(self.folder)}]})

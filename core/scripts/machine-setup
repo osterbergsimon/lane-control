@@ -115,13 +115,6 @@ def harness_model(spec: str) -> tuple:
         raise SystemExit2(f"--machine-coordinator {spec}: refused, as lane-tier refuses it: OpenCode's own providers "
                           "(opencode/, opencode-go/) run only where lane-tier allows (model-routing.md, \"Sandbox per "
                           "tier\"), never for the machine coordinator; choose a provider the owner allows")
-    cmd = ["bash", str(HERE / "lane-tier"), "--model", model, "--harness", harness]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise SystemExit2(f"--machine-coordinator {spec}: cannot ask lane-tier ({e})")
-    if r.returncode:  # only a model lane-tier knows is safe: the machine coordinator is no project's lane
-        raise SystemExit2(f"--machine-coordinator {spec}: " + (" ".join(r.stderr.split()) or "lane-tier refuses the model"))
     return harness, model
 
 

@@ -131,7 +131,7 @@ Orchestrator: Rove
 Orchestrator: Rove
 - **Failures:** the documented launch form broke on Rove's appended brief (needs `--auto --prompt`); the engine's new-session flag froze the TUI size; an explicit branch override lost to the caller's task env; files outside the worktree (worker rules, symlinked skills) vanished inside; no `bd`, no CI read, no host loopback; the header said no key was needed.
 - **Fixes (removed with the sandbox, below):** a launch form and conventions for sandboxed lanes; the flag gated; a read-only CI-checks relay; an explicit branch wins; sandboxed lanes filed through the coordinator. Positive: auto-approve inside the sandbox ended permission-prompt stalls (an unsandboxed lane had sat 8 h on a prompt).
-- Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (where the owner allows it: see `CHINA_REGION_MODELS_PROJECT` in machine.conf). To bring it back, restore it from git history (last in main at b97c919).
+- Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (in a project whose own tier table lists it). To bring it back, restore it from git history (last in main at b97c919).
 
 ## 24. A crash-looping tool inside a lane floods the host with core dumps
 - **Failure:** a browser binary downloaded inside a lane crashed in a loop; the host's core-dump handler tried to process every dump and overloaded the machine.

@@ -130,17 +130,16 @@ class TierTableTests(unittest.TestCase):
 
     def test_the_owners_decision_on_the_sandbox_is_written_down(self):
         line = ("Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed "
-                "(where the owner allows it: see `CHINA_REGION_MODELS_PROJECT` in machine.conf). To bring it back, restore it from git history (last in main at b97c919).")
+                "(in a project whose own tier table lists it). To bring it back, restore it from git history (last in main at b97c919).")
         for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             self.assertIn(line, (ROOT / f).read_text(), f)
         for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             flat = " ".join((ROOT / f).read_text().split())
-            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, in the one project the owner names",
+            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, only in a project whose own tier table lists it",
                            "orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash",
                            "lane-control's own lane tools do not start OpenCode",
-                           "no hosted global-region model runs bare",
                            "needs the sandbox back first (restore it from b97c919)",
-                           "`CHINA_REGION_MODELS_PROJECT`"):
+                           "carry no China-region hosted models"):
                 self.assertIn(needle, flat, f)
             self.assertNotIn("swift is `none` for now", flat, f)
         self.assertIn("are not trusted with the owner's machine", (ROOT / "core" / "model-routing.md").read_text())
@@ -462,8 +461,8 @@ class LaneSkillCliTests(unittest.TestCase):
             self.assertNotIn(word, self.text)
 
     def test_the_skill_sends_a_refused_opencode_tier_one_tier_up(self):
-        self.assertIn("Exit 4 refuses a restricted model", self.flat)
-        self.assertIn("a China-region route runs only in the one project the owner allows", self.flat)
+        self.assertIn("Exit 4 refuses an OpenCode tier", self.flat)
+        self.assertIn("swift on OpenCode is listed only in the table of a project that wants it", self.flat)
         self.assertNotIn("there are no OpenCode lanes", self.flat)
         self.assertIn("never start a refused tier with `cotal_spawn`", self.flat)
 
@@ -798,7 +797,7 @@ class NativePersonaTests(unittest.TestCase):
                            "{{TIERS}}", "{{REVIEWER}}", "orchestrators/native-orca/templates/lane-brief.md",
                            "`lane-tier` still gates it", "`core/scripts/lane-tier`"):
                 self.assertIn(needle, t, (role, needle))
-            self.assertNotIn("CHINA_REGION_MODELS_PROJECT", t, role)  # the rule is lane-tier's and the project's settings'; a persona copy goes stale
+            self.assertNotIn("China-region", t, role)  # the rule is the project's own tier table's; a persona copy goes stale
 
     def test_lane_starters_place_lanes_the_way_orca_accepts(self):
         # worker-start --help: remote current and new-child are invalid; OpenCode model selection needs an

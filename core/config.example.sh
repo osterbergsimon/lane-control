@@ -3,9 +3,8 @@
 # EXAMPLE; this is the only file that names models or vendors.
 
 # --- Tiers, by role. Any tier may be "none" (engine empty): routing then skips it. ---
-#   swift:    cheap third-party lane. none here: OpenCode on swift runs unsandboxed through the Orca coordinator of the project the owner
-#             allows (CHINA_REGION_MODELS_PROJECT in machine.conf; model-routing.md, "Sandbox per tier");
-#             elsewhere it needs the sandbox back first
+#   swift:    cheap third-party lane. none here: the default tables carry no China-region hosted models; a project that wants OpenCode on
+#             swift lists it in its own tier table, started by its Orca coordinator (model-routing.md, "Sandbox per tier")
 #   standard: everyday lane
 #   deep:     careful lane, reviews from tier B  top: rare second opinion, only via the machine coordinator
 TIERS="swift standard deep top"

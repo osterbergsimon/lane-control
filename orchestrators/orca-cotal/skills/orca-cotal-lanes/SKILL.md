@@ -30,10 +30,9 @@ Tier by the paths the task touches (lane-control model-routing: highest tier win
 for prose docs, scripts without private data and CI). Then look the tier up in the tier table file your persona names (the project's `lanes.tsv` in its settings store under
 `~/.config/lane-control/projects/<project>/`, by absolute path, because lane worktrees do not carry it): run `~/.agents/bin/lane-tier <table> <tier>`, which prints the tier's harness, model and permission.
 
-A tier whose harness is `none` is skipped: `lane-tier` exits 3, go one tier up. Exit 4 refuses a restricted model
-(a China-region route runs only in the one project the owner allows, started by its Orca coordinator): never start a refused tier with `cotal_spawn`, never edit the table, a settings file or machine.conf to get past it; go
-one tier up and tell the owner in your next line. A tier that passes with a `lane-tier: note:` line on stderr (exit 0: only an Orca coordinator may start it) is not
-started with `cotal_spawn` either: go one tier up. Any other non-zero exit: hold the lane and tell the owner what it
+A tier whose harness is `none` is skipped: `lane-tier` exits 3, go one tier up. Exit 4 refuses an OpenCode tier
+(swift on OpenCode is listed only in the table of a project that wants it, started by its Orca coordinator, never by `cotal_spawn`): never start a refused tier with `cotal_spawn` and never edit the table to get past it; go
+one tier up and tell the owner in your next line. Any other non-zero exit: hold the lane and tell the owner what it
 printed. `inherit` means the project's Claude permission mode, which
 your persona names; pass that value.
 

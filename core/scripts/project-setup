@@ -1050,13 +1050,11 @@ class Refused(Fail):
     """A choice project-setup will not run (exit 2), found before anything is written."""
 
 
-def lane_tier_refusal(model: str, harness: str = "claude"):
-    """None when lane-tier lets the model run as a standing role (`lane-tier --model`), else its refusal: the one reader of
-    the rule (a hosted model always; a China-region route while the owner's restriction is set, unless it goes through
-    the owner's own gateway). An opencode pin's own gate, the --own-model declaration, is own_check's."""
-    cmd = ["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--model", model, "--harness", harness]
+def lane_tier_refusal(model: str):
+    """None when lane-tier lets the model run (`lane-tier --model`), else its refusal: the one reader of the rule."""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--model", model],
+                           capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise Fail(f"cannot ask lane-tier about {model}: {e}")
     if r.returncode == 0:
@@ -1066,24 +1064,13 @@ def lane_tier_refusal(model: str, harness: str = "claude"):
     raise Fail(f"lane-tier --model {model} failed: {r.stderr.strip() or r.returncode}")
 
 
-def pin_refusal(pins: dict):
-    """None, or why lane-tier refuses a standing role's model (the orca-cotal path; the native one asks in
-    native_pin_refusal)."""
-    for role in ("coordinator", "reviewer"):
-        h, m = pins[role]
-        why = lane_tier_refusal(m, h)
-        if why:
-            return f"the {role} pins {h}/{m}: {why}"
-    return None
-
-
 def native_pin_refusal(pins: dict, mode: str, own: set):
     """None, or why the native path will not run these pins: a model lane-tier refuses (any role, any harness), an
     OpenCode model nobody declared --own-model, or a standing OpenCode role with a Claude-only permission mode."""
     oc = load_harness("opencode")
     for role in ("coordinator", "reviewer"):
         h, m = pins[role]
-        why = lane_tier_refusal(m, h)
+        why = lane_tier_refusal(m)
         if why:
             return f"the {role} pins {h}/{m}: {why}"
         if h == "opencode" and m not in own:
@@ -1111,25 +1098,13 @@ def check_tier_table(text: str) -> list:
     return [tuple(l.split()) for l in r.stdout.splitlines() if l.strip()]
 
 
-def opencode_rows_note(tier_text: str, repo: "Path | None" = None):
-    """Warns about the rows of a project's table whose model is restricted (lane-tier --restricted: a China-region route
-    while the owner's restriction is set; none for the allowed project, none when nothing is restricted): lane-tier
-    refuses them, so their work goes one tier up. `repo` is the project's checkout."""
-    check_tier_table(tier_text)  # a bad table is a Fail, as before
-    cmd = ["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--restricted", "/dev/stdin"]
-    if repo is not None:
-        cmd += ["--project", str(repo)]
-    try:
-        r = subprocess.run(cmd, input=tier_text, capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise Fail(f"cannot check the tier table: {e}")
-    if r.returncode != 0:
-        raise Fail(r.stderr.strip())
-    rows = r.stdout.split()
+def opencode_rows_note(tier_text: str):
+    """Warns about the OpenCode rows of a project's table: lane-tier refuses them, so their work goes one tier up."""
+    rows = [t for t, h, m in check_tier_table(tier_text) if h == "opencode" or m.startswith(HOSTED_OPENCODE)]
     if rows:
-        print(f"warning: {', '.join(rows)}: lane-tier refuses this tier here: this model may run only in the one project "
-              "the owner allows; ask the owner (model-routing.md). Set its harness to none in the project's lanes.tsv.",
-              file=sys.stderr, flush=True)
+        print(f"warning: {', '.join(rows)} is an OpenCode tier: lane-tier refuses it (swift on OpenCode is started "
+              "by a project's own Orca coordinator, not through lane-tier; model-routing.md). Set its harness to none in the "
+              "project's lanes.tsv.", file=sys.stderr, flush=True)
 
 
 def usable_own_model(name: str) -> bool:
@@ -1166,7 +1141,7 @@ def personas_and_tiers(repo: Path, project: str, coord, reviewer, mode: str, tie
         if state == "updated" and not (h == "opencode" and m.startswith(HOSTED_OPENCODE)):
             changed.append(name)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
-    opencode_rows_note(tier_text, repo)
+    opencode_rows_note(tier_text)
     say("gitignore", ignore_cotal(repo), ".cotal/")
     return changed
 
@@ -1252,7 +1227,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             f"only in the defaults: {key(theirs)}")
     if own_text is not None:
         try:
-            opencode_rows_note(own_text, repo)
+            opencode_rows_note(own_text)
         except Fail as e:
             print(f"warning: {e}: lane-tier refuses every tier until it is fixed", file=sys.stderr, flush=True)
     changed = []
@@ -2792,11 +2767,11 @@ def resolve_settings(repo: Path, a) -> dict:
         changes["permission_mode"] = mode
     if a.name:
         changes["name"] = a.name
-    # before anything is written: a refused run leaves the store as it was
-    own = {x for x in st.get("own_models") or [] if isinstance(x, str)} | set(getattr(a, "own_model", []) or [])
-    why = native_pin_refusal(pins, mode, own) if ORCHESTRATOR == "native-orca" else pin_refusal(pins)
-    if why:
-        raise Refused(why)
+    if ORCHESTRATOR == "native-orca":  # before anything is written: a refused run leaves the store as it was
+        own = {x for x in st.get("own_models") or [] if isinstance(x, str)} | set(getattr(a, "own_model", []) or [])
+        why = native_pin_refusal(pins, mode, own)
+        if why:
+            raise Refused(why)
     settings(repo, **changes)
     return {"pins": pins, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
 
@@ -2831,7 +2806,7 @@ def show(repo: Path) -> int:
         tiers = [l.split("\t")[0] for l in tab.read_text().splitlines() if l.strip() and not l.startswith("#")][1:]
         print(f"lanes.tsv: {tab} (tiers: {', '.join(tiers) or 'none'})")
         try:
-            opencode_rows_note(tab.read_text(), repo)
+            opencode_rows_note(tab.read_text())
         except Fail as e:
             print(f"warning: {e}", file=sys.stderr, flush=True)
     except (OSError, UnicodeDecodeError):
@@ -4161,21 +4136,17 @@ def main(argv=None) -> int:
             print(f"project-setup: --private takes a glob relative to the repo root, got {g!r}", file=sys.stderr)
             return 2
     for flag, pin in flag_pins:
-        if ORCHESTRATOR != "native-orca" and pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
-            print(f"project-setup: {flag} {pin[0]}/{pin[1]}: project-setup starts no project agent on a hosted "
-                  "OpenCode model. Use claude/<model>, or an opencode/<provider>/<model> on a gateway "
-                  "you run yourself", file=sys.stderr)
-            return 2
-        try:  # on either orchestrator
-            why = lane_tier_refusal(pin[1], pin[0])
-        except Fail as e:
-            print(f"project-setup: {e}", file=sys.stderr)
-            return 1
-        if why:
-            print(f"project-setup: {flag} {pin[0]}/{pin[1]}: {why} Use claude/<model>, or an "
-                  "opencode/<provider>/<model> on a gateway you run yourself", file=sys.stderr)
-            return 2
-        if pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
+        if ORCHESTRATOR == "native-orca":
+            try:
+                why = lane_tier_refusal(pin[1])
+            except Fail as e:
+                print(f"project-setup: {e}", file=sys.stderr)
+                return 1
+            if why:
+                print(f"project-setup: {flag} {pin[0]}/{pin[1]}: {why} Use claude/<model>, or an "
+                      "opencode/<provider>/<model> on a gateway you run yourself", file=sys.stderr)
+                return 2
+        elif pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
             print(f"project-setup: {flag} {pin[0]}/{pin[1]}: project-setup starts no project agent on a hosted "
                   "OpenCode model. Use claude/<model>, or an opencode/<provider>/<model> on a gateway "
                   "you run yourself", file=sys.stderr)
