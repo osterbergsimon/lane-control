@@ -131,18 +131,22 @@ class TierTableTests(unittest.TestCase):
     def test_the_owners_decision_on_the_sandbox_is_written_down(self):
         line = ("Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed "
                 "(in a project whose own tier table lists it). To bring it back, restore it from git history (last in main at b97c919).")
-        for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
+        docs = ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md")
+        for f in docs:
             self.assertIn(line, (ROOT / f).read_text(), f)
-        for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
+        for f in docs:
             flat = " ".join((ROOT / f).read_text().split())
-            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, only in a project whose own tier table lists it",
-                           "orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash",
-                           "lane-control's own lane tools do not start OpenCode",
-                           "needs the sandbox back first (restore it from b97c919)",
-                           "carry no China-region hosted models"):
-                self.assertIn(needle, flat, f)
-            self.assertNotIn("swift is `none` for now", flat, f)
-        self.assertIn("are not trusted with the owner's machine", (ROOT / "core" / "model-routing.md").read_text())
+            for needle in ("Owner 2026-11-24: no refusals by model or harness",
+                           "is the only place that says which models it uses",
+                           "a self-hosted gateway (for example LiteLLM, with any models behind it) is first class",
+                           "`orca-ide orchestration worker-start --agent opencode2 --model <provider>/<model>`",
+                           "`scripts/lane-tier` refuses nothing",
+                           "carry no China-region hosted models",
+                           "The owner may restrict a project in its own conf"):
+                self.assertIn(needle, flat, (f, needle))
+            for old in ("exit 4", "refuses every OpenCode tier", "lane-control's own lane tools do not start OpenCode",
+                        "needs the sandbox back first", "--own-model", "swift is `none` for now"):
+                self.assertNotIn(old, flat, (f, old))
         self.assertNotIn("807d944", " ".join((ROOT / f).read_text() for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md", "reliability.md")))
 
     def test_the_rove_example_runs_no_opencode_tier(self):
@@ -460,11 +464,11 @@ class LaneSkillCliTests(unittest.TestCase):
         for word in ("sandbox", "launch wrapper"):
             self.assertNotIn(word, self.text)
 
-    def test_the_skill_sends_a_refused_opencode_tier_one_tier_up(self):
-        self.assertIn("Exit 4 refuses an OpenCode tier", self.flat)
-        self.assertIn("swift on OpenCode is listed only in the table of a project that wants it", self.flat)
-        self.assertNotIn("there are no OpenCode lanes", self.flat)
-        self.assertIn("never start a refused tier with `cotal_spawn`", self.flat)
+    def test_the_skill_starts_an_opencode_tier_like_any_other(self):
+        self.assertNotIn("Exit 4", self.flat)
+        self.assertNotIn("refused tier", self.flat)
+        self.assertIn("A tier whose harness is `opencode` is started like any other", self.flat)
+        self.assertIn("`agent: opencode`", self.flat)
 
     def test_every_tier_goes_through_lane_tier_before_a_spawn(self):
         self.assertIn("~/.agents/bin/lane-tier", self.text)
@@ -474,11 +478,34 @@ class LaneSkillCliTests(unittest.TestCase):
         self.assertIn("lane-tier", review)
 
 
-class PersonaTierRefusalTests(unittest.TestCase):
-    def test_the_coordinator_looks_a_tier_up_through_the_refusal(self):
+class PersonaTierLookupTests(unittest.TestCase):
+    def test_the_coordinator_looks_a_tier_up_and_skips_only_none(self):
         text = " ".join((ROOT / "orchestrators" / "orca-cotal" / "personas" / "coordinator.md").read_text().split())
         self.assertIn("~/.agents/bin/lane-tier", text)
-        self.assertIn("never start a refused tier", text)
+        self.assertNotIn("refused tier", text)
+        self.assertIn("harness `none`", text)
+
+
+class GatewaySetupDocTests(unittest.TestCase):
+    """orchestrators/native-orca/setup.md: OpenCode on a self-hosted LiteLLM gateway (lc-48m)."""
+
+    def setUp(self):
+        text = (ROOT / "orchestrators" / "native-orca" / "setup.md").read_text()
+        self.assertIn("## OpenCode on a self-hosted LiteLLM gateway", text)
+        self.sec = " ".join(text.split("## OpenCode on a self-hosted LiteLLM gateway", 1)[1].split("\n## ", 1)[0].split())
+
+    def test_where_the_url_and_key_go(self):
+        for needle in ("~/.config/opencode/opencode.json", '"baseURL"', '"apiKey": "{env:', "@ai-sdk/openai-compatible",
+                       "never the key itself", "no key, host or gateway URL in any repo"):
+            self.assertIn(needle, self.sec, needle)
+
+    def test_how_the_suggestion_works(self):
+        for needle in ("--suggest-tiers", "/v1/models", "/model/info", "--tiers <file>", "--gateway-key-env",
+                       "opencode/<provider>/<alias>", "--automation-provider opencode"):
+            self.assertIn(needle, self.sec, needle)
+
+    def test_the_example_names_no_real_place(self):
+        self.assertNotRegex(self.sec, r"https?://(?!127\.0\.0\.1|<)")
 
 
 class BeadsSteeringTests(unittest.TestCase):
@@ -795,9 +822,11 @@ class NativePersonaTests(unittest.TestCase):
             for needle in ("orca-ide skills get orchestration", "orca-ide orchestration worker-start", "--agent",
                            "orca-ide orchestration send", "~/.agents/bin/lane-room", "~/.agents/bin/lane-tier",
                            "{{TIERS}}", "{{REVIEWER}}", "orchestrators/native-orca/templates/lane-brief.md",
-                           "`lane-tier` still gates it", "`core/scripts/lane-tier`"):
+                           "`--agent opencode2 --model <provider>/<model>`", "`core/scripts/lane-tier`"):
                 self.assertIn(needle, t, (role, needle))
             self.assertNotIn("China-region", t, role)  # the rule is the project's own tier table's; a persona copy goes stale
+            self.assertNotIn("exit 4", t, role)
+            self.assertNotIn("still gates", t, role)
 
     def test_lane_starters_place_lanes_the_way_orca_accepts(self):
         # worker-start --help: remote current and new-child are invalid; OpenCode model selection needs an
@@ -1215,6 +1244,8 @@ class NativeLaneSkillTests(unittest.TestCase):
             self.assertIn(needle, t, needle)
         self.assertLess(t.index("lane-room"), t.index("orca-ide orchestration worker-start"))
         self.assertLess(t.index("lane-tier"), t.index("orca-ide orchestration worker-start"))
+        self.assertNotIn("Exit 4", t)
+        self.assertIn("`--agent opencode2 --model <provider>/<model>`", t)
 
     def test_lane_mechanics(self):
         t = self.flat

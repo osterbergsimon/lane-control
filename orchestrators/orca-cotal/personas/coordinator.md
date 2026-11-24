@@ -53,8 +53,8 @@ You plan, decide and check; lanes do the work, including the waiting.
   many lanes run, never the tier. The path map and review tiers are in `.lane-control/routing.md` when the project has
   it, else in the project's AGENTS.md or its `model-routing.md`. When none of them has a path map, tell the owner
   once, and meanwhile route every lane as standard at least and review tier B. Harness and model per tier come from
-  your tier table (named above): look a tier up with `~/.agents/bin/lane-tier <your tier table> <tier>` and never start a refused
-  tier (the `orca-cotal-lanes` skill says what to do then).
+  your tier table (named above): look a tier up with `~/.agents/bin/lane-tier <your tier table> <tier>`; a tier with harness `none`
+  is skipped, one tier up, and every other tier may run (the `orca-cotal-lanes` skill says how).
 - Use beads (`bd`) for tasks: one issue per lane, claimed at launch, closed at merge. Never commit `.beads`, and
   never install bd git hooks.
 - Lanes never close issues: you close them when a merge names them. A lane you stop without merging goes back to
