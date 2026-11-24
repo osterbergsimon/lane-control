@@ -716,7 +716,7 @@ def lane_cleanup(repo: Path) -> None:
     if core not in sys.path:
         sys.path.insert(0, core)
     import cleanup
-    yes = (lambda q: owner_says_yes(q, "github")) if has_terminal() else None
+    yes = (lambda q: owner_says_yes(q, "github", default=True)) if has_terminal() else None
     for step, what, detail in [*cleanup.orca_report(LOCAL.argv()[0], repo), *cleanup.github_report(repo, yes)]:
         if what in cleanup.PROBLEMS:
             print(f"project-setup: note: {step}: {what} {detail}", file=sys.stderr)
@@ -2119,15 +2119,18 @@ def flush_input() -> None:
         pass
 
 
-def owner_says_yes(question: str = "Commit these files and run the Orca setup? [y/N] ", step: str = "commit") -> bool:
+def owner_says_yes(question: str = "Commit these files and run the Orca setup? [y/N] ", step: str = "commit",
+                   default: bool = False) -> bool:
+    """`default` is what Enter means; with True ([Y/n]) only an explicit n/no is a no. Other steps keep [y/N]."""
     if not has_terminal():
         say(step, "skipped", "no terminal to ask the owner in")
         return False
     flush_input()
     try:
-        return input(question).strip().lower() in ("y", "yes")
+        ans = input(question).strip().lower()
     except EOFError:
         return False
+    return ans not in ("n", "no") if default else ans in ("y", "yes")
 
 
 def commit_adapted(repo: Path, paths: list, message: str = "Add lane-control files adapted to this project"):

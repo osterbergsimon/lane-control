@@ -1913,6 +1913,28 @@ class CleanupSetupTests(Case):
         self.assertIn("github: skipped", out)
         self.assertFalse([c for c in self.gh_calls() if c.startswith("repo edit")])
 
+    def test_enter_in_a_terminal_means_yes_for_the_recommended_step(self):
+        out, ask = self.terminal_run("")
+        self.assertIn("github: created", out)
+        self.assertIn("repo edit --delete-branch-on-merge", self.gh_calls())
+        q = [c.args[0] for c in ask.call_args_list if "Automatically delete head branches" in c.args[0]][0]
+        self.assertIn("[Y/n]", q)
+        self.assertIn("recommended", q)
+
+    def test_only_an_explicit_no_leaves_it_off(self):
+        for answer in ("no", "N", " n "):
+            self.setUp()
+            out, _ = self.terminal_run(answer)
+            self.assertIn("github: skipped", out, answer)
+            self.assertFalse([c for c in self.gh_calls() if c.startswith("repo edit")], answer)
+
+    def test_other_steps_keep_enter_meaning_no(self):
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                contextlib.redirect_stdout(Tty()), mock.patch("builtins.input", return_value=""):
+            self.assertFalse(m.owner_says_yes("Commit orca.yaml? [y/N] ", "publish"))
+            self.assertTrue(m.owner_says_yes("x [Y/n] ", "github", default=True))
+
 
 if __name__ == "__main__":
     unittest.main()
