@@ -130,15 +130,15 @@ class TierTableTests(unittest.TestCase):
 
     def test_the_owners_decision_on_the_sandbox_is_written_down(self):
         line = ("Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed "
-                "(only in the one project the owner allows: `CHINA_REGION_MODELS_PROJECT` in machine.conf). To bring it back, restore it from git history (last in main at b97c919).")
+                "(where the owner allows it: see `CHINA_REGION_MODELS_PROJECT` in machine.conf). To bring it back, restore it from git history (last in main at b97c919).")
         for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             self.assertIn(line, (ROOT / f).read_text(), f)
         for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             flat = " ".join((ROOT / f).read_text().split())
-            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, in exactly one project, the one the owner names",
+            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, in the one project the owner names",
                            "orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash",
                            "lane-control's own lane tools do not start OpenCode",
-                           "lobal-region model",
+                           "no hosted global-region model runs bare",
                            "needs the sandbox back first (restore it from b97c919)",
                            "`CHINA_REGION_MODELS_PROJECT`"):
                 self.assertIn(needle, flat, f)
@@ -463,7 +463,7 @@ class LaneSkillCliTests(unittest.TestCase):
 
     def test_the_skill_sends_a_refused_opencode_tier_one_tier_up(self):
         self.assertIn("Exit 4 refuses a restricted model", self.flat)
-        self.assertIn("one that is not known safe runs only in the one project the owner allows", self.flat)
+        self.assertIn("a China-region route runs only in the one project the owner allows", self.flat)
         self.assertNotIn("there are no OpenCode lanes", self.flat)
         self.assertIn("never start a refused tier with `cotal_spawn`", self.flat)
 

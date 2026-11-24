@@ -4,28 +4,30 @@
 #   lane-tier <table> <tier>     prints harness=<h> model=<m> permission=<p>
 #   lane-tier --check <table>    prints "<tier> <harness> <model>" per row (- for no model); nothing else is decided
 #   lane-tier --restricted <table> [--project <checkout>]
-#                                prints the tiers whose model is restricted (one a project may run only if the owner
-#                                allows it there); none for the project that is allowed. project-setup warns with it
-#   lane-tier --model <model> [--harness <h>] [--own]
+#                                prints the tiers whose model is restricted for that project (see below); nothing when
+#                                the owner set no restriction or the project is the allowed one. project-setup warns
+#   lane-tier --model <model> [--harness <h>]
 #                                exit 0 when the model may run as a standing role, 4 when it is refused; project-setup
-#                                asks this for its standing roles. --own: the owner declared the model theirs
-#                                (project-setup --own-model), so only a hosted model is refused
+#                                asks this for its standing roles
 #
 # Exit: 0 the tier may be started; 2 usage, a bad table or an unknown tier; 3 the tier's harness is none (skip it, one
 # tier up); 4 refused, because the model is restricted.
 #
-# A model is unrestricted only when it is known safe: an Anthropic model on the claude harness (or anthropic/<id> on
-# opencode), or a model the owner listed in ALLOWED_MODELS in machine.conf. Every other model, on any harness spelling
-# (opencode, OpenCode, opencode2, codex, claude with a non-Anthropic id, any), is restricted, and an opencode/ or
-# opencode-go/ model always is (where it is served is unknown). A restricted model may run, as a lane tier only, in the
-# one project the owner names in machine.conf (CHINA_REGION_MODELS_PROJECT=<name>; empty or missing: none). Only the
-# owner writes that line, by hand; nothing here or in project-setup ever does. The project is told apart by its own
-# settings store: the table must be the lanes.tsv in the store folder of that project's checkout, and the caller must be
-# in that checkout (or a worktree of it); a settings.json beside a table proves nothing. Only an Orca coordinator starts
-# such a lane (worker-start), never cotal_spawn, and never a standing role: --model refuses a restricted model whatever
-# a project says (model-routing.md, "Sandbox per tier"). Columns other than tier, harness, model and permission are
-# ignored (a table from before may still have a sandbox column). The check is what the orca-cotal-lanes skill runs
-# before cotal_spawn; --check only lists the rows.
+# Open by default: with no restriction set, every model in a tier table runs. The one restriction is about where code
+# is sent: the owner may set CHINA_REGION_MODELS_PROJECT=<name> in machine.conf (by hand; nothing here or in
+# project-setup writes it). While it is set, a hosted China-region route (CHINA below: OpenCode's hosted opencode/ and
+# opencode-go/ names, and the vendors' own APIs such as deepseek/, moonshot/, kimi, zhipu/, glm, qwen/, dashscope,
+# minimax; on every harness spelling) runs only as a lane tier in that one project, started by its Orca coordinator and
+# never by cotal_spawn. Not set, an empty name or a name nobody has: no restriction, or (a name nobody has) nobody
+# gets them. An unreadable machine.conf that sets the key counts as set to nobody. A model reached through the owner's
+# own gateway (OWN_GATEWAY in machine.conf: the provider prefix(es) its model ids use, whatever model is behind it)
+# is self-hosted and never restricted. The project is told apart by its own settings store: the table must be the
+# lanes.tsv in the store folder of that project's checkout, and the caller must be in that checkout (or a worktree of
+# it); a settings.json beside a table proves nothing. --model (a standing role) refuses a hosted opencode/ or
+# opencode-go/ model always, and any other restricted route while the restriction is set, whatever a project says
+# (model-routing.md, "Sandbox per tier"). Columns other than tier, harness, model and permission are ignored (a table
+# from before may still have a sandbox column). The check is what the orca-cotal-lanes skill runs before cotal_spawn;
+# --check only lists the rows.
 set -u
 
 die() { echo "lane-tier: $*" >&2; exit 2; }
@@ -36,24 +38,35 @@ refuse() {
   exit 4
 }
 
-# Policy that reads machine.conf and the filesystem. Every failure (no file, no python3, a bad line) is "no".
+# Policy that reads machine.conf and the filesystem. `restricted` answers 0 (restricted) or 1 (free); the rest answer yes/no
+# and any failure is "no". The list of China-region routes is here, once.
 POLICY_PY='
 import hashlib, os, re, subprocess, sys
 from pathlib import Path
 
-def conf(*names):
+HOSTED = ("opencode", "opencode-go")  # OpenCode-hosted names: where they are served is unknown, so they count as China-region
+CHINA = r"(?:deepseek|kimi|moonshot(?:ai)?|glm|zhipu(?:ai)?|z-ai|qwen|dashscope|minimax)"  # a vendor, as a path segment
+KEY = "CHINA_REGION_MODELS_PROJECT"
+
+def config():
     cfg = Path(os.environ.get("XDG_CONFIG_HOME") or Path(os.environ.get("HOME") or Path.home()) / ".config")
-    p = Path(os.environ.get("LANE_MACHINE_CONF") or cfg / "lane-control" / "machine.conf")
+    return cfg, Path(os.environ.get("LANE_MACHINE_CONF") or cfg / "lane-control" / "machine.conf")
+
+def source(p, names):
     dump = "for k in \"$@\"; do printf \"%s\\0%s\\0\" \"$k\" \"${!k-}\"; done"
     r = subprocess.run(["bash", "-c", "set -e; . \"$0\" >/dev/null; " + dump, str(p), *names], capture_output=True,
                        text=True, timeout=20, env={**os.environ, "BASH_ENV": ""})
     if r.returncode:
         raise SystemExit(1)
     parts = r.stdout.split("\0")
-    return cfg, dict(zip(parts[0::2], parts[1::2]))
+    return dict(zip(parts[0::2], parts[1::2]))
+
+def conf(*names):
+    cfg, p = config()
+    return cfg, source(p, names)
 
 def allowed_checkout(vals):
-    name = vals["CHINA_REGION_MODELS_PROJECT"].strip()
+    name = vals[KEY].strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
         raise SystemExit(1)
     for line in vals["COORDINATORS"].splitlines():
@@ -62,16 +75,46 @@ def allowed_checkout(vals):
             return Path(os.path.expanduser(f[1])).resolve()
     raise SystemExit(1)
 
+def china_route(m):
+    segs = m.lower().split("/")
+    return segs[0] in HOSTED or any(re.fullmatch(CHINA + r"[-_.:0-9a-z]*", s) for s in segs)
+
+def restricted(h, m):
+    """0 when the owner set the restriction and this model is a China-region route (not through the own gateway)."""
+    _, p = config()
+    if not p.exists():
+        return 1  # no machine.conf: nothing is restricted
+    try:
+        text = p.read_text()
+        vals = source(p, (KEY, "OWN_GATEWAY"))
+    except (OSError, UnicodeDecodeError):
+        vals = {KEY: "nobody", "OWN_GATEWAY": ""}  # cannot be read: it may set the key, so it counts as set to nobody
+    except SystemExit:  # it does not run: restricted only when it says the key, and then to nobody
+        if not re.search(r"^[ \t]*(?:export[ \t]+)?" + KEY + "=", text, re.M):
+            return 1
+        vals = {KEY: "nobody", "OWN_GATEWAY": ""}
+    if not vals[KEY].strip():
+        return 1
+    if m.lower().startswith(tuple(g.lower() + "/" for g in vals["OWN_GATEWAY"].split()
+                                  if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", g) and g.lower() not in HOSTED)):
+        return 1  # the owner'"'"'s own gateway: self-hosted, whatever model is behind it
+    if china_route(m):
+        return 0
+    return 0 if (m in ("", "-") and h != "claude") else 1  # an unnamed model on another harness may default to anything
+
 def main(argv):
     cmd = argv[0]
-    if cmd == "allowed-model":
-        _, v = conf("ALLOWED_MODELS")
-        ok = argv[1] in v["ALLOWED_MODELS"].split() and not argv[1].startswith(("opencode/", "opencode-go/"))
-        raise SystemExit(0 if ok else 1)
+    if cmd == "restricted":
+        try:
+            raise SystemExit(restricted(argv[1], argv[2]))
+        except SystemExit:
+            raise
+        except Exception:
+            raise SystemExit(0)
     if cmd != "allowed-project":
         raise SystemExit(1)
     opts = dict(zip(argv[1::2], argv[2::2]))
-    cfg, v = conf("CHINA_REGION_MODELS_PROJECT", "COORDINATORS")
+    cfg, v = conf(KEY, "COORDINATORS")
     want = allowed_checkout(v)
     if not opts:
         raise SystemExit(1)
@@ -98,34 +141,28 @@ except Exception:
 '
 policy() { python3 -I -c "$POLICY_PY" "$@" 2>/dev/null; }
 
-# Whether a model is known safe on a harness (see the top). Anything else, and any hosted model, is restricted.
-ANTHROPIC='(opus|sonnet|haiku|fable)(-[0-9][0-9a-z.-]*)?|claude-[0-9a-z][0-9a-z.-]*'
-unrestricted() {
-  local h=$1 m=$2
-  case $m in opencode/*|opencode-go/*) return 1 ;; esac
-  case $h in
-    claude) [[ -z $m || $m = - || $m =~ ^($ANTHROPIC)(\[[0-9a-z]+\])?$ ]] && return 0 ;;
-    opencode) [[ $m =~ ^anthropic/($ANTHROPIC)(\[[0-9a-z]+\])?$ ]] && return 0 ;;
-  esac
-  policy allowed-model "$m"
+# Whether the model is a restricted route for this caller (see the top). Not 0 or 1 (no python3, a crash): restricted.
+restricted_model() {
+  policy restricted "$1" "$2"
+  [ $? -eq 1 ] && return 1
+  return 0
 }
 
 if [ "${1:-}" = "--model" ]; then
   shift
-  model=${1:-} harness=claude own=
-  [ -n "$model" ] || die "usage: lane-tier --model <model> [--harness <h>] [--own]"
+  model=${1:-} harness=claude
+  [ -n "$model" ] || die "usage: lane-tier --model <model> [--harness <h>]"
   shift
   while [ $# -gt 0 ]; do
     case $1 in
-      --harness) [ $# -ge 2 ] || die "usage: lane-tier --model <model> [--harness <h>] [--own]"; harness=$2; shift 2 ;;
-      --own) own=1; shift ;;
-      *) die "usage: lane-tier --model <model> [--harness <h>] [--own]" ;;
+      --harness) [ $# -ge 2 ] || die "usage: lane-tier --model <model> [--harness <h>]"; harness=$2; shift 2 ;;
+      *) die "usage: lane-tier --model <model> [--harness <h>]" ;;
     esac
   done
   case $model in
     opencode/*|opencode-go/*) refuse "$model is a hosted OpenCode model (opencode/ or opencode-go/)" "It never runs as a standing role or through project-setup (model-routing.md, \"Sandbox per tier\")." ;;
   esac
-  if [ -z "$own" ] && ! unrestricted "$harness" "$model"; then
+  if restricted_model "$harness" "$model"; then
     refuse "$model on the $harness harness" "It never runs as a standing role or through project-setup (model-routing.md, \"Sandbox per tier\")."
   fi
   echo "model=$model ok"
@@ -190,7 +227,7 @@ if [ -n "$restricted" ]; then
   while read -r t h m; do
     [ "$h" = none ] && continue
     [ "$m" = "-" ] && m=
-    unrestricted "$h" "$m" || printf '%s\n' "$t"
+    if restricted_model "$h" "$m"; then printf '%s\n' "$t"; fi
   done <<<"$out"
   exit 0
 fi
@@ -204,9 +241,9 @@ if [ "$harness" = none ]; then
   echo "lane-tier: tier $tier has harness none: skip it and go one tier up" >&2
   exit 3
 fi
-if ! unrestricted "$harness" "$model"; then
+if restricted_model "$harness" "$model"; then
   if policy allowed-project --table "$table" --cwd "$PWD"; then
-    echo "lane-tier: note: tier $tier runs a model that is restricted to this one project: only its Orca coordinator starts it (worker-start), never cotal_spawn." >&2
+    echo "lane-tier: note: tier $tier runs a model the owner restricted to this one project: only its Orca coordinator starts it (worker-start), never cotal_spawn." >&2
   else
     refuse "tier $tier (harness $harness, model $model)" "Do not start it with cotal_spawn: go one tier up, and tell the owner that $table still has this row."
   fi

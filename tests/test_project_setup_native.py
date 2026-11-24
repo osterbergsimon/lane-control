@@ -1301,22 +1301,59 @@ def store_bytes(e, repo):
 
 class PinCheckTests(Case):
     def test_lane_tier_judges_a_model_alone(self):
-        for model, code in (("opus", 0), ("gw/m1", 4), ("deepseek/deepseek-chat", 4), ("opencode-go/x", 4), ("opencode/big-pickle", 4)):
-            r = subprocess.run(["bash", str(LANE_TIER), "--model", model], capture_output=True, text=True)
+        # open by default (this scratch HOME has no machine.conf), except a hosted opencode/ or opencode-go/ model
+        for model, code in (("opus", 0), ("gw/m1", 0), ("deepseek/deepseek-chat", 0), ("opencode-go/x", 4), ("opencode/big-pickle", 4)):
+            r = subprocess.run(["bash", str(LANE_TIER), "--model", model], capture_output=True, text=True, env=self.e.env)
             self.assertEqual(r.returncode, code, (model, r.stderr))
-        r = subprocess.run(["bash", str(LANE_TIER), "--model"], capture_output=True, text=True)
+        r = subprocess.run(["bash", str(LANE_TIER), "--model"], capture_output=True, text=True, env=self.e.env)
         self.assertEqual(r.returncode, 2)
 
-    def test_the_owners_allowance_never_lets_a_standing_role_run_a_restricted_model(self):
-        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+    def restrict(self, extra=""):
         conf = self.e.home / ".config" / "lane-control" / "machine.conf"
-        conf.write_text(f'COORDINATORS="\napp {self.repo}\n"\nCHINA_REGION_MODELS_PROJECT=app\n')
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(f'COORDINATORS="\nother {self.e.home}/other\n"\nCHINA_REGION_MODELS_PROJECT=other\n{extra}')
+        return conf
+
+    def test_while_the_owner_restricts_a_china_route_is_no_standing_role_and_the_owners_gateway_is(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        before = store_bytes(self.e, self.repo)
+        # open by default: a vendor model is a model (it still needs --own-model, as any opencode pin does)
+        self.assertEqual(self.e.run(str(self.repo), "--coordinator", "claude/deepseek/deepseek-chat", "--no-start").returncode, 0)
+        self.assertEqual(self.e.run(str(self.repo), "--coordinator", "claude/opus", "--no-start").returncode, 0)
+        self.restrict(extra='OWN_GATEWAY="gw"\n')
+        before = store_bytes(self.e, self.repo)
         for args in (["--coordinator", "claude/opencode-go/x"], ["--reviewer", "claude/opencode/x"],
-                     ["--coordinator", "opencode/opencode-go/x", "--own-model", "opencode-go/x"],
-                     ["--coordinator", "claude/deepseek/deepseek-chat"], ["--reviewer", "claude/gw/m1"]):
+                     ["--coordinator", "claude/deepseek/deepseek-chat"], ["--reviewer", "claude/glm-4.6"],
+                     ["--coordinator", "opencode/deepseek/deepseek-chat", "--own-model", "deepseek/deepseek-chat"],
+                     ["--coordinator", "opencode/moonshot/kimi-k2", "--own-model", "moonshot/kimi-k2"]):
             r = self.e.run(str(self.repo), *args, "--no-start")
             self.assertEqual(r.returncode, 2, (args, r.stderr))
-            self.assertIn("this model may run only in the one project the owner allows", r.stderr, args) if "claude/" in args[1] else None
+            self.assertIn("this model may run only in the one project the owner allows", r.stderr, args)
+            self.assertNotIn("CHINA_REGION", r.stderr)
+            self.assertEqual(store_bytes(self.e, self.repo), before, args)
+        # the owner's own gateway, a deepseek id behind it included, is first class, with --own-model as ever
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/deepseek-v3", "--own-model", "gw/deepseek-v3", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.e.settings(self.repo)["models"]["coordinator"], "opencode/gw/deepseek-v3")
+        # a stored pin (an old record, a hand edit) is asked of lane-tier on every run too
+        st = self.e.settings(self.repo)
+        st["models"]["reviewer"] = "claude/deepseek/deepseek-chat"
+        (self.e.store(self.repo) / "settings.json").write_text(json.dumps(st))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("this model may run only in the one project the owner allows", r.stderr)
+
+    def test_the_same_pins_are_refused_on_the_orca_cotal_path(self):
+        repo = self.e.repo("cotalproj")
+        self.restrict()
+        for args in (["--coordinator", "claude/deepseek/deepseek-chat"], ["--reviewer", "claude/qwen-max"],
+                     ["--coordinator", "claude/opencode-go/x"]):
+            r = self.e.run(str(repo), *args, "--no-start", "--orchestrator", "orca-cotal")
+            self.assertEqual(r.returncode, 2, (args, r.stderr))
+            self.assertIn("this model may run only in the one project the owner allows", r.stderr, args)
+        (self.e.home / ".config" / "lane-control" / "machine.conf").unlink()
+        r = self.e.run(str(repo), "--coordinator", "claude/deepseek/deepseek-chat", "--no-start", "--orchestrator", "orca-cotal")
+        self.assertEqual(r.returncode, 0, r.stderr)  # open by default
 
     def test_a_refused_run_leaves_the_store_byte_identical(self):
         # M1: the refusal comes before anything is written.
