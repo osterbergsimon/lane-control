@@ -4,13 +4,14 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
 
   project-setup <git-url|dir> [<host>] [--orchestrator native-orca|orca-cotal] [--name N] [--dest DIR] [--coordinator HARNESS/MODEL]
                 [--permission-mode auto|bypassPermissions|default]
-                [--port N] [--tiers FILE] [--own-model M]... [--no-start]
+                [--port N] [--tiers FILE] [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
                 [--no-desktop-lanes] [--no-machine-setup] [--orca-port N]
                 [--orca-from DIR | --orca-bundle TAR] [--orca-version V]
                 [--tunnel-auth-sock PATH] [--tunnel-ssh PATH] [--tunnel-no-enable]
   project-setup --remove-host <host>
+  project-setup <dir> --suggest-tiers <provider> [--gateway URL] [--gateway-key-env NAME]
 
 Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
 adapting agent and a reviewer, committed only on the owner's yes; the role files go to .lane-control/additions/ and
@@ -61,11 +62,21 @@ tier table alone and says which running agents keep the old text until restarted
 agent, no broker, no Orca worktree, no commit.
 
 The tier table is decided once per project: a full --tiers, else the defaults (orchestrators/orca-cotal/templates/lanes.tsv). A re-run keeps the
-project's table unless --tiers gives another.
+project's table unless --tiers gives another. Nothing is refused by model or harness (owner 2026-11-24): the project's
+table is the only place that says which models it uses.
+
+--suggest-tiers <provider> suggests that table from an OpenAI-compatible gateway (a self-hosted LiteLLM, say): GET
+<base>/v1/models, and <base>/model/info where it answers (LiteLLM: the model behind each alias). Each row is
+opencode/<provider>/<alias>, <provider> being the gateway's provider id in OpenCode's config. The base URL is --gateway,
+else that provider's options.baseURL in OpenCode's own config; the key only an environment variable: --gateway-key-env,
+else the {env:NAME} its options.apiKey names. OpenCode's auth files are never read; the key is never printed, logged,
+stored or put in an argv (core/tiersuggest.py). It shows the suggestion with each alias's model and asks, in a terminal,
+whether to write it as the project's lanes.tsv; nothing else runs, and on no (or no terminal) nothing is written and
+it exits 3: edit the table shown and pass it with --tiers.
 
 Per-project settings live outside the repo and outside .cotal/ (which Cotal owns), in
 ~/.config/lane-control/projects/<folder name>-<short hash of its path>/: settings.json (models per role, permission mode,
---private globs, own models, broker port) and lanes.tsv (the tier table). Flags update
+--private globs, broker port) and lanes.tsv (the tier table). Flags update
 the store and a run without them reuses it; --show prints it. A project set up before the store existed is moved there
 once, automatically, and the run says what moved. Only the rendered personas stay in .cotal/agents/. No secret goes in.
 """
@@ -109,6 +120,15 @@ def _agentsdoc():
 
 
 DOC = _agentsdoc()
+
+
+def _tiersuggest():
+    """core/tiersuggest.py: a tier table suggested from a gateway's model list."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lc_tiersuggest", HERE / "core" / "tiersuggest.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 GENERATED = DOC.GENERATED  # the generated coordination's own file, at the repo root; AGENTS.md only points to it
 OC = HERE / "orchestrators" / "orca-cotal"  # this orchestrator's personas, skill and templates
 HARNESSES = ("claude", "opencode")
@@ -203,7 +223,7 @@ def free_port(start: int) -> int:
     raise Fail("no free broker port in 14200-14999")
 
 
-SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "own_models", "port",
+SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
                 "paired_environment", "beads_repo")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
@@ -1043,47 +1063,21 @@ def ignore_cotal(repo: Path) -> str:
     return "updated"
 
 
-HOSTED_OPENCODE = ("opencode/", "opencode-go/")  # served by OpenCode, its region unknown
-
-
 class Refused(Fail):
     """A choice project-setup will not run (exit 2), found before anything is written."""
 
 
-def lane_tier_refusal(model: str):
-    """None when lane-tier lets the model run (`lane-tier --model`), else its refusal: the one reader of the rule."""
-    try:
-        r = subprocess.run(["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--model", model],
-                           capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise Fail(f"cannot ask lane-tier about {model}: {e}")
-    if r.returncode == 0:
-        return None
-    if r.returncode == 4:
-        return " ".join(r.stderr.split()) or f"lane-tier refuses {model}"
-    raise Fail(f"lane-tier --model {model} failed: {r.stderr.strip() or r.returncode}")
-
-
-def native_pin_refusal(pins: dict, mode: str, own: set):
-    """None, or why the native path will not run these pins: a model lane-tier refuses (any role, any harness), an
-    OpenCode model nobody declared --own-model, or a standing OpenCode role with a Claude-only permission mode."""
+def native_pin_refusal(pins: dict, mode: str):
+    """None, or why the native path will not run these pins: a standing OpenCode role with a Claude-only permission
+    mode. Any model on any harness is the owner's choice (owner 2026-11-24): nothing is refused by model."""
     oc = load_harness("opencode")
     for role in ("coordinator", "reviewer"):
         h, m = pins[role]
-        why = lane_tier_refusal(m)
-        if why:
-            return f"the {role} pins {h}/{m}: {why}"
-        if h == "opencode" and m not in own:
-            return (f"the {role} pins {h}/{m}: this model would run bare on this machine, and nothing says it is "
-                    f"yours. Use claude/<model>, or add --own-model {m} only if it is on a gateway you run yourself")
         if h == "opencode" and role != "reviewer" and mode not in oc.AUTO_MODES | oc.ASK_MODES:
             return (f"the {role} runs on OpenCode, which has no permission mode {mode!r}: it takes "
                     f"{', '.join(sorted(oc.AUTO_MODES))} (both --auto) or default. Pass one of those, or "
                     f"claude/<model> for the {role}")
     return None
-OWN_NOTE = ("This model runs on this machine. Choose only a model on a gateway you run yourself, offline or internal, "
-            "not one a third party hosts.")
-MODEL_NAME = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:/-]+")
 
 
 def check_tier_table(text: str) -> list:
@@ -1096,19 +1090,6 @@ def check_tier_table(text: str) -> list:
     if r.returncode != 0:
         raise Fail(r.stderr.strip())
     return [tuple(l.split()) for l in r.stdout.splitlines() if l.strip()]
-
-
-def opencode_rows_note(tier_text: str):
-    """Warns about the OpenCode rows of a project's table: lane-tier refuses them, so their work goes one tier up."""
-    rows = [t for t, h, m in check_tier_table(tier_text) if h == "opencode" or m.startswith(HOSTED_OPENCODE)]
-    if rows:
-        print(f"warning: {', '.join(rows)} is an OpenCode tier: lane-tier refuses it (swift on OpenCode is started "
-              "by a project's own Orca coordinator, not through lane-tier; model-routing.md). Set its harness to none in the "
-              "project's lanes.tsv.", file=sys.stderr, flush=True)
-
-
-def usable_own_model(name: str) -> bool:
-    return bool(MODEL_NAME.fullmatch(name)) and not name.startswith(HOSTED_OPENCODE)
 
 
 def choose_tiers(repo: Path, a, default_table: Path) -> str:
@@ -1138,10 +1119,9 @@ def personas_and_tiers(repo: Path, project: str, coord, reviewer, mode: str, tie
                               review_persona, attached=attached)
         state = write_if_changed(repo / ".cotal" / "agents" / f"{name}.md", text)
         say(f"persona {name}", state, f"{h}/{m}")
-        if state == "updated" and not (h == "opencode" and m.startswith(HOSTED_OPENCODE)):
+        if state == "updated":
             changed.append(name)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
-    opencode_rows_note(tier_text)
     say("gitignore", ignore_cotal(repo), ".cotal/")
     return changed
 
@@ -1189,7 +1169,6 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             f"ran another, correct it in {agents}")
     table = store_table(repo)
     texts = {}
-    no_restart = set()
     for name in ("coordinator", "reviewer"):
         if name in old:
             h = re.search(r"^agent: (\S+)$", old[name], re.M)
@@ -1197,10 +1176,6 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             if not (h and m):
                 raise Fail(f"{agents / (name + '.md')} has no agent/model lines to keep; nothing was changed")
             harness, model = h.group(1), m.group(1)
-            if harness == "opencode" and model.startswith(HOSTED_OPENCODE):
-                print(f"warning: persona {name} pins {model}: project-setup starts no project agent on a hosted "
-                      "OpenCode model. Do not restart it on that model.", file=sys.stderr, flush=True)
-                no_restart.add(name)
         else:
             pin = (stored.get("models") or {}).get(name)  # the store's pin for a persona that is missing
             harness, model = harness_model(pin) if isinstance(pin, str) and name != "reviewer" else reviewer
@@ -1225,11 +1200,6 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
         key = lambda rs: ", ".join(sorted(r.split("\t")[0] for r in rs)) or "none"
         say("tiers", "exists", f"{table} kept, differs from the defaults: only in the project: {key(mine)}; "
             f"only in the defaults: {key(theirs)}")
-    if own_text is not None:
-        try:
-            opencode_rows_note(own_text)
-        except Fail as e:
-            print(f"warning: {e}: lane-tier refuses every tier until it is fixed", file=sys.stderr, flush=True)
     changed = []
     kept = {"root": str(repo),
             "models": {**{n: f"{h}/{m}" for n, (h, m, _) in texts.items()}, **(stored.get("models") or {})}}
@@ -1246,7 +1216,6 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
     needs = {n: "persona changed" for n in changed}
     if skill != "exists":
         needs.setdefault("coordinator", "skill changed")
-    needs = {n: why for n, why in needs.items() if n not in no_restart}
     if not needs:
         say("restart", "none", "nothing changed")
         return 0
@@ -2672,31 +2641,17 @@ def bad_glob(g) -> bool:
 def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
-    want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
+    want = {"private": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
             "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
                        f"not {json.dumps(st[k])[:40]}")
-    for k in ("private", "own_models", "attached"):
+    for k in ("private", "attached"):
         if any(not isinstance(x, str) for x in st.get(k, [])):
             raise Fail(f"{f}: {k} must be a list of strings")
     if any(not isinstance(v, str) for v in (st.get("models") or {}).values()):
         raise Fail(f"{f}: models must map each role to a harness/model string")
-
-
-def known_own_models(repo) -> set:
-    """own_models the project holds, read-only and tolerant: the store, else a record from before the store."""
-    out = set()
-    if repo is None:
-        return out
-    for f in (store_dir(repo) / "settings.json", repo / ".cotal" / "lane-control.json"):
-        try:
-            v = json.loads(f.read_text()).get("own_models")
-            out |= {x for x in v if isinstance(x, str)} if isinstance(v, list) else set()
-        except (OSError, ValueError, AttributeError):
-            pass
-    return out
 
 
 def peek_repo(target: str, dest: Path, name: str):
@@ -2709,21 +2664,6 @@ def peek_repo(target: str, dest: Path, name: str):
         return None
     top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False)
     return Path(top.stdout.strip()) if top.returncode == 0 else None
-
-
-def own_check(flag_pins: list, own: set):
-    """None when every flagged opencode pin is declared own (by a flag or the store); else the refusal, printed. A hosted
-    model never gets here."""
-    for flag, pin in flag_pins:
-        if pin[0] != "opencode":
-            continue
-        if pin[1] not in own:
-            print(f"project-setup: {flag} {pin[0]}/{pin[1]}: this model would run bare on this machine, and nothing "
-                  f"says it is yours. Use claude/<model>, or add --own-model {pin[1]} only if it is on a gateway you "
-                  "run yourself, offline or internal", file=sys.stderr)
-            return 2
-        print(f"note: {flag} {pin[0]}/{pin[1]}: {OWN_NOTE}", flush=True)
-    return None
 
 
 def resolve_settings(repo: Path, a) -> dict:
@@ -2739,9 +2679,6 @@ def resolve_settings(repo: Path, a) -> dict:
             pins[role] = harness_model(spec)
         except SystemExit:
             raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is {spec!r}, expected <claude|opencode>/<model>")
-        if not flag and pins[role][0] == "opencode" and pins[role][1].startswith(HOSTED_OPENCODE):
-            raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is a hosted OpenCode model, and "
-                       "project-setup starts no project agent on one")
     mode = a.permission_mode or st.get("permission_mode")
     persona_modes = {}
     if not mode:  # nothing says it: the personas already rendered do, and when they differ each keeps its own
@@ -2768,8 +2705,7 @@ def resolve_settings(repo: Path, a) -> dict:
     if a.name:
         changes["name"] = a.name
     if ORCHESTRATOR == "native-orca":  # before anything is written: a refused run leaves the store as it was
-        own = {x for x in st.get("own_models") or [] if isinstance(x, str)} | set(getattr(a, "own_model", []) or [])
-        why = native_pin_refusal(pins, mode, own)
+        why = native_pin_refusal(pins, mode)
         if why:
             raise Refused(why)
     settings(repo, **changes)
@@ -2794,6 +2730,66 @@ def which_orchestrator(flag, repo, default: str = None) -> str:
     return default or DEFAULT_ORCHESTRATOR
 
 
+def suggest_tiers(a) -> int:
+    """--suggest-tiers: the gateway's models, a suggested tier table, and the owner's yes before it is written (the
+    store's lanes.tsv, nothing else). 0 written, 3 not (no, or no terminal), 2 usage, 1 the gateway failed."""
+    TS = _tiersuggest()
+    provider = a.suggest_tiers
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", provider):
+        print(f"project-setup: --suggest-tiers takes OpenCode's provider id (such as litellm), got {provider!r}",
+              file=sys.stderr)
+        return 2
+    try:
+        d = Path(a.target).expanduser().resolve()
+        top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
+        if top is None or top.returncode != 0:
+            raise Fail(f"{d} is not an existing git repository; --suggest-tiers needs the project's checkout")
+        repo = Path(top.stdout.strip())
+        base, key_env, where = TS.opencode_provider(provider)
+    except (Fail, TS.GatewayError) as e:
+        print(f"project-setup: {e}", file=sys.stderr)
+        return 1
+    base, key_env = a.gateway or base, a.gateway_key_env or key_env
+    if not base:
+        print(f"project-setup: no gateway URL for {provider}: pass --gateway <base URL>, or give the provider "
+              "options.baseURL in OpenCode's config", file=sys.stderr)
+        return 2
+    key = None
+    if key_env:
+        key = os.environ.get(key_env)
+        if not key:
+            print(f"project-setup: the gateway key's environment variable {key_env} is not set"
+                  + (f" ({where} names it)" if where and not a.gateway_key_env else ""), file=sys.stderr)
+            return 2
+    try:
+        models = TS.fetch_models(base, key)
+        text = TS.table(provider, TS.suggest(models))
+        check_tier_table(text)
+    except (TS.GatewayError, Fail) as e:
+        print(f"project-setup: {e}", file=sys.stderr)
+        return 1
+    say("gateway", "read", f"{len(models)} models at {TS.root_of(base)}" + (f" (key from ${key_env})" if key else ""))
+    width = max(len(m[0]) for m in models)
+    for alias, real in models:
+        print(f"  {alias.ljust(width)}  {real if real != alias else '(no model/info: the alias itself)'}"
+              f"  -> {TS.kind(alias, real)}")
+    print("\nSuggested tier table:\n" + text, flush=True)
+    table = store_table(repo)
+    was = table.read_text() if table.exists() else None
+    if was == text:
+        say("tiers", "exists", f"{table} (the same as the suggestion)")
+        return 0
+    question = (f"Write this as the tier table of {repo.name} ({table}"
+                + (", it replaces the one there" if was is not None else "") + ")? [y/N] ")
+    if not owner_says_yes(question, step="tiers"):
+        say("tiers", "not written", "to change it: save the table above to a file, edit it, and run project-setup "
+            f"{repo} --tiers <file>")
+        return 3
+    store_dir(repo).mkdir(parents=True, exist_ok=True, mode=0o700)
+    say("tiers", write_if_changed(table, text), str(table))
+    return 0
+
+
 def show(repo: Path) -> int:
     """Prints the project's store, writes nothing."""
     d, st = store_dir(repo), settings(repo)
@@ -2805,10 +2801,6 @@ def show(repo: Path) -> int:
     try:
         tiers = [l.split("\t")[0] for l in tab.read_text().splitlines() if l.strip() and not l.startswith("#")][1:]
         print(f"lanes.tsv: {tab} (tiers: {', '.join(tiers) or 'none'})")
-        try:
-            opencode_rows_note(tab.read_text())
-        except Fail as e:
-            print(f"warning: {e}", file=sys.stderr, flush=True)
     except (OSError, UnicodeDecodeError):
         print(f"lanes.tsv: {tab} (not there yet)")
     for d in attached_of(st):
@@ -3290,7 +3282,7 @@ def native_project(repo: Path, name: str = "") -> dict:
     mode = st.get("permission_mode") or "auto"
     if mode not in NATIVE_MODES:
         raise Fail(f"{store_dir(repo) / 'settings.json'}: permission_mode {mode!r} must be one of {', '.join(NATIVE_MODES)}")
-    why = native_pin_refusal(pins, mode, {x for x in st.get("own_models") or [] if isinstance(x, str)})
+    why = native_pin_refusal(pins, mode)
     if why:  # a hand-edited store never starts what setup would refuse
         raise Fail(f"{store_dir(repo) / 'settings.json'}: {why.rstrip('.')}. Nothing was started or rendered")
     return {"pins": pins, "mode": mode,
@@ -3397,7 +3389,7 @@ def native_preflight(needed: set, place: Place = LOCAL):
             raise Fail(f"{BINARIES[h]} not on PATH, but this project starts {h} sessions")
 
 
-def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
+def native_main(a, tiers: Path) -> int:
     """The native-Orca path: no Cotal space, broker or manager."""
     global ORCA
     add_orca_cli_to_path()
@@ -3420,9 +3412,6 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             print(f"project-setup: {e}", file=sys.stderr)
             return 1
     try:
-        bad = own_check(flag_pins, own_models | known_own_models(peek_repo(a.target, Path(a.dest).expanduser(), slug(base))))
-        if bad:
-            return bad
         place = Place()
         native_preflight(set(), place)
         host_hygiene()
@@ -3482,8 +3471,6 @@ def native_main(a, flag_pins: list, own_models: set, tiers: Path) -> int:
             orca_repo(d, place)
             setup_script(d, a.write_orca_yaml)
         native_skills()
-        if own_models:
-            settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
         changed = native_personas(repo, project, pins, cfg["mode"], tier_text, tuple(str(d) for d in attached))
         retire_design_lead(repo, project, place)
         persona_hooks(repo, {h for h in standing if h == "opencode"} | ({"claude"} if pins["coordinator"][0] == "claude" else set()))
@@ -4029,9 +4016,14 @@ def main(argv=None) -> int:
                                               "unattended coordinator unable to act)")
     ap.add_argument("--port", type=int)
     ap.add_argument("--tiers", help="a full tier table to use as it is")
-    ap.add_argument("--own-model", action="append", default=[], metavar="PROVIDER/MODEL",
-                    help="declare a model as your own or on a gateway you run (repeatable). Needed before --coordinator "
-                         "or --reviewer may pin opencode/<provider>/<model>")
+    ap.add_argument("--suggest-tiers", metavar="PROVIDER",
+                    help="suggest the project's tier table from a gateway's model list, rows opencode/PROVIDER/<alias> "
+                         "(PROVIDER: the gateway's provider id in OpenCode's config); writes it only on the owner's yes")
+    ap.add_argument("--gateway", metavar="URL",
+                    help="with --suggest-tiers: the gateway's base URL (default: OpenCode's config for PROVIDER)")
+    ap.add_argument("--gateway-key-env", metavar="NAME",
+                    help="with --suggest-tiers: the environment variable that holds the gateway key (default: the "
+                         "{env:NAME} OpenCode's config names); the key itself is never an argument")
     ap.add_argument("--beads-repo", metavar="OWNER/NAME",
                     help="the private GitHub repo that holds this project's beads (default: the project's origin owner "
                          "and `<repo name>-beads`). Kept in the settings store")
@@ -4088,6 +4080,14 @@ def main(argv=None) -> int:
         print(f"project-setup: two hosts given ({a.host_pos} and --host {a.host}); give one", file=sys.stderr)
         return 2
     host = a.host or a.host_pos
+    if (a.gateway or a.gateway_key_env) and a.suggest_tiers is None:
+        print("project-setup: --gateway and --gateway-key-env go with --suggest-tiers", file=sys.stderr)
+        return 2
+    if a.suggest_tiers is not None:
+        if host:
+            print("project-setup: --suggest-tiers runs where the project is: run it on the host", file=sys.stderr)
+            return 2
+        return suggest_tiers(a)
     if a.orca_from and a.orca_bundle:
         print("project-setup: --orca-from and --orca-bundle exclude each other: give one source", file=sys.stderr)
         return 2
@@ -4123,33 +4123,13 @@ def main(argv=None) -> int:
     if a.design_lead:
         print(f"project-setup: --design-lead: {RETIRED}. Nothing was changed", file=sys.stderr)
         return 2
-    flag_pins = [(f, harness_model(v)) for f, v in (("--coordinator", a.coordinator), ("--reviewer", a.reviewer)) if v]
+    for v in (a.coordinator, a.reviewer):  # any harness/model the owner gives; only the shape is checked
+        if v:
+            harness_model(v)
     adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
-    bad_own = [m for m in a.own_model if not usable_own_model(m)]
-    if bad_own:
-        print(f"project-setup: --own-model {bad_own[0]}: must be provider/model, and not a hosted opencode/ or "
-              "opencode-go/ model", file=sys.stderr)
-        return 2
-    own_models = set(a.own_model)
     for g in a.private:
         if bad_glob(g):
             print(f"project-setup: --private takes a glob relative to the repo root, got {g!r}", file=sys.stderr)
-            return 2
-    for flag, pin in flag_pins:
-        if ORCHESTRATOR == "native-orca":
-            try:
-                why = lane_tier_refusal(pin[1])
-            except Fail as e:
-                print(f"project-setup: {e}", file=sys.stderr)
-                return 1
-            if why:
-                print(f"project-setup: {flag} {pin[0]}/{pin[1]}: {why} Use claude/<model>, or an "
-                      "opencode/<provider>/<model> on a gateway you run yourself", file=sys.stderr)
-                return 2
-        elif pin[0] == "opencode" and pin[1].startswith(HOSTED_OPENCODE):
-            print(f"project-setup: {flag} {pin[0]}/{pin[1]}: project-setup starts no project agent on a hosted "
-                  "OpenCode model. Use claude/<model>, or an opencode/<provider>/<model> on a gateway "
-                  "you run yourself", file=sys.stderr)
             return 2
     if not a.skip_adapt and not a.refresh and {adapter[0], adapt_reviewer[0]} != {"claude"}:
         print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
@@ -4165,7 +4145,7 @@ def main(argv=None) -> int:
               "already attached; run without them to attach another)", file=sys.stderr)
         return 2
     if a.refresh:
-        ignored = [f for f in ("--coordinator", "--permission-mode", "--own-model")
+        ignored = [f for f in ("--coordinator", "--permission-mode")
                    if any(x == f or x.startswith(f + "=") for x in argv)]
         if ignored:
             print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
@@ -4180,7 +4160,7 @@ def main(argv=None) -> int:
         return 2
     global ORCA
     if ORCHESTRATOR == "native-orca":
-        return native_main(a, flag_pins, own_models, tiers)
+        return native_main(a, tiers)
     if a.show:
         try:
             d = Path(a.target).expanduser().resolve()
@@ -4212,9 +4192,6 @@ def main(argv=None) -> int:
             why = stale_checkout(repo, quick=True)
             if why:  # a refresh works on any checkout, but says so
                 print(f"project-setup: warning: {why}", file=sys.stderr)
-            bad = own_check(flag_pins, own_models | known_own_models(repo))  # before anything is moved
-            if bad:
-                return bad
             migrate(repo)
             st = settings(repo)
             validate_settings(repo, st)
@@ -4242,9 +4219,6 @@ def main(argv=None) -> int:
     os.environ.setdefault("COTAL_ORCA_BIN", ORCA)
     base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
     try:
-        bad = own_check(flag_pins, own_models | known_own_models(peek_repo(a.target, Path(a.dest).expanduser(), slug(base))))
-        if bad:  # before a folder is made, cloned or moved: a refused run leaves nothing behind
-            return bad
         preflight(set())  # the agents' harnesses are checked once the project's settings are known
         host_hygiene()
         repo = resolve_repo(a.target, Path(a.dest).expanduser(), slug(base))
@@ -4305,8 +4279,6 @@ def main(argv=None) -> int:
         cotal_space(repo, space)
         if "claude" in needed | tier_harnesses:
             claude_wiring(repo, space)
-        if own_models:
-            settings(repo, own_models=sorted(set(settings(repo).get("own_models", [])) | own_models))
         changed = personas_and_tiers(repo, project, coord, reviewer, modes, tier_text, tuple(str(d) for d in attached))
         retire_design_lead(repo, project, None)
         needs = {n: "persona changed" for n in changed}

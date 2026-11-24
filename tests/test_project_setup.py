@@ -2426,28 +2426,21 @@ class RunTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("sandbox", (r.stdout + r.stderr).replace(str(ROOT), "").lower())  # the checkout path may hold the word
 
-    def test_an_own_model_on_a_setup_flag_gets_the_notice(self):
+    def test_any_opencode_pin_is_taken_with_no_own_model_step(self):
+        # owner 2026-11-24: no refusal by model or harness; the owner's flag is the choice
         repo = self.e.repo()
-        r = self.e.run(str(repo), "--coordinator", "opencode/deepseek/deepseek-chat", "--own-model", "deepseek/deepseek-chat", "--no-start")
+        r = self.e.run(str(repo), "--coordinator", "opencode/litellm/chat", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("--coordinator opencode/deepseek/deepseek-chat", r.stdout)
-        self.assertIn("gateway you run yourself", r.stdout)
-        self.assertEqual(self.e.settings(repo)["own_models"], ["deepseek/deepseek-chat"])
+        self.assertNotIn("gateway you run yourself", r.stdout + r.stderr)
+        self.assertNotIn("own_models", self.e.settings(repo))
+        self.assertEqual(self.e.settings(repo)["models"]["coordinator"], "opencode/litellm/chat")
 
-    def test_an_opencode_pin_on_a_setup_flag_without_an_explicit_own_choice_is_refused(self):
+    def test_own_model_is_gone(self):
         repo = self.e.repo()
-        for args in (["--coordinator", "opencode/deepseek/deepseek-chat"],
-                     ["--reviewer", "opencode/gw/m", "--own-model", "gw/other"]):
-            r = self.e.run(str(repo), *args, "--no-start")
-            self.assertEqual(r.returncode, 2, r.stderr)
-            self.assertIn("--own-model", r.stderr)
-
-    def test_own_model_refuses_a_hosted_or_malformed_name(self):
-        repo = self.e.repo()
-        for name in ("opencode/x", "opencode-go/x", "noslash"):
-            r = self.e.run(str(repo), "--own-model", name, "--no-start")
-            self.assertEqual(r.returncode, 2, r.stderr)
-            self.assertIn("--own-model", r.stderr)
+        r = self.e.run(str(repo), "--own-model", "gw/m", "--no-start")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("unrecognized arguments: --own-model", r.stderr)
+        self.assertNotIn("--own-model", SCRIPT.read_text())
 
     def test_the_manager_gets_no_opencode_shim_on_path(self):
         repo = self.e.repo()
@@ -2455,15 +2448,13 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("cotal-opencode", json.loads(self.e.state.read_text())["mgr_path"])
         self.assertFalse((self.e.home / ".agents" / "bin" / "cotal-opencode").exists())
 
-    def test_hosted_opencode_pins_on_setups_own_agents_are_refused(self):
-        repo = self.e.repo()
+    def test_hosted_opencode_pins_on_setups_own_agents_are_taken(self):
         for args in (["--coordinator", "opencode/opencode/deepseek-v4.1-flash"],
                      ["--coordinator", "opencode/opencode-go/x"], ["--reviewer", "opencode/opencode/x-free"]):
+            repo = self.e.repo("app-" + str(abs(hash(tuple(args))))[:6])
             r = self.e.run(str(repo), *args)
-            self.assertEqual(r.returncode, 2, args)
-            self.assertIn("starts no project agent on a hosted OpenCode model", r.stderr)
-        self.assertFalse((repo / ".cotal" / "agents").exists())
-        self.assertNotIn("spawn", "\n".join(self.e.calls()))
+            self.assertEqual(r.returncode, 0, (args, r.stderr))
+            self.assertNotIn("hosted", r.stderr)
 
     def test_mgr_passes_opencode_key_by_name_only(self):
         repo = self.e.repo()
@@ -2504,7 +2495,7 @@ class RunTests(unittest.TestCase):
 
     def test_opencode_coordinator(self):
         repo = self.e.repo()
-        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/deepseek-v4.1-flash", "--own-model", "gateway/deepseek-v4.1-flash")
+        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/deepseek-v4.1-flash")
         self.assertEqual(r.returncode, 0, r.stderr)
         sp = [c for c in self.e.calls() if c.startswith("cotal spawn coordinator")][0]
         self.assertIn("--harness opencode", sp)
@@ -2676,7 +2667,7 @@ class RunTests(unittest.TestCase):
 
     def test_reviewer_persona_rendered(self):
         repo = self.e.repo()
-        r = self.e.run(str(repo), "--reviewer", "opencode/gateway/glm-5", "--own-model", "gateway/glm-5", "--no-start")
+        r = self.e.run(str(repo), "--reviewer", "opencode/gateway/glm-5", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
         text = (repo / ".cotal" / "agents" / "reviewer.md").read_text()
         self.assertIn("agent: opencode", text)
@@ -2735,7 +2726,7 @@ class RunTests(unittest.TestCase):
     def test_untrusted_folder_is_fine_without_claude_agents(self):
         repo = self.e.repo()
         self.e.trust(repo, accepted=False)
-        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/glm-5", "--own-model", "gateway/glm-5", "--no-design-lead")
+        r = self.e.run(str(repo), "--coordinator", "opencode/gateway/glm-5", "--no-design-lead")
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_rerun_leaves_existing_tabs_alone(self):
@@ -2810,10 +2801,10 @@ class RunTests(unittest.TestCase):
         oc = "opencode/gateway/x"
         tiers = self.e.home / "tiers.tsv"
         tiers.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode/x\t-\n")
-        self.assertEqual(self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", oc, "--reviewer", oc,
+        self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--reviewer", oc,
                                     "--tiers", str(tiers)).returncode, 0)
         self.assertFalse(any(c.startswith("cotal setup") for c in self.e.calls()))
-        r = self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", "claude/opus", "--reviewer", oc,
+        r = self.e.run(str(repo), "--coordinator", "claude/opus", "--reviewer", oc,
                        "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(any(c.startswith("cotal setup") for c in self.e.calls()))
@@ -2884,7 +2875,7 @@ class RunTests(unittest.TestCase):
     def test_personas_carry_mode_and_tier_path(self):
         repo = self.e.repo()
         oc = "opencode/gateway/x"
-        self.assertEqual(self.e.run(str(repo), "--own-model", "gateway/x", "--coordinator", oc, "--permission-mode", "bypassPermissions").returncode, 0)
+        self.assertEqual(self.e.run(str(repo), "--coordinator", oc, "--permission-mode", "bypassPermissions").returncode, 0)
         text = (repo / ".cotal" / "agents" / "coordinator.md").read_text()
         self.assertIn("`bypassPermissions`", text)
         self.assertIn(str(self.e.store(repo) / "lanes.tsv"), text)
@@ -2982,7 +2973,7 @@ class RefreshTests(unittest.TestCase):
         r = self.refresh()
         self.assertIn("restart: none no changed role is running", r.stdout)
 
-    def test_an_agent_pinned_to_a_hosted_model_is_not_listed_for_restart(self):
+    def test_an_agent_pinned_to_a_hosted_model_is_listed_for_restart_like_any_other(self):
         self.setup_project()
         text = self.persona().read_text()
         self.persona().write_text(re.sub(r"^agent: .*$", "agent: opencode", re.sub(r"^model: .*$", "model: opencode/old", text, flags=re.M), flags=re.M) + "stale\n")
@@ -2991,8 +2982,8 @@ class RefreshTests(unittest.TestCase):
         self.e.state.write_text(json.dumps(state))
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("Do not restart it on that model", r.stderr)
-        self.assertNotIn("restart: needed", r.stdout)
+        self.assertNotIn("Do not restart it", r.stderr)
+        self.assertRegex(r.stdout, r"restart: (needed|unknown).*coordinator")  # the owner's choice like any other
 
     def test_changed_skill_names_the_coordinator(self):
         self.setup_project()
@@ -3027,7 +3018,7 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.persona().read_text(), "stale\n")
 
     def test_opencode_personas_keep_their_recorded_mode(self):
-        self.setup_project("--own-model", "gw/m", "--coordinator", "opencode/gw/m", "--reviewer", "opencode/gw/m",
+        self.setup_project("--coordinator", "opencode/gw/m", "--reviewer", "opencode/gw/m",
                            "--permission-mode", "default")
         self.persona().write_text(self.persona().read_text() + "stale\n")
         r = self.refresh()
@@ -3106,11 +3097,11 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.refresh().returncode, 0)
         self.assertIn("swift\tnone\t-\t-\n", table.read_text())
 
-    def test_refresh_warns_about_an_opencode_tier(self):
+    def test_refresh_says_nothing_about_an_opencode_tier(self):
         self.setup_project("--tiers", str(self._old_table()))
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
+        self.assertNotIn("OpenCode tier", r.stderr)
         self.assertNotIn("sandbox required", r.stderr)
 
     def _old_table(self):
@@ -3118,14 +3109,15 @@ class RefreshTests(unittest.TestCase):
         f.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\tgw/m\t-\ndeep\tclaude\topus\tinherit\n")
         return f
 
-    def test_refresh_warns_about_a_persona_already_on_a_hosted_model(self):
+    def test_refresh_keeps_a_persona_on_a_hosted_model_without_a_warning(self):
         self.setup_project()
         text = self.persona().read_text()
         text = re.sub(r"^agent: \S+$", "agent: opencode", text, flags=re.M)
         self.persona().write_text(re.sub(r"^model: \S+$", "model: opencode/old", text, flags=re.M))
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("persona coordinator pins opencode/old", r.stderr)
+        self.assertNotIn("warning", r.stderr)
+        self.assertRegex(self.persona().read_text(), r"(?m)^model: opencode/old$")
 
     def test_non_utf8_persona_is_a_clean_failure_and_writes_nothing(self):
         self.setup_project()
@@ -3212,27 +3204,27 @@ class LaneTierTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "harness=claude model=sonnet permission=inherit\n")
 
-    def test_every_opencode_tier_is_refused(self):
-        for model in ("opencode/deepseek-v4.1-flash", "opencode-go/kimi", "gw/m", ""):
-            r = self.tier(f"{self.HEAD}\nswift\topencode\t{model}\t-\n", "swift")
-            self.assertEqual(r.returncode, 4, model)
-            self.assertEqual(r.stdout, "")
-            for word in ("refused", "own Orca coordinator", "Orca coordinator", "one tier up", "cotal_spawn", str(self.table)):
-                self.assertIn(word, r.stderr)
-            self.assertNotIn("removed", r.stderr)
+    def test_an_opencode_tier_is_started_like_any_other(self):
+        # owner 2026-11-24: lane-tier refuses no model and no harness; the project's own table decides
+        for harness, model in (("opencode", "litellm/chat"), ("opencode", "opencode/deepseek-v4.1-flash"),
+                               ("opencode", "opencode-go/kimi"), ("claude", "opencode-go/x"), ("opencode", "")):
+            r = self.tier(f"{self.HEAD}\nswift\t{harness}\t{model}\t-\n", "swift")
+            self.assertEqual(r.returncode, 0, (harness, model, r.stderr))
+            self.assertEqual(r.stdout, f"harness={harness} model={model} permission=-\n")
+            self.assertEqual(r.stderr, "")
 
-    def test_a_hosted_opencode_model_is_refused_whatever_the_harness_cell_says(self):
-        for harness in ("claude", "OpenCode", "opencode2", "oc"):
-            for model in ("opencode/deepseek-v4.1-flash", "opencode-go/deepseek-v4.1-flash"):
-                r = self.tier(f"{self.HEAD}\nswift\t{harness}\t{model}\t-\n", "swift")
-                self.assertEqual(r.returncode, 4, (harness, model))
-                self.assertEqual(r.stdout, "")
+    def test_lane_tier_has_no_model_question_left(self):
+        r = subprocess.run([str(TIER_TOOL), "--model", "opencode-go/x"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("refused", r.stdout + r.stderr)
+        self.assertNotIn("exit 4", TIER_TOOL.read_text())
+        self.assertNotIn("--model", TIER_TOOL.read_text())
 
     def test_a_sandbox_column_from_before_is_ignored(self):
         for cell in ("required", "none", "", "maybe"):
             text = (f"{self.HEAD}\tsandbox\nswift\topencode\topencode/x\t-\t{cell}\n"
                     f"deep\tclaude\topus\tinherit\t{cell}\n")
-            self.assertEqual(self.tier(text, "swift").returncode, 4, cell)
+            self.assertEqual(self.tier(text, "swift").stdout, "harness=opencode model=opencode/x permission=-\n", cell)
             r = self.tier(text, "deep")
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(r.stdout, "harness=claude model=opus permission=inherit\n")
@@ -3358,9 +3350,10 @@ class SettingsStoreTests(unittest.TestCase):
                 m.settings(self.repo, api_key="x")
             self.assertFalse((self.store / "settings.json").exists())
         self.assertNotIn("design_lead", m.SETTING_KEYS)  # the design lead is retired
-        for k in ("root", "name", "models", "permission_mode", "private", "own_models", "port",
+        for k in ("root", "name", "models", "permission_mode", "private", "port",
                   "claude_setup"):
             self.assertIn(k, m.SETTING_KEYS)
+        self.assertNotIn("own_models", m.SETTING_KEYS)  # --own-model is gone (owner 2026-11-24)
         self.assertFalse({"opencode", "opencode_model"} & set(m.SETTING_KEYS))  # the OpenCode answer is gone
         self.assertFalse([k for k in m.SETTING_KEYS if re.search(r"key|token|secret|password|auth", k)])
 
@@ -3575,17 +3568,18 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertIn(str(old_store), r.stderr)
         self.assertNotEqual(self.e.store(new), old_store)
 
-    def test_an_own_model_stored_earlier_allows_a_later_pin_without_the_flag(self):
-        self.run_setup("--own-model", "my/x")
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/x", "--no-start")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/y", "--no-start")
-        self.assertEqual(r.returncode, 2)
+    def test_a_store_from_before_with_own_models_takes_any_pin(self):
+        self.run_setup()
+        st = self.e.settings(self.repo)
+        (self.store / "settings.json").write_text(json.dumps({**st, "own_models": ["my/x"]}))
+        for pin in ("opencode/my/x", "opencode/my/y"):
+            r = self.e.run(str(self.repo), "--coordinator", pin, "--no-start")
+            self.assertEqual(r.returncode, 0, (pin, r.stderr))
 
     def test_hand_edited_values_of_the_wrong_type_are_refused_and_named(self):
         self.run_setup()
         st = self.e.settings(self.repo)
-        for key, bad in (("private", "secret"), ("private", 5), ("own_models", "my/x"), ("models", "claude/opus"),
+        for key, bad in (("private", "secret"), ("private", 5), ("models", "claude/opus"),
                          ("design_lead", "no"), ("private", [1])):
             (self.store / "settings.json").write_text(json.dumps({**st, key: bad}))
             r = self.e.run(str(self.repo))
@@ -3633,15 +3627,15 @@ class SettingsStoreTests(unittest.TestCase):
     def test_a_refused_pin_leaves_nothing_behind(self):
         d = self.e.home / "fresh"
         d.mkdir()
-        r = self.e.run(str(d), "--coordinator", "opencode/other/y", "--no-start")
-        self.assertEqual(r.returncode, 2)
+        r = self.e.run(str(d), "--coordinator", "nosuch/y", "--no-start")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("expected <claude|opencode>/<model>", r.stderr)
         self.assertFalse((d / ".git").exists())
 
-    def test_a_stored_own_model_still_allows_the_pin_on_a_project_not_yet_moved(self):
+    def test_an_old_record_with_own_models_takes_any_pin_on_a_project_not_yet_moved(self):
         self.run_setup()
-        old = {"own_models": ["my/x"]}
-        (self.repo / ".cotal" / "lane-control.json").write_text(json.dumps(old))
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/x", "--no-start")
+        (self.repo / ".cotal" / "lane-control.json").write_text(json.dumps({"own_models": ["my/x"]}))
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/my/z", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_a_migrating_run_with_no_start_still_names_a_running_coordinator(self):
@@ -3717,15 +3711,14 @@ class TierChoiceTests(unittest.TestCase):
         r = self.e.run(str(self.repo), "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), tiers.read_text())
-        self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
-        self.assertIn("own Orca coordinator", r.stderr)
+        self.assertNotIn("OpenCode tier", r.stderr)
 
-    def test_a_misspelled_harness_on_a_hosted_model_is_warned_about(self):
+    def test_a_hosted_model_under_any_harness_cell_is_taken_quietly(self):
         tiers = self.e.home / "t.tsv"
         tiers.write_text("tier\tharness\tmodel\tpermission\nswift\tOpenCode\topencode-go/deepseek-v4.1-flash\t-\n")
         r = self.e.run(str(self.repo), "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("warning: swift is an OpenCode tier", r.stderr)
+        self.assertNotIn("warning: swift", r.stderr)
 
     def test_the_default_table_gets_no_opencode_warning(self):
         r = self.e.run(str(self.repo))
@@ -3760,10 +3753,10 @@ class TierChoiceTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), old)
         self.assertNotIn("sandbox required", r.stderr)
-        self.assertIn("warning: swift is an OpenCode tier", r.stderr)
+        self.assertNotIn("OpenCode tier", r.stderr)
         show = self.e.run(str(self.repo), "--show", adapt=True)
         self.assertEqual(show.returncode, 0, show.stderr)
-        self.assertIn("warning: swift is an OpenCode tier", show.stderr)
+        self.assertNotIn("OpenCode tier", show.stderr)
 
 
 if __name__ == "__main__":

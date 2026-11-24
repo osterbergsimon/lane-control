@@ -3,33 +3,15 @@
 #
 #   lane-tier <table> <tier>     prints harness=<h> model=<m> permission=<p>
 #   lane-tier --check <table>    prints "<tier> <harness> <model>" per row (- for no model); nothing else is decided
-#   lane-tier --model <model>    exit 0 when the model may run, 4 when it is refused (an opencode/ or opencode-go/
-#                                model, whatever the harness); project-setup asks this for its standing roles
 #
 # Exit: 0 the tier may be started; 2 usage, a bad table or an unknown tier; 3 the tier's harness is none (skip it, one
-# tier up); 4 refused: an OpenCode tier (harness opencode, or an opencode/ or opencode-go/ model whatever the harness
-# cell says). Swift on OpenCode is started by a project's own Orca coordinator from its own table, never through
-# lane-tier; there are no OpenCode lanes through lane-tier until the sandbox is back (model-routing.md, "Sandbox per
-# tier"). Columns other than tier, harness, model and permission are ignored (a table from before may still have a
-# sandbox column). The check is what the orca-cotal-lanes skill runs before cotal_spawn; --check only lists the rows.
+# tier up). No model and no harness is refused (owner 2026-11-24): the project's own table, written by project-setup
+# outside the repo, is the only place that says which models a project uses (model-routing.md, "Sandbox per tier").
+# Columns other than tier, harness, model and permission are ignored (a table from before may still have a sandbox
+# column). The lane skills run the lookup before every start; --check only lists the rows.
 set -u
 
 die() { echo "lane-tier: $*" >&2; exit 2; }
-
-if [ "${1:-}" = "--model" ]; then
-  [ $# -eq 2 ] && [ -n "$2" ] || die "usage: lane-tier --model <model>"
-  case $2 in
-    opencode/*|opencode-go/*)
-      cat >&2 <<MSG
-lane-tier: refused: $2 is a hosted OpenCode model (opencode/ or opencode-go/). It is started, where a project's
-own tier table lists it, by that project's Orca coordinator, never through lane-tier or project-setup (model-routing.md,
-"Sandbox per tier").
-MSG
-      exit 4 ;;
-  esac
-  echo "model=$2 ok"
-  exit 0
-fi
 
 check=""
 if [ "${1:-}" = "--check" ]; then
@@ -85,17 +67,5 @@ IFS=$'\037' read -r harness model permission <<<"$out"
 if [ "$harness" = none ]; then
   echo "lane-tier: tier $tier has harness none: skip it and go one tier up" >&2
   exit 3
-fi
-opencode_tier=
-[ "$harness" = opencode ] && opencode_tier=1
-case $model in opencode/*|opencode-go/*) opencode_tier=1 ;; esac
-if [ -n "$opencode_tier" ]; then
-  cat >&2 <<MSG
-lane-tier: refused: tier $tier is an OpenCode tier (harness $harness, model $model).
-Swift on OpenCode is started by a project's own Orca coordinator as an Orca worker, from its own table;
-lane-tier never starts it, and no hosted global-region model runs bare through it (model-routing.md, "Sandbox per
-tier"). Do not start it with cotal_spawn: go one tier up, and tell the owner that $table still has this row.
-MSG
-  exit 4
 fi
 printf 'harness=%s model=%s permission=%s\n' "$harness" "$model" "$permission"
