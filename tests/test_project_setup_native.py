@@ -1866,6 +1866,22 @@ class CleanupSetupTests(Case):
         self.assertNotIn("orca cleanup: exists", r.stdout)
         self.assertNotIn("orca cleanup: off", r.stdout + r.stderr)
 
+    def test_the_released_workers_rule_is_reported_recommended_with_where(self):
+        self.e.set_state(cleanup_cause="rules-off")
+        r = self.setup()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        text = r.stdout + r.stderr
+        self.assertIn("orca cleanup workers: off", text)
+        self.assertIn("recommended", text)
+        self.assertIn("Cleanup rules -> 'Delete released orchestration worker workspaces'", text)
+
+    def test_the_released_workers_rule_that_the_preview_cannot_show_says_so_as_a_note(self):
+        self.e.set_state(cleanup_cause="no-rule-matched")
+        r = self.setup()
+        self.assertIn("note: orca cleanup workers: check", r.stderr)
+        self.assertIn("cannot tell", r.stderr)
+        self.assertNotIn("orca cleanup workers: exists", r.stdout)
+
     def test_it_never_runs_a_cleanup_or_changes_orca(self):
         self.e.set_state(cleanup_cause="rules-off")
         self.setup()

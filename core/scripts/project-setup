@@ -709,9 +709,10 @@ def beads_report(repo, override=None):
 
 
 def lane_cleanup(repo: Path) -> None:
-    """Lane close leaves the worktree to Orca's merged cleanup rule and the remote branch to GitHub (core/cleanup.py):
-    says where the owner turns the rule on when it is off (Orca's settings are never touched) and, on the owner's yes
-    in a terminal, turns on GitHub's "Automatically delete head branches". Never stops a run."""
+    """Lane close leaves the worktree to Orca's merged cleanup rule (and the recommended released-workers rule) and the
+    remote branch to GitHub (core/cleanup.py): says where the owner turns the rules on when they are off (Orca's
+    settings are never touched) and, on the owner's yes in a terminal, turns on GitHub's "Automatically delete head
+    branches". Never stops a run."""
     core = str(HERE / "core")
     if core not in sys.path:
         sys.path.insert(0, core)

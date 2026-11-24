@@ -56,7 +56,11 @@ class Stubs(unittest.TestCase):
 
 class OrcaRulesTests(Stubs):
     def project(self, rows, **kw):
-        return cleanup.orca_report(self.orca(rows, **kw), str(self.repo))
+        """The merged-rule line(s) only; `workers` below has the released-workers rule's."""
+        return [l for l in cleanup.orca_report(self.orca(rows, **kw), str(self.repo)) if l[0] != cleanup.WORKERS_STEP]
+
+    def workers(self, rows, **kw):
+        return [l for l in cleanup.orca_report(self.orca(rows, **kw), str(self.repo)) if l[0] == cleanup.WORKERS_STEP]
 
     def test_it_only_runs_the_preview_which_removes_nothing(self):
         self.project([main_row(path=str(self.repo))])
@@ -138,9 +142,102 @@ class OrcaRulesTests(Stubs):
         self.assertEqual(what, "unknown")
 
 
+WORKERS = "Settings -> Workspace Cleanup -> Cleanup rules -> 'Delete released orchestration worker workspaces'"
+
+
+class ReleasedWorkersRuleTests(Stubs):
+    """The recommended 'Delete released orchestration worker workspaces' rule: report only, and plain about what the
+    preview cannot show (a row says `reason: orchestration-worker` only when that rule matched it)."""
+
+    def project(self, rows):
+        return [l for l in cleanup.orca_report(self.orca(rows), str(self.repo)) if l[0] == cleanup.WORKERS_STEP]
+
+    def test_a_row_the_rule_matched_proves_it_is_on(self):
+        (step, what, detail), = self.project([main_row(path=str(self.repo)),
+                                                row("lane-1", action="delete", reason="orchestration-worker")])
+        self.assertEqual((step, what), ("orca cleanup workers", "exists"))
+        self.assertIn("released-workers rule is on", detail)
+
+    def test_a_kept_row_with_that_reason_proves_it_too(self):
+        (step, what, detail), = self.project([main_row(path=str(self.repo)),
+                                                row("lane-1", cause="recently-active", reason="orchestration-worker")])
+        self.assertEqual(what, "exists")
+
+    def test_rules_off_says_it_is_off_recommended_and_where(self):
+        (step, what, detail), = self.project([main_row(path=str(self.repo)), row("lane-1", cause="rules-off")])
+        self.assertEqual(what, "off")
+        self.assertIn("recommended", detail)
+        self.assertIn(WORKERS, detail)
+        self.assertIn("only once Git finds its HEAD in the default branch or a merged review", detail)
+        self.assertIn("an unmerged lane's worktree stays", detail)
+        self.assertNotIn("released only after", detail)
+        self.assertIn("lane-control does not change Orca's settings", detail)
+
+    def test_project_off_names_the_project_page_then_the_rule(self):
+        (step, what, detail), = self.project([main_row(path=str(self.repo)), row("lane-1", cause="project-off")])
+        self.assertEqual(what, "off")
+        self.assertIn("'Use global'", detail)
+        self.assertIn(WORKERS, detail)
+
+    def test_with_a_rule_on_but_no_released_worker_row_it_says_it_cannot_tell(self):
+        # a merged row hides which rule matched; an unmatched row shows no rule at all
+        for r in (row("lane-1", action="delete", reason="merged"), row("lane-1", cause="no-rule-matched")):
+            (step, what, detail), = self.project([main_row(path=str(self.repo)), r])
+            self.assertEqual(what, "check")
+            self.assertIn("cannot tell", detail)
+            self.assertIn("recommended", detail)
+            self.assertIn(f"Turn it on at {WORKERS}", detail)
+
+    def test_a_project_with_only_its_main_workspace_cannot_tell_either(self):
+        (step, what, detail), = self.project([main_row(path=str(self.repo))])
+        self.assertEqual(what, "check")
+        self.assertIn("cannot tell", detail)
+
+    def test_only_the_projects_own_rows_count(self):
+        rows = [main_row(path=str(self.repo)), row("lane-1", cause="no-rule-matched"),
+                row("lane-9", repo="other", repo_id="r-other", action="delete", reason="orchestration-worker")]
+        (step, what, detail), = self.project(rows)
+        self.assertEqual(what, "check")
+
+    def test_it_is_a_problem_to_read_when_off_or_unsure_not_when_on(self):
+        self.assertTrue({"off", "check"} <= cleanup.PROBLEMS)
+        self.assertNotIn("exists", cleanup.PROBLEMS)
+
+    def test_the_preview_is_read_once_and_nothing_else_runs(self):
+        cleanup.orca_report(self.orca([main_row(path=str(self.repo)), row("lane-1", cause="rules-off")]),
+                            str(self.repo))
+        self.assertEqual(self.orca_calls(), ["workspace cleanup preview --json"])
+
+    def test_an_unreadable_preview_is_one_skipped_line_naming_both_rules(self):
+        lines = cleanup.orca_report(self.orca(raw="boom", code=2), str(self.repo))
+        (step, what, detail), = lines
+        self.assertEqual(what, "skipped")
+        self.assertIn("'Delete merged workspaces'", detail)
+        self.assertIn(WORKERS, detail)
+
+    def test_machine_wide_it_names_the_projects_per_state(self):
+        rows = [row("l1", "a", "r-a", action="delete", reason="orchestration-worker"),
+                row("l2", "b", "r-b", cause="rules-off"), row("l3", "c", "r-c", cause="project-off"),
+                row("l4", "d", "r-d", cause="no-rule-matched")]
+        lines = [l for l in cleanup.orca_report(self.orca(rows)) if l[0] == cleanup.WORKERS_STEP]
+        self.assertEqual(sorted(w for _, w, _ in lines), ["check", "exists", "off", "off"])
+        text = {w: d for _, w, d in lines if w != "off"}
+        self.assertIn("projects: a", text["exists"])
+        self.assertIn("for d", text["check"])
+        offs = [d for _, w, d in lines if w == "off"]
+        self.assertTrue(any("for b" in d for d in offs) and any("for c" in d for d in offs))
+
+    def test_machine_wide_with_no_project_at_all_still_says_it_cannot_tell(self):
+        (step, what, detail), = cleanup.orca_report(self.orca([]), None)[-1:]
+        self.assertEqual((step, what), ("orca cleanup workers", "check"))
+
+
 class MachineWideTests(Stubs):
     def machine(self, rows, **kw):
-        return cleanup.orca_report(self.orca(rows, **kw), None)
+        return [l for l in cleanup.orca_report(self.orca(rows, **kw), None) if l[0] != cleanup.WORKERS_STEP]
+
+    def workers(self, rows, **kw):
+        return [l for l in cleanup.orca_report(self.orca(rows, **kw), None) if l[0] == cleanup.WORKERS_STEP]
 
     def test_every_project_off_is_one_off_line_with_the_where(self):
         rows = [main_row(), row("lane-1", cause="rules-off"),
