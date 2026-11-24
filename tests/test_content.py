@@ -2511,33 +2511,67 @@ class PrivateNamesTests(unittest.TestCase):
 # --- docs/getting-started.md and docs/README.md (lc-c8p) ----------------------------------------------------------
 
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")  # [text](target); the target has no space
+HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
+
+
+def slug(heading):
+    """GitHub's anchor for a heading: no emphasis or code marks or link syntax, lower case, punctuation dropped
+    (hyphens and underscores kept), spaces to hyphens."""
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading)
+    text = re.sub(r"[`*]", "", text).strip().lower()
+    return re.sub(r"[^\w\- ]", "", text).replace(" ", "-")
+
+
+def anchors(path):
+    """The anchors a .md file offers: one per heading outside code fences, repeats numbered -1, -2 as GitHub does."""
+    seen, found, fence = {}, set(), None
+    for line in Path(path).read_text().splitlines():
+        mark = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if mark:
+            fence = None if fence and mark.group(1)[0] == fence else (fence or mark.group(1)[0])
+            continue
+        m = None if fence else HEADING.match(line)
+        if m:
+            s = slug(m.group(1))
+            n = seen.get(s, 0)
+            seen[s] = n + 1
+            found.add(s if n == 0 else f"{s}-{n}")
+    return found
 
 
 def linked_files(root, doc):
     """(links, broken): the paths `doc` links to (resolved from its own folder, as repo-relative strings), and those
-    among them that are not a file or folder. A web link, a mail link and a bare #anchor are not files; a #fragment is cut."""
+    among them that are not a file or folder. A web link or mail link is not a file. A #fragment on a .md target (or a
+    bare #fragment, which is this doc) must match one of that file's headings, GitHub style; it is cut for the path."""
     doc = Path(doc)
     found, broken = set(), []
     for target in LINK.findall(doc.read_text()):
-        if re.match(r"[a-z][a-z0-9+.-]*:", target, re.I) or target.startswith("#"):
+        if re.match(r"[a-z][a-z0-9+.-]*:", target, re.I):
             continue
-        path = (doc.parent / target.split("#", 1)[0]).resolve()
-        rel = os.path.relpath(path, Path(root).resolve())
-        found.add(rel)
+        name, _, fragment = target.partition("#")
+        path = (doc.parent / name).resolve() if name else doc.resolve()
+        found.add(os.path.relpath(path, Path(root).resolve()))
         if not path.exists():
+            broken.append(target)
+        elif fragment and path.suffix == ".md" and fragment not in anchors(path):
             broken.append(target)
     return found, broken
 
 
 def owner_docs(root):
     """The owner-facing docs docs/README.md must index, as repo-relative strings: every top-level docs/*.md (except the
-    index itself), every orchestrators/*/setup.md and every core/*.md. Specs, plans and research under docs/ are
-    indexed as folders, not one by one; a record, notes or an orchestrator's own docs/ folder are not in this set."""
+    index itself), every core/*.md, the root README.md and AGENTS.md, every top-level orchestrators/*.md, and every
+    orchestrators/*/setup.md plus all top-level *.md of the orchestrator in use (native-orca: setup, remote,
+    night-manager, record). Specs, plans and research under docs/ are indexed as folders, not one by one; a parked
+    orchestrator's notes, record and docs/ folder are not in this set."""
     root = Path(root)
     found = [p for p in (root / "docs").glob("*.md") if p.name != "README.md"]
-    found += (root / "orchestrators").glob("*/setup.md")
     found += (root / "core").glob("*.md")
-    return sorted(os.path.relpath(p, root) for p in found)
+    found += [p for p in (root / "README.md", root / "AGENTS.md") if p.is_file()]
+    found += (root / "orchestrators").glob("*.md")
+    found += (root / "orchestrators").glob("*/setup.md")
+    found += (root / "orchestrators" / "native-orca").glob("*.md")
+    return sorted({os.path.relpath(p, root) for p in found})
 
 
 def unindexed(root):
@@ -2578,24 +2612,37 @@ class DocsIndexTests(unittest.TestCase):
     def test_the_checks_catch_a_broken_link_and_a_missing_doc(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            for sub in ("docs", "core", "orchestrators/native-orca"):
+            for sub in ("docs", "core", "orchestrators/native-orca", "orchestrators/rove"):
                 (root / sub).mkdir(parents=True)
-            (root / "docs" / "guide.md").write_text("x")
-            (root / "core" / "roles.md").write_text("x")
-            (root / "core" / "README.md").write_text("x")
-            (root / "orchestrators" / "native-orca" / "setup.md").write_text("x")
-            (root / "orchestrators" / "native-orca" / "record.md").write_text("x")
+            (root / "docs" / "guide.md").write_text("# Guide\n\n## Step 2: it `works`\n\n```\n# not a heading\n```\n")
+            for name in ("core/roles.md", "core/README.md", "README.md", "AGENTS.md", "orchestrators/README.md",
+                         "orchestrators/native-orca/setup.md", "orchestrators/native-orca/night-manager.md",
+                         "orchestrators/rove/setup.md", "orchestrators/rove/notes.md"):
+                (root / name).write_text("x")
             index = root / "docs" / "README.md"
-            index.write_text("[g](guide.md) [r](../core/roles.md#top) [w](https://example.com/x) [a](#here) "
-                             "[gone](nope.md) [setup](../orchestrators/native-orca/setup.md)")
-            self.assertEqual(owner_docs(root), ["core/README.md", "core/roles.md", "docs/guide.md",
-                                                "orchestrators/native-orca/setup.md"])
+            index.write_text("# Index\n\n## Here\n[g](guide.md#step-2-it-works) [r](../core/roles.md) "
+                             "[w](https://example.com/x#nope) [a](#here) [gone](nope.md) "
+                             "[setup](../orchestrators/native-orca/setup.md)")
+            every = ["AGENTS.md", "README.md", "core/README.md", "core/roles.md", "docs/guide.md",
+                     "orchestrators/README.md", "orchestrators/native-orca/night-manager.md",
+                     "orchestrators/native-orca/setup.md", "orchestrators/rove/setup.md"]
+            self.assertEqual(owner_docs(root), every)  # not rove's notes
             found, broken = linked_files(root, index)
             self.assertEqual(broken, ["nope.md"])
-            self.assertEqual(unindexed(root), ["core/README.md"])
-            self.assertNotIn("orchestrators/native-orca/record.md", unindexed(root))
+            self.assertEqual(unindexed(root), [x for x in every if x not in (
+                "core/roles.md", "docs/guide.md", "orchestrators/native-orca/setup.md")])
             (root / "docs" / "second.md").write_text("x")
-            self.assertEqual(unindexed(root), ["core/README.md", "docs/second.md"])
+            self.assertIn("docs/second.md", unindexed(root))
+
+    def test_a_dead_anchor_is_a_broken_link(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "docs").mkdir()
+            (root / "docs" / "guide.md").write_text("# Guide\n\n## Same\n\n## Same\n\n## 4B. On a gateway\n")
+            index = root / "docs" / "README.md"
+            index.write_text("[a](guide.md#same-1) [b](guide.md#4b-on-a-gateway) [c](guide.md#no-such-anchor) "
+                             "[d](#nowhere) [e](#index)\n\n# Index\n")
+            self.assertEqual(linked_files(root, index)[1], ["guide.md#no-such-anchor", "#nowhere"])
 
 
 if __name__ == "__main__":
