@@ -33,8 +33,9 @@ precheck and prompt, and never from a lane worktree.
    with the command to remove it, and no second one is added.
 6. Workspace cleanup, report only: whether Orca's cleanup rules would remove a merged lane's worktree (`orca-ide
    workspace cleanup preview`, which removes nothing). When no rule is on, or a project has cleanup off, it says
-   where in Orca's Settings to turn on "Delete merged workspaces"; Orca's settings are never edited, and an Orca
-   without the command is skipped.
+   where in Orca's Settings to turn on "Delete merged workspaces". It also reports the recommended "Delete released
+   orchestration worker workspaces" (`off`, `exists`, or `check`: the preview cannot always tell). Orca's settings are
+   never edited, and an Orca without the command is skipped.
 7. The ci-presence user timer (every 15 minutes and at boot), if systemd --user works; otherwise a warning and the
    CI limits stay the slice unit's own. An older timer that sets the CI slice (ci-cpu) is reported with the command
    to stop it, and ci-presence is not installed beside it.

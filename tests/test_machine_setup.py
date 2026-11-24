@@ -1340,6 +1340,17 @@ class MachineSetupTests(BudgetTest):
         self.assertIn("alpha", line)
         self.assertIn("beta", line)
 
+    def test_the_released_workers_rule_is_reported_machine_wide_with_where(self):
+        self.cleanup_rows(("alpha", "rules-off"), ("beta", "no-rule-matched"))
+        out = self.setup_machine("--no-start").stdout
+        off = next(l for l in out.splitlines() if l.startswith("orca cleanup workers: off"))
+        self.assertIn("alpha", off)
+        self.assertIn("recommended", off)
+        self.assertIn("Cleanup rules -> 'Delete released orchestration worker workspaces'", off)
+        check = next(l for l in out.splitlines() if l.startswith("orca cleanup workers: check"))
+        self.assertIn("beta", check)
+        self.assertIn("cannot tell", check)
+
     def test_a_project_with_cleanup_off_is_named(self):
         self.cleanup_rows(("alpha", "no-rule-matched"), ("beta", "project-off"))
         out = self.setup_machine("--no-start").stdout

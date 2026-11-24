@@ -111,7 +111,7 @@ You plan, decide and check; lanes do the work, including the waiting.
   `project-off`, `unchanged` or `no-rule-matched`) is closed by the fallback below, and when it is `rules-off` or
   `project-off` tell the owner where to turn the rule on; for the others tell the owner too that Orca has not seen the
   merge (the rule reads merge-commit merges from its PR cache) and that the Git-only rule "Delete released
-  orchestration workers" is theirs to turn on.
+  orchestration worker workspaces" is recommended (a worker is released only after its merge) and theirs to turn on.
 - The fallback, right after the merge and the worker release, with no ask when every check passes: `git -C <W> status
   --porcelain --ignored` shows only known build output and the `.beads` link (ignored files such as `.env` stop it:
   `worktree rm` removes them without `--force`), `git fetch origin`, and `git -C <W> merge-base --is-ancestor HEAD
