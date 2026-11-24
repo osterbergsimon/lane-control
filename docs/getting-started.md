@@ -262,10 +262,13 @@ harness, and the table is yours to edit.
    `claude/opus`), and a machine without Claude then stops with `claude not on PATH, but the onboarding agents use it`.
 
 **Onboarding on OpenCode.** On a project not onboarded yet, each onboarding agent runs as `opencode2 run` in the repo,
-with the same prompts, checks and review round as on Claude. It reads the project but not its private files (`.git`,
-git-ignored paths, `.env*`, `--private` globs, and symlinks that lead out of the repo or into those), has no shell, no
-grep and no web, and only the adapter writes, only under `.lane-control/`. The project's own OpenCode config and
-plugins are not loaded. Pass the flags again on a later `--readapt`: project-setup does not keep them. An onboarded
+with the same prompts, checks and review round as on Claude. It reads the project with `read` alone (no shell, grep,
+glob or web) and never its private files: `.git`, git-ignored paths, `.env*`, the files your `--private` globs match,
+and every symlink that leads to a folder, out of the repo or to one of those (a link to a readable file, like
+`AGENTS.md -> CLAUDE.md`, stays readable). Only the adapter writes, only under `.lane-control/`. The project's own
+OpenCode config and plugins are not loaded. The two flags are kept in the project's settings store once given, so a
+later run or `--readapt` without them uses the same models; a run that uses a default says so beside the model
+(`adapt: running claude/sonnet (the default: ...)`). An onboarded
 project (its `.lane-control/` files and `AGENTS.lane-control.md` committed on the default branch) says `adapt: exists
 .lane-control/ is committed` and runs no onboarding agent, so the flags make no difference there. The details, and how
 it differs from Claude's run, are in [the native Orca setup](../orchestrators/native-orca/setup.md), "OpenCode on a
@@ -462,8 +465,11 @@ The box's copy is refreshed and the box's own `--refresh` runs there (lane tools
 only what `project-setup` needs. A full `project-setup <repo> example-host` run also runs `machine-setup --host
 example-host` (unless `--no-machine-setup`), which adds all of lane-control's `core` to the same folder, `project-pause`
 and the `--suggest-tiers` code among them. `--refresh` does not run it, so those are from the last `machine-setup`,
-and missing on a box set up with `--no-machine-setup`. Run `machine-setup --host example-host` to update them; then
-from an Orca terminal of the box, `~/.local/share/lane-control/core/scripts/project-pause stop <repo>` and `start
+and missing on a box set up with `--no-machine-setup`. `machine-setup --host example-host` updates them, but on a box
+set up with `--no-machine-setup` it also does the rest of a machine setup for the first time: it starts a machine
+coordinator (default `claude/sonnet`: pass `--machine-coordinator opencode/<provider>/<model>` on a gateway box, or
+`--no-start`, which skips only that coordinator) and adds the Orca automations and the CI timer. Then from an Orca
+terminal of the box, `~/.local/share/lane-control/core/scripts/project-pause stop <repo>` and `start
 <repo>` restart its coordinator. Without them: tell the coordinator in its terminal to write its handover, close its
 terminal in Orca (it shows in your window), then run `project-setup <repo on the host> example-host` again: it starts
 the missing coordinator, which reads `handover-latest`. (From the source; not run.) Without a restart the coordinator reads the new persona at its next

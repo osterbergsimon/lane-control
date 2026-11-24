@@ -111,21 +111,29 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
 4. Setting a project up on such a machine: the onboarding agents run on either harness, so pass OpenCode ones,
    `core/scripts/project-setup <repo> --adapter opencode/litellm/code --adapt-reviewer opencode/litellm/deep
    --coordinator opencode/litellm/chat --reviewer opencode/litellm/deep` (the defaults stay `claude/sonnet` and
-   `claude/opus`; only a harness a role uses must be on PATH, so a box without Claude needs no `claude`). Each runs
-   `opencode2 run --standalone --model <provider>/<model> --agent lane-onboard --format json` in the repo, the prompt
-   on stdin, with the same prompts, checks and review round as Claude. Its rules, in `OPENCODE_CONFIG_CONTENT` (an
-   agent of its own, so the owner's agents and `default_agent` do not apply): every tool off, then read and glob on,
-   edit only under `.lane-control/` and only for the adapter, then the same private paths off as for Claude
-   (`orchestrators/orca-cotal/docs/orca.md`, "Private files during onboarding"). It differs from Claude's run in
-   these ways: grep is off (OpenCode's grep reads a file it is pointed at even when read denies it); glob and a
-   folder read show the names of private paths, never their contents; OpenCode follows symlinks, so a link out of
-   the repo or into a private path is denied by name; the project's own OpenCode config and plugins are not loaded
-   (`OPENCODE_DISABLE_PROJECT_CONFIG=1`); the session is kept in OpenCode's own store (it has no switch to keep
-   none); the owner's MCP servers start, with their tools off by the first rule (not checked with a real MCP
-   server). A run that uses all its steps (80 for the adapter, 60 for the reviewer) fails as a Claude run out of
-   turns does. `--refresh` runs no agent and needs no Claude either.
-   The opt-in live check: `LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p
-   test_project_setup_native.py -k OpenCodeOnboardingLiveTests`.
+   `claude/opus`; the two are kept in the settings store, `models.adapter` and `models.adapt-reviewer`, once given, and
+   a run on a default says so; only a harness a role uses must be on PATH, so a box without Claude needs no `claude`).
+   Each runs `opencode2 run --standalone --model <provider>/<model> --agent lane-onboard --format json` in the repo, the
+   prompt on stdin, with the same prompts, checks and review round as Claude. Its rules go in by `OPENCODE_CONFIG` as a
+   memfd of project-setup's (`/proc/<pid>/fd/<n>`: in memory, never a file, no size limit; `OPENCODE_CONFIG_CONTENT`
+   where there is none or the owner's environment sets `OPENCODE_CONFIG`), for an agent of its own, so the owner's
+   agents and `default_agent` do not apply: every tool off, then read on, edit only under `.lane-control/` and only for
+   the adapter, then every private path off. OpenCode matches the path it is asked for, never what a symlink leads to,
+   and its wildcard is not git's, so the private paths are worked out for it (`opencode_private`): `.git` at any depth,
+   each git-ignored path (a folder and all below it), each `.env*` file, each file a `--private` glob matches (git
+   expands the globs as ignore lines, nested repos included; a glob with no wildcard also as a folder), and every
+   symlink that leads to a folder, out of the repo, into a `.git` or to a private file, ignored ones too (lane-control's
+   own `.beads` link among them), as the link and all below it. A link to a readable file stays readable; a link to a
+   readable folder does not. Other differences from Claude's run, each checked live: grep and glob are off, since their
+   rules match the pattern, never the folder (grep reads a file it is pointed at even when read denies it; glob lists
+   names through a linked folder), so the agents look around with read on a folder, which shows the names in a readable
+   folder (ignored ones among them), never below a denied path; the project's own OpenCode config and plugins are not
+   loaded (`OPENCODE_DISABLE_PROJECT_CONFIG=1`); the session is kept in OpenCode's own store (it has no switch to keep
+   none); the owner's MCP servers start, with their tools off by the first rule. A run that uses all its steps (80 for
+   the adapter, 60 for the reviewer) fails as a Claude run out of turns does, and so does one that exits 0 with no
+   answer and no tool call. `--refresh` runs no agent and needs no Claude either. The opt-in live check:
+   `LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p test_project_setup_native.py -k
+   OpenCodeOnboardingLiveTests`.
 
 The URL, the key's variable and the model names stay in OpenCode's config and the project's settings store: no key,
 host or gateway URL in any repo.

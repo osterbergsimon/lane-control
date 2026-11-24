@@ -261,9 +261,10 @@ readable. The rules cover Read, Glob and Grep, and the file tools stay inside th
 is refused. The list exists only in the agents' command line, never in a file. An untracked, not-ignored private file
 that is not `.env*` needs `--private` or an ignore line. A name with `( ) * ? [ ] { } \` or a newline cannot be put in a
 rule: setup stops and names it. An OpenCode adapter or reviewer (`--adapter opencode/<provider>/<model>`) gets the
-same paths denied for read and edit by OpenCode's own rules (in its environment, never a file), with grep off, and
-each symlink that leads out of the repo or into a private path denied by name, since OpenCode follows it
-(`orchestrators/native-orca/setup.md`, "OpenCode on a self-hosted LiteLLM gateway").
+same paths denied by OpenCode's own rules (in memory, never a file), worked out for it: the files the `--private`
+globs match (git expands them), and every symlink that leads to a folder, out of the repo or to a private file,
+ignored ones too, since OpenCode follows a link; grep and glob are off (`orchestrators/native-orca/setup.md`, "OpenCode
+on a self-hosted LiteLLM gateway").
 
 ### The settings store: per-project choices, outside the repo
 Everything project-setup decides for a project lives in `~/.config/lane-control/projects/<folder>-<hash>/` (under

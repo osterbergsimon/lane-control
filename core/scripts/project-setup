@@ -229,6 +229,8 @@ SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
                 "paired_environment", "beads_repo")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
+ONBOARD_PINS = {"adapter": "claude/sonnet", "adapt-reviewer": "claude/opus"}  # stored only once given (models.<role>)
+ONBOARD_FROM: dict = {}  # where this run's onboarding pins came from: flag, settings store or default
 
 
 def config_home() -> Path:
@@ -1735,20 +1737,16 @@ def repo_private_names(repo: Path, prefix: str, depth: int = 0) -> list:
     return out
 
 
-def private_rules(repo: Path, links: bool = False) -> list:
+def private_rules(repo: Path) -> list:
     """Read-deny rules for what the onboarding agents must not see, by name; the list is never written to a file.
 
     A .git folder or file at any depth; every git-ignored path (data folders, local settings, keys, the .beads link,
     .direnv), also inside submodules and embedded repos; every .env* file except templates and .envrc; and each --private
     glob. Other tracked files stay readable. Grep skips ignored files on its own but not when it is pointed at one, so
-    these rules cover Read, Glob and Grep alike. `links`: also each symlink that leads out of the repo or into a private
-    path (OpenCode follows one; Claude's --restricted refuses it on its own)."""
+    these rules cover Read, Glob and Grep alike. Claude's run only: OpenCode's are opencode_private's."""
     rules = ["Read(/.git/**)", "Read(/.git)", "Read(/**/.git/**)", "Read(/**/.git)"]  # remote URLs and hooks
-    names = repo_private_names(repo, "")
-    for n in names + (private_links(repo, names) if links else []):
-        if RULE_UNSAFE & set(n):
-            raise Fail("a git-ignored or .env name has a character that a deny rule cannot carry "
-                       f"(one of ( ) * ? [ ] {{ }} \\ or a newline): {n!r}. Rename it, or move it out of the repo")
+    for n in repo_private_names(repo, ""):
+        check_rule_safe(n)
         rules.append(f"Read(/{n}**)" if n.endswith("/") else f"Read(/{n})")
     for g in PRIVATE_GLOBS:
         rules.append(f"Read(/{g})")
@@ -1757,25 +1755,87 @@ def private_rules(repo: Path, links: bool = False) -> list:
     return rules
 
 
-def private_links(repo: Path, private: list, prefix: str = "") -> list:
-    """Symlinks (tracked or untracked, not ignored; nested repos too) that lead out of the repo, into a .git, or into a
-    private name or --private glob, each as `<name>/` so the rule covers what is below a linked folder. An ignored one
-    is denied already with its folder."""
-    root, out = repo.resolve(), []
-    for n in git_z(repo, "ls-files", "-c", "-o", "--exclude-standard"):
-        if not (repo / n).is_symlink():
-            continue
-        t = (repo / n).resolve()
-        rel = prefix + t.relative_to(root).as_posix() if t.is_relative_to(root) else None  # from the outer repo
-        if rel is None or ".git" in rel.split("/") or env_private(t.name) \
-                or any(rel == x.rstrip("/") or rel.startswith(x if x.endswith("/") else x + "/") for x in private) \
-                or any(fnmatch.fnmatch(rel, g) for g in PRIVATE_GLOBS):
-            out.append(f"{prefix}{n}/")
+def check_rule_safe(n: str) -> None:
+    if RULE_UNSAFE & set(n):
+        raise Fail("a git-ignored, .env or --private name has a character that a deny rule cannot carry "
+                   f"(one of ( ) * ? [ ] {{ }} \\ or a newline): {n!r}. Rename it, or move it out of the repo")
+
+
+def readable_names(repo: Path, prefix: str = "") -> list:
+    """Every tracked or untracked, not ignored path of the repo and of each repo nested in it (relative to the outer
+    one). A symlink is listed as itself: git never goes into a linked folder."""
+    out = [prefix + n for n in git_z(repo, "ls-files", "-c", "-o", "--exclude-standard")]
     untracked_dirs = [n for n in git_z(repo, "ls-files", "-o", "--exclude-standard", "--directory") if n.endswith("/")]
     for sub in nested_repos(repo, untracked_dirs):
-        if (repo / sub / ".git").exists():  # a link out of the nested repo counts as out, even into the outer one
-            out += private_links(repo / sub, private, f"{prefix}{sub}/")
+        if (repo / sub / ".git").exists():
+            out += readable_names(repo / sub, f"{prefix}{sub}/")
     return out
+
+
+def glob_matches(repo: Path, names: list) -> set:
+    """Which of `names` the --private globs match, as git matches an ignore line (a name alone also matches a folder of
+    that name and all below it, `dir/` a folder, `**`, `[0-9]`): git check-ignore with a git folder of its own whose
+    only exclude lines are the globs, over this worktree (the repo's own .gitignore files may match more; those are
+    denied anyway). Only the globs go into that folder's exclude file, which is gone when this returns."""
+    if not PRIVATE_GLOBS or not names:
+        return set()
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="lane-private-") as tmp:
+        run(["git", "init", "-q", tmp])
+        (Path(tmp) / ".git" / "info").mkdir(exist_ok=True)
+        (Path(tmp) / ".git" / "info" / "exclude").write_text("".join(g + "\n" for g in PRIVATE_GLOBS))
+        p = run(["git", "--git-dir", str(Path(tmp) / ".git"), "--work-tree", str(repo), "check-ignore", "--no-index",
+                 "--stdin", "-z"], input="".join(n + "\0" for n in names), check=False)
+    if p.returncode not in (0, 1):  # 1: nothing matched
+        raise Fail(f"git check-ignore could not match the --private globs: {p.stderr.strip() or p.returncode}")
+    return {n for n in p.stdout.split("\0") if n}
+
+
+def opencode_private(repo: Path) -> list:
+    """What an OpenCode onboarding run must not read, as OpenCode resource patterns (relative to the repo; `*` crosses
+    folders). OpenCode matches the path it is asked for, never what a symlink leads to, and its wildcard is not git's,
+    so, unlike private_rules:
+    - every private path by name: .git at any depth, each git-ignored path (a folder as `<dir>` and `<dir>/**`), each
+      .env* file, and each file a --private glob matches (git expands the globs, glob_matches), plus `<g>` and `<g>/**`
+      for a glob with no wildcard;
+    - every symlink that leads to a folder (the folder may hold private files, or be outside), out of the repo, into a
+      .git, or to a private file, as `<link>` and `<link>/**`; an ignored one too (git lists an ignored link to a
+      folder as a file). A link to a readable file in the repo (AGENTS.md -> CLAUDE.md) stays readable.
+    The list is never written to a file."""
+    out = [".git", ".git/**", "**/.git", "**/.git/**"]
+    root = repo.resolve()
+    ignored = repo_private_names(repo, "")
+    readable = readable_names(repo)
+    globbed = glob_matches(repo, readable)
+
+    def private(rel: str) -> bool:
+        return (".git" in rel.split("/") or env_private(Path(rel).name) or rel in globbed
+                or any(rel == x.rstrip("/") or rel.startswith(x if x.endswith("/") else x + "/") for x in ignored))
+
+    def both(n: str) -> list:
+        n = n.rstrip("/")
+        return [n, n + "/**"]
+
+    for n in ignored:
+        out += both(n) if n.endswith("/") or (repo / n).is_symlink() else [n]
+    out += sorted(globbed)
+    for g in PRIVATE_GLOBS:
+        if not set("*?[") & set(g):
+            out += both(g.strip("/"))
+    for n in readable:
+        if not (repo / n).is_symlink():
+            continue
+        try:
+            t = (repo / n).resolve(strict=True)
+            rel = t.relative_to(root).as_posix() if t.is_relative_to(root) else None
+            leak = rel is None or t.is_dir() or private(rel)
+        except (OSError, RuntimeError):  # dangling or a loop: nothing to read, but never guess
+            leak = True
+        if leak:
+            out += both(n)
+    for n in out:
+        check_rule_safe(n.replace("/**", "").replace("**/", ""))
+    return list(dict.fromkeys(out))
 
 
 def git_z(repo: Path, *args) -> list:
@@ -1813,45 +1873,62 @@ def check_limit() -> None:
 
 
 OPENCODE_AGENT = "lane-onboard"  # the agent each OpenCode onboarding run defines for itself and runs
-ENV_LIMIT = 120000  # bytes of OpenCode's config; one environment string may hold at most 128 KiB
+ENV_LIMIT = 120000  # bytes of OpenCode's config in its environment (no memfd): one string may hold at most 128 KiB
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def opencode_rules(write: bool, deny: tuple) -> list:
-    """OpenCode's permissions for one onboarding run, from the Claude deny rules (private_rules with links): every tool
-    off, then read and glob on, edit only under .lane-control/ for the adapting agent, then every private path off
-    for read and edit (the last rule that matches wins). Grep stays off: OpenCode's grep reads a file it is pointed at
-    even when read denies it. Glob and a folder read show names, never contents."""
-    rules = [("*", "*", "deny"), ("read", "*", "allow"), ("glob", "*", "allow")]
+def opencode_rules(write: bool, private: list) -> list:
+    """OpenCode's permissions for one onboarding run (the last rule that matches wins): every tool off, then read on,
+    edit only under .lane-control/ for the adapting agent, then each private pattern (opencode_private) off for read,
+    and for edit where it could fall under .lane-control/ (everything else is off for edit already). Grep and glob
+    stay off, since their rules match the pattern searched for, never the folder: OpenCode's grep reads a file it is
+    pointed at even when read denies it, and its glob lists names through a linked folder (both checked live). The
+    agents look around with read on a folder, which is checked by its path; it shows the names in a readable folder,
+    ignored ones among them, never what is below a denied path."""
+    rules = [("*", "*", "deny"), ("read", "*", "allow")]
     if write:
         rules.append(("edit", f"{ADAPTED}/**", "allow"))
-    for r in deny:
-        path = r[len("Read(/"):-1]
-        for p in (path, path[:-len("/**")]) if path.endswith("/**") else (path,):  # the folder's own listing too
-            rules += [("read", p, "deny"), ("edit", p, "deny")]
+    rules += [("read", p, "deny") for p in private]
+    if write:
+        rules += [("edit", p, "deny") for p in private if p.startswith((ADAPTED + "/", "*"))]
     return [{"action": a, "resource": r, "effect": e} for a, r, e in rules]
 
 
-def opencode_agent(model: str, write: bool, deny: tuple) -> tuple:
-    """A plain headless OpenCode run, `opencode2 run`, as agent_cmd is for Claude: (argv, environment).
+@contextlib.contextmanager
+def opencode_agent(model: str, write: bool, private: list):
+    """A plain headless OpenCode run, `opencode2 run`, as agent_cmd is for Claude: yields (argv, environment).
 
     The prompt goes on stdin (an argument that starts with - would be read as a flag). --standalone runs a private
     server started here, in the repo, so the config below reaches it (the shared background service would not see it).
-    The run uses its own agent, defined in OPENCODE_CONFIG_CONTENT, so no agent of the owner's (or their default_agent)
-    applies; its rules come after the owner's and so win. Steps are MAX_TURNS plus OpenCode's forced last answer. The
-    project's own OpenCode config and plugins are not loaded (OPENCODE_DISABLE_PROJECT_CONFIG): a plugin there is
-    code. The owner's own config is, for the provider: the gateway's URL and the variable its key is in. Nothing here
-    carries a key. LANE_ROLE and LANE_PERSONA are dropped, so a coordinator's persona and guard plugins stay out of it.
-    Not as tight as Claude: OpenCode keeps the session in its own store, and has no switch to start without the owner's
-    MCP servers (their tools are off, by the first rule)."""
+    The run uses its own agent, so no agent of the owner's (or their default_agent) applies; its rules come after the
+    owner's and so win. Steps are MAX_TURNS plus OpenCode's forced last answer. The config goes in by OPENCODE_CONFIG as
+    a memfd (/proc/<this process>/fd/<n>): in memory only, never a file, with no size limit; where there is no memfd,
+    or the owner's environment sets OPENCODE_CONFIG already, by OPENCODE_CONFIG_CONTENT (ENV_LIMIT). The project's own
+    OpenCode config and plugins are not loaded (OPENCODE_DISABLE_PROJECT_CONFIG): a plugin there is code. The owner's
+    own config is, for the provider: the gateway's URL and the variable its key is in. Nothing here carries a key.
+    LANE_ROLE and LANE_PERSONA are dropped, so a coordinator's persona and guard plugins stay out of it. Not as tight as
+    Claude: OpenCode keeps the session in its own store, and starts the owner's MCP servers (their tools are off, by
+    the first rule)."""
     conf = json.dumps({"agents": {OPENCODE_AGENT: {"mode": "primary", "model": model, "steps": MAX_TURNS[write] + 1,
-                                                   "permissions": opencode_rules(write, deny)}}})
-    if len(conf) > ENV_LIMIT:
-        raise Fail(f"{len(deny)} private paths are too many to deny one by one; ignore a folder instead of its files")
+                                                   "permissions": opencode_rules(write, private)}}})
     env = {k: v for k, v in os.environ.items() if k not in ("LANE_ROLE", "LANE_PERSONA")}
-    env.update(OPENCODE_CONFIG_CONTENT=conf, OPENCODE_DISABLE_PROJECT_CONFIG="1")
-    return ([BINARIES["opencode"], "run", "--standalone", "--model", model, "--agent", OPENCODE_AGENT,
-             "--format", "json"], env)
+    env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    fd = None
+    if hasattr(os, "memfd_create") and "OPENCODE_CONFIG" not in env and Path(f"/proc/{os.getpid()}/fd").is_dir():
+        fd = os.memfd_create("lane-onboard-config")
+        os.write(fd, conf.encode())
+        env["OPENCODE_CONFIG"] = f"/proc/{os.getpid()}/fd/{fd}"
+    elif len(conf) > ENV_LIMIT:
+        raise Fail(f"{len(private)} private paths are too many to deny one by one in OpenCode's environment; ignore a "
+                   "folder instead of its files")
+    else:
+        env["OPENCODE_CONFIG_CONTENT"] = conf
+    try:
+        yield ([BINARIES["opencode"], "run", "--standalone", "--model", model, "--agent", OPENCODE_AGENT,
+                "--format", "json"], env)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def opencode_result(stdout: str) -> tuple:
@@ -1883,19 +1960,20 @@ def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
     started = time.monotonic()
     opencode = who[0] == "opencode"
     try:
-        deny = tuple(private_rules(repo, links=opencode))
         if opencode:
-            cmd, env = opencode_agent(who[1], write, deny)
-            p = run(cmd, cwd=repo, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
+            with opencode_agent(who[1], write, opencode_private(repo)) as (cmd, env):
+                p = run(cmd, cwd=repo, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
         else:
-            p = run(agent_cmd(who[1], prompt, write, deny), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL,
-                    check=False)
+            p = run(agent_cmd(who[1], prompt, write, tuple(private_rules(repo))), cwd=repo, timeout=AGENT_TIMEOUT,
+                    stdin=subprocess.DEVNULL, check=False)
     finally:
         agent_spent += time.monotonic() - started
     stderr = ANSI.sub("", p.stderr).strip()
+    empty = False
     if opencode:
         out, steps, error = opencode_result(p.stdout)
-        failed, out_of_turns = p.returncode != 0 or bool(error), steps >= MAX_TURNS[write]
+        empty = not out.strip() and not steps  # exit 0 with nothing done (a help print, an empty answer)
+        failed, out_of_turns = p.returncode != 0 or bool(error) or empty, steps >= MAX_TURNS[write]
         shown = (error or stderr).splitlines()
     else:
         out, failed = p.stdout, p.returncode != 0
@@ -1908,6 +1986,9 @@ def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
         if out_of_turns:
             raise Fail(f"the {'adapting agent' if write else 'reviewer'} used all {MAX_TURNS[write]} turns and was "
                        f"stopped before it finished. Nothing was committed and no Orca step ran.{left}")
+        if empty and not error and p.returncode == 0:
+            raise Fail(f"opencode2 run --model {who[1]} gave no answer and called no tool"
+                       f"{': ' + shown[-1] if shown else ''}. Nothing was committed.{left}")
         raise Fail(f"{'opencode2 run' if opencode else 'claude -p'} --model failed: "
                    f"{shown[-1] if shown else p.returncode}. Nothing was committed.{left}")
     return out
@@ -2071,7 +2152,7 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
     notes = []
 
     def review(earlier: str = "") -> str:
-        say("review", "running", "/".join(reviewer) + (" (checks the fixes only)" if earlier else ""))
+        say("review", "running", "/".join(reviewer) + (" (checks the fixes only)" if earlier else onboard_from("adapt-reviewer")))
         try:
             out = run_agent(repo, reviewer, review_prompt(repo, project, earlier, visibility), write=False)
         except Fail as e:
@@ -2574,6 +2655,14 @@ def stale_checkout(repo: Path, quick: bool = False):
     return None
 
 
+def onboard_from(role: str) -> str:
+    """Said beside a run's model: where it came from, so a run that falls back to the default says so."""
+    src = ONBOARD_FROM.get(role)
+    flag = "--adapter" if role == "adapter" else "--adapt-reviewer"
+    return (f" (the default: no {flag} given and none in the settings store)" if src == "default"
+            else " (from the settings store)" if src == "settings store" else "")
+
+
 def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool) -> bool:
     """The steps in front of the Orca setup; True when that setup may run. A re-run is safe: committed files are left
     alone unless `again`, and uncommitted ones (an earlier run, a hand edit) go back to review instead of being
@@ -2583,8 +2672,12 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
         return refresh_section(repo)
     for h in sorted({adapter[0], reviewer[0]}):  # only the harnesses a role here uses (a gateway-only box has no claude)
         if not shutil.which(BINARIES[h]):
-            raise Fail("claude not on PATH, but the onboarding agents use it" if h == "claude" else
-                       f"{BINARIES[h]} not on PATH, but the onboarding agents run on {h}")
+            fell = [r for r, w in (("adapter", adapter), ("adapt-reviewer", reviewer))
+                    if w[0] == h and ONBOARD_FROM.get(r) == "default"]
+            hint = (f" ({', '.join('--' + r for r in fell)} not given and none in the settings store, so the default; "
+                    "pass opencode/<provider>/<model> to onboard on OpenCode)") if fell else ""
+            raise Fail(("claude not on PATH, but the onboarding agents use it" if h == "claude" else
+                        f"{BINARIES[h]} not on PATH, but the onboarding agents run on {h}") + hint)
     for key in ("user.name", "user.email"):
         if not run(["git", "config", "--get", key], cwd=repo, check=False).stdout.strip():
             raise Fail(f"git has no {key} here, so the owner's commit can't be made; set it and run again")
@@ -2603,7 +2696,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
         if left and not again:
             say("adapt", "unfinished", f"{ADAPTED}/ is from a run that did not finish; "
                 "the adapter runs again over it")
-        say("adapt", "running", "/".join(adapter))
+        say("adapt", "running", "/".join(adapter) + onboard_from("adapter"))
         kept_suggestions(repo).unlink(missing_ok=True)
         adapt(repo, adapter, fill("prompt.md", project, visibility=visibility) + ADAPT_RULES, before)
     if not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
@@ -2804,7 +2897,20 @@ def resolve_settings(repo: Path, a) -> dict:
     for g in private:
         if bad_glob(g):
             raise Fail(f"{store_dir(repo) / 'settings.json'}: private glob {g!r} is not a glob relative to the repo root")
-    changes = {"root": str(repo), "models": {r: f"{h}/{m}" for r, (h, m) in pins.items()},
+    onboarding, kept = {}, {}
+    for role, flag in (("adapter", a.adapter), ("adapt-reviewer", a.adapt_reviewer)):
+        spec = flag or stored.get(role) or ONBOARD_PINS[role]
+        try:
+            onboarding[role] = harness_model(spec)
+        except SystemExit:
+            raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is {spec!r}, expected <claude|opencode>/<model>")
+        if flag or stored.get(role):  # what the owner gave once is kept; the defaults are never written
+            kept[role] = spec
+        ONBOARD_FROM[role] = "flag" if flag else "settings store" if stored.get(role) else "default"
+    if onboarding["adapter"][1] == onboarding["adapt-reviewer"][1]:
+        raise Refused(f"--adapter and --adapt-reviewer must be different models, both are {onboarding['adapter'][1]} "
+                      f"(the store's models.adapter and models.adapt-reviewer count too)")
+    changes = {"root": str(repo), "models": {**{r: f"{h}/{m}" for r, (h, m) in pins.items()}, **kept},
                "private": private, "orchestrator": ORCHESTRATOR}
     if not persona_modes:
         changes["permission_mode"] = mode
@@ -2815,7 +2921,8 @@ def resolve_settings(repo: Path, a) -> dict:
         if why:
             raise Refused(why)
     settings(repo, **changes)
-    return {"pins": pins, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
+    return {"pins": pins, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name"),
+            "onboarding": onboarding}
 
 
 def which_orchestrator(flag, repo, default: str = None) -> str:
@@ -3585,7 +3692,7 @@ def native_main(a, tiers: Path) -> int:
             ADAPT_RULES += NATIVE_PLACEMENT
             REVIEW_RULES = NATIVE_REVIEW_NOTE + REVIEW_RULES
             CHECK_RULES = NATIVE_REVIEW_NOTE + CHECK_RULES
-        adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
+        adapter, adapt_reviewer = cfg["onboarding"]["adapter"], cfg["onboarding"]["adapt-reviewer"]
         if not a.skip_adapt:
             refuse_tracked(repo, NATIVE_ROLES)
             with rendered_aside(repo):
@@ -4166,11 +4273,12 @@ def main(argv=None) -> int:
                     help="a tracked file or folder the onboarding agents must not read, relative to the repo root "
                          "(repeatable, e.g. 'shot*.png' or 'private/**'; applies to every repo of the project, attached ones too); git-ignored paths are always denied. Kept in "
                          "the settings store: a later run adds to the list, it never drops one")
-    ap.add_argument("--adapter", default="claude/sonnet",
+    ap.add_argument("--adapter",
                     help="harness/model of the agent that adapts the project's files (claude/<model> or "
-                         "opencode/<provider>/<model>)")
-    ap.add_argument("--adapt-reviewer", default="claude/opus",
-                    help="harness/model that reviews the adapted files; must be a different model from --adapter")
+                         "opencode/<provider>/<model>; default claude/sonnet); kept in the project's settings store")
+    ap.add_argument("--adapt-reviewer",
+                    help="harness/model that reviews the adapted files; must be a different model from --adapter "
+                         "(default claude/opus); kept in the project's settings store")
     again = ap.add_mutually_exclusive_group()
     again.add_argument("--readapt", action="store_true", help="adapt the project again although it was done before")
     again.add_argument("--refresh", action="store_true",
@@ -4258,14 +4366,17 @@ def main(argv=None) -> int:
     for v in (a.coordinator, a.reviewer):  # any harness/model the owner gives; only the shape is checked
         if v:
             harness_model(v)
-    adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
+    for v in (a.adapter, a.adapt_reviewer):
+        if v:
+            harness_model(v)
     for g in a.private:
         if bad_glob(g):
             print(f"project-setup: --private takes a glob relative to the repo root, got {g!r}", file=sys.stderr)
             return 2
-    if not a.skip_adapt and not a.refresh and adapter[1] == adapt_reviewer[1]:
-        print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are {adapter[1]}",
-              file=sys.stderr)
+    if not a.skip_adapt and not a.refresh and a.adapter and a.adapt_reviewer \
+            and harness_model(a.adapter)[1] == harness_model(a.adapt_reviewer)[1]:
+        print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are "
+              f"{harness_model(a.adapter)[1]}", file=sys.stderr)
         return 2
     tiers = Path(a.tiers or OC / "templates" / "lanes.tsv").expanduser()
     if a.with_repos and (a.refresh or a.show):
@@ -4370,6 +4481,7 @@ def main(argv=None) -> int:
             # a stored repo that is gone stays listed: only the owner takes it out
             settings(repo, attached=list(dict.fromkeys([*stored_attached, *(str(d) for d in attached)])))
         coord, reviewer = cfg["pins"]["coordinator"], cfg["pins"]["reviewer"]
+        adapter, adapt_reviewer = cfg["onboarding"]["adapter"], cfg["onboarding"]["adapt-reviewer"]
         PRIVATE_GLOBS[:] = cfg["private"]
         mode = cfg["mode"]
         modes = {r: cfg["modes"].get(r, mode) for r in ("coordinator", "reviewer")}
