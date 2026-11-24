@@ -90,6 +90,8 @@ if cmd == "terminal create":
     state["terminals"].append(t); out({"terminal": t})
 if cmd == "automations list": out({"automations": state["automations"]})
 if cmd == "automations create":
+    if opt("--provider") in state.get("unknown_providers", []):  # Orca checks it before anything is sent
+        print(json.dumps({"ok": False, "error": {"message": "Unknown provider: " + opt("--provider")}})); sys.exit(1)
     x = {"id": "auto-%d" % (len(state["automations"]) + 1), "name": opt("--name"), "prompt": opt("--prompt"),
          "precheck": {"command": opt("--precheck"), "timeoutSeconds": int(opt("--precheck-timeout", "60"))}}
     state["automations"].append(x); out({"automation": x})
@@ -1568,6 +1570,29 @@ class MachineSetupTests(BudgetTest):
                 self.assertIn("OpenCode's own default model", r.stdout)
                 if "--machine-coordinator" in args:
                     self.assertIn("litellm/chat", r.stdout)  # named, so the owner can make it OpenCode's default
+
+    def test_an_automation_id_orca_does_not_know_creates_nothing_and_the_rest_still_runs(self):
+        # review m5: opencode2 is read from Orca 1.4.268's own code, not from a live create; a wrong id must not leave
+        # machine-setup half done
+        self.orca({"unknown_providers": ["opencode2"]})
+        r = self.setup_machine("--no-start", "--automation-provider", "opencode")
+        self.assertEqual(r.returncode, 1, r.stderr + r.stdout)
+        self.assertEqual(json.loads((self.tmp / "orca.json").read_text())["automations"], [])  # none was created
+        self.assertIn("automations: failed", r.stdout)
+        self.assertIn("Unknown provider: opencode2", r.stdout)
+        self.assertIn("unverified", r.stdout)
+        self.assertIn("ci-presence timer:", r.stdout)  # the step after the automations still ran
+        self.assertEqual(len([c for c in self.orca_calls() if c[:2] == ["automations", "create"]]), 1)
+
+    def test_the_opencode_model_note_comes_only_with_a_new_automation_and_says_what_to_set(self):
+        # review n2
+        self.orca({})
+        r = self.setup_machine("--no-start", "--automation-provider", "opencode")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn('set "model" in OpenCode\'s config to a <provider>/<model>', r.stdout)
+        again = self.setup_machine("--no-start", "--automation-provider", "opencode")
+        self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
+        self.assertNotIn("OpenCode's own default model", again.stdout)
 
     def test_the_automation_provider_flag_wins_and_is_checked(self):
         r = self.setup_machine("--no-start", "--machine-coordinator", "opencode/litellm/chat",

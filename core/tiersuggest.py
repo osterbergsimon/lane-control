@@ -4,16 +4,21 @@ project-setup --suggest-tiers <provider> uses it: GET <base>/v1/models, and for 
 each alias to the model behind it (absent elsewhere: the alias stands for itself). The base URL comes from a flag or
 OpenCode's own config (provider.<id>.options.baseURL); the key only from an environment variable, named by a flag or
 by the config's `{env:NAME}` reference. OpenCode's auth files are never read, and the key is never printed, logged,
-stored or put in argv: it goes in one request header, in this process.
+stored or put in argv: it goes in one request header, in this process, to the gateway's own URL only (no redirect is
+followed and no proxy is used, so it never reaches another host).
 """
+import http.client
 import json
 import os
 import re
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-TIMEOUT = 15
+DEADLINE = 20  # seconds for the whole of GET /v1/models, wall clock (the socket timeout is only per read)
+INFO_DEADLINE = 8  # the same for /model/info, which is optional
+CHAT_MODES = (None, "chat", "responses")  # LiteLLM's model_info.mode; None: the gateway does not say
 ENV_REF = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
 # Name hints, matched as whole tokens of the alias and the model behind it; the owner edits whatever this gets wrong.
 SWIFT = frozenset({"mini", "nano", "flash", "haiku", "small", "lite", "tiny", "fast", "air", "instant"})
@@ -62,9 +67,11 @@ def opencode_config_paths(env=os.environ) -> list:
     return [home / n for n in ("opencode.json", "opencode.jsonc", "config.json")]
 
 
-def opencode_provider(provider: str, env=os.environ) -> "tuple[str | None, str | None, str]":
-    """(base URL, name of the key's environment variable, where it came from) for this provider in OpenCode's config;
-    None for what it does not say. A key written into the config itself is never used (only an {env:NAME} reference)."""
+def opencode_provider(provider: str, env=os.environ) -> dict:
+    """What OpenCode's config says of this provider: base (its baseURL), key_env (the NAME of an {env:NAME} apiKey),
+    literal_key (True when apiKey is written in the config itself, which is never used), models (the aliases listed
+    under its models, or None when it lists none) and where (the file); None or "" for what it does not say."""
+    out = {"base": None, "key_env": None, "literal_key": False, "models": None, "where": ""}
     for path in opencode_config_paths(env):
         try:
             conf = json.loads(strip_jsonc(path.read_text()))
@@ -76,10 +83,13 @@ def opencode_provider(provider: str, env=os.environ) -> "tuple[str | None, str |
         if not isinstance(entry, dict):
             continue
         opts = entry.get("options") if isinstance(entry.get("options"), dict) else {}
-        base = opts.get("baseURL") if isinstance(opts.get("baseURL"), str) else None
-        ref = ENV_REF.fullmatch(opts.get("apiKey") or "") if isinstance(opts.get("apiKey"), str) else None
-        return base, ref.group(1) if ref else None, str(path)
-    return None, None, ""
+        key = opts.get("apiKey") if isinstance(opts.get("apiKey"), str) and opts.get("apiKey") else None
+        ref = ENV_REF.fullmatch(key) if key else None
+        listed = entry.get("models")
+        return {"base": opts.get("baseURL") if isinstance(opts.get("baseURL"), str) else None,
+                "key_env": ref.group(1) if ref else None, "literal_key": bool(key and not ref),
+                "models": list(listed) if isinstance(listed, dict) and listed else None, "where": str(path)}
+    return out
 
 
 def root_of(base: str) -> str:
@@ -88,20 +98,51 @@ def root_of(base: str) -> str:
     return base[:-3] if base.endswith("/v1") else base
 
 
-def _get(url: str, key: "str | None"):
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx is an answer, never followed: urllib would send the Authorization header on to the new host."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _get(url: str, key: "str | None", deadline: float):
+    """The JSON at url, within `deadline` seconds wall clock. No proxy (the environment's would get the key, in clear
+    for http://) and no redirect. A reply that is not HTTP, or none in time, is a GatewayError."""
     req = urllib.request.Request(url, headers={"Accept": "application/json",
                                                **({"Authorization": f"Bearer {key}"} if key else {})})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:  # noqa: S310 (the owner's own gateway URL)
-        return json.loads(r.read().decode("utf8"))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    box = {}
+
+    def work():
+        try:
+            with opener.open(req, timeout=deadline) as r:  # the owner's own gateway URL
+                box["data"] = json.loads(r.read().decode("utf8"))
+        except BaseException as e:  # handed to the caller's thread
+            box["error"] = e
+    th = threading.Thread(target=work, daemon=True)  # a gateway that drips bytes never ends a read: left behind
+    th.start()
+    th.join(deadline)
+    if th.is_alive():
+        raise GatewayError(f"GET {url}: no full answer within {deadline:g} s")
+    e = box.get("error")
+    if isinstance(e, urllib.error.HTTPError) and 300 <= e.code < 400:
+        raise GatewayError(f"GET {url}: HTTP {e.code}, a redirect to {e.headers.get('Location') or 'elsewhere'}; it is "
+                           "never followed, so the key stays with the URL you gave: give the gateway's own URL")
+    if isinstance(e, http.client.HTTPException):
+        raise GatewayError(f"GET {url}: not an HTTP reply ({type(e).__name__}): is it https://?")
+    if e is not None:
+        raise e
+    return box["data"]
 
 
 def fetch_models(base: str, key: "str | None") -> list:
-    """[(alias, model behind it)] in the gateway's order. /v1/models must answer; /model/info (LiteLLM) may not."""
+    """[(alias, model behind it, mode or None)] in the gateway's order. /v1/models must answer; /model/info (LiteLLM:
+    the model behind each alias and its mode) may not, and its failure is silent."""
     root = root_of(base)
     if not re.match(r"^https?://", root):
         raise GatewayError(f"the gateway URL must start with http:// or https://, got {base!r}")
     try:
-        data = _get(root + "/v1/models", key)
+        data = _get(root + "/v1/models", key, DEADLINE)
     except urllib.error.HTTPError as e:
         raise GatewayError(f"GET {root}/v1/models: HTTP {e.code}"
                            + (" (the key was refused, or none was sent)" if e.code in (401, 403) else ""))
@@ -111,16 +152,34 @@ def fetch_models(base: str, key: "str | None") -> list:
     aliases = [m["id"] for m in rows or [] if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
     if not aliases:
         raise GatewayError(f"GET {root}/v1/models lists no models")
-    behind = {}
+    behind, modes = {}, {}
     try:
-        info = _get(root + "/model/info", key)
+        info = _get(root + "/model/info", key, INFO_DEADLINE)
         for m in (info.get("data") if isinstance(info, dict) else None) or []:
             params = m.get("litellm_params") if isinstance(m, dict) else None
             if isinstance(m.get("model_name"), str) and isinstance(params, dict) and isinstance(params.get("model"), str):
                 behind.setdefault(m["model_name"], params["model"])
-    except (urllib.error.URLError, OSError, ValueError, AttributeError):
-        pass  # not LiteLLM, or no access to it: each alias stands for itself
-    return [(a, behind.get(a, a)) for a in dict.fromkeys(aliases)]
+                mode = (m.get("model_info") or {}).get("mode") if isinstance(m.get("model_info"), dict) else None
+                if isinstance(mode, str):
+                    modes.setdefault(m["model_name"], mode)
+    except (GatewayError, urllib.error.URLError, OSError, ValueError, AttributeError):
+        pass  # not LiteLLM, no access to it, or too slow: each alias stands for itself
+    return [(a, behind.get(a, a), modes.get(a)) for a in dict.fromkeys(aliases)]
+
+
+def usable(models: list, provider: str, listed: "list | None") -> tuple:
+    """(kept [(alias, real)], left out [(alias, why)]): a model whose mode is not chat (an embedding, a reranker) is
+    left out, and so is an alias OpenCode's config does not list, when it lists any (OpenCode starts only those)."""
+    kept, out = [], []
+    for alias, real, mode in models:
+        if mode not in CHAT_MODES:
+            words = mode.replace("_", " ")
+            out.append((alias, f"{'an' if words[:1] in 'aeiou' else 'a'} {words} model"))
+        elif listed is not None and alias not in listed:
+            out.append((alias, f"not in OpenCode's config: provider.{provider}.models"))
+        else:
+            kept.append((alias, real))
+    return kept, out
 
 
 def kind(alias: str, real: str) -> str:

@@ -270,7 +270,10 @@ def automation_agent(provider: str) -> list:
     return ["--provider", harnesses.load_harness(provider).ORCA_AGENT_ID]
 
 
-def automations_step(folder: Path, from_lane: bool = False, provider: str = "claude"):
+def automations_step(folder: Path, from_lane: bool = False, provider: str = "claude") -> int:
+    """How many automations it created. The first create that Orca refuses stops the step before a second one: Orca
+    checks the provider id before anything is sent, so a wrong id creates nothing (said as failed, the run goes on)."""
+    created = 0
     have = {a.get("name"): a for a in orca("automations", "list").get("automations", []) or []}
     for name, trigger, precheck, timeout, prompt in automation_specs():
         if name in have:
@@ -295,11 +298,26 @@ def automations_step(folder: Path, from_lane: bool = False, provider: str = "cla
             say(name, "found older", f"automation {o.get('name')!r} ({o['id']}) does this job; not adding a second. "
                                      f"To switch: orca-ide automations remove {o['id']}  then run machine-setup again")
             continue
-        orca("automations", "create", "--name", name, "--trigger", trigger, "--prompt", prompt,
-             *automation_agent(provider), "--precheck", precheck,
-             "--precheck-timeout", str(timeout),
-             "--workspace", f"path:{folder}", "--workspace-mode", "existing", "--enabled")
+        try:
+            orca("automations", "create", "--name", name, "--trigger", trigger, "--prompt", prompt,
+                 *automation_agent(provider), "--precheck", precheck,
+                 "--precheck-timeout", str(timeout),
+                 "--workspace", f"path:{folder}", "--workspace-mode", "existing", "--enabled")
+        except Fail as e:
+            if provider == "claude" or created:
+                raise
+            agent = automation_agent(provider)[1]
+            raise AutomationFail(f"{e} (the agent id {agent} for OpenCode is unverified: it is read from Orca 1.4.268's "
+                                 "own code, its agent catalog, not from a live create; no automation was created. "
+                                 "Use the id `orca-ide automations create --help` or Orca's docs give for OpenCode v2, "
+                                 "or --automation-provider claude)") from None
+        created += 1
         say(name, "created", f"(automation, {trigger}, precheck {precheck})")
+    return created
+
+
+class AutomationFail(Exception):
+    """The automations could not be made; the steps after them still run, and the run exits 1."""
 
 
 def systemctl(*args) -> subprocess.CompletedProcess:
@@ -432,12 +450,21 @@ def main(argv) -> int:
         else:
             start_step(harness, model, a.permission_mode, folder, persona, a.trust_folder)
         provider = a.automation_provider or harness
-        automations_step(folder, from_lane=bool(warning), provider=provider)
-        if provider == "opencode":
-            say("automations", "note", "they run on OpenCode's own default model (Orca passes no model to OpenCode)"
-                + (f"; to run them on {model}, make it the default model in OpenCode's config" if harness == "opencode"
-                   else ""))
+        failed = None
+        try:
+            created = automations_step(folder, from_lane=bool(warning), provider=provider)
+        except AutomationFail as e:
+            created, failed = 0, str(e)
+            say("automations", "failed", failed)
+        if provider == "opencode" and created:
+            say("automations", "note", "they run on OpenCode's own default model (Orca passes no model to OpenCode): "
+                "set \"model\" in OpenCode's config to a <provider>/<model>"
+                + (f", such as {model}, the machine coordinator's" if harness == "opencode" else "")
+                + "; without one OpenCode picks a model itself")
         timer_step()
+        if failed:
+            print(f"machine-setup: the automations were not made: {failed}", file=sys.stderr)
+            return 1
     except (Fail, ValueError, OSError) as e:
         print(f"machine-setup: {e}", file=sys.stderr)
         return 1

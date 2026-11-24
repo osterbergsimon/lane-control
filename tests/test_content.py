@@ -504,6 +504,32 @@ class GatewaySetupDocTests(unittest.TestCase):
                        "opencode/<provider>/<alias>", "--automation-provider opencode"):
             self.assertIn(needle, self.sec, needle)
 
+    def test_a_host_set_up_earlier_refreshes_first(self):
+        # review M1: the installed lane-tier, skills and personas are copies; they stay old until a refresh
+        for needle in ("set up before this change", "--refresh", "restart the coordinator",
+                       "`~/.agents/bin/lane-tier`", "project-pause stop"):
+            self.assertIn(needle, self.sec, needle)
+        self.assertLess(self.sec.index("--refresh"), self.sec.index("--suggest-tiers"))
+
+    def test_what_the_suggestion_leaves_out_and_where_the_key_goes(self):
+        for needle in ("no redirect is followed", "no proxy", "model_info.mode", "provider.<id>.models"):
+            self.assertIn(needle, self.sec, needle)
+
+    def test_the_machine_section_names_the_unmetered_case(self):
+        text = " ".join((ROOT / "orchestrators" / "native-orca" / "setup.md").read_text().split())
+        machine = text.split("## A machine", 1)[1]
+        self.assertIn("unless no budget in the playbook config has a feed", machine)
+
+    def test_the_night_manager_does_not_read_an_unmetered_machine_as_unknown(self):
+        # review n3
+        text = " ".join((ROOT / "orchestrators" / "native-orca" / "night-manager.md").read_text().split())
+        self.assertIn("`no metered budget` is not unknown", text)
+
+    def test_the_native_setup_spec_says_the_model_rule_is_superseded(self):
+        # review n1
+        text = " ".join((ROOT / "docs" / "superpowers" / "specs" / "2026-11-19-native-orca-setup-design.md").read_text().split())
+        self.assertGreaterEqual(text.count("Superseded 2026-11-24"), 2)
+
     def test_the_example_names_no_real_place(self):
         self.assertNotRegex(self.sec, r"https?://(?!127\.0\.0\.1|<)")
 

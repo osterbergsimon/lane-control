@@ -21,7 +21,7 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    nothing is due now: end.
 2. **Budget gate.** A `BUDGET push-and-handover` line (the no-new-work or push-and-handover step, or the short
    window at 95 or 98 %) means each check-in asks only to commit and push work in progress, write the handover,
-   back beads up (in the beads repo `git push`, then `bd dolt push`) and start nothing new. Run `<lc>/core/scripts/budget-state` once more: if it now shows step 4 stop, or unknown,
+   back beads up (in the beads repo `git push`, then `bd dolt push`) and start nothing new. Run `<lc>/core/scripts/budget-state` once more (empty output with the note `no metered budget` is not unknown: no budget has a feed, the caps are the limit, carry on): if it now shows step 4 stop, or unknown,
    stand down: send no check-in, but run `--checked <name>` (step 3) for each due coordinator all the same, so it is
    not due again for two hours.
 3. **Check-ins.** For each `DUE` coordinator, find where to send it: run `<lc>/core/scripts/night-precheck --find

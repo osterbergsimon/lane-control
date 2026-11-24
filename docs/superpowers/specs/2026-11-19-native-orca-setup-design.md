@@ -153,7 +153,9 @@ Generalized from the machine coordinator's working files (2026-11-16..19):
 - **Machine coordinator:** a plain Orca session on Sonnet in its own private folder (not a repo that is pushed
   publicly), persona from section 5. Checks budget and machine every 30 minutes; warns coordinators once per step.
 - **Night manager:** an Orca automation (`automations create --trigger "37 * * * *" --workspace <machine folder>
-  --workspace-mode existing --provider claude --extra-agent-args="--model sonnet" --precheck <script>`). The
+  --workspace-mode existing --provider claude --extra-agent-args="--model sonnet" --precheck <script>`; Superseded 2026-11-24
+  in part: on a machine without Claude, `machine-setup --automation-provider opencode` makes them `--provider opencode2`
+  with no extra args, `orchestrators/native-orca/setup.md`). The
   precheck exits 0 only when the owner is away (away file younger than 14 h) or it is night (23-07 by default),
   AND some coordinator has been idle at least 45 minutes (newest transcript write) and was not checked in on in
   2 hours, or a runner is offline. So idle hours cost nothing. The agent sends each due coordinator one check-in
@@ -225,7 +227,8 @@ Into `core/reliability.md` (tagged with their orchestrator where one applies), g
 - **Model rule still holds:** the owner's "no code to China" rule limits which OpenCode providers may run unsandboxed
   (today only a project whose own tier table lists `opencode-go/deepseek-v4.1-flash` runs it, and only through its own coordinator). An OpenCode
   coordinator or lane elsewhere needs a provider the owner allows; `project-setup` refuses a role/model pair the
-  tier rules (`core/scripts/lane-tier`) refuse.
+  tier rules (`core/scripts/lane-tier`) refuse. Superseded 2026-11-24 by `core/model-routing.md`, "Sandbox per tier":
+  nothing is refused by model or harness; each project's own tier table says which models it uses.
 - **Refresh, pause, wake without Cotal:** refresh = re-render the personas and the hook; the next compaction or
   restart picks them up, and an optional `--restart` asks the coordinator to write its handover, then relaunches it.
   Pause = the coordinator writes its handover, its terminal is closed, and the project is marked paused in the

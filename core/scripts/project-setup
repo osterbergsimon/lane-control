@@ -2739,17 +2739,27 @@ def suggest_tiers(a) -> int:
         print(f"project-setup: --suggest-tiers takes OpenCode's provider id (such as litellm), got {provider!r}",
               file=sys.stderr)
         return 2
+    if a.gateway_key_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", a.gateway_key_env):
+        print("project-setup: --gateway-key-env takes the NAME of an environment variable (letters, digits and _), "
+              "never the key itself", file=sys.stderr)  # not echoed: it may be a key pasted by mistake
+        return 2
     try:
         d = Path(a.target).expanduser().resolve()
         top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
         if top is None or top.returncode != 0:
             raise Fail(f"{d} is not an existing git repository; --suggest-tiers needs the project's checkout")
         repo = Path(top.stdout.strip())
-        base, key_env, where = TS.opencode_provider(provider)
+        oc = TS.opencode_provider(provider)
     except (Fail, TS.GatewayError) as e:
         print(f"project-setup: {e}", file=sys.stderr)
         return 1
-    base, key_env = a.gateway or base, a.gateway_key_env or key_env
+    where = oc["where"]
+    base, key_env = a.gateway or oc["base"], a.gateway_key_env or oc["key_env"]
+    if not key_env and oc["literal_key"]:
+        print(f"project-setup: OpenCode's config ({where}) has the apiKey of {provider} written in it, which is never "
+              "used: write it as \"{env:NAME}\" and set NAME in the environment, or pass --gateway-key-env NAME",
+              file=sys.stderr)
+        return 2
     if not base:
         print(f"project-setup: no gateway URL for {provider}: pass --gateway <base URL>, or give the provider "
               "options.baseURL in OpenCode's config", file=sys.stderr)
@@ -2762,18 +2772,33 @@ def suggest_tiers(a) -> int:
                   + (f" ({where} names it)" if where and not a.gateway_key_env else ""), file=sys.stderr)
             return 2
     try:
-        models = TS.fetch_models(base, key)
+        found = TS.fetch_models(base, key)
+        models, left_out = TS.usable(found, provider, oc["models"])
+        if not models:
+            raise Fail("no chat model left to suggest: " + ", ".join(f"{m} ({why})" for m, why in left_out))
         text = TS.table(provider, TS.suggest(models))
         check_tier_table(text)
     except (TS.GatewayError, Fail) as e:
         print(f"project-setup: {e}", file=sys.stderr)
         return 1
-    say("gateway", "read", f"{len(models)} models at {TS.root_of(base)}" + (f" (key from ${key_env})" if key else ""))
+    say("gateway", "read", f"{len(found)} models at {TS.root_of(base)}" + (f" (key from ${key_env})" if key else ""))
     width = max(len(m[0]) for m in models)
     for alias, real in models:
         print(f"  {alias.ljust(width)}  {real if real != alias else '(no model/info: the alias itself)'}"
               f"  -> {TS.kind(alias, real)}")
+    if left_out:
+        print("  left out: " + ", ".join(f"{m} ({why})" for m, why in left_out))
     print("\nSuggested tier table:\n" + text, flush=True)
+    installed = Path(os.environ.get("HOME", str(Path.home()))) / ".agents" / "bin" / "lane-tier"
+    try:
+        old_tools = installed.read_bytes() != (HERE / "core" / "scripts" / "lane-tier").read_bytes()
+    except OSError:
+        old_tools = True
+    if old_tools:  # a host set up before LIT-1: its lane-tier, skills and personas still refuse OpenCode tiers
+        print(f"warning: {installed} is not this checkout's lane-tier, so the installed lane tools, skills and personas "
+              "may be older and refuse an OpenCode tier. Before a coordinator uses this table: run project-setup "
+              f"{repo} --refresh from this checkout, then restart the coordinator (project-pause stop {repo}, then start {repo})",
+              file=sys.stderr, flush=True)
     table = store_table(repo)
     was = table.read_text() if table.exists() else None
     if was == text:
