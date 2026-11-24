@@ -108,7 +108,8 @@ and explain themselves; check what exists first and build on it. The exact text 
 - `away/<YYYY-MM-DD>` per project, pushed after every merge (a backup). Public repos: the branch is public; the bar
   for every merge is tests green and nothing private (the existing public-repo rules).
 - One labelled merge per item (`away: <item title>`), never squashed, so a single item can be reverted.
-- `AWAY-LOG.md` at the branch root (removed when the branch is adopted): a summary at the top kept current by the
+- *(Superseded 2026-11-24, see "The log moves into PRs and merge commits" at the end: there is no log file any more.)*
+  `AWAY-LOG.md` at the branch root (removed when the branch is adopted): a summary at the top kept current by the
   coordinator (what was done, what is worth looking at first, what to drop if unsure), then one entry per item:
   what, why, what it builds on, what existing work it checked, how to try it, how to drop it (the merge to revert,
   and which later items depend on it), test results.
@@ -168,7 +169,7 @@ draft PR from `away/<date>` to the integration branch. The owner adopts the whol
 
 - **A skill, `away-improve`,** under the native-orca skills next to `native-orca-lanes`, installed like the other
   lane-control skills for Claude and OpenCode. It holds the cycle steps, the scout brief, the build-lane brief (with
-  the innovation prompt from `core/templates/` and the duplicate check), the AWAY-LOG.md format and the merge rules.
+  the innovation prompt from `core/templates/` and the duplicate check), the log entry format (AWAY-LOG.md until 2026-11-24, then the PR body's headings) and the merge rules.
   The coordinator persona only says: when improve is on for your project, load the away-improve skill.
 - **No MCP server** for now: agents already call the CLIs and scripts directly, and a server would not enforce
   anything while agents have a shell. Revisit for a harness without a shell, or for one audited action log.
@@ -249,3 +250,28 @@ Ordered by the owner on top of the merged mode; the owner's guide describes the 
   403) or unknown. It never changes a setting. The guide notes it next to "a backstop, not a wall".
 - Not done: a global (not per-project) item cap; a spend cap in
   money rather than the weekly budget percentage.
+
+## The log moves into PRs and merge commits (2026-11-24, AWF-1; lc-o8i, lc-509)
+
+Decided by the owner after the first real run. This replaces "The branch and the log" and the AWAY-LOG.md parts of the
+follow-ups above; everything else there stands.
+
+- **No log file on the away branch.** Each item's entry lives in its build lane's PR body, under fixed headings: What, Why,
+  Builds on, Existing work checked, How to try it, How to drop it, Tests (template `core/templates/away-entry.md`, which
+  replaces `core/templates/AWAY-LOG.md`). `away-merge` copies the entry into the merge commit's message body (after the
+  `Pull request #<n>` line the "Items merged" list reads; the subject stays `away: <item>`) and refuses a PR whose body lacks
+  a heading (a new check, `entry`, one line naming what is missing).
+- **The summary PR body is built from the merge commits**: the "Items merged" list as before, each item's entry under it
+  (collapsed), and a short summary the coordinator writes, given with `lane-improve pr <project> --summary-file <path>` (a file
+  outside the project; the body keeps it between markers, so later refreshes by `away-merge` keep it). The body stays within
+  GitHub's 65536-character limit: entries are shortened to their first lines, then left out, and the body says so; it never fails.
+- **The start commit is empty** (`away: start <date>`, no file), not dropped: GitHub opens no PR for a branch with nothing
+  beyond its base, and the summary PR is opened at `on`. `--continue`, the "never given any work" test and the PR all work as
+  before; a log file left on the integration branch by an adopted branch is no longer a problem.
+- **A draft item PR merges (lc-509).** Lane PRs open as drafts and GitHub refuses to merge a draft: `away-merge` marks the item
+  PR ready (`gh pr ready`) right before the merge, after every check passed, and never the summary PR (it refuses a PR recorded
+  as the summary PR, whose base is the integration branch anyway).
+- **The wrap-up works at the cap (lc-o8i).** `lane-improve pr` reads the mode's state without the merge hard stops, so it runs
+  after `--max-items` is reached and while draining, as the refusal and the wrap-up steps tell the coordinator; merges stay
+  refused.
+- Scouts read the merged away items (the merge commits) and the summary PR, not a log file.

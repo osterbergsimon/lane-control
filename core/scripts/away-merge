@@ -4,8 +4,9 @@ docs/superpowers/specs/2026-11-23-away-improve-design.md).
 
   away-merge --project NAME --pr N --item "<title>" [--local-suite-ok LOG]
 
-Merges PR N into the project's active away/<date> branch as a merge commit titled `away: <item>` (never squashed),
-and prints the merge commit; it also records the merge (what --max-items counts) and refreshes the draft summary PR. It refuses,
+Merges PR N into the project's active away/<date> branch as a merge commit titled `away: <item>` (never squashed), whose
+message body is `Pull request #N` and the item's log entry, copied from the PR's body, and prints the merge commit; a PR that is
+still a draft is marked ready first (GitHub refuses to merge a draft), never the summary PR; it also records the merge (what --max-items counts) and refreshes the draft summary PR. It refuses,
 merging nothing, with one line per failed check, unless all of these hold:
   improve    improve mode is on for NAME (core/improve.py), which names the project's away branch; or it is draining
              (`lane-improve off` or the end time, until `lane-improve drained NAME`): the running lane's last PR still merges
@@ -15,10 +16,13 @@ merging nothing, with one line per failed check, unless all of these hold:
              current head commit (the coordinator writes it after the reviewer's clean round; the PR body never
              counts). A push after the review needs a new review. That a lane never writes it or runs away-merge is a
              rule of the skill, not something one gh identity can enforce.
+  entry      the PR's body has the log entry, one section per heading: What, Why, Builds on, Existing work checked, How to try
+             it, How to drop it, Tests (any heading level, none empty). The refusal is one line naming what is missing.
+             The entry is what goes into the merge commit message and, from there, into the summary PR (core/improve.py)
   ci         every check on the PR passed, or --local-suite-ok is the path of the log of the full suite run through
              lane-heavy, whose last line shows a pass (OK, N passed; any other string, a missing or empty file or a
              failing end is refused). Use it only when CI itself is failing or unavailable for reasons outside the
-             change; the log's last line is printed, and say so in AWAY-LOG.md
+             change; the log's last line is printed, and the PR body's Tests section must say so
   secrets    the diff is clean: gitleaks when the project has a .gitleaks.toml (no gitleaks to run it is a refusal),
              otherwise a built-in scan of the added lines (every one, `++` lines too) for keys, tokens, home paths,
              private addresses and credentials file names
@@ -39,7 +43,7 @@ merging nothing, with one line per failed check, unless all of these hold:
 The merge is `--match-head-commit <the head that was reviewed and scanned>`, and the head is read again after the diff,
 so a push in between is refused. The project's checkout is its coordinator's, from machine.conf. gh is called read-only
 except for the merge itself and, after it, the project's draft summary PR (away/<date> -> the integration branch): its body is
-brought up to the log's summary (`gh pr edit`), and it is opened as a draft (`gh pr create --draft`) when it does not exist.
+rebuilt from the branch's merge commits, keeping the coordinator's summary (`gh pr edit`), and it is opened as a draft (`gh pr create --draft`) when it does not exist.
 That PR is never merged by an agent; a failure there does not undo the merge (stderr says so, and names `lane-improve pr`).
 Exit: 0 merged; 1 refused or could not be checked; 2 usage.
 """
@@ -334,7 +338,7 @@ def run(a) -> int:
         print("\n".join(failed), file=sys.stderr)
         return 1
     try:
-        pr = json.loads(gh(["pr", "view", str(a.pr), "--json", "baseRefName,headRefOid,state,comments,statusCheckRollup,files"],
+        pr = json.loads(gh(["pr", "view", str(a.pr), "--json", "baseRefName,headRefOid,state,body,isDraft,comments,statusCheckRollup,files"],
                            checkout))
         diff = gh(["pr", "diff", str(a.pr)], checkout)
         head_now = json.loads(gh(["pr", "view", str(a.pr), "--json", "headRefOid"], checkout)).get("headRefOid")
@@ -363,13 +367,17 @@ def run(a) -> int:
         refuse("review", f"no comment by {login or '(the gh login could not be read)'} says `Review: passed {head}` "
                          f"for PR {a.pr}'s current head (the coordinator writes it after the reviewer's clean round; "
                          "the PR body never counts; a push after the review needs a new one)")
+    entry, missing = improve.parse_entry(pr.get("body"))
+    if missing:
+        refuse("entry", f"PR {a.pr}'s body has no log entry for: {', '.join(missing)} ("
+                        "a heading each; the lane writes them, see the away build brief)")
     why = ci_green(pr.get("statusCheckRollup") or [])
     suite_line = ""
     if why:
         suite_line, bad = suite_log_end(a.local_suite_ok)
         if bad:
             refuse("ci", f"{why} (CI must be green; or, when CI itself is failing for reasons outside the change, "
-                         f"pass --local-suite-ok <log of the full suite run through lane-heavy> and note it in the log; {bad})")
+                         f"pass --local-suite-ok <log of the full suite run through lane-heavy> and note it in the PR body's Tests section; {bad})")
     hit = secret_scan(checkout, diff)
     if hit:
         refuse("secrets", hit)
@@ -387,6 +395,10 @@ def run(a) -> int:
     if failed:
         print("\n".join(failed), file=sys.stderr)
         return 1
+    if a.pr == state.get("prs", {}).get(a.project):
+        print(f"away-merge: refused (summary): PR {a.pr} is {a.project}'s draft summary PR, which only the owner merges",
+              file=sys.stderr)
+        return 1
     # The cap is counted, the merge made and the merge recorded under one hold of the improve lock (lc-jpg): two merges at
     # once cannot both see the last free slot. The state is read again under the lock, so a cap reached while the checks
     # above ran refuses this merge.
@@ -396,8 +408,17 @@ def run(a) -> int:
             print(f"away-merge: refused (improve): {mode}", file=sys.stderr)
             return 1
         sha = None
+        if pr.get("isDraft"):
+            try:
+                gh(["pr", "ready", str(a.pr)], checkout)
+            except Refuse as e:
+                print(f"away-merge: refused (ready): PR {a.pr} is a draft and could not be marked ready ({e}); nothing merged",
+                      file=sys.stderr)
+                return 1
+            print(f"away-merge: PR {a.pr} was a draft: marked it ready to merge")
+        message = f"Pull request #{a.pr}\n\n{entry}".replace("\x1e", "").replace("\x1f", "")
         try:
-            gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--body", f"Pull request #{a.pr}", "--match-head-commit", head], checkout)
+            gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--body", message, "--match-head-commit", head], checkout)
         except Refuse as e:
             # gh can fail after GitHub merged (a timeout, a 5xx): look once, and count the merge when it happened
             try:
@@ -421,7 +442,7 @@ def run(a) -> int:
             print(f"away-merge: {name_line}")
         if why:
             print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
-                  f"(ends: {suite_line}) (record this in AWAY-LOG.md)")
+                  f"(ends: {suite_line})")
         try:
             improve.record_merge(state, a.project, a.pr, item, sha)
         except OSError as e:
@@ -432,8 +453,8 @@ def run(a) -> int:
 
 
 def refresh_summary_pr(checkout: Path, state: dict, project: str) -> None:
-    """After a merge: the draft summary PR (away/<date> -> the integration branch) gets its body from the log's summary,
-    and is opened first when it does not exist. Never fails the merge, which has happened: a PR that cannot be refreshed
+    """After a merge: the draft summary PR (away/<date> -> the integration branch) gets its body rebuilt from the branch's
+    merge commits (its summary kept), and is opened first when it does not exist. Never fails the merge, which has happened: a PR that cannot be refreshed
     is said on stderr with the command to run by hand."""
     try:
         n, url, what = improve.sync_and_record(checkout, state, project)
@@ -441,7 +462,7 @@ def refresh_summary_pr(checkout: Path, state: dict, project: str) -> None:
         print(f"away-merge: the merge is done, but the summary PR was not refreshed ({e}); run `lane-improve pr {project}`",
               file=sys.stderr)
         return
-    print(f"away-merge: summary PR #{n} {what} from the log: {url}")
+    print(f"away-merge: summary PR #{n} {what}: {url}")
 
 
 def main(argv=None) -> int:

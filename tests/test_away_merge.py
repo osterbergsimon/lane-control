@@ -45,8 +45,18 @@ if a[:2] == ["pr", "view"] and "mergeCommit" in a:
 if a[:2] == ["pr", "view"] and a[a.index("--json") + 1] == "headRefOid":
     print(json.dumps({"headRefOid": pr.get("head_after", pr["headRefOid"])})); sys.exit(0)
 if a[:2] == ["pr", "view"]:
-    print(json.dumps({k: pr[k] for k in ("baseRefName", "headRefOid", "state", "body", "comments", "statusCheckRollup", "files")})); sys.exit(0)
+    print(json.dumps({k: pr[k] for k in ("baseRefName", "headRefOid", "state", "body", "comments", "statusCheckRollup", "files")}
+                     | {"isDraft": pr.get("isDraft", False)})); sys.exit(0)
+if a[:2] == ["pr", "ready"]:
+    if os.environ.get("GH_READY_FAIL"):
+        print("gh: " + os.environ["GH_READY_FAIL"], file=sys.stderr); sys.exit(1)
+    pr["isDraft"] = False
+    prs[a[2]] = pr
+    json.dump(prs, open(os.environ["GH_PRS"], "w")); sys.exit(0)
 if a[:2] == ["pr", "merge"]:
+    json.dump(a, open(os.environ["GH_PRS"] + ".merge", "w"))
+    if pr.get("isDraft"):  # GitHub refuses to merge a draft
+        print("gh: Pull request is still a draft", file=sys.stderr); sys.exit(1)
     time.sleep(float(os.environ.get("GH_MERGE_SLEEP", "0")))  # a slow merge: lets a second away-merge run beside it
     if os.environ.get("GH_MERGE_FAIL"):  # gh itself failed (a timeout, a 5xx); GH_STATE_AFTER says what GitHub did
         print("gh: " + os.environ["GH_MERGE_FAIL"], file=sys.stderr); sys.exit(1)
@@ -65,6 +75,9 @@ if "LEAKME" in text:
 sys.exit(0)
 """
 
+ENTRY = (
+    "## What\nAdds x.\n\n## Why\nUsers asked.\n\n## Builds on\nnothing\n\n## Existing work checked\nLooked in lib/ and the "
+    "issues: no x.\n\n## How to try it\nRun `x --help`.\n\n## How to drop it\nRevert the merge commit.\n\n## Tests\nSuite green.\n")
 CLEAN_DIFF = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n+print('hello')\n"
 OID = "0123456789abcdef0123456789abcdef01234567"
 OLD_OID = "fedcba9876543210fedcba9876543210fedcba98"
@@ -85,7 +98,7 @@ class AwayMergeTest(ImproveTest):
         return {"author": {"login": login}, "body": text if text is not None else f"Review: passed {oid}"}
 
     def pr(self, n=7, **over):
-        pr = {"baseRefName": self.branch, "headRefOid": OID, "state": "OPEN", "body": "Adds x.\n",
+        pr = {"baseRefName": self.branch, "headRefOid": OID, "state": "OPEN", "body": "Adds x.\n\n" + ENTRY,
               "comments": [self.marker()],
               "statusCheckRollup": [{"name": "unittest", "status": "COMPLETED", "conclusion": "SUCCESS"}],
               "files": [{"path": "x.py"}], "diff": CLEAN_DIFF, "merge_oid": "abc1234"}
@@ -113,7 +126,8 @@ class AwayMergeTests(AwayMergeTest):
     def test_merges_with_subject(self):
         r = self.merge()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --body Pull request #7 --match-head-commit {OID}"])
+        self.assertEqual([c.split(" --body ")[0] for c in self.merged()], ["pr merge 7 --merge --subject away: Add the x feature"])
+        self.assertTrue(self.merged()[0].endswith(f"--match-head-commit {OID}"))
         self.assertIn("abc1234", r.stdout)
         self.assertNotIn("--squash", " ".join(self.gh_calls()))
         self.assertNotIn("--rebase", " ".join(self.gh_calls()))
@@ -243,7 +257,7 @@ class AwayMergeTests(AwayMergeTest):
         r = self.merge("--local-suite-ok", log)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(log, r.stdout)
-        self.assertIn("OK (skipped=9)", r.stdout)  # the log's last line is printed, so the AWAY-LOG entry can quote it
+        self.assertIn("OK (skipped=9)", r.stdout)  # the log's last line is printed, so the PR body's Tests section can quote it
         self.assertEqual(len(self.merged()), 1)
 
     def test_local_suite_ok_must_be_a_real_log_with_a_passing_end(self):
@@ -513,12 +527,121 @@ class AwayMergeTests(AwayMergeTest):
     def test_only_read_commands_besides_the_merge(self):
         self.merge()
         for c in self.gh_calls():
-            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "repo view", "api user -q", "pr list --head", "pr edit",
+            self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "pr ready", "repo view", "api user -q", "pr list --head", "pr edit",
                                           "pr create --draft")), c)
 
 
+class AwayMergeEntryTests(AwayMergeTest):
+    """The item's log entry lives in its PR body; away-merge copies it into the merge commit's message and refuses a body
+    without it (AWF-1)."""
+
+    def merge_args(self) -> list:
+        return json.loads((self.tmp / "prs.json.merge").read_text())
+
+    def merge_body(self) -> str:
+        a = self.merge_args()
+        return a[a.index("--body") + 1]
+
+    def test_the_merge_message_body_is_the_pr_line_then_the_entry(self):
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        a = self.merge_args()
+        self.assertEqual(a[a.index("--subject") + 1], "away: Add the x feature")
+        body = self.merge_body()
+        self.assertTrue(body.startswith("Pull request #7\n\n## What\nAdds x.\n"), body)
+        self.assertIn("## Tests\nSuite green.", body)
+        self.assertNotRegex(body, r"(?m)^Pull request #7\n.*Pull request #7")
+        self.assertIn("--match-head-commit", a)
+
+    def test_text_outside_the_entry_headings_is_not_copied(self):
+        self.pr(body="Intro that is only for reviewers.\n\n" + ENTRY + "\n## Also noticed\nunrelated filing\n")
+        self.assertEqual(self.merge().returncode, 0)
+        self.assertNotIn("Intro", self.merge_body())
+        self.assertNotIn("unrelated", self.merge_body())
+
+    def test_refuses_a_body_without_the_entry_and_names_what_is_missing(self):
+        self.pr(body=ENTRY.replace("## Why\nUsers asked.\n\n", "").replace("Suite green.", ""))
+        r = self.merge()
+        self.assertRefused(r, "entry")
+        line = [l for l in r.stderr.splitlines() if "refused (entry)" in l]
+        self.assertEqual(len(line), 1, r.stderr)
+        self.assertIn("Why", line[0])
+        self.assertIn("Tests", line[0])
+        self.assertNotIn("Builds on", line[0])  # only what is missing
+
+    def test_refuses_an_empty_body(self):
+        self.pr(body="")
+        self.assertRefused(self.merge(), "entry")
+
+    def test_the_summary_pr_lists_the_item_from_its_merge_message_not_a_file(self):
+        # the stub merges nothing in git: the list is read from the branch's merge commits, so seed one as GitHub would make it
+        work = self.tmp / "work-shop"
+        subprocess.run(["git", "clone", "-q", str(self.tmp / "shop.git"), str(work)], check=True, capture_output=True)
+        git(work, "checkout", "-q", "-b", "item", "origin/" + self.branch)
+        (work / "x.txt").write_text("x\n")
+        git(work, "add", "x.txt")
+        git(work, "commit", "-qm", "the x feature")
+        git(work, "checkout", "-q", self.branch)
+        git(work, "merge", "-q", "--no-ff", "-m", "away: Add the x feature\n\nPull request #7\n\n" + ENTRY, "item")
+        git(work, "push", "-q", "origin", self.branch)
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = self.summary_prs(self.shop)[str(self.state()["prs"]["shop"])]["body"]
+        self.assertIn("Add the x feature (PR #7", body)
+        self.assertIn("Adds x.", body)
+        self.assertIn("Suite green.", body)
+
+
+class AwayMergeDraftTests(AwayMergeTest):
+    """lc-509: GitHub refuses to merge a draft, so away-merge marks the item PR ready first; never the summary PR."""
+
+    def calls(self):
+        return [c.split(" --")[0] for c in self.gh_calls() if c.startswith(("pr ready", "pr merge"))]
+
+    def test_a_draft_item_pr_is_marked_ready_then_merged(self):
+        self.pr(isDraft=True)
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls(), ["pr ready 7", "pr merge 7"])
+        self.assertIn("ready", r.stdout)
+
+    def test_a_ready_item_pr_is_not_touched(self):
+        self.pr(isDraft=False)
+        self.assertEqual(self.merge().returncode, 0)
+        self.assertEqual(self.calls(), ["pr merge 7"])
+
+    def test_nothing_is_marked_ready_when_a_check_refuses(self):
+        self.pr(isDraft=True, comments=[])
+        self.assertRefused(self.merge(), "review")
+        self.assertEqual(self.calls(), [])
+
+    def test_a_ready_that_fails_refuses_the_merge(self):
+        self.pr(isDraft=True)
+        (self.tmp / "gh.log").write_text("")
+        r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "Add the x feature",
+                            env={"GH_READY_FAIL": "HTTP 502"})
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("ready", r.stderr)
+        self.assertEqual(self.merged(), [])
+
+    def test_the_summary_pr_is_never_marked_ready_or_merged(self):
+        # its base is the integration branch: the base check refuses it before anything is touched
+        self.pr(n=8, isDraft=True, baseRefName="main")
+        self.assertRefused(self.merge(pr=8), "base")
+        self.assertEqual(self.calls(), [])
+        # and were a PR recorded as the summary PR somehow based on the away branch, it is refused by its number
+        st = self.state()
+        st["prs"]["shop"] = 7
+        self.improve_file().write_text(json.dumps(st))
+        self.pr(isDraft=True)
+        r = self.merge()
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("summary PR", r.stderr)
+        self.assertEqual(self.calls(), [])
+
+
 class AwayMergeSummaryTests(AwayMergeTest):
-    """After a merge the summary PR's body is brought up to the AWAY-LOG.md summary by away-merge itself, so the
+    """After a merge the summary PR's body is rebuilt from the branch's merge commits (its summary kept) by away-merge itself, so the
     coordinator has nothing to remember. The summary PR is a draft and is never merged here (lc-2nz)."""
 
     def number(self) -> str:
@@ -527,17 +650,20 @@ class AwayMergeSummaryTests(AwayMergeTest):
     def body(self) -> str:
         return self.summary_prs(self.shop)[self.number()]["body"]
 
-    def test_a_merge_refreshes_the_summary_pr_from_the_log(self):
-        self.push_log(self.shop, self.branch)
+    def test_a_merge_refreshes_the_summary_pr_and_keeps_the_coordinators_summary(self):
+        f = self.tmp / "summary.md"
+        f.write_text("- Done: the x feature\n")
+        self.assertEqual(self.run_script("lane-improve", "pr", "shop", "--summary-file", str(f)).returncode, 0)
         r = self.merge()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Done: the x feature", self.body())
-        self.assertNotIn("### 1. Add x", self.body())
+        self.assertIn("Items merged", self.body())
+        self.assertNotIn("AWAY-LOG", self.body())
         self.assertIn(f"/pull/{self.number()}", r.stdout)
 
     def test_the_summary_pr_is_never_merged_and_stays_a_draft(self):
         self.merge()
-        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --body Pull request #7 --match-head-commit {OID}"])
+        self.assertEqual(len(self.merged()), 1)
         self.assertTrue(self.summary_prs(self.shop)[self.number()]["draft"])
         self.assertNotRegex(" ".join(self.gh_calls()), r"pr (ready|close)")
 
@@ -561,11 +687,10 @@ class AwayMergeSummaryTests(AwayMergeTest):
         st.pop("prs")
         self.improve_file().write_text(json.dumps(st))
         (self.tmp / "gh-summary.json").unlink()
-        self.push_log(self.shop, self.branch)
         r = self.merge()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(self.number(), self.summary_prs(self.shop))
-        self.assertIn("Done: the x feature", self.body())
+        self.assertIn("Items merged", self.body())
         self.assertTrue(self.summary_prs(self.shop)[self.number()]["draft"])
 
     def test_a_closed_summary_pr_is_left_alone(self):
@@ -580,7 +705,9 @@ class AwayMergeSummaryTests(AwayMergeTest):
         self.assertEqual([c for c in self.gh_calls() if c.startswith(("pr edit", "pr create"))], [])
 
     def test_a_merge_while_draining_refreshes_too(self):
-        self.push_log(self.shop, self.branch)
+        f = self.tmp / "summary.md"
+        f.write_text("- Done: the x feature\n")
+        self.run_script("lane-improve", "pr", "shop", "--summary-file", str(f))
         number = self.number()
         self.run_script("lane-improve", "off")
         r = self.merge()
@@ -603,8 +730,7 @@ class AwayMergeCapTests(AwayMergeTest):
     def status(self) -> str:
         return self.run_script("lane-improve", "status").stdout
 
-    def test_a_merge_is_recorded_by_away_merge_not_read_from_the_log(self):
-        self.push_log(self.shop, self.branch, "# log\n\n## Summary\n- Done: nothing, 9 items, items 9/10\n")
+    def test_a_merge_is_recorded_by_away_merge_not_read_from_the_summary(self):
         r = self.merge(item="Add the x feature")
         self.assertEqual(r.returncode, 0, r.stderr)
         rec = self.period()["merges"]["shop"]
@@ -733,6 +859,28 @@ class AwayMergeCapTests(AwayMergeTest):
         self.assertEqual(again.returncode, 1)
         self.assertIn("wrapped up", again.stderr)
         self.assertEqual(self.run_script("lane-improve", "drained", "shop").returncode, 1)
+
+    def test_the_wrap_up_order_works_at_the_cap_pr_then_drained(self):
+        """lc-o8i: the cap is reached, `lane-improve pr` still runs (its own refusal and the skill tell the coordinator to),
+        then `drained`; only after that does the project refuse everything."""
+        self.merge(item="one")
+        self.merge(item="two")
+        self.assertIn("items 2/2", self.status())
+        self.assertRefused(self.merge(item="three"), "improve")  # the cap is a hard stop for merges
+        f = self.tmp / "summary.md"
+        f.write_text("- Done: one and two\n")
+        r = self.run_script("lane-improve", "pr", "shop", "--summary-file", str(f))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("summary PR", r.stdout)
+        self.assertIn("Done: one and two", self.summary_prs(self.shop)[str(self.state()["prs"]["shop"])]["body"])
+        self.assertEqual(self.run_script("lane-improve", "drained", "shop").returncode, 0)
+        self.assertIn("shop", self.period()["wrapped"])
+        self.assertIn("improve: on", self.status())
+
+    def test_pr_refuses_a_project_that_is_not_in_the_period_even_at_a_cap(self):
+        r = self.run_script("lane-improve", "pr", "blog")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("blog", r.stderr)
 
     def test_off_after_a_wrap_up_leaves_only_the_others_to_drain(self):
         self.assertEqual(self.on("--continue", "--project", "blog").returncode, 0)
@@ -929,25 +1077,24 @@ class AwayMergeCapTests(AwayMergeTest):
                 mod.improve.sync_and_record = orig
             self.assertIn("lane-improve pr shop", err.getvalue(), repr(exc))
 
-    def test_a_git_that_hangs_reading_the_log_is_no_log(self):
+    def test_a_git_that_hangs_reading_the_items_gives_none(self):
         code = (f"import sys, subprocess; sys.path.insert(0, {str(ROOT / 'core')!r}); import improve\n"
                 "def boom(*a, **k):\n    raise subprocess.TimeoutExpired('git', 120)\n"
                 "improve._git = boom\n"
-                "from pathlib import Path\nprint(improve.read_log(Path('.'), 'away/2026-11-23'))\n")
+                "from pathlib import Path\nprint(improve.merged_items(Path('.'), 'away/2026-11-23', 'main'))\n")
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "None"), r.stderr)
 
-    def test_the_log_is_read_from_its_own_ref_not_from_fetch_head(self):
+    def test_the_items_are_read_from_their_own_refs_not_from_fetch_head(self):
         code = (f"import sys, subprocess; sys.path.insert(0, {str(ROOT / 'core')!r}); import improve\n"
                 "calls = []\n"
                 "def fake(repo, *args, **k):\n    calls.append(args)\n"
-                "    return subprocess.CompletedProcess(args, 0, 'log text', '')\n"
+                "    return subprocess.CompletedProcess(args, 0, '', '')\n"
                 "improve._git = fake\n"
-                "from pathlib import Path\nimprove.read_log(Path('.'), 'away/2026-11-23')\nprint(calls)\n")
+                "from pathlib import Path\nimprove.merged_items(Path('.'), 'away/2026-11-23', 'main')\nprint(calls)\n")
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True).stdout
         self.assertNotIn("FETCH_HEAD", out)
         self.assertIn("+refs/heads/away/2026-11-23:refs/remotes/origin/away/2026-11-23", out)
-        self.assertIn("refs/remotes/origin/away/2026-11-23:AWAY-LOG.md", out)
 
 
 if __name__ == "__main__":

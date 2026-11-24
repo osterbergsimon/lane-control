@@ -2164,7 +2164,7 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_build_brief_has_innovation_and_duplicate_check(self):
         t = flat(AWAY_TEMPLATES / "away-build-brief.md")
-        for needle in ("<LIMITS>", "verbatim", "Existing work checked", "duplicate", "AWAY-LOG.md", "how to try",
+        for needle in ("<LIMITS>", "verbatim", "Existing work checked", "duplicate", "PR's body", "away-entry.md", "how to try",
                        "how to drop", "rewritten", "justify", "Review: passed", "<AWAY_BRANCH>", "never merge"):
             self.assertIn(needle.lower(), t.lower(), needle)
         self.assertIn("`away-innovation.md`", flat(AWAY_SKILL))
@@ -2174,19 +2174,36 @@ class AwayImproveContentTests(unittest.TestCase):
         t = flat(AWAY_TEMPLATES / "away-scout-brief.md")
         for needle in ("read-only", "never edit", "3-5", "ranked", "what and why", "the gain for the product",
                        "what already exists nearby", "references", "builds on", "rough size", "clash with the owner's limits",
-                       "research items", "recently closed", "the away log", "<LIMITS>", "open and recently merged PRs"):
+                       "research items", "recently closed", "merged away items", "summary PR", "<LIMITS>", "open and recently merged PRs"):
             self.assertIn(needle.lower(), t.lower(), needle)
 
-    def test_log_template_sections(self):
-        t = (AWAY_TEMPLATES / "AWAY-LOG.md").read_text()
-        self.assertIn("## Summary", t)
-        for needle in ("what was done", "worth looking at first", "drop if unsure", "Skipped"):
-            self.assertIn(needle.lower(), t.lower(), needle)
-        item = t[t.index("## Items"):]
-        for field in ("What:", "Why:", "Builds on:", "Existing work checked:", "How to try:", "How to drop:", "Tests:"):
-            self.assertIn(field, item, field)
-        self.assertIn("merge commit", item)
-        self.assertIn("depend", item)
+    def test_entry_template_has_the_seven_headings_and_no_log_file_is_left(self):
+        t = (AWAY_TEMPLATES / "away-entry.md").read_text()
+        self.assertFalse((AWAY_TEMPLATES / "AWAY-LOG.md").exists())
+        for h in ("What", "Why", "Builds on", "Existing work checked", "How to try it", "How to drop it", "Tests"):
+            self.assertIn(f"\n## {h}\n", t, h)
+        self.assertIn("merge commit", t)
+        self.assertIn("depend", t)
+        self.assertIn("away-merge refuses", t)
+
+    def test_nothing_the_agents_read_names_the_old_log_file(self):
+        for f in (AWAY_SKILL, *AWAY_TEMPLATES.glob("away-*.md"), ROOT / "docs" / "away-improve.md",
+                  ROOT / "core" / "scripts" / "lane-improve", ROOT / "core" / "scripts" / "away-merge"):
+            self.assertNotIn("AWAY-LOG", f.read_text(), f.name)
+
+    def test_the_skill_says_where_the_log_and_the_summary_live(self):
+        s = flat(AWAY_SKILL)
+        for needle in ("There is no log file on the away branch", "PR body", "merge commit's message", "--summary-file",
+                       "outside the project", "marks the PR ready", "never touches the summary PR", "away-entry.md",
+                       "works after a cap is reached too"):
+            self.assertIn(needle, s, needle)
+
+    def test_build_brief_writes_the_entry_in_the_pr_body_and_leaves_the_summary_to_the_coordinator(self):
+        b = flat(AWAY_TEMPLATES / "away-build-brief.md")
+        for needle in ("in your PR's body, not in a file", "`away-merge` refuses a PR whose body lacks", "Add no log file",
+                       "leave the summary to <PARENT>", "marks it ready"):
+            self.assertIn(needle, b, needle)
+        self.assertNotIn("<SUMMARY_UPDATE>", b)
 
     def test_personas_explicit_only(self):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
@@ -2225,12 +2242,12 @@ class AwayImproveContentTests(unittest.TestCase):
     def test_the_summary_pr_the_caps_and_the_protection_report_are_documented(self):
         guide = flat(ROOT / "docs" / "away-improve.md").replace("**", "")
         for needle in ("--stop-at", "--max-items", "lane-improve pr <project>", "improve-period.json", "cap reached",
-                       "`away: start <date>`", "never another project's name",
+                       "`away: start <date>`", "`--summary-file <path>`", "an empty commit rather than none", "The item PR and its entry",
                        "no agent merges it", "Branch protection report", "admins are exempt", "not available on the repository's plan",
                        "never changes a setting", "require a PR for everyone, admins included"):
             self.assertIn(needle, guide, needle)
         skill = flat(AWAY_SKILL)
-        for needle in ("`lane-improve pr <project>`", "`cap reached`", "`--max-items`", "`--stop-at`",
+        for needle in ("`lane-improve pr <project> --summary-file <path>`", "`cap reached`", "`--max-items`", "`--stop-at`",
                        "you never merge it, mark it ready or close", "`lane-improve drained <your project>`"):
             self.assertIn(needle, skill.replace("**", ""), needle)
         self.assertNotIn("open a **draft PR**", skill)  # lane-improve on opens it; the wrap-up updates it
@@ -2281,7 +2298,7 @@ class AwayImproveContentTests(unittest.TestCase):
     def test_skill_installed_for_claude_and_opencode(self):
         src = (ROOT / "core" / "scripts" / "project-setup").read_text()
         self.assertIn('"away-improve"', src)
-        for f in ("away-scout-brief.md", "away-build-brief.md", "away-innovation.md", "AWAY-LOG.md"):
+        for f in ("away-scout-brief.md", "away-build-brief.md", "away-innovation.md", "away-entry.md"):
             self.assertIn(f, src, f)
 
 

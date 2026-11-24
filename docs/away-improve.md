@@ -12,11 +12,12 @@ you run and what to expect; the design and its reasons are in
   features, anything it judges better for the product), a build lane builds one, a reviewer on a different model
   reviews it, and the coordinator merges it into the project's away branch with `away-merge`.
 - Everything lands on `away/<YYYY-MM-DD>`, cut from the project's integration branch (main or develop) plus one start
-  commit, `away: start <date>`, that adds the first `AWAY-LOG.md`. Nothing reaches the integration branch without your word.
+  commit, `away: start <date>`, that is empty (it adds no file). Nothing reaches the integration branch without your word.
 - A project has **one away branch, ever**. A second period continues the same branch; there is never a pile of
   unrelated ones.
-- The coordinator keeps `AWAY-LOG.md` on the branch: each item, why it was picked, what it checked already existed, how
-  it was tested, and what to revert it.
+- There is no log file on the branch. Each item's log entry (what, why, what it builds on, existing work checked, how to
+  try it, how to drop it, tests) is in its build lane's PR body; `away-merge` copies it into the merge commit's message,
+  and the draft summary PR is built from those messages (below).
 
 ## Switching it on and off
 
@@ -30,7 +31,7 @@ mode in your own words.
 | `lane-improve off` | Ends the mode; what is running drains (below). |
 | `lane-improve status` | Off, on (what runs), or draining (what is left to wrap up, and how long it has waited). |
 | `lane-improve drained <project>...` or `--all` | A coordinator's wrap-up is done: its deny rules come out. Coordinators run this themselves. While the mode is on it takes only a project whose cap is reached. |
-| `lane-improve pr <project>` | Opens the project's draft summary PR if it has none, brings its body up to the log's summary and prints the link. Coordinators run it at the wrap-up; `away-merge` does the same after every merge. |
+| `lane-improve pr <project>` | Opens the project's draft summary PR if it has none, rebuilds its body from the branch's merge commits and prints the link. `--summary-file <path>` sets the short summary the coordinator writes (a file kept outside the project; later refreshes keep it). Coordinators run it at the wrap-up, also after `--max-items` is reached; `away-merge` refreshes the body after every merge. |
 | `lane-improve rest <project>` | A coordinator's note that nothing within your limits is left. It only quiets the idle nudges. |
 
 Options worth knowing:
@@ -48,7 +49,7 @@ Options worth knowing:
 Both are off unless you give them (an old `--continue` re-run keeps what is set; `none` drops one):
 
 - `--max-items N`: no new cycle for a project after N merges through `away-merge` in this period, counted from
-  `away-merge`'s own record (`improve-period.json`), never from the log's text. Each project counts its own.
+  `away-merge`'s own record (`improve-period.json`), never from any text in the PRs. Each project counts its own.
 - `--stop-at <weekly %>`: no new cycle for a project once `budget-state --project <name>` gives a weekly use at or above
   that value (when a project has several metered budgets, any one reaching it counts). It is refused with `--unmetered`
   (there is no budget to read) and when the value is at or above the project's ceiling (the budget steps would stop it first),
@@ -98,9 +99,9 @@ started, say) and keeps the others. `away-merge` says this when it finds a proje
 `lane-improve off` or the end time stops new cycles. The mode is then **draining**: the lane that is running finishes
 and its PR can still merge through `away-merge`, and the deny rules stay. Each coordinator then:
 
-1. merges its last PR and updates the log summary,
-2. runs `lane-improve pr <project>`: the **draft PR** from `away/<date>` into the integration branch (open since
-   `lane-improve on`, see below) gets its final summary,
+1. merges its last PR,
+2. runs `lane-improve pr <project> --summary-file <path>`: the **draft PR** from `away/<date>` into the integration branch
+   (open since `lane-improve on`, see below) gets its final summary,
 3. sends you the summary and that PR's link as its first message,
 4. runs `lane-improve drained <project>`.
 
@@ -110,28 +111,44 @@ night, so a drain nobody finished does not sit there. A new `on` is refused whil
 `lane-improve drained --all` when you want to close it yourself.
 
 Then you adopt the whole branch (merge the draft PR as usual) or name the items to drop; the coordinator runs a lane
-that reverts those merges (they are titled `away: <item>`), keeping to the dependencies in the log.
+that reverts those merges (they are titled `away: <item>`), keeping to the dependencies in the entries.
 
 ## The summary PR
 
 `lane-improve on` opens, for each project whose away branch it cuts or continues, a **draft PR** from `away/<date>` into
-the integration branch, titled `away: <date> (<project>)`, and records its number in `improve.json`. Its body is the
-summary at the top of `AWAY-LOG.md`, then **Items merged**: one line per merged item (title, PR number, short sha) with its
-`git revert -m 1 <sha>` (or "already reverted" when a later commit reverts it), read from git (the first-parent merges titled `away: <item>`, not the period record), oldest first;
-revert the latest first when later items build on it. `away-merge` brings it up to date after every merge (and opens it
-first if it was not open), so nobody has to remember to. It stays a draft: **no agent merges it, marks it ready or closes it**; you
-merge it (to adopt the whole branch) or name the items to drop. A PR you closed is left alone.
+the integration branch, titled `away: <date> (<project>)`, and records its number in `improve.json`. Its body is built from
+the branch, not from a file on it:
 
-GitHub opens no PR for a branch with nothing beyond its base, so `on` gives each new branch one start commit, `away: start
-<date>`, that adds the first `AWAY-LOG.md` from the template: the header (project, branch, integration branch), your
-limits verbatim, which projects the period covers (never another project's name: the branch may be public) and an empty
-summary. The PR therefore opens at `on` with that summary as its body. The branch is the integration head plus that one
-commit, authored as the checkout's configured git identity, with nothing else on it. `--continue` adds no new seed to a
-branch that has one (a project added with `--continue` gets its own, as it gets its own branch). When the commit cannot be
-made (the checkout has no git identity, or the integration branch already has an `AWAY-LOG.md`) the branch is cut from the
-head alone, `on` warns, and `away-merge` opens the PR after the first merged item (`lane-improve pr <project>` does it by
-hand). The start commit is not an item: it is the log's first version, and a branch with only it counts as never given any
-work when you decide to adopt or drop it.
+- a short **summary** the coordinator writes at the wrap-up (`lane-improve pr <project> --summary-file <path>`; what was
+  done, what to look at first, what to drop if unsure, what was skipped). Until then it says "No summary yet". Later
+  refreshes keep it;
+- **Items merged**: one line per merged item (title, PR number, short sha) with its `git revert -m 1 <sha>` (or "already
+  reverted" when a later commit reverts it), read from git (the first-parent merges titled `away: <item>`, not the period
+  record), oldest first; revert the latest first when later items build on it;
+- under the list, each item's **log entry** (what, why, builds on, existing work checked, how to try it, how to drop it,
+  tests), read from its merge commit message. GitHub refuses a PR body of more than 65536 characters: when the entries do
+  not fit they are shortened to their first lines, then left out, and the body says so (the whole entry stays in the
+  merge commit, `git show <sha>`, and in the item's PR).
+
+`away-merge` rebuilds it after every merge (and opens it first if it was not open), so nobody has to remember to. It stays a
+draft: **no agent merges it, marks it ready or closes it**; you merge it (to adopt the whole branch) or name the items to
+drop. A PR you closed is left alone.
+
+GitHub opens no PR for a branch with nothing beyond its base, so `on` gives each new branch one **empty** start commit,
+`away: start <date>` (an empty commit rather than none: without it the PR could not open at `on`, and `--continue` and the
+summary PR need nothing else). It adds no file. The branch is the integration head plus that one commit, authored as the
+checkout's configured git identity. `--continue` adds none to a branch that has one (a project added with `--continue` gets
+its own, as it gets its own branch). When the commit cannot be made (the checkout has no git identity) the branch is cut from
+the head alone, `on` warns, and `away-merge` opens the PR after the first merged item (`lane-improve pr <project>` does it by
+hand). The start commit is not an item: a branch with only it counts as never given any work when you decide to adopt or drop it.
+
+## The item PR and its entry
+
+Each build lane opens its PR into the away branch with the entry in its body, under these headings (template
+`core/templates/away-entry.md`): What, Why, Builds on, Existing work checked, How to try it, How to drop it, Tests.
+`away-merge` refuses a PR whose body lacks one (one line naming what is missing), copies the entry into the merge commit's
+message body after the `Pull request #<n>` line (the subject stays `away: <item>`), and, when the PR is still a draft
+(lane PRs open as drafts and GitHub will not merge a draft), marks it ready first. It never touches the summary PR.
 
 ## What keeps it inside its limits
 
@@ -140,7 +157,7 @@ Be clear about what is enforced and what is a backstop.
 - **`away-merge` is the only merge route and it checks**: improve mode is on (or draining) for the project; the PR's
   base is exactly the project's recorded away branch (never main, develop or another project's branch); a review
   comment by the gh login running the script says `Review: passed <head sha>` for the current head (the PR body never
-  counts); CI is green, or `--local-suite-ok <log of the full suite run through lane-heavy>` (the log must end in a pass
+  counts); the PR body holds the log entry (all seven headings); CI is green, or `--local-suite-ok <log of the full suite run through lane-heavy>` (the log must end in a pass
   and its last line is printed; use it only when CI itself is failing for reasons outside the change); a secret scan
   (gitleaks if the project has a `.gitleaks.toml`, else a built-in scan for keys, tokens, home paths and private
   addresses); for a public repo, the names it must not carry (hostnames, usernames, project names) in the added lines and
@@ -190,7 +207,7 @@ once to look for new work. Nudges go out by day or night; the plain check-ins st
 | Period record | `improve-period.json` beside it: `away-merge`'s record of each merge (what `--max-items` counts) and the projects that wrapped up at a cap; it belongs to one period (its `started`), so a new period counts from nothing |
 | Nudge idle time | `IMPROVE_IDLE_MIN` in `machine.conf` (default 30 minutes) |
 | Deny rules | each coordinator checkout's uncommitted `.claude/settings.local.json`; for OpenCode a guard plugin next to the persona plugin and a record under the user's state folder |
-| The branch's log | `AWAY-LOG.md` on `away/<date>` (template `core/templates/AWAY-LOG.md`) |
+| An item's log entry | its PR body, then its merge commit's message on `away/<date>` (template `core/templates/away-entry.md`) |
 
 ## What is tested, and what is not
 
@@ -199,8 +216,8 @@ test suite, using temporary repositories and stubs for `gh` and `gitleaks`. The 
 real `opencode2` serving a fake model on localhost, but that test is opt-in
 (`LANE_LIVE_OPENCODE=1 python3 -m unittest tests.test_opencode_guard.GuardLiveTests`) and is not run by the
 suite. The summary PR, the caps and the protection report are covered the same way, with a stub `gh` that models
-`pr list --head`, `pr create --draft`, `pr edit` and the protection answers (everyone, partly, none, ruleset, 403, an
+`pr list --head`, `pr create --draft`, `pr edit`, `pr ready` and the protection answers (everyone, partly, none, ruleset, 403, an
 unreadable one), and the start commit is checked against real temporary git repositories; none of the `gh` calls has run against the real GitHub, so the first real `on` is where the PR calls and the
 protection wording get their test. A real away period (scout and build lanes, reviews, `away-merge` against GitHub, the draft
-PR on return) has not been run end to end; the first one is the real test. Watch `lane-improve status` and the log, and expect to
+PR on return) has not been run end to end; the first one is the real test. Watch `lane-improve status` and the summary PR, and expect to
 adjust the skill from what you see.

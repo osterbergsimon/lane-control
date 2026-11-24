@@ -579,7 +579,7 @@ class NativeSkillTests(Case):
         skill = self.e.home / ".agents" / "skills" / "away-improve"
         src = ROOT / "orchestrators" / "native-orca" / "skills" / "away-improve" / "SKILL.md"
         self.assertEqual((skill / "SKILL.md").read_text(), src.read_text())
-        for name in ("away-innovation.md", "away-scout-brief.md", "away-build-brief.md", "AWAY-LOG.md"):
+        for name in ("away-innovation.md", "away-scout-brief.md", "away-build-brief.md", "away-entry.md"):
             self.assertEqual((skill / name).read_text(), (ROOT / "core" / "templates" / name).read_text(), name)
         for agent_dir in (self.e.home / ".claude" / "skills", Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills"):
             link = agent_dir / "away-improve"
