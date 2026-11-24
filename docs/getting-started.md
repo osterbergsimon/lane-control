@@ -261,18 +261,20 @@ harness, and the table is yours to edit.
    adapting agent and its reviewer, which must be different models. Without them they are Claude (`claude/sonnet` and
    `claude/opus`), and a machine without Claude then stops with `claude not on PATH, but the onboarding agents use it`.
 
-**Onboarding on OpenCode.** On a project not onboarded yet, each onboarding agent runs as `opencode2 run` in the repo,
-with the same prompts, checks and review round as on Claude. It reads the project with `read` alone (no shell, grep,
-glob or web) and never its private files: `.git`, git-ignored paths, `.env*`, the files your `--private` globs match,
-and every symlink that leads to a folder, out of the repo or to one of those (a link to a readable file, like
-`AGENTS.md -> CLAUDE.md`, stays readable). Only the adapter writes, only under `.lane-control/`. The project's own
-OpenCode config and plugins are not loaded. The two flags are kept in the project's settings store once given, so a
-later run or `--readapt` without them uses the same models; a run that uses a default says so beside the model
-(`adapt: running claude/sonnet (the default: ...)`). An onboarded
-project (its `.lane-control/` files and `AGENTS.lane-control.md` committed on the default branch) says `adapt: exists
-.lane-control/ is committed` and runs no onboarding agent, so the flags make no difference there. The details, and how
-it differs from Claude's run, are in [the native Orca setup](../orchestrators/native-orca/setup.md), "OpenCode on a
-self-hosted LiteLLM gateway".
+**Onboarding on OpenCode.** On a project not onboarded yet, each onboarding agent runs as `opencode2 run` in a scratch
+copy of the project, with the same prompts, checks and review round as on Claude. The copy holds only what it may see:
+the tracked files (and onboarding's own new files under `.lane-control/`), minus `.env*` files and everything your
+`--private` globs cover. It has no `.git`, no ignored file and no symlink: a link to a file that is in the copy, like
+`AGENTS.md -> CLAUDE.md`, comes as that file's content, and every other link is left out. So OpenCode never sees a
+private file, including an `AGENTS.md` it would attach by itself. In the copy the agent has `read` alone (no shell,
+grep, glob or web), and only the adapter writes, only under `.lane-control/`. Only new or changed files there come back
+to the repo; anything else it changed stops the run, and nothing is copied. The project's own OpenCode config and
+plugins are not loaded. The two flags are kept in the project's settings store once given, so a later run or `--readapt`
+without them uses the same models; a run that uses a default says so beside the model (`adapt: running claude/sonnet
+(the default: ...)`). An onboarded project (its `.lane-control/` files and `AGENTS.lane-control.md` committed on the
+default branch) says `adapt: exists .lane-control/ is committed` and runs no onboarding agent, so the flags make no
+difference there. The details, and how it differs from Claude's run, are in [the native Orca
+setup](../orchestrators/native-orca/setup.md), "OpenCode on a self-hosted LiteLLM gateway".
 
 ### What the setup does, and what you should see
 

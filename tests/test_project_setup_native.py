@@ -446,7 +446,11 @@ class OpenCodeOnboardingTests(Case):
         return status
 
     def config(self, run):
-        return json.loads(run["config"])["agents"]["lane-onboard"]
+        agents = json.loads(run["config"])["agents"]
+        self.assertEqual(len(agents), 1)
+        name, conf = next(iter(agents.items()))
+        self.assertEqual(run["argv"][run["argv"].index("--agent") + 1], name)
+        return conf
 
     def rules(self, run):
         return [(r["action"], r["resource"], r["effect"]) for r in self.config(run)["permissions"]]
@@ -459,13 +463,20 @@ class OpenCodeOnboardingTests(Case):
         self.assertNotIn("claude not on PATH", self.err)
         runs = self.e.agent_runs()
         self.assertEqual([(r["tool"], r["model"]) for r in runs], [("opencode2", OC_ADAPTER), ("opencode2", OC_REVIEWER)])
+        names = set()
         for r in runs:
             with self.subTest(model=r["model"]):
                 # OpenCode's own non-interactive form; the prompt on stdin (an argument starting with - would be
-                # read as a flag), the repo as the working folder, a private server so this config reaches it
-                self.assertEqual(r["argv"], ["run", "--standalone", "--model", r["model"], "--agent", "lane-onboard",
-                                             "--format", "json"])
-                self.assertEqual(Path(r["cwd"]).resolve(), self.repo.resolve())
+                # read as a flag); an agent whose name is new each run (m7: no owner config can name it)
+                self.assertEqual(r["argv"][:4], ["run", "--standalone", "--model", r["model"]])
+                self.assertEqual(r["argv"][4], "--agent")
+                self.assertRegex(r["argv"][5], r"^lane-onboard-[0-9a-f]{12}$")
+                self.assertEqual(r["argv"][6:], ["--format", "json"])
+                names.add(r["argv"][5])
+                # it runs in a scratch copy, outside the repo, removed afterwards
+                cwd = Path(r["cwd"]).resolve()
+                self.assertFalse(cwd.is_relative_to(self.repo.resolve()), cwd)
+                self.assertFalse(cwd.exists())
                 self.assertIn("lane-control", r["prompt"])
                 self.assertEqual(r["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")  # no project plugin or config
                 self.assertIsNone(r["env"]["LANE_ROLE"])  # never a coordinator's persona or guard
@@ -476,107 +487,142 @@ class OpenCodeOnboardingTests(Case):
                 self.assertEqual(r["env"]["LITELLM_API_KEY"], GATEWAY_KEY)
                 self.assertNotIn(GATEWAY_KEY, " ".join(r["argv"]))
                 self.assertNotIn(GATEWAY_KEY, r["config"])
-                # the config is a memfd of project-setup's (m3: no size limit, never a file), not a variable
+                # the config is a memfd of project-setup's, never a file, and the owner's variable is left alone
                 self.assertRegex(r["env"]["OPENCODE_CONFIG"], r"^/proc/\d+/fd/\d+$")
                 self.assertIsNone(r["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(len(names), 2)
         committed = git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
-        self.assertIn(ADDITION, committed)
+        self.assertIn(ADDITION, committed)  # the adapter's files came back from its copy
 
-    def test_permissions_read_the_repo_write_only_lane_control_and_nothing_else(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+    def private_repo(self):
+        """A repo with every shape of private file the reviews found (B1-B6, m5), committed where git allows."""
         outside = self.e.home / "app-beads"
         outside.mkdir()
-        (self.repo / ".gitignore").write_text("data/\n.beads\nsub/secret.key\n")
-        (self.repo / "data").mkdir()
-        (self.repo / "data" / "x.csv").write_text("private\n")
-        (self.repo / ".env").write_text("SECRET=1\n")
+        (outside / "config.yaml").write_text("x\n")
+        files = {
+            ".gitignore": "data/\n.beads\nsub/secret.key\nsub/AGENTS.md\n*.txt\n!keep.txt\n",
+            "docs/.gitignore": "!*.md\n", "data/x.csv": "p\n", ".env": "SECRET=1\n", "sub/secret.key": "k\n",
+            "sub/AGENTS.md": "ignored notes\n", "sub/ok.md": "ok\n", "secrets/a.md": "x\n", "private/b.md": "x\n",
+            "root.pem": "x\n", "shot1.md": "x\n", "shots/f.png": "x\n", "docs/private/plan.md": "x\n",
+            "#notes/a.md": "x\n", "config/keys.md": "x\n", "app/(group)/p.tsx": "x\n", "app/[id]/q.tsx": "x\n",
+            "keep.txt": "readable\n", "CLAUDE.md": "# rules\n", "lib/AGENTS.md": "private nested notes\n",
+        }
+        for n, text in files.items():
+            (self.repo / n).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / n).write_text(text)
         (self.repo / ".beads").symlink_to(outside)  # B1: an ignored link to a folder out of the repo
-        (self.repo / "docs.md").symlink_to("/etc/hostname")  # a link to a file out of the repo
-        (self.repo / "keys").symlink_to(".env")  # a link to a private file
-        (self.repo / "self").symlink_to(".")  # B2: links to folders that hold private files
-        (self.repo / "sub").mkdir()
-        (self.repo / "sub" / "secret.key").write_text("k\n")
-        (self.repo / "sub" / "ok.txt").write_text("ok\n")
-        (self.repo / "sublink").symlink_to("sub")
-        for d, f in (("secrets", "a.txt"), ("private", "b.txt"), ("shots", "f.png")):  # B3: the --private forms
-            (self.repo / d).mkdir()
-            (self.repo / d / f).write_text("x\n")
-        (self.repo / "root.pem").write_text("pem\n")
-        (self.repo / "shot1.txt").write_text("s\n")
-        (self.repo / "CLAUDE.md").write_text("# rules\n")
-        (self.repo / "rules.md").symlink_to("CLAUDE.md")  # a link to a readable file stays readable
+        (self.repo / "self").symlink_to(".")  # B2: a link to a folder holding private files
+        (self.repo / "keys").symlink_to(".env")
+        (self.repo / "out.md").symlink_to("/etc/hostname")
+        (self.repo / "rules.md").symlink_to("CLAUDE.md")  # a link to a readable file
         git("add", "-A", cwd=self.repo)
+        git("add", "-f", "keep.txt", cwd=self.repo)
         git("commit", "-qm", "files", cwd=self.repo)
-        globs = ("secrets", "private/", "**/*.pem", "shot[0-9].txt", "shots/**")
+        return ("secrets", "private/", "**/*.pem", "shot[0-9].md", "shots/**", "docs/private/**", "#notes/**",
+                "config/**", "app/**", "lib/AGENTS.md")
+
+    def test_the_copy_holds_only_what_the_agents_may_see(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        globs = self.private_repo()
         self.assertEqual(self.setup(*ALL_OPENCODE, *[x for g in globs for x in ("--private", g)]), 0,
                          self.err + self.out)
         adapter, reviewer = self.e.agent_runs()
         for r in (adapter, reviewer):
-            rules = self.rules(r)
             with self.subTest(model=r["model"]):
-                self.assertEqual(rules[0], ("*", "*", "deny"))  # shell, web, MCP, sub-agents, questions: all off
-                self.assertIn(("read", "*", "allow"), rules)
-                # grep reads a denied file; glob lists names through a linked folder: both off
-                self.assertEqual([a for a, _, e in rules if e == "allow"], ["read"] + (["edit"] if r is adapter else []))
-                for private in (".git", ".git/**", "**/.git/**", "data", "data/**", ".env", ".beads", ".beads/**",
-                                "docs.md", "docs.md/**", "keys", "self", "self/**", "sublink", "sublink/**",
-                                "sub/secret.key", "secrets/a.txt", "secrets", "secrets/**", "private/b.txt",
-                                "private", "private/**", "root.pem", "shot1.txt", "shots/f.png"):
-                    self.assertIn(("read", private, "deny"), rules)
-                    # the last rule that matches wins: every deny comes after the allows
-                    self.assertGreater(rules.index(("read", private, "deny")), rules.index(("read", "*", "allow")))
-                for readable in ("rules.md", "CLAUDE.md", "sub/ok.txt", "sub"):
-                    self.assertNotIn(("read", readable, "deny"), rules)
-        self.assertIn(("edit", ".lane-control/**", "allow"), self.rules(adapter))
-        self.assertNotIn("edit", [a for a, _, e in self.rules(reviewer) if e == "allow"])
+                files = set(r["files"])
+                self.assertFalse([f for f in files if f.endswith("@")], files)  # no link at all
+                for private in (".env", "data/x.csv", "sub/secret.key", "sub/AGENTS.md", "secrets/a.md",
+                                "private/b.md", "root.pem", "shot1.md", "shots/f.png", "docs/private/plan.md",
+                                "#notes/a.md", "config/keys.md", "app/(group)/p.tsx", "app/[id]/q.tsx",
+                                "lib/AGENTS.md", "keys", "out.md", "self", ".beads"):
+                    self.assertNotIn(private, files)
+                self.assertFalse([f for f in files if f.startswith((".git/", ".beads/", "self/"))], files)
+                for readable in ("CLAUDE.md", "rules.md", "sub/ok.md", "keep.txt", ".gitignore"):
+                    self.assertIn(readable, files)
+                rules = self.rules(r)
+                self.assertEqual(rules[:2], [("*", "*", "deny"), ("read", "*", "allow")])  # second layer
+        self.assertEqual(self.rules(adapter)[2:], [("edit", ".lane-control/**", "allow")])
+        self.assertEqual(self.rules(reviewer)[2:], [])
+        for ours in (".lane-control/project.md", "AGENTS.md", GENERATED):  # the reviewer sees onboarding's work
+            self.assertIn(ours, reviewer["files"])
         self.assertEqual(self.config(adapter)["steps"], 81)  # 80 turns, then OpenCode's forced last answer
         self.assertEqual(self.config(reviewer)["steps"], 61)
 
-    def test_links_and_globs_in_a_nested_repo_are_denied_too(self):
+    def test_globs_match_from_the_repo_root_whatever_the_working_folder(self):
+        # B5: started from a subfolder, an anchored glob still covers its files
         self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
-        lib = self.repo / "vendor" / "lib"
-        lib.mkdir(parents=True)
-        git("init", "-q", cwd=lib)
-        (lib / ".gitignore").write_text("cache/\n")
-        (lib / "cache").mkdir()
-        (lib / "key.pem").write_text("k\n")
+        (self.repo / "config").mkdir()
+        (self.repo / "config" / "keys.md").write_text("x\n")
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "a.md").write_text("x\n")
+        git("add", "-A", cwd=self.repo)
+        git("commit", "-qm", "files", cwd=self.repo)
+        here = os.getcwd()
+        os.chdir(self.repo / "docs")
+        self.addCleanup(os.chdir, here)
+        self.assertEqual(self.setup(*ALL_OPENCODE, "--private", "config/**"), 0, self.err + self.out)
+        files = self.e.agent_runs()[0]["files"]
+        self.assertNotIn("config/keys.md", files)
+        self.assertIn("docs/a.md", files)
+
+    def test_a_submodule_is_copied_without_its_private_files_and_an_embedded_repo_not_at_all(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        lib = self.e.home / "lib-src"
+        lib.mkdir()
+        git("init", "-q", "-b", "main", cwd=lib)
+        for n, text in (("readme.md", "r\n"), ("key.pem", "k\n"), ("AGENTS.md", "lib notes\n"), (".env", "S=1\n")):
+            (lib / n).write_text(text)
         (lib / "up").symlink_to("..")
-        (lib / "readme.md").write_text("r\n")
         git("add", "-A", cwd=lib)
         git("commit", "-qm", "lib", cwd=lib)
-        self.assertEqual(self.setup(*ALL_OPENCODE, "--private", "**/*.pem"), 0, self.err + self.out)
-        rules = self.rules(self.e.agent_runs()[0])
-        for private in ("vendor/lib/up", "vendor/lib/up/**", "vendor/lib/key.pem", "vendor/lib/cache",
-                        "vendor/lib/cache/**", "**/.git/**"):
-            self.assertIn(("read", private, "deny"), rules)
-        self.assertNotIn(("read", "vendor/lib/readme.md", "deny"), rules)
+        git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib", cwd=self.repo)
+        git("commit", "-qm", "submodule", cwd=self.repo)
+        embedded = self.repo / "tools" / "x"
+        embedded.mkdir(parents=True)
+        git("init", "-q", cwd=embedded)
+        (embedded / "note.md").write_text("n\n")
+        git("add", "-A", cwd=embedded)
+        git("commit", "-qm", "x", cwd=embedded)
+        self.assertEqual(self.setup(*ALL_OPENCODE, "--private", "**/*.pem", "--private", "vendor/lib/AGENTS.md"), 0,
+                         self.err + self.out)
+        files = set(self.e.agent_runs()[0]["files"])
+        self.assertIn("vendor/lib/readme.md", files)
+        for private in ("vendor/lib/key.pem", "vendor/lib/AGENTS.md", "vendor/lib/.env", "vendor/lib/up",
+                        "tools/x/note.md"):
+            self.assertNotIn(private, files)
+        self.assertFalse([f for f in files if ".git" in f.split("/")], files)
 
-    def test_a_link_under_lane_control_is_denied_for_edit_too(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
-        (self.repo / ".lane-control").mkdir()
-        (self.repo / ".lane-control" / "out").symlink_to(self.e.home)
-        git("add", "-A", cwd=self.repo)
-        git("commit", "-qm", "a link", cwd=self.repo)
-        self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)
-        rules = self.rules(self.e.agent_runs()[0])
-        for p in (".lane-control/out", ".lane-control/out/**"):
-            self.assertIn(("edit", p, "deny"), rules)
-            self.assertGreater(rules.index(("edit", p, "deny")), rules.index(("edit", ".lane-control/**", "allow")))
+    def test_only_lane_control_comes_back_from_the_adapter(self):
+        self.opencode_agents({OC_ADAPTER: [{"write": {ADDITION: "x\n", "AGENTS.md": "rewritten\n"}}]})
+        before = (self.repo / "AGENTS.md").read_text() if (self.repo / "AGENTS.md").exists() else None
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+        self.assertIn("the OpenCode adapting agent changed AGENTS.md in its copy of the project, outside what it may "
+                      "write (.lane-control/, adapter only): nothing it wrote was copied back", self.err)
+        self.assertFalse((self.repo / ADDITION).exists())
+        after = (self.repo / "AGENTS.md").read_text() if (self.repo / "AGENTS.md").exists() else None
+        self.assertNotEqual(after, "rewritten\n")
+        self.assertEqual(before, None if after is None else before)
 
-    def test_hundreds_of_ignored_folders_fit(self):
-        # m3: over Claude's command-line limit for OpenCode's environment; the memfd carries any size
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
-        (self.repo / ".gitignore").write_text("__pycache__/\n")
-        for i in range(2000):
-            d = self.repo / "src" / f"package{i:04d}" / "__pycache__"
-            d.mkdir(parents=True)
-            (d / "m.pyc").write_text("x")
-        git("add", ".gitignore", cwd=self.repo)
-        git("commit", "-qm", "ignore", cwd=self.repo)
+    def test_the_reviewer_writes_nothing_back(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [{"write": {ADDITION: "changed\n"}, **PASS}]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+        self.assertIn(f"the OpenCode reviewer changed {ADDITION} in its copy", self.err)
+        self.assertEqual((self.repo / ADDITION).read_text(), WRITE_NATIVE["write"][ADDITION])
+
+    def test_an_unreadable_memfd_falls_back_to_the_environment(self):
+        # m6: OpenCode behind a wrapper that cannot open the parent's /proc fd says the agent is not found
+        self.opencode_agents({OC_ADAPTER: [{"error": 'Agent not found: "x"', "exit": 1}, WRITE_NATIVE],
+                              OC_REVIEWER: [PASS]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)
-        rules = self.rules(self.e.agent_runs()[0])
-        self.assertIn(("read", "src/package1999/__pycache__/**", "deny"), rules)
-        self.assertGreater(len(self.e.agent_runs()[0]["config"]), 120000)
+        first, again = self.e.agent_runs()[:2]
+        self.assertIsNotNone(first["env"]["OPENCODE_CONFIG"])
+        self.assertIsNone(again["env"]["OPENCODE_CONFIG"])
+        self.assertEqual(json.loads(again["env"]["OPENCODE_CONFIG_CONTENT"]), json.loads(again["config"]))
+
+    def test_an_unreadable_memfd_with_an_owner_config_says_why(self):
+        self.opencode_agents({OC_ADAPTER: [{"error": 'Agent not found: "x"', "exit": 1}]})
+        self.assertEqual(self.setup(*ALL_OPENCODE, env_extra={"OPENCODE_CONFIG_CONTENT": "{}"}), 1)
+        self.assertIn("opencode2 could not read its config from project-setup's memfd", self.err)
 
     def test_an_empty_opencode_run_is_a_failure_with_what_it_said(self):
         # m2: exit 0 with no answer and no tool call (a help print, an empty answer) is no result
@@ -656,12 +702,17 @@ class OpenCodeOnboardingTests(Case):
 
 @unittest.skipUnless(os.environ.get("LANE_LIVE_OPENCODE") and shutil.which("opencode2"), "opt-in: LANE_LIVE_OPENCODE=1")
 class OpenCodeOnboardingLiveTests(unittest.TestCase):
-    """The real opencode2 (2.x) run as project-setup runs an onboarding agent (opencode_agent: its argv, its config, the
-    prompt on stdin), in temp HOME/XDG folders, against tests/stubs/fake_tool_llm.py on 127.0.0.1 (no real provider,
-    no sign-in), which asks for one tool call per run. The owner's own config allows everything and names another
-    default agent, and the repo has its own OpenCode plugin: the run's rules still hold and the plugin never loads.
-    About 10 s. Run: LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p test_project_setup_native.py
-    -k OpenCodeOnboardingLiveTests"""
+    """The real opencode2 (2.x) run as project-setup runs an onboarding agent (run_opencode: the scratch copy, its argv
+    and config, the prompt on stdin, the copy back), in temp HOME/XDG folders, against tests/stubs/fake_tool_llm.py on
+    127.0.0.1 (no real provider, no sign-in), which asks for one tool call per run. Every private file holds a marker
+    of its own, and every request the model gets is searched for all of them, so what OpenCode adds by itself (an
+    AGENTS.md it attaches, B6) counts as much as a tool result. The owner's own config allows everything and names
+    another default agent, the owner's OPENCODE_CONFIG_CONTENT defines an allow-all `lane-onboard` (m7), and the repo
+    has its own OpenCode plugin. About 40 s. Run: LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p
+    test_project_setup_native.py -k OpenCodeOnboardingLiveTests"""
+
+    GLOBS = ["secrets", "private/", "**/*.pem", "shot[0-9].md", "shots/**", "docs/private/**", "#notes/**",
+             "config/**", "app/**", "lib/AGENTS.md"]
 
     def setUp(self):
         import tempfile
@@ -671,46 +722,61 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.t = Path(tmp.name)
-        for d in ("home", "config/opencode", "data", "state", "cache"):
+        for d in ("home", "config/opencode", "data", "state", "cache", "beads"):
             (self.t / d).mkdir(parents=True)
         self.repo = self.t / "repo"
         self.repo.mkdir()
         git("init", "-q", "-b", "main", cwd=self.repo)
-        (self.repo / "AGENTS.md").write_text("readable\n")
-        (self.repo / ".gitignore").write_text("data/\n.beads\nsub/secret.key\n")
-        (self.repo / "data").mkdir()
-        (self.repo / "data" / "x.csv").write_text("PRIVATE-DATA\n")
-        (self.repo / ".env").write_text("SECRET=1\n")
-        (self.t / "outside.txt").write_text("OUTSIDE\n")
-        (self.repo / "link.txt").symlink_to(self.t / "outside.txt")
-        (self.t / "beads").mkdir()  # B1: the beads layout, an ignored link to a folder out of the repo
-        (self.t / "beads" / "config.yaml").write_text("OUTSIDE-BEADS\n")
-        (self.repo / ".beads").symlink_to(self.t / "beads")
-        (self.repo / "self").symlink_to(".")  # B2: links to folders holding private files
-        (self.repo / "sub").mkdir()
-        (self.repo / "sub" / "secret.key").write_text("IGNORED-KEY\n")
-        (self.repo / "sub" / "ok.txt").write_text("readable-sub\n")
-        (self.repo / "sublink").symlink_to("sub")
-        for d, f in (("secrets", "a.txt"), ("private", "b.txt"), ("shots", "a.txt")):  # B3: the --private forms
-            (self.repo / d).mkdir()
-            (self.repo / d / f).write_text("GLOB-PRIVATE\n")
-        (self.repo / "alias").symlink_to("shots")
-        (self.repo / "root.pem").write_text("GLOB-PRIVATE\n")
-        (self.repo / "shot1.txt").write_text("GLOB-PRIVATE\n")
-        (self.repo / "CLAUDE.md").write_text("claude-rules\n")
+        self.secrets = {}
+
+        def secret(path, base=self.repo):
+            mark = f"LIVE-SECRET-{len(self.secrets):02d}"
+            self.secrets[mark] = str(path)
+            (base / path).parent.mkdir(parents=True, exist_ok=True)
+            (base / path).write_text(mark + "\n")
+
+        files = {"AGENTS.md": "root rules readable\n", "CLAUDE.md": "claude-rules\n", "sub/ok.md": "readable-sub\n",
+                 "keep.txt": "readable-keep\n", "docs/a.md": "readable-docs\n", "lib/ok.md": "readable-lib\n",
+                 # B4: a whitelist .gitignore (its negations must not switch a --private glob off), then the
+                 # ignored files, after it, so no negation takes them back
+                 ".gitignore": "*\n!*/\n!*.md\n!.gitignore\n!keep.txt\n!*.png\n!*.pem\n!*.tsx\n"
+                               "data/\n.beads\nsub/secret.key\nsub/AGENTS.md\n",
+                 "docs/.gitignore": "!*.md\n"}
+        for n, text in files.items():
+            (self.repo / n).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / n).write_text(text)
+        for n in (".env", "data/x.csv", "sub/secret.key", "sub/AGENTS.md", "secrets/a.md", "private/b.md", "root.pem",
+                  "shot1.md", "shots/f.png", "docs/private/plan.md", "#notes/a.md", "config/keys.md",
+                  "app/(group)/p.tsx", "app/[id]/q.tsx", "lib/AGENTS.md"):
+            secret(n)
+        secret("config.yaml", self.t / "beads")
+        secret("outside.md", self.t)
+        (self.repo / ".beads").symlink_to(self.t / "beads")  # B1
+        (self.repo / "self").symlink_to(".")  # B2
+        (self.repo / "keys").symlink_to(".env")
+        (self.repo / "out.md").symlink_to(self.t / "outside.md")
+        (self.repo / "lib" / "link").mkdir()
+        (self.repo / "lib" / "link" / "AGENTS.md").symlink_to(self.t / "outside.md")  # B6: an AGENTS.md link out
         (self.repo / "rules.md").symlink_to("CLAUDE.md")
         (self.repo / ".opencode" / "plugins").mkdir(parents=True)
         (self.repo / ".opencode" / "plugins" / "p.js").write_text(
             f'import fs from "fs"\nfs.writeFileSync({json.dumps(str(self.t / "plugin-ran"))}, "x")\n'
             'export default { id: "p", setup() {} }\n')
-        git("add", "AGENTS.md", ".gitignore", "link.txt", "self", "sub/ok.txt", "sublink", "secrets", "private",
-            "shots", "alias", "root.pem", "shot1.txt", "CLAUDE.md", "rules.md", cwd=self.repo)
+        git("add", "-A", cwd=self.repo)
+        git("add", "-f", "keep.txt", "lib/link/AGENTS.md", "self", "keys", "out.md", "rules.md", cwd=self.repo)
         git("commit", "-qm", "init", cwd=self.repo)
+        tracked = git("ls-files", cwd=self.repo).splitlines()
+        for n in ("sub/AGENTS.md", "sub/secret.key", "data/x.csv", ".beads"):  # really ignored, so never tracked
+            self.assertNotIn(n, tracked)
+        for n in ("secrets/a.md", "docs/private/plan.md", "#notes/a.md", "lib/AGENTS.md", "app/(group)/p.tsx", "self",
+                  "lib/link/AGENTS.md"):
+            self.assertIn(n, tracked)  # tracked: private only by --private, or a link
         self.m = load()
-        self.m.PRIVATE_GLOBS[:] = ["secrets", "private/", "**/*.pem", "shot[0-9].txt", "shots/**"]
+        self.m.PRIVATE_GLOBS[:] = self.GLOBS
 
-    def call(self, tool: str, args: dict, write: bool):
-        """One onboarding run whose model asks for `tool` with `args`; returns (tool result, run text, status)."""
+    def call(self, tool: str, args: dict, write: bool, cwd: "Path | None" = None):
+        """One onboarding run whose model asks for `tool` with `args`; returns (tool result, run text). Fails when any
+        marker reached the model."""
         log = self.t / "requests.jsonl"
         log.write_text("")
         fake = subprocess.Popen([sys.executable, str(ROOT / "tests" / "stubs" / "fake_tool_llm.py"), str(log)],
@@ -724,64 +790,82 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
             "permission": {"*": "allow"}, "default_agent": "plan",
             "provider": {"lanetest": {"npm": "@ai-sdk/openai-compatible", "name": "lanetest", "models": {"m": {}},
                                       "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "unused"}}}}))
+        owner = {"agents": {"lane-onboard": {"mode": "primary", "permission": {"*": "allow"}}}}  # m7
         env = {"PATH": os.environ["PATH"], "HOME": str(self.t / "home"), "XDG_CONFIG_HOME": str(self.t / "config"),
                "XDG_DATA_HOME": str(self.t / "data"), "XDG_STATE_HOME": str(self.t / "state"),
                "XDG_CACHE_HOME": str(self.t / "cache"), "OPENCODE_DISABLE_MODELS_FETCH": "1",
-               "OPENCODE_DISABLE_AUTOUPDATE": "1", "LANE_ROLE": "coordinator"}
-        with mock.patch.dict(os.environ, env, clear=True):
-            with self.m.opencode_agent("lanetest/m", write, self.m.opencode_private(self.repo)) as (cmd, run_env):
-                self.assertIn("OPENCODE_CONFIG", run_env)  # the memfd, as project-setup runs it
-                p = subprocess.run(cmd, cwd=self.repo, env=run_env, input="- RUN-TOOL check", capture_output=True,
-                                   text=True, timeout=180)
+               "OPENCODE_DISABLE_AUTOUPDATE": "1", "LANE_ROLE": "coordinator",
+               "OPENCODE_CONFIG_CONTENT": json.dumps(owner)}
+        here = os.getcwd()
+        try:
+            os.chdir(cwd or self.t)
+            with mock.patch.dict(os.environ, env, clear=True):
+                p = self.m.run_opencode(self.repo, "lanetest/m", "- RUN-TOOL check", write)
+        finally:
+            os.chdir(here)
         text, _, error = self.m.opencode_result(p.stdout)
-        results = [m["content"] for line in log.read_text().splitlines()
-                   for m in json.loads(json.loads(line)["body"]).get("messages", []) if m.get("role") == "tool"]
         self.assertEqual((p.returncode, error), (0, ""), p.stderr[-2000:])
+        body = log.read_text()
+        leaked = {m: path for m, path in self.secrets.items() if m in body}
+        self.assertEqual(leaked, {}, f"{tool} {args}: private content reached the model")
+        results = [m["content"] for line in body.splitlines()
+                   for m in json.loads(json.loads(line)["body"]).get("messages", []) if m.get("role") == "tool"]
+        self.assertFalse((self.t / "plugin-ran").exists())  # the project's own plugin never ran
         return (str(results[-1]) if results else ""), text
 
     def test_reads_the_repo(self):
         got, text = self.call("read", {"path": "AGENTS.md"}, write=False)
-        self.assertIn("readable", got)
+        self.assertIn("root rules readable", got)
         self.assertEqual(text, "done")  # the last message's text, as claude -p prints it
-        self.assertFalse((self.t / "plugin-ran").exists())  # the project's own plugin never ran
+        for path, want in (("rules.md", "claude-rules"), ("sub/ok.md", "readable-sub"), ("keep.txt", "readable-keep"),
+                           ("lib/ok.md", "readable-lib")):
+            with self.subTest(path=path):
+                self.assertIn(want, self.call("read", {"path": path}, write=False)[0])
 
-    def test_private_paths_and_links_out_are_denied(self):
-        for path in (".env", "data/x.csv", ".git/config", "link.txt", str(self.t / "outside.txt"),
-                     ".beads/config.yaml", "./.beads/config.yaml", ".beads",  # B1
-                     "self/.env", "self/data/x.csv", "self//.env", "sublink/secret.key", "self/sub/secret.key",  # B2
-                     "secrets/a.txt", "private/b.txt", "root.pem", "shot1.txt", "shots/a.txt", "alias/a.txt"):  # B3
+    def test_no_private_content_reaches_the_model(self):
+        repo = str(self.repo)
+        for path in (".env", "data/x.csv", ".git/config", f"{repo}/.env", f"{repo}/.git/config",
+                     ".beads/config.yaml", ".beads",  # B1
+                     "self/.env", "self/data/x.csv", "keys", "out.md", "self/sub/secret.key",  # B2
+                     "secrets/a.md", "private/b.md", "root.pem", "shot1.md", "shots/f.png",  # B3
+                     "docs/private/plan.md", "#notes/a.md",  # B4: whitelist .gitignore, a leading #
+                     "config/keys.md",  # B5 below runs it from a subfolder too
+                     "sub/AGENTS.md", "lib/AGENTS.md", "lib/link/AGENTS.md",  # B6
+                     "app/(group)/p.tsx", "app/[id]/q.tsx"):  # m5
             with self.subTest(path=path):
                 got, _ = self.call("read", {"path": path}, write=False)
-                self.assertIn("Permission denied", got)
-                for secret in ("SECRET", "OUTSIDE", "PRIVATE-DATA", "IGNORED-KEY", "GLOB-PRIVATE"):
-                    self.assertNotIn(secret, got)
+                self.assertNotIn("LIVE-SECRET", got)
 
-    def test_readable_files_and_links_to_them_stay_readable(self):
-        for path, text in (("rules.md", "claude-rules"), ("sub/ok.txt", "readable-sub")):
+    def test_folder_reads_attach_no_private_agents_md(self):
+        # B6: OpenCode adds "Instructions from: <folder>/AGENTS.md" when it reads in or lists a folder; none of the
+        # private ones is in the copy (call() searches every request for their markers)
+        for path in (".", "sub", "lib", "lib/link", "sub/ok.md", "lib/ok.md", "docs/a.md"):
             with self.subTest(path=path):
-                self.assertIn(text, self.call("read", {"path": path}, write=False)[0])
+                self.call("read", {"path": path}, write=False)
 
-    def test_folder_reads_stop_at_denied_paths(self):
-        got, _ = self.call("read", {"path": "."}, write=False)
-        self.assertIn("AGENTS.md", got)  # the agents look around with read on a folder
-        for path in (".beads", "self", "data", "secrets"):
-            with self.subTest(path=path):
-                self.assertIn("Permission denied", self.call("read", {"path": path}, write=False)[0])
+    def test_anchored_globs_hold_from_a_subfolder(self):
+        # B5: project-setup started in <repo>/docs
+        got, _ = self.call("read", {"path": "config/keys.md"}, write=False, cwd=self.repo / "docs")
+        self.assertNotIn("LIVE-SECRET", got)
+        self.assertIn("readable-docs", self.call("read", {"path": "docs/a.md"}, write=False, cwd=self.repo / "docs")[0])
 
-    def test_no_shell_grep_glob_or_web(self):
-        for tool, args in (("shell", {"command": f"touch {self.t / 'ran'}"}), ("grep", {"pattern": "SECRET", "path": ".env"}),
-                           ("glob", {"pattern": "**/*", "path": ".beads"}), ("webfetch", {"url": "http://127.0.0.1:9/"})):
+    def test_no_shell_grep_glob_or_web_even_with_an_owner_lane_onboard_agent(self):
+        # m7: the owner's OPENCODE_CONFIG_CONTENT defines an allow-all lane-onboard; the run's agent has another name
+        for tool, args in (("shell", {"command": f"touch {self.t / 'ran'}"}), ("grep", {"pattern": "LIVE", "path": "."}),
+                           ("glob", {"pattern": "**/*"}), ("webfetch", {"url": "http://127.0.0.1:9/"})):
             with self.subTest(tool=tool):
                 got, _ = self.call(tool, args, write=True)
                 self.assertIn("No tool named", got)
         self.assertFalse((self.t / "ran").exists())
 
-    def test_the_adapter_writes_only_lane_control(self):
+    def test_the_adapter_writes_only_lane_control_and_it_comes_back(self):
         got, _ = self.call("write", {"path": "AGENTS.md", "content": "changed"}, write=True)
-        self.assertIn("Permission denied", got)
-        self.assertEqual((self.repo / "AGENTS.md").read_text(), "readable\n")
-        got, _ = self.call("write", {"path": ".lane-control/project.md", "content": "facts"}, write=True)
+        self.assertIn("Permission denied", got)  # the second layer; copy_back would refuse it too
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), "root rules readable\n")
+        self.call("write", {"path": ".lane-control/project.md", "content": "facts"}, write=True)
         self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "facts")
+        got, _ = self.call("write", {"path": f"{self.repo}/.lane-control/x.md", "content": "x"}, write=True)
+        self.assertFalse((self.repo / ".lane-control" / "x.md").exists())  # the real repo is out of reach
         got, _ = self.call("write", {"path": ".lane-control/project.md", "content": "x"}, write=False)
         self.assertIn('No tool named \\"write\\"', got)  # the reviewer has no write tool at all
         self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "facts")

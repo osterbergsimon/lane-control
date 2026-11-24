@@ -3,7 +3,7 @@
 
 Invoked through a symlink named claude, opencode or opencode2. Appends `<tool> -p --model <model>` (claude) or
 `<tool> run --model <model>` (OpenCode) to $STUB_LOG and one JSON line (tool, argv, prompt, the files in .lane-control,
-cwd, and for OpenCode the environment and the config it got) to $STUB_LOG.agents. Claude takes the prompt as its last
+cwd, and for OpenCode the environment, the config and the files it got) to $STUB_LOG.agents. Claude takes the prompt as its last
 argument, OpenCode on stdin. Each call takes the next step queued for its model of $STUB_STATE (key agent_steps):
 {"write": {path: text}, "commit": message, "say": stdout text, "err": stderr text, "exit": code}. For OpenCode the
 output is `--format json` events: "say" is one text event; "steps": n adds n tool-call steps before it (default: 1
@@ -36,6 +36,9 @@ if opencode:
     # the config as OpenCode reads it: the file OPENCODE_CONFIG names (project-setup's memfd), else the variable
     row["config"] = (Path(os.environ["OPENCODE_CONFIG"]).read_text() if os.environ.get("OPENCODE_CONFIG")
                      else os.environ.get("OPENCODE_CONFIG_CONTENT"))
+    # what the run can see: every path in its folder (project-setup's scratch copy), links marked
+    row["files"] = sorted(str(Path(h, n).relative_to(".")) + ("@" if Path(h, n).is_symlink() else "")
+                          for h, ds, fs in os.walk(".") for n in fs + [d for d in ds if Path(h, d).is_symlink()])
 with open(os.environ["STUB_LOG"] + ".agents", "a") as log:
     log.write(json.dumps(row) + "\n")
 for path, text in step.get("write", {}).items():

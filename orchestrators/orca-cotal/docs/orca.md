@@ -260,11 +260,10 @@ submodules and embedded repos), every `.env*` file except `*.example`, `*.sample
 readable. The rules cover Read, Glob and Grep, and the file tools stay inside the repo, so a symlink pointing out of it
 is refused. The list exists only in the agents' command line, never in a file. An untracked, not-ignored private file
 that is not `.env*` needs `--private` or an ignore line. A name with `( ) * ? [ ] { } \` or a newline cannot be put in a
-rule: setup stops and names it. An OpenCode adapter or reviewer (`--adapter opencode/<provider>/<model>`) gets the
-same paths denied by OpenCode's own rules (in memory, never a file), worked out for it: the files the `--private`
-globs match (git expands them), and every symlink that leads to a folder, out of the repo or to a private file,
-ignored ones too, since OpenCode follows a link; grep and glob are off (`orchestrators/native-orca/setup.md`, "OpenCode
-on a self-hosted LiteLLM gateway").
+rule: setup stops and names it. An OpenCode adapter or reviewer (`--adapter opencode/<provider>/<model>`) does not get
+these rules: it runs in a scratch copy that holds only the tracked files minus `.env*` and everything a `--private` glob
+covers, with no `.git`, ignored file or symlink, and only its new files under `.lane-control/` come back
+(`orchestrators/native-orca/setup.md`, "OpenCode on a self-hosted LiteLLM gateway").
 
 ### The settings store: per-project choices, outside the repo
 Everything project-setup decides for a project lives in `~/.config/lane-control/projects/<folder>-<hash>/` (under
