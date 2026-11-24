@@ -1227,6 +1227,42 @@ class MachineCheckTests(BudgetTest):
         self.playbook(None, None)
         self.assertIn("CHANGED budget main: unknown", self.check().stdout)
 
+    def test_a_coordinator_orca_cannot_find_is_a_warning_line_once(self):
+        # lc-5w1 M2: the owner sees which project and why, not only the night manager's stderr
+        from test_night_precheck import agent_terminal
+        co = self.home / "code" / "proj"
+        co.mkdir(parents=True)
+        self.machine_conf(f'COORDINATORS="\nproj {co}\n"\n')
+        self.orca({"terminals": []})
+        first = self.check()
+        self.assertIn("WARN coordinator proj: not found in Orca (no agent terminal in", first.stdout)
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)  # already said by the first run
+        self.orca({"terminals": [agent_terminal(co, handle="t1"), agent_terminal(co, handle="t2")]})
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"WARN coordinator proj: not found in Orca \(2 agent terminals in .*proj")
+        self.assertEqual(self.check().returncode, 1)  # not said again while it stays so
+        self.orca({"terminals": [agent_terminal(co)]})
+        self.assertEqual(self.check().stdout, "CHANGED coordinator proj: found in Orca again\n")
+
+    def test_the_warning_names_the_project_when_orca_is_down(self):
+        co = self.home / "code" / "proj"
+        co.mkdir(parents=True)
+        self.machine_conf(f'COORDINATORS="\nproj {co}\n"\n')
+        self.orca({"down": True})
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARN coordinator proj: not found in Orca (Orca could not be asked (runtime not reachable))", r.stdout)
+
+    def test_a_complete_line_and_a_paused_project_are_not_looked_up(self):
+        co = self.home / "code" / "proj"
+        co.mkdir(parents=True)
+        self.machine_conf(f'COORDINATORS="\nproj {co} claude proj coordinator\n"\n')
+        self.orca({"down": True})
+        self.assertEqual(self.check().returncode, 1)
+        self.assertEqual(self.orca_calls(), [])
+
     def test_memory_low_wakes(self):
         self.check()
         (self.proc / "meminfo").write_text(MEMINFO_46G.replace("30000000", "2000000"))

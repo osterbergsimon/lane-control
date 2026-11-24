@@ -1138,10 +1138,17 @@ def sync_and_record(repo: Path, state: dict, project: str, summary: "str | None"
 
 def install_denies(cos: list, integrations: dict) -> "tuple[list, list]":
     """Ask each coordinator's harness adapter for away-improve deny rules. (notes, warnings): what was done or is
-    not possible per harness, and what could not be done (the mode still runs: away-merge is the main guard)."""
+    not possible per harness, and what could not be done (the mode still runs: away-merge is the main guard). A
+    harness machine.conf does not give is looked up from Orca; one that cannot be found gets no rules, and says why."""
     import harnesses
+    import machineconf
     notes, warns = [], []
-    for c in cos:
+    found, problems = machineconf.resolve(cos, titles=False)
+    for pr in problems:
+        again = " ".join(f"--project {n}" for n in pr.names)
+        warns.append(f"lane-improve: deny rules NOT installed ({pr.text}); away-merge is the only guard on its merge "
+                     f"route. Start its coordinator, then `lane-improve on --continue {again}`")
+    for c in found:
         try:
             mod = harnesses.load_harness(c.harness)
             changes = mod.install_away_denies(c.checkout, integrations[c.name], c.name)
@@ -1156,14 +1163,17 @@ def install_denies(cos: list, integrations: dict) -> "tuple[list, list]":
 
 
 def remove_denies(cos: list) -> list:
-    """Take the deny rules out of every coordinator's checkout; returns warnings for what could not be removed."""
+    """Take the deny rules out of every coordinator's checkout; returns warnings for what could not be removed. Every
+    harness adapter is asked, whatever harness runs there now (it may have changed since the rules went in): each
+    removes only what lane-control recorded for that checkout and harness, and has nothing to do without its record."""
     import harnesses
     warns = []
     for c in cos:
-        try:
-            harnesses.load_harness(c.harness).remove_away_denies(c.checkout)
-        except (ValueError, OSError) as e:
-            warns.append(f"lane-improve: {c.name}: deny rules not removed ({e})")
+        for name in harnesses.harnesses_names():
+            try:
+                harnesses.load_harness(name).remove_away_denies(c.checkout)
+            except (ValueError, OSError) as e:
+                warns.append(f"lane-improve: {c.name}: deny rules not removed ({e})")
     return warns
 
 

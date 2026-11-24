@@ -77,7 +77,9 @@ the box's coordinator run lanes here with the desktop's share link (`remote.md`)
 `core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
 every step says `exists` on a re-run):
 - `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators
-  (name, checkout, harness, terminal title), the runner repos it watches, night hours, idle and recheck minutes, and
+  (`<name> <checkout>` each: the owner's list of whom the night manager may wake; Orca gives each one's harness and
+  session name, the single agent terminal in that checkout, and a harness and terminal title written after the checkout
+  override it), the runner repos it watches, night hours, idle and recheck minutes, and
   how long `lane-away on` lasts. Fill it in by hand; no value from it goes in a repo. A machine set up before
   `machine-setup` existed has no `machine.conf`: create it (run `machine-setup`, which writes it from the example, or
   copy the example there by hand), since `lane-improve` and `night-precheck` need the file.
