@@ -58,8 +58,8 @@ can take the worktree. A merged branch is deleted with its workspace; an unmerge
   settings, and an Orca without the command or a failing CLI is a `skipped` line. The preview cannot say which rule is
   on, so a project shown as "on" is told to check that "Delete merged workspaces" is one of them.
 - **project-setup** also turns on GitHub's "Automatically delete head branches" (`delete_branch_on_merge`) on the
-  owner's yes in a terminal, where it is marked recommended and Enter means yes (`[Y/n]`; only an explicit n/no
-  leaves it off); without a terminal it says so ("recommended") and a re-run says `exists`.
+  owner's yes in a terminal, where it is marked recommended and Enter means yes (`[Y/n]`; Enter, y or yes turns
+  it on, anything else leaves it off); without a terminal it says so ("recommended") and a re-run says `exists`.
 - **The coordinator's lane close** (`native-orca-lanes`, section 7): merge on the owner's word with `--merge
   --match-head-commit <full head sha>`, then `bd close` and `bd dolt push`. The merged rule removes the worktree. The
   trigger for the manual route is the lane's own preview row, not the rule: `reason: merged` with a keep cause is left

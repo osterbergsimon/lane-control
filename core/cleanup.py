@@ -141,7 +141,7 @@ def orca_report(orca: str, repo=None, timeout: float = TIMEOUT) -> list:
 def github_report(repo, yes=None, gh: str = None) -> list:
     """GitHub's "Automatically delete head branches" (deleteBranchOnMerge) for the repo at `repo`: already on is
     `exists`; off is turned on unless `yes(question)` answers False (`created`; the question marks it recommended
-    and defaults to yes, so only an explicit no leaves it off), and without `yes` (no terminal) it
+    and defaults to yes: Enter, y or yes turns it on, anything else leaves it off), and without `yes` (no terminal) it
     is `missing` with the command to run. gh missing, not signed in, offline or unclear is `skipped`."""
     gh = gh or shutil.which("gh") or "gh"
     p = _run([gh, "repo", "view", "--json", "deleteBranchOnMerge", "-q", ".deleteBranchOnMerge"], cwd=repo, timeout=30)
@@ -155,9 +155,10 @@ def github_report(repo, yes=None, gh: str = None) -> list:
         return [(GITHUB_STEP, "exists", "(automatically delete head branches is on)")]
     command = "gh repo edit --delete-branch-on-merge"
     if yes is None:
-        return [(GITHUB_STEP, "missing", f"(automatically delete head branches is off (recommended on: a merged "
-                                         f"lane's remote branch stays otherwise); to turn it on run `{command}` in the repo, or set it in "
-                                         "the repo's GitHub settings, General; needs admin rights)")]
+        return [(GITHUB_STEP, "missing", "(automatically delete head branches is off; recommended on, since "
+                                         f"otherwise a merged lane's remote branch stays; to turn it on run "
+                                         f"`{command}` in the repo, or set it in the repo's GitHub settings, "
+                                         "General; needs admin rights)")]
     if not yes("Turn on GitHub's 'Automatically delete head branches' for this repo (recommended: a merged lane's "
                "branch is deleted at merge)? Enter = yes [Y/n] "):
         return [(GITHUB_STEP, "skipped", "(left off at the owner's no)")]

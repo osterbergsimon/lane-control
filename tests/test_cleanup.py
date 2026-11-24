@@ -1,5 +1,5 @@
 """core/cleanup.py: what Orca's workspace cleanup preview says about the merged rule (report only), and GitHub's
-"Automatically delete head branches" (set only on the owner's yes). Orca's CLI and gh are stub executables."""
+"Automatically delete head branches" (recommended; set unless the owner says no). Orca's CLI and gh are stub executables."""
 import json
 import os
 import stat

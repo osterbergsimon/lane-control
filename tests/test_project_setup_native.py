@@ -1921,12 +1921,25 @@ class CleanupSetupTests(Case):
         self.assertIn("[Y/n]", q)
         self.assertIn("recommended", q)
 
-    def test_only_an_explicit_no_leaves_it_off(self):
-        for answer in ("no", "N", " n "):
+    def test_anything_but_enter_y_yes_leaves_it_off(self):
+        for answer in ("no", "N", " n ", "nope", "q", "no thanks", "0"):
             self.setUp()
             out, _ = self.terminal_run(answer)
             self.assertIn("github: skipped", out, answer)
             self.assertFalse([c for c in self.gh_calls() if c.startswith("repo edit")], answer)
+
+    def test_yes_answers_are_enter_y_yes_any_case_trimmed(self):
+        m = load()
+        for answer in ("", " ", "y", "Y", " yes ", "YES"):
+            with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                    contextlib.redirect_stdout(Tty()), mock.patch("builtins.input", return_value=answer):
+                self.assertTrue(m.owner_says_yes("x [Y/n] ", "github", default=True), repr(answer))
+
+    def test_eof_is_a_no_even_with_a_yes_default(self):
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                contextlib.redirect_stdout(Tty()), mock.patch("builtins.input", side_effect=EOFError):
+            self.assertFalse(m.owner_says_yes("x [Y/n] ", "github", default=True))
 
     def test_other_steps_keep_enter_meaning_no(self):
         m = load()

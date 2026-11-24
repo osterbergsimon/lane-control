@@ -44,7 +44,7 @@ The shared doctrine and scripts are in `core/` (`core/README.md`): roles, model 
 
 Away-improve mode lets each project's coordinator keep improving its product on its own `away/<date>` branch while you are away, spending your usage, and keeps one draft PR for you to review (opened when the mode starts, its summary refreshed after every merge): it is off unless you switch it on with `lane-improve on`, and has optional caps (`--max-items`, `--stop-at`). The owner's guide is `docs/away-improve.md`.
 
-A merged lane's worktree is removed by Orca's own "Delete merged workspaces" cleanup rule, not by a script of ours; setup says when that rule is off and where to turn it on, and turns on GitHub's "Automatically delete head branches" on your yes (`docs/orca-cleanup.md`).
+A merged lane's worktree is removed by Orca's own "Delete merged workspaces" cleanup rule, not by a script of ours; setup says when that rule is off and where to turn it on, and turns on GitHub's "Automatically delete head branches" (recommended; Enter means yes) (`docs/orca-cleanup.md`).
 
 The design kit (`docs/superpowers/specs/2026-11-21-design-kit-design.md`) replaces a long-lived design lead: the frontend brief addition (`core/templates/frontend-brief.md`), a project's design file (template `core/templates/DESIGN.md`), the design reviewer (native Orca), the `component-gallery` skill (`core/skills/`) and `design-shots` (headless screenshots at phone and desktop width in both themes, installed with the lane tools). Setup installs the design skills it names for Claude and OpenCode from their upstream repos at pinned commits (`core/design-skills.tsv`); lane-control never copies their content.
 

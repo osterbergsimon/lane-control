@@ -34,7 +34,7 @@ A merged lane's worktree is removed by Orca's own cleanup rule "Delete merged wo
 (`docs/orca-cleanup.md`). `project-setup` and `machine-setup` read `orca-ide workspace cleanup preview` and say
 plainly when no rule is on or the project has cleanup off, with where to turn it on in Orca (Settings -> Workspace
 Cleanup -> Cleanup rules); they never change Orca's settings. `project-setup` also turns on GitHub's "Automatically
-delete head branches" in a terminal (recommended: Enter means yes, only n/no leaves it off; without a
+delete head branches" in a terminal (recommended: Enter, y or yes turns it on, anything else leaves it off; without a
 terminal it only says so; a re-run says `exists`).
 
 ## How a coordinator works

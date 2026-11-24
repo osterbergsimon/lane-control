@@ -2121,7 +2121,8 @@ def flush_input() -> None:
 
 def owner_says_yes(question: str = "Commit these files and run the Orca setup? [y/N] ", step: str = "commit",
                    default: bool = False) -> bool:
-    """`default` is what Enter means; with True ([Y/n]) only an explicit n/no is a no. Other steps keep [y/N]."""
+    """`default` is what Enter means. With True ([Y/n]) only Enter, y or yes is a yes; anything else, and EOF, is a
+    no. Other steps keep [y/N]."""
     if not has_terminal():
         say(step, "skipped", "no terminal to ask the owner in")
         return False
@@ -2130,7 +2131,7 @@ def owner_says_yes(question: str = "Commit these files and run the Orca setup? [
         ans = input(question).strip().lower()
     except EOFError:
         return False
-    return ans not in ("n", "no") if default else ans in ("y", "yes")
+    return ans in (("", "y", "yes") if default else ("y", "yes"))
 
 
 def commit_adapted(repo: Path, paths: list, message: str = "Add lane-control files adapted to this project"):
