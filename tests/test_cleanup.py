@@ -1,5 +1,5 @@
 """core/cleanup.py: what Orca's workspace cleanup preview says about the merged rule (report only), and GitHub's
-"Automatically delete head branches" (set only on the owner's yes). Orca's CLI and gh are stub executables."""
+"Automatically delete head branches" (recommended; set unless the owner says no). Orca's CLI and gh are stub executables."""
 import json
 import os
 import stat
@@ -214,6 +214,8 @@ class GithubTests(Stubs):
         self.assertEqual(what, "created")
         self.assertEqual(len(asked), 1)
         self.assertIn("Automatically delete head branches", asked[0])
+        self.assertIn("recommended", asked[0])
+        self.assertTrue(asked[0].rstrip().endswith("[Y/n]"), asked[0])
         self.assertIn("repo edit --delete-branch-on-merge", self.calls())
 
     def test_off_with_the_owners_no_changes_nothing(self):
@@ -225,6 +227,7 @@ class GithubTests(Stubs):
         (step, what, detail), = self.report(self.gh("false"), None)
         self.assertEqual(what, "missing")
         self.assertIn("gh repo edit --delete-branch-on-merge", detail)
+        self.assertIn("recommended", detail)
         self.assertEqual([c for c in self.calls() if c.startswith("repo edit")], [])
 
     def test_a_refused_edit_is_a_warning_with_gh_s_message(self):
