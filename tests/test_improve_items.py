@@ -65,17 +65,39 @@ class MergedItemsTests(unittest.TestCase):
     def test_lists_away_merges_oldest_first_with_title_pr_and_sha(self):
         a = self.r.merge("away: Add the x feature", "Pull request #7")
         b = self.r.merge("away: Fix the y bug", "Pull request #9")
-        self.assertEqual(self.items(), [("Add the x feature", 7, a), ("Fix the y bug", 9, b)])
+        self.assertEqual(self.items(), [("Add the x feature", 7, a, False), ("Fix the y bug", 9, b, False)])
 
     def test_a_merge_without_a_recorded_pr_number_has_none(self):
         a = self.r.merge("away: Old item", "Some PR title that mentions #3 in passing")
-        self.assertEqual(self.items(), [("Old item", None, a)])
+        self.assertEqual(self.items(), [("Old item", None, a, False)])
 
     def test_other_merges_and_the_start_commit_are_left_out(self):
         self.r.merge("Merge pull request #5 from someone/else", "A PR title")
         self.r.merge("Merge branch 'main' into away/2026-11-23")
         a = self.r.merge("away: Real item", "Pull request #8")
-        self.assertEqual(self.items(), [("Real item", 8, a)])
+        self.assertEqual(self.items(), [("Real item", 8, a, False)])
+
+    def test_an_item_whose_title_starts_with_start_is_listed(self):
+        a = self.r.merge("away: start the night cap earlier", "Pull request #6")
+        b = self.r.merge("away: Other", "Pull request #7")
+        self.assertEqual(self.items(), [("start the night cap earlier", 6, a, False), ("Other", 7, b, False)])
+
+    def test_an_item_reverted_by_a_later_commit_is_marked(self):
+        a = self.r.merge("away: Item X", "Pull request #5")
+        b = self.r.merge("away: Item Y", "Pull request #6")
+        git(self.r.clone, "revert", "-m", "1", "--no-edit", b)
+        git(self.r.clone, "push", "-q", "origin", BRANCH)
+        self.assertEqual(self.items(), [("Item X", 5, a, False), ("Item Y", 6, b, True)])
+
+    def test_an_item_reverted_inside_a_later_merge_is_marked(self):
+        a = self.r.merge("away: Item X", "Pull request #5")
+        c = self.r.clone
+        git(c, "checkout", "-q", "-b", "drop", BRANCH)
+        git(c, "revert", "-m", "1", "--no-edit", a)
+        git(c, "checkout", "-q", BRANCH)
+        git(c, "merge", "-q", "--no-ff", "-m", "Merge branch 'drop'", "drop")
+        git(c, "push", "-q", "origin", BRANCH)
+        self.assertEqual(self.items(), [("Item X", 5, a, True)])
 
     def test_a_plain_commit_titled_away_is_not_a_merge(self):
         self.r.commit("away: not a merge")
@@ -101,7 +123,7 @@ class MergedItemsTests(unittest.TestCase):
         git(c, "merge", "-q", "--no-ff", "-m", "Merge branch 'other'", "other")
         git(c, "push", "-q", "origin", BRANCH)
         shown = self.r.merge("away: Shown", "Pull request #3")
-        self.assertEqual(self.items(), [("Shown", 3, shown)])
+        self.assertEqual(self.items(), [("Shown", 3, shown, False)])
 
     def test_unreadable_branch_gives_none(self):
         self.assertIsNone(improve.merged_items(self.r.clone, "away/2099-01-01", "main"))
@@ -112,15 +134,29 @@ class PrBodyItemsTests(unittest.TestCase):
         return improve.pr_body("shop", BRANCH, "main", "## Summary\n- Done: x\n\n## Items\n", items)
 
     def test_each_item_has_title_pr_sha_and_its_revert_command(self):
-        b = self.body([("Add the x feature", 7, "abc1234"), ("Old item", None, "def5678")])
+        b = self.body([("Add the x feature", 7, "abc1234", False), ("Old item", None, "def5678", False)])
         self.assertIn("Items merged", b)
         self.assertIn("- Add the x feature (PR #7, abc1234): `git revert -m 1 abc1234`", b)
         self.assertIn("- Old item (def5678): `git revert -m 1 def5678`", b)
 
     def test_the_list_is_in_merge_order_and_says_to_revert_latest_first(self):
-        b = self.body([("First", 1, "aaaaaaa"), ("Second", 2, "bbbbbbb")])
+        b = self.body([("First", 1, "aaaaaaa", False), ("Second", 2, "bbbbbbb", False)])
         self.assertLess(b.index("First"), b.index("Second"))
         self.assertIn("latest first", b)
+
+    def test_a_reverted_item_shows_no_revert_command(self):
+        b = self.body([("Gone", 3, "ccccccc", True), ("Kept", 4, "ddddddd", False)])
+        self.assertIn("- Gone (PR #3, ccccccc): already reverted", b)
+        self.assertNotIn("git revert -m 1 ccccccc", b)
+        self.assertIn("`git revert -m 1 ddddddd`", b)
+
+    def test_it_says_where_to_run_the_command(self):
+        b = self.body([("A", 1, "aaaaaaa", False)])
+        self.assertIn("on the away branch", b)
+        self.assertIn("name it to the coordinator", b)
+
+    def test_the_footer_says_the_list_comes_from_git_too(self):
+        self.assertIn("summary and the branch's merges", self.body([]))
 
     def test_no_items_says_none_yet(self):
         self.assertIn("Items merged: none yet", self.body([]))
@@ -131,7 +167,7 @@ class PrBodyItemsTests(unittest.TestCase):
         self.assertNotIn("git revert", b)
 
     def test_the_list_follows_the_summary(self):
-        b = self.body([("A", 1, "aaaaaaa")])
+        b = self.body([("A", 1, "aaaaaaa", False)])
         self.assertLess(b.index("Done: x"), b.index("Items merged"))
 
 
