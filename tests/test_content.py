@@ -130,17 +130,17 @@ class TierTableTests(unittest.TestCase):
 
     def test_the_owners_decision_on_the_sandbox_is_written_down(self):
         line = ("Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed "
-                "(only in a project whose settings allow it: `global_region_models`). To bring it back, restore it from git history (last in main at b97c919).")
+                "(only in the one project the owner allows: `CHINA_REGION_MODELS_PROJECT` in machine.conf). To bring it back, restore it from git history (last in main at b97c919).")
         for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             self.assertIn(line, (ROOT / f).read_text(), f)
         for f in ("core/model-routing.md", "README.md", "orchestrators/orca-cotal/docs/orca.md"):
             flat = " ".join((ROOT / f).read_text().split())
-            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, only in a project the owner allowed it in",
+            for needle in ("Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, in exactly one project, the one the owner names",
                            "orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash",
                            "lane-control's own lane tools do not start OpenCode",
-                           "no hosted global-region model runs bare",
+                           "lobal-region model",
                            "needs the sandbox back first (restore it from b97c919)",
-                           "`global_region_models`"):
+                           "`CHINA_REGION_MODELS_PROJECT`"):
                 self.assertIn(needle, flat, f)
             self.assertNotIn("swift is `none` for now", flat, f)
         self.assertIn("are not trusted with the owner's machine", (ROOT / "core" / "model-routing.md").read_text())
@@ -462,8 +462,8 @@ class LaneSkillCliTests(unittest.TestCase):
             self.assertNotIn(word, self.text)
 
     def test_the_skill_sends_a_refused_opencode_tier_one_tier_up(self):
-        self.assertIn("Exit 4 refuses an OpenCode tier", self.flat)
-        self.assertIn("swift on OpenCode runs only in a project whose settings set `global_region_models`", self.flat)
+        self.assertIn("Exit 4 refuses a restricted model", self.flat)
+        self.assertIn("one that is not known safe runs only in the one project the owner allows", self.flat)
         self.assertNotIn("there are no OpenCode lanes", self.flat)
         self.assertIn("never start a refused tier with `cotal_spawn`", self.flat)
 
@@ -798,7 +798,7 @@ class NativePersonaTests(unittest.TestCase):
                            "{{TIERS}}", "{{REVIEWER}}", "orchestrators/native-orca/templates/lane-brief.md",
                            "`lane-tier` still gates it", "`core/scripts/lane-tier`"):
                 self.assertIn(needle, t, (role, needle))
-            self.assertNotIn("global_region_models", t, role)  # the rule is lane-tier's and the project's settings'; a persona copy goes stale
+            self.assertNotIn("CHINA_REGION_MODELS_PROJECT", t, role)  # the rule is lane-tier's and the project's settings'; a persona copy goes stale
 
     def test_lane_starters_place_lanes_the_way_orca_accepts(self):
         # worker-start --help: remote current and new-child are invalid; OpenCode model selection needs an
@@ -2368,10 +2368,13 @@ class ScratchHomeAndMachineConfContentTests(unittest.TestCase):
 
 class PrivateNamesTests(unittest.TestCase):
     """The repo is public: no tracked file carries this machine's hostname, login user or the name of one of its
-    projects (the names live in conf, never here). Machine-dependent, so it skips where there are no names to check
-    (CI). A failure says the kind and file:line, never the name."""
+    projects (the names live in conf, never here). Machine-dependent: it skips, with one plain reason, under CI ($CI) and
+    wherever no project name or private-names file is loaded (a hostname alone is not the check that matters). A failure
+    says the kind and file:line, never the name."""
 
     def names(self):
+        if os.environ.get("CI"):
+            self.skipTest("CI: this machine has no project names or private-names file to check")
         sys.path.insert(0, str(ROOT / "core"))
         try:
             import machineconf
@@ -2390,7 +2393,9 @@ class PrivateNamesTests(unittest.TestCase):
         try:
             names = privatenames.load(projects=sorted(projects), own="lane-control")
         except privatenames.NamesError as e:
-            self.skipTest(f"no private names on this machine to check: {e}")
+            self.skipTest(str(e))
+        if not any(k in ("project name", "listed name") for k, _ in names.entries):
+            self.skipTest("no project names or private-names file on this machine to check (a hostname alone is not)")
         entries = list(names.entries)
         try:  # a short login name is skipped by the loader (a plain word elsewhere); a file naming it still leaks it
             user = getpass.getuser()
@@ -2420,6 +2425,21 @@ class PrivateNamesTests(unittest.TestCase):
                     found.append(f"{kind} at {names.mask(rel)}:{n}")
         self.assertEqual(found, [], "a tracked file carries a private name (the repo is public; names live in conf):\n  "
                          + "\n  ".join(found[:40]))
+
+    def test_it_skips_with_one_plain_reason_under_ci_and_where_no_project_name_is_known(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            with self.assertRaises(unittest.SkipTest) as c:
+                self.names()
+        self.assertEqual(str(c.exception), "CI: this machine has no project names or private-names file to check")
+        with tempfile.TemporaryDirectory() as d:  # no machine.conf, no store, no names file; the hostname alone is no check
+            env = {k: v for k, v in os.environ.items() if k not in ("CI", "LANE_PRIVATE_NAMES")}
+            env.update(HOME=d, XDG_CONFIG_HOME=d, LANE_MACHINE_CONF=str(Path(d) / "none.conf"))
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch("socket.gethostname", return_value="ci-runner-0042"):
+                with self.assertRaises(unittest.SkipTest) as c:
+                    self.names()
+        self.assertNotIn("no private names to check: no private names", str(c.exception))
+        self.assertLess(len(str(c.exception)), 200)
 
     def test_the_check_finds_a_name_and_reports_no_name(self):
         sys.path.insert(0, str(ROOT / "core"))

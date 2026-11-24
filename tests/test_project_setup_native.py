@@ -1301,19 +1301,22 @@ def store_bytes(e, repo):
 
 class PinCheckTests(Case):
     def test_lane_tier_judges_a_model_alone(self):
-        for model, code in (("opus", 0), ("gw/m1", 0), ("opencode-go/x", 4), ("opencode/big-pickle", 4)):
+        for model, code in (("opus", 0), ("gw/m1", 4), ("deepseek/deepseek-chat", 4), ("opencode-go/x", 4), ("opencode/big-pickle", 4)):
             r = subprocess.run(["bash", str(LANE_TIER), "--model", model], capture_output=True, text=True)
             self.assertEqual(r.returncode, code, (model, r.stderr))
         r = subprocess.run(["bash", str(LANE_TIER), "--model"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
 
-    def test_a_project_setting_never_lets_a_standing_role_run_a_hosted_model(self):
+    def test_the_owners_allowance_never_lets_a_standing_role_run_a_restricted_model(self):
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
-        self.edit_store(global_region_models=True)
+        conf = self.e.home / ".config" / "lane-control" / "machine.conf"
+        conf.write_text(f'COORDINATORS="\napp {self.repo}\n"\nCHINA_REGION_MODELS_PROJECT=app\n')
         for args in (["--coordinator", "claude/opencode-go/x"], ["--reviewer", "claude/opencode/x"],
-                     ["--coordinator", "opencode/opencode-go/x", "--own-model", "opencode-go/x"]):
+                     ["--coordinator", "opencode/opencode-go/x", "--own-model", "opencode-go/x"],
+                     ["--coordinator", "claude/deepseek/deepseek-chat"], ["--reviewer", "claude/gw/m1"]):
             r = self.e.run(str(self.repo), *args, "--no-start")
             self.assertEqual(r.returncode, 2, (args, r.stderr))
+            self.assertIn("this model may run only in the one project the owner allows", r.stderr, args) if "claude/" in args[1] else None
 
     def test_a_refused_run_leaves_the_store_byte_identical(self):
         # M1: the refusal comes before anything is written.

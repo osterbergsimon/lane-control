@@ -21,6 +21,15 @@ COORDINATORS="
 # owner/repo of each repo whose self-hosted runners the night manager and the machine check watch (space separated)
 RUNNER_REPOS=""
 
+# Models that are not known safe (everything but Anthropic models on the claude harness) run in no project, except the
+# one named here; code sent to them may go to China-served servers (model-routing.md, "Sandbox per tier"). Owner only,
+# by hand: no tool and no agent writes or edits these two lines (they ship commented out). Empty or missing: no
+# project. A COORDINATORS name.
+# CHINA_REGION_MODELS_PROJECT=<name>
+# Other models you trust to run anywhere (space separated, exact model ids as a tier table or pin names them; a hosted
+# opencode/ or opencode-go/ model is never trusted by this list). Empty or missing: none.
+# ALLOWED_MODELS="<model> <model>"
+
 # Night, in local hours: from NIGHT_START to NIGHT_END (23-07 wraps past midnight).
 NIGHT_START=23
 NIGHT_END=7

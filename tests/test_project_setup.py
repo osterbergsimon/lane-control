@@ -3110,25 +3110,47 @@ class RefreshTests(unittest.TestCase):
         self.setup_project("--tiers", str(self._old_table()))
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
+        self.assertIn("warning: swift: lane-tier refuses this tier here", r.stderr)
         self.assertNotIn("sandbox required", r.stderr)
 
-    def test_refresh_does_not_warn_in_a_project_whose_settings_allow_opencode_tiers(self):
+    def test_refresh_does_not_warn_in_the_one_project_the_owner_names_in_machine_conf(self):
         self.setup_project("--tiers", str(self._old_table()))
-        store = self.e.store(self.repo) / "settings.json"
-        st = json.loads(store.read_text())
-        self.assertNotIn("global_region_models", st)  # default off: nothing is written for it
-        st["global_region_models"] = True
-        store.write_text(json.dumps(st))
+        self.assertIn("lane-tier refuses this tier here", self.refresh().stderr)
+        self.assertNotIn("CHINA_REGION", self.refresh().stderr)  # the warning names no key
+        conf = self.e.home / ".config" / "lane-control" / "machine.conf"
+        conf.write_text(f'COORDINATORS="\napp {self.repo}\n"\nCHINA_REGION_MODELS_PROJECT=app\n')
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("is an OpenCode tier", r.stderr)
-        self.assertTrue(json.loads(store.read_text())["global_region_models"])  # a refresh keeps it
-        st["global_region_models"] = "yes"
-        store.write_text(json.dumps(st))
+        self.assertNotIn("lane-tier refuses", r.stderr)
+        self.assertEqual(conf.read_text(), f'COORDINATORS="\napp {self.repo}\n"\nCHINA_REGION_MODELS_PROJECT=app\n')  # untouched
+        conf.write_text(f'COORDINATORS="\napp {self.repo}\n"\nCHINA_REGION_MODELS_PROJECT=other\n')
+        self.assertIn("lane-tier refuses this tier here", self.refresh().stderr)
+
+    def test_no_run_writes_the_allowance_and_an_old_record_cannot_carry_one_in(self):
+        # B1: a .cotal/lane-control.json in a checkout (any agent can write one) never reaches the store or machine.conf
+        self.setup_project()
+        rec = self.repo / ".cotal" / "lane-control.json"
+        rec.write_text(json.dumps({"global_region_models": True, "china_region_models_project": "app", "port": 4242}))
         r = self.refresh()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("global_region_models must be a bool", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = json.loads((self.e.store(self.repo) / "settings.json").read_text())
+        self.assertFalse([k for k in st if "region" in k], st)
+        conf = self.e.home / ".config" / "lane-control" / "machine.conf"
+        self.assertFalse(conf.exists() and "CHINA_REGION" in conf.read_text())
+        # the same for a project set up for the first time with such a record, and for a key planted in the store
+        other = self.e.repo("fresh")
+        (other / ".cotal").mkdir()
+        (other / ".cotal" / "lane-control.json").write_text(json.dumps({"global_region_models": True}))
+        self.assertEqual(self.e.run(str(other), "--no-start").returncode, 0)
+        self.assertNotIn("region", json.dumps(self.e.settings(other)))
+        table = self.e.store(other) / "lanes.tsv"
+        table.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\topencode-go/x\t-\n")
+        st = self.e.settings(other)
+        st["global_region_models"] = True
+        (self.e.store(other) / "settings.json").write_text(json.dumps(st))
+        run = subprocess.run([str(TIER_TOOL), str(table), "swift"], capture_output=True, text=True, cwd=other,
+                             env={**self.e.env, "LANE_MACHINE_CONF": str(self.e.home / "none.conf")})
+        self.assertEqual(run.returncode, 4)
 
     def _old_table(self):
         f = self.e.home / "old.tsv"
@@ -3214,69 +3236,175 @@ TIER_TOOL = Path(__file__).resolve().parent.parent / "scripts" / "lane-tier"
 
 class LaneTierTests(unittest.TestCase):
     HEAD = "tier\tharness\tmodel\tpermission"
+    HOSTED = ("opencode/deepseek-v4.1-flash", "opencode-go/kimi")
 
     def setUp(self):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
-        self.table = Path(d.name) / "lanes.tsv"
+        self.dir = Path(d.name).resolve()
+        self.table = self.dir / "lanes.tsv"
+        self.cfg = self.dir / "cfg"  # XDG_CONFIG_HOME: no real machine.conf, no real store is read
+        self.conf = self.dir / "machine.conf"
+        self.env = {**os.environ, "HOME": str(self.dir), "XDG_CONFIG_HOME": str(self.cfg),
+                    "LANE_MACHINE_CONF": str(self.conf)}
+        self.cwd = self.dir
 
-    def tier(self, text, tier):
-        self.table.write_text(text)
-        return subprocess.run([str(TIER_TOOL), str(self.table), tier], capture_output=True, text=True)
+    def machine(self, text):
+        self.conf.write_text(text)
+
+    def project(self, name="shop"):
+        """A made-up project checkout (a git repo) and the lanes.tsv of its settings store."""
+        co = self.dir / "code" / name
+        co.mkdir(parents=True)
+        git("init", "-q", "-b", "main", cwd=co)
+        git("commit", "-q", "--allow-empty", "-m", "init", cwd=co)
+        store = self.cfg / "lane-control" / "projects" / store_key(co)
+        store.mkdir(parents=True)
+        return co, store / "lanes.tsv"
+
+    def tier(self, text, tier, table=None):
+        table = table or self.table
+        table.write_text(text)
+        return subprocess.run([str(TIER_TOOL), str(table), tier], capture_output=True, text=True, env=self.env,
+                              cwd=self.cwd)
+
+    def run_tool(self, *args, input=None):
+        return subprocess.run([str(TIER_TOOL), *args], capture_output=True, text=True, env=self.env, cwd=self.cwd,
+                              input=input)
 
     def test_a_tier_prints_its_row(self):
         r = self.tier(f"{self.HEAD}\nstandard\tclaude\tsonnet\tinherit\n", "standard")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "harness=claude model=sonnet permission=inherit\n")
 
-    def test_every_opencode_tier_is_refused(self):
+    def test_every_restricted_tier_is_refused_and_the_refusal_names_no_key(self):
         for model in ("opencode/deepseek-v4.1-flash", "opencode-go/kimi", "gw/m", ""):
             r = self.tier(f"{self.HEAD}\nswift\topencode\t{model}\t-\n", "swift")
             self.assertEqual(r.returncode, 4, model)
             self.assertEqual(r.stdout, "")
-            for word in ("refused", "global_region_models", "Orca coordinator", "one tier up", "cotal_spawn", str(self.table)):
+            for word in ("refused", "this model may run only in the one project the owner allows; ask the owner",
+                         "one tier up", "cotal_spawn", str(self.table)):
                 self.assertIn(word, r.stderr)
-            self.assertNotIn("removed", r.stderr)
+            for word in ("removed", "CHINA_REGION_MODELS_PROJECT", "machine.conf", "global_region", "settings"):
+                self.assertNotIn(word, r.stderr)
 
-    def settings(self, text):
-        (self.table.parent / "settings.json").write_text(text)
-
-    def test_the_project_setting_lets_an_opencode_tier_through_and_only_the_json_true_does(self):
-        for model in ("opencode/deepseek-v4.1-flash", "opencode-go/kimi", "gw/m"):
-            for harness in ("opencode", "claude"):
-                if harness == "claude" and model == "gw/m":
-                    continue
-                self.settings('{"global_region_models": true}')
+    def test_a_model_is_unrestricted_only_when_known_safe_whatever_the_harness_spelling(self):
+        for model in ("sonnet", "opus", "haiku", "fable", "opus[1m]", "claude-opus-4-1", "claude-sonnet-5-5", "sonnet-4-5", ""):
+            r = self.tier(f"{self.HEAD}\nstandard\tclaude\t{model}\tinherit\n", "standard")
+            self.assertEqual(r.returncode, 0, (model, r.stderr))
+        for harness in ("opencode", "OpenCode", "opencode2", "oc", "codex", "Claude", "pi", "cotal", "gemini"):
+            for model in ("sonnet", "opus", "claude-opus-4-1", "deepseek/deepseek-chat", "gw/m", "gpt-5", ""):
                 r = self.tier(f"{self.HEAD}\nswift\t{harness}\t{model}\t-\n", "swift")
-                self.assertEqual(r.returncode, 0, (harness, model, r.stderr))
-                self.assertEqual(r.stdout, f"harness={harness} model={model} permission=-\n")
-                self.assertIn("cotal_spawn", r.stderr)
-        for off in ('{"global_region_models": false}', '{"global_region_models": "true"}', '{"global_region_models": 1}',
-                    '{"global_region_models": [true]}', '{"global_region_models": null}', "{}", "[true]", "", "{not json",
-                    '{"global_region_models": true', '"global_region_models"'):
-            self.settings(off)
-            r = self.tier(f"{self.HEAD}\nswift\topencode\topencode-go/x\t-\n", "swift")
-            self.assertEqual((r.returncode, r.stdout), (4, ""), off)
-            self.assertIn("global_region_models", r.stderr)
+                self.assertEqual((r.returncode, r.stdout), (4, ""), (harness, model))
+        for model in ("deepseek/deepseek-chat", "moonshot/kimi-k2", "kimi", "opencode-go/x", "opencode/x", "gpt-5",
+                      "claude/x", "claude-", "opusx", "anthropic/claude-sonnet-4-5", "sonnet;x"):
+            r = self.tier(f"{self.HEAD}\nswift\tclaude\t{model}\t-\n", "swift")
+            self.assertEqual((r.returncode, r.stdout), (4, ""), model)  # claude harness, a model that is not Anthropic's
+        r = self.tier(f"{self.HEAD}\nswift\topencode\tanthropic/claude-sonnet-4-5\t-\n", "swift")
+        self.assertEqual(r.returncode, 0, r.stderr)  # OpenCode's Anthropic provider is the one other known safe spelling
 
-    def test_without_a_settings_file_or_beside_another_table_name_the_opencode_tier_stays_refused(self):
-        row = f"{self.HEAD}\nswift\topencode\topencode-go/x\t-\n"
-        self.assertEqual(self.tier(row, "swift").returncode, 4)  # no settings.json at all
-        self.settings('{"global_region_models": true}')
-        self.table = self.table.parent / "tiers.tsv"  # the setting belongs to the project's lanes.tsv only
-        self.assertEqual(self.tier(row, "swift").returncode, 4)
-        self.table = self.table.parent / "lanes.tsv"
-        self.assertEqual(self.tier(row, "swift").returncode, 0)
-        r = subprocess.run([str(TIER_TOOL), "--check", "/dev/stdin"], input=row, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0)  # --check only lists
+    def test_the_owner_lists_other_models_but_never_a_hosted_one(self):
+        row = f"{self.HEAD}\nswift\topencode\t%s\t-\n"
+        self.machine('ALLOWED_MODELS="gw/m1 gpt-5"\n')
+        self.assertEqual(self.tier(row % "gw/m1", "swift").returncode, 0)
+        self.assertEqual(self.tier(row % "gpt-5", "swift").returncode, 0)
+        self.assertEqual(self.tier(row % "gw/m2", "swift").returncode, 4)
+        self.machine('ALLOWED_MODELS="opencode-go/kimi opencode/x"\n')
+        for model in self.HOSTED:
+            self.assertEqual(self.tier(row % model, "swift").returncode, 4, model)
+        self.conf.write_text("ALLOWED_MODELS='unterminated\n")  # a broken file lists nothing
+        self.assertEqual(self.tier(row % "gw/m1", "swift").returncode, 4)
 
-    def test_the_setting_changes_nothing_for_a_standing_role_or_another_tier(self):
-        self.settings('{"global_region_models": true}')
-        r = subprocess.run([str(TIER_TOOL), "--model", "opencode-go/x"], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 4)  # --model has no project: a coordinator or reviewer never runs a hosted model
-        self.assertIn("global_region_models", r.stderr)
-        r = self.tier(f"{self.HEAD}\nstandard\tclaude\tsonnet\tinherit\ntop\tnone\t-\t-\n", "top")
-        self.assertEqual(r.returncode, 3)
+    def test_the_one_project_the_owner_names_may_run_a_restricted_tier_and_only_from_its_own_store(self):
+        co, table = self.project("shop")
+        rows = f"{self.HEAD}\nswift\topencode\topencode-go/kimi\t-\nstandard\tclaude\tsonnet\tinherit\n"
+        self.machine(f'COORDINATORS="\nshop {co}\n"\nCHINA_REGION_MODELS_PROJECT=shop\n')
+        self.cwd = co
+        r = self.tier(rows, "swift", table)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "harness=opencode model=opencode-go/kimi permission=-\n")
+        self.assertIn("never cotal_spawn", r.stderr)
+        # a worktree of the checkout is the same project
+        wt = self.dir / "wt"
+        git("worktree", "add", "-q", str(wt), "-b", "lane", cwd=co)
+        self.cwd = wt
+        self.assertEqual(self.run_tool(str(table), "swift").returncode, 0)
+        # ... a caller in another checkout, or in no repo, is not
+        other, other_table = self.project("blog")
+        for cwd in (other, self.dir):
+            self.cwd = cwd
+            r = self.run_tool(str(table), "swift")
+            self.assertEqual((r.returncode, r.stdout), (4, ""), cwd)
+        self.cwd = co
+        # a table elsewhere is not the project's store, even with a settings.json beside it saying yes
+        (self.dir / "settings.json").write_text('{"global_region_models": true, "root": "%s"}' % co)
+        self.assertEqual(self.tier(rows, "swift").returncode, 4)
+        (co / ".cotal").mkdir()
+        self.assertEqual(self.tier(rows, "swift", co / ".cotal" / "lanes.tsv").returncode, 4)
+        # the store of another project is not the allowed one's, even called from the allowed checkout
+        self.assertEqual(self.tier(rows, "swift", other_table).returncode, 4)
+        # a link to the allowed table from anywhere else still has to be called from the allowed checkout
+        link = self.dir / "link.tsv"
+        link.symlink_to(table)
+        self.assertEqual(self.run_tool(str(link), "swift").returncode, 0)
+        self.cwd = other
+        self.assertEqual(self.run_tool(str(link), "swift").returncode, 4)
+        self.cwd = co
+        # other tiers never change
+        self.assertEqual(self.run_tool(str(table), "standard").stdout, "harness=claude model=sonnet permission=inherit\n")
+
+    def test_no_project_gets_a_restricted_tier_unless_the_owner_names_it_in_machine_conf(self):
+        co, table = self.project("shop")
+        self.cwd = co
+        rows = f"{self.HEAD}\nswift\topencode\topencode-go/kimi\t-\n"
+        (table.parent / "settings.json").write_text('{"global_region_models": true}')  # an old or planted key means nothing
+        coord = f'COORDINATORS="\nshop {co}\n"\n'
+        for conf in (None, "", "CHINA_REGION_MODELS_PROJECT=\n", 'CHINA_REGION_MODELS_PROJECT=""\n' + coord,
+                     coord + "# CHINA_REGION_MODELS_PROJECT=shop\n",
+                     coord + "CHINA_REGION_MODELS_PROJECT=blog\n",  # a name nobody has
+                     coord + 'CHINA_REGION_MODELS_PROJECT="shop blog"\n',
+                     f'COORDINATORS="\n#shop {co}\n"\nCHINA_REGION_MODELS_PROJECT=shop\n',
+                     "CHINA_REGION_MODELS_PROJECT=shop\n",  # no coordinator line for it
+                     "CHINA_REGION_MODELS_PROJECT='unterminated\n"):
+            if conf is None:
+                self.conf.unlink(missing_ok=True)
+            else:
+                self.machine(conf)
+            r = self.tier(rows, "swift", table)
+            self.assertEqual((r.returncode, r.stdout), (4, ""), conf)
+
+    def test_a_standing_role_never_gets_a_restricted_model_whatever_machine_conf_says(self):
+        co, _ = self.project("shop")
+        self.machine(f'COORDINATORS="\nshop {co}\n"\nCHINA_REGION_MODELS_PROJECT=shop\nALLOWED_MODELS="gw/m1"\n')
+        self.cwd = co
+        for model, harness, code in (("opus", "claude", 0), ("sonnet", "claude", 0), ("anthropic/claude-sonnet-4-5", "opencode", 0),
+                                     ("gw/m1", "opencode", 0),  # the owner listed it
+                                     ("opencode-go/kimi", "claude", 4), ("opencode/x", "opencode", 4),
+                                     ("deepseek/deepseek-chat", "claude", 4), ("deepseek/deepseek-chat", "opencode", 4),
+                                     ("gw/m2", "codex", 4), ("opus", "codex", 4), ("opus", "OpenCode", 4),
+                                     ("gw/m2", "opencode2", 4)):
+            r = self.run_tool("--model", model, "--harness", harness)
+            self.assertEqual(r.returncode, code, (model, harness, r.stderr))
+        r = self.run_tool("--model", "deepseek/deepseek-chat")
+        self.assertEqual(r.returncode, 4)
+        self.assertNotIn("CHINA_REGION", r.stderr)
+        self.assertIn("this model may run only in the one project the owner allows; ask the owner", r.stderr)
+        # --own is the owner's own gateway (project-setup --own-model): fine, unless it is a hosted model
+        self.assertEqual(self.run_tool("--model", "gw/m9", "--harness", "opencode", "--own").returncode, 0)
+        self.assertEqual(self.run_tool("--model", "opencode-go/kimi", "--harness", "opencode", "--own").returncode, 4)
+        self.assertEqual(self.run_tool("--model", "x", "--bogus").returncode, 2)
+        self.assertEqual(self.run_tool("--model").returncode, 2)
+
+    def test_restricted_lists_the_tiers_a_project_may_not_run(self):
+        co, table = self.project("shop")
+        rows = (f"{self.HEAD}\nswift\topencode\topencode-go/kimi\t-\nstandard\tclaude\tsonnet\tinherit\n"
+                "deep\tcodex\tgpt-5\t-\ntop\tnone\t-\t-\n")
+        r = self.run_tool("--restricted", "/dev/stdin", input=rows)
+        self.assertEqual((r.returncode, r.stdout), (0, "swift\ndeep\n"), r.stderr)
+        self.machine(f'COORDINATORS="\nshop {co}\n"\nCHINA_REGION_MODELS_PROJECT=shop\n')
+        self.assertEqual(self.run_tool("--restricted", "/dev/stdin", "--project", str(co), input=rows).stdout, "")
+        other, _ = self.project("blog")
+        self.assertEqual(self.run_tool("--restricted", "/dev/stdin", "--project", str(other), input=rows).stdout, "swift\ndeep\n")
 
     def test_a_hosted_opencode_model_is_refused_whatever_the_harness_cell_says(self):
         for harness in ("claude", "OpenCode", "opencode2", "oc"):
@@ -3774,15 +3902,15 @@ class TierChoiceTests(unittest.TestCase):
         r = self.e.run(str(self.repo), "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), tiers.read_text())
-        self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
-        self.assertIn("global_region_models", r.stderr)
+        self.assertIn("warning: swift: lane-tier refuses this tier here", r.stderr)
+        self.assertIn("this model may run only in the one project the owner allows", r.stderr)
 
     def test_a_misspelled_harness_on_a_hosted_model_is_warned_about(self):
         tiers = self.e.home / "t.tsv"
         tiers.write_text("tier\tharness\tmodel\tpermission\nswift\tOpenCode\topencode-go/deepseek-v4.1-flash\t-\n")
         r = self.e.run(str(self.repo), "--tiers", str(tiers))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("warning: swift is an OpenCode tier", r.stderr)
+        self.assertIn("warning: swift: lane-tier refuses this tier here", r.stderr)
 
     def test_the_default_table_gets_no_opencode_warning(self):
         r = self.e.run(str(self.repo))
@@ -3817,10 +3945,10 @@ class TierChoiceTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), old)
         self.assertNotIn("sandbox required", r.stderr)
-        self.assertIn("warning: swift is an OpenCode tier", r.stderr)
+        self.assertIn("warning: swift: lane-tier refuses this tier here", r.stderr)
         show = self.e.run(str(self.repo), "--show", adapt=True)
         self.assertEqual(show.returncode, 0, show.stderr)
-        self.assertIn("warning: swift is an OpenCode tier", show.stderr)
+        self.assertIn("warning: swift: lane-tier refuses this tier here", show.stderr)
 
 
 if __name__ == "__main__":

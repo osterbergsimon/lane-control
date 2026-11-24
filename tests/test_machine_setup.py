@@ -1489,6 +1489,10 @@ class MachineSetupTests(BudgetTest):
                 r = self.setup_machine("--machine-coordinator", bad)
                 self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("lane-tier", self.setup_machine("--machine-coordinator", "opencode/opencode-go/x").stderr)
+        for spec in ("opencode/deepseek/deepseek-chat", "opencode/gw/m1", "claude/moonshot/kimi-k2"):  # not known safe
+            r = self.setup_machine("--machine-coordinator", spec)
+            self.assertNotEqual(r.returncode, 0, spec)
+            self.assertIn("this model may run only in the one project the owner allows", r.stderr, spec)
 
     def test_running_coordinator_not_restarted(self):
         self.orca({"terminals": [{"handle": "term_1", "title": "machine coordinator", "worktreePath": str(self.folder)}]})
@@ -1700,7 +1704,7 @@ class NightManagerDocTests(unittest.TestCase):
                        "stand down", "BUDGET push-and-handover"):
             self.assertIn(needle, text)
         self.assertNotIn("--apply", text.replace("never `--apply`", "").replace("never --apply", ""))
-        for private in ("/home/", "10.10."):  # machine and project names: test_content.PrivateNamesTests
+        for private in ("/home/", "10.10.", "alice", "shop-vps"):  # made-up names, so this runs in CI; the real ones: test_content.PrivateNamesTests
             self.assertNotIn(private, text.lower())
 
 if __name__ == "__main__":

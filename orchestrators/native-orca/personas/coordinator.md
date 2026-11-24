@@ -134,7 +134,7 @@ You plan, decide and check; lanes do the work, including the waiting.
   many lanes run, never the tier. The path map and review tiers are in `.lane-control/routing.md` when the project has
   it, else in the project's AGENTS.md or its `model-routing.md`. When none of them has a path map, tell the owner
   once, and meanwhile route every lane as standard at least and review tier B. Never start a tier `lane-tier`
-  refuses (exit 3: skip it, one tier up; exit 4: refused, tell the owner).
+  refuses (exit 3: skip it, one tier up; exit 4: refused, tell the owner; never edit the table, a settings file or machine.conf to get past it).
 - Budget: read the usage feed and the ceiling before each launch (`{{LANE_CONTROL}}/core/model-routing.md`). Steps
   count from the weekly ceiling: ceiling-15 is a pressure notice (nothing changes), ceiling-7 no new work, ceiling-4
   push everything and write the handover, ceiling-2 stop. "Free until reset" means use it, with the hard edge at

@@ -360,17 +360,18 @@ The coordinator follows the `orca-cotal-lanes` skill:
 Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
 
 ### OpenCode tiers
-Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (only in a project whose settings allow it: `global_region_models`). To bring it back, restore it from git history (last in main at b97c919).
+Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (only in the one project the owner allows: `CHINA_REGION_MODELS_PROJECT` in machine.conf). To bring it back, restore it from git history (last in main at b97c919).
 
-Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, only in a project the owner allowed it in
-(owner 2026-11-15): the setting `global_region_models` in its `settings.json`, default off. There, its Orca coordinator starts it with
+Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, in exactly one project, the one the owner
+names (owner 2026-11-15): the owner-only line `CHINA_REGION_MODELS_PROJECT=<name>` in machine.conf, empty or missing
+by default, written by hand and by no tool or agent. There, its Orca coordinator starts it with
 `orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash`, never with `cotal_spawn`;
-lane-control's own lane tools do not start OpenCode. In a project without the setting there are no OpenCode lanes and no
-hosted global-region model runs bare (`model-routing.md`, "Sandbox per tier"); re-adding them needs the sandbox back first
-(restore it from b97c919). The default tier table's swift row is harness `none`, so its work goes one tier up. `lane-tier`
-refuses every OpenCode tier in a project without the setting (exit 4: harness `opencode`, or an `opencode/` or
-`opencode-go/` model whatever the harness cell says), and
-project-setup warns about an OpenCode row in such a project's table (on a run, `--refresh` and `--show`): set its harness to
+lane-control's own lane tools do not start OpenCode. Anywhere else there are no OpenCode lanes and no hosted global-region
+model runs bare (`model-routing.md`, "Sandbox per tier"); re-adding them needs the sandbox back first (restore it from
+b97c919). The default tier table's swift row is harness `none`, so its work goes one tier up. `lane-tier` refuses
+every tier whose model is not known safe (exit 4: any harness spelling, an `opencode/` or `opencode-go/` model whatever
+the harness cell says) in every project but the one the owner allows, and
+project-setup warns about such a row in a project's table (on a run, `--refresh` and `--show`): set its harness to
 `none`. A table from before may still have a `sandbox` column; `lane-tier` ignores it.
 
 The agents setup starts itself are narrower: `--coordinator` and `--reviewer` refuse every

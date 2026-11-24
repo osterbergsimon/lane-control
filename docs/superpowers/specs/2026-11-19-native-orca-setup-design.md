@@ -223,7 +223,7 @@ Into `core/reliability.md` (tagged with their orchestrator where one applies), g
   coordinator, as SPIKE-2 did for Claude workers). Idle for the night manager: the newest write of the
   coordinator's OpenCode session in OpenCode's data folder, the counterpart of Claude's transcript.
 - **Model rule still holds:** the owner's "no code to China" rule limits which OpenCode providers may run unsandboxed
-  (today only a project whose settings set `global_region_models` may run `opencode-go/deepseek-v4.1-flash`, and only through its own coordinator). An OpenCode
+  (today only the one project the owner names in machine.conf (`CHINA_REGION_MODELS_PROJECT`) may run `opencode-go/deepseek-v4.1-flash`, and only through its own coordinator). An OpenCode
   coordinator or lane elsewhere needs a provider the owner allows; `project-setup` refuses a role/model pair the
   tier rules (`core/scripts/lane-tier`) refuse.
 - **Refresh, pause, wake without Cotal:** refresh = re-render the personas and the hook; the next compaction or

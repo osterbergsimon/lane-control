@@ -205,7 +205,7 @@ def free_port(start: int) -> int:
 
 SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "own_models", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
-                "paired_environment", "beads_repo", "global_region_models")  # all that is ever written: names and choices, never a secret
+                "paired_environment", "beads_repo")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -1050,11 +1050,15 @@ class Refused(Fail):
     """A choice project-setup will not run (exit 2), found before anything is written."""
 
 
-def lane_tier_refusal(model: str):
-    """None when lane-tier lets the model run (`lane-tier --model`), else its refusal: the one reader of the rule."""
+def lane_tier_refusal(model: str, harness: str = "claude"):
+    """None when lane-tier lets the model run as a standing role (`lane-tier --model`), else its refusal: the one reader of
+    the rule. An opencode pin is asked with --own: its own gate is the --own-model declaration (own_check), so lane-tier
+    refuses only a hosted model there; every other harness's model must be known safe to lane-tier."""
+    cmd = ["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--model", model, "--harness", harness]
+    if harness == "opencode":
+        cmd.append("--own")
     try:
-        r = subprocess.run(["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--model", model],
-                           capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise Fail(f"cannot ask lane-tier about {model}: {e}")
     if r.returncode == 0:
@@ -1070,7 +1074,7 @@ def native_pin_refusal(pins: dict, mode: str, own: set):
     oc = load_harness("opencode")
     for role in ("coordinator", "reviewer"):
         h, m = pins[role]
-        why = lane_tier_refusal(m)
+        why = lane_tier_refusal(m, h)
         if why:
             return f"the {role} pins {h}/{m}: {why}"
         if h == "opencode" and m not in own:
@@ -1098,23 +1102,24 @@ def check_tier_table(text: str) -> list:
     return [tuple(l.split()) for l in r.stdout.splitlines() if l.strip()]
 
 
-def region_models_on(repo: Path) -> bool:
-    """Whether the project's settings.json sets global_region_models to the JSON true (default off; anything unreadable
-    is off). The one setting that lets lane-tier pass a hosted OpenCode tier; no standing role ever runs on one."""
-    try:
-        return json.loads((store_dir(repo) / "settings.json").read_text()).get("global_region_models") is True
-    except (OSError, ValueError, AttributeError):
-        return False
-
-
 def opencode_rows_note(tier_text: str, repo: "Path | None" = None):
-    """Warns about the OpenCode rows of a project's table: lane-tier refuses them (one tier up) unless the project's
-    settings turn global-region models on, which only `repo` can say."""
-    rows = [t for t, h, m in check_tier_table(tier_text) if h == "opencode" or m.startswith(HOSTED_OPENCODE)]
-    if rows and not (repo is not None and region_models_on(repo)):
-        print(f"warning: {', '.join(rows)} is an OpenCode tier: lane-tier refuses it (hosted global-region models run "
-              "only in a project whose settings.json sets global_region_models; model-routing.md). Set its harness to "
-              "none in the project's lanes.tsv, or set global_region_models if the owner decided this project may.",
+    """Warns about the rows of a project's table whose model is restricted (lane-tier --restricted: not known safe, so a
+    project may run it only if the owner allows it there; none for that project): lane-tier refuses them, so their work
+    goes one tier up. `repo` is the project's checkout."""
+    check_tier_table(tier_text)  # a bad table is a Fail, as before
+    cmd = ["bash", str(HERE / "core" / "scripts" / "lane-tier"), "--restricted", "/dev/stdin"]
+    if repo is not None:
+        cmd += ["--project", str(repo)]
+    try:
+        r = subprocess.run(cmd, input=tier_text, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Fail(f"cannot check the tier table: {e}")
+    if r.returncode != 0:
+        raise Fail(r.stderr.strip())
+    rows = r.stdout.split()
+    if rows:
+        print(f"warning: {', '.join(rows)}: lane-tier refuses this tier here: this model may run only in the one project "
+              "the owner allows; ask the owner (model-routing.md). Set its harness to none in the project's lanes.tsv.",
               file=sys.stderr, flush=True)
 
 
@@ -2684,8 +2689,7 @@ def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool,
-            "global_region_models": bool}
+            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
@@ -4150,7 +4154,7 @@ def main(argv=None) -> int:
     for flag, pin in flag_pins:
         if ORCHESTRATOR == "native-orca":
             try:
-                why = lane_tier_refusal(pin[1])
+                why = lane_tier_refusal(pin[1], pin[0])
             except Fail as e:
                 print(f"project-setup: {e}", file=sys.stderr)
                 return 1

@@ -28,7 +28,8 @@ Do these in order; any that fails holds the lane, and you tell the owner what it
    `<KEY>-<n>` as the label `lane:<KEY>-<n>`, and `bd update <id> --claim` it at launch.
 3. Tier: by the paths the task touches (your persona's path map; highest tier wins, in doubt one tier up). Look it up
    with `~/.agents/bin/lane-tier <your tier table> <tier>`, which prints harness, model and permission. Exit 3: skip
-   that tier, go one up. Exit 4: refused, never start it and never edit the table; tell the owner.
+   that tier, go one up. Exit 4: refused, never start it and never edit the table, a settings file or machine.conf;
+   tell the owner.
 4. Budget: your persona's budget step allows new work (ceiling-7 and past: no new lanes).
 5. Room: run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner instead of starting it.
 6. Checkout: `git fetch origin`, `git status -sb`, `git rev-list --count HEAD..origin/<default>`. Detached, on
