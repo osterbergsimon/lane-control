@@ -154,30 +154,21 @@ class OrchestratorChoiceTests(Case):
 
 
 class RolePinTests(Case):
-    def test_hosted_opencode_role_is_refused_naming_the_rule(self):
-        for flag in ("--coordinator", "--reviewer"):
-            for model in ("opencode/opencode-go/deepseek-v4.1-flash", "opencode/opencode/big-pickle"):
-                r = self.e.run(str(self.repo), flag, model, "--no-start")
-                self.assertEqual(r.returncode, 2, (flag, model, r.stderr))
-                self.assertIn("lane-tier", r.stderr)
-                self.assertIn("model-routing.md", r.stderr)
-        self.assertEqual(self.e.calls(), [])  # refused before anything ran
+    def test_any_opencode_model_is_taken_for_every_role(self):
+        # owner 2026-11-24: no refusal by model or harness, and no --own-model step
+        for model in ("opencode/gw/m1", "opencode/opencode-go/deepseek-v4.1-flash", "opencode/opencode/big-pickle"):
+            r = self.e.run(str(self.repo), "--coordinator", model, "--reviewer", model, "--no-start")
+            self.assertEqual(r.returncode, 0, (model, r.stderr + r.stdout))
+            self.assertEqual(self.e.settings(self.repo)["models"], {"coordinator": model, "reviewer": model})
+            self.assertNotIn("lane-tier", r.stderr)
 
-    def test_an_own_opencode_model_is_taken_for_every_role(self):
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1",
-                       "--reviewer", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
-        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        self.assertEqual(self.e.settings(self.repo)["models"],
-                         {"coordinator": "opencode/gw/m1", "reviewer": "opencode/gw/m1"})
-
-    def test_an_opencode_model_not_declared_own_is_refused(self):
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--no-start")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("--own-model", r.stderr)
+    def test_a_claude_pin_on_any_model_name_is_taken(self):
+        r = self.e.run(str(self.repo), "--coordinator", "claude/opencode-go/x", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_opencode_role_refuses_claude_only_permission_modes(self):
         for mode in ("acceptEdits", "plan", "dontAsk"):
-            r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1",
+            r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1",
                            "--permission-mode", mode)
             self.assertEqual(r.returncode, 2, (mode, r.stderr))
             self.assertIn("OpenCode", r.stderr)
@@ -231,7 +222,7 @@ class RenderTests(Case):
 
     def test_four_roles_rendered_with_native_text_for_both_harnesses(self):
         for coord in ("claude/opus", "opencode/gw/m1"):
-            r = self.e.run(str(self.repo), "--coordinator", coord, "--own-model", "gw/m1", "--no-start")
+            r = self.e.run(str(self.repo), "--coordinator", coord, "--no-start")
             self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
             h, m = coord.split("/", 1)
             for role in ROLES:
@@ -381,7 +372,7 @@ class RenderTests(Case):
         plugin = Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "lane-persona.js"
         self.e.run(str(self.repo), "--no-start")
         self.assertFalse(plugin.exists())  # no OpenCode role: nothing of OpenCode's is touched
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(plugin.read_bytes(), (ROOT / "core" / "harnesses" / "opencode" / "lane-persona.js").read_bytes())
 
@@ -389,7 +380,7 @@ class RenderTests(Case):
         guard = Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "lane-away-guard.js"
         self.e.run(str(self.repo), "--no-start")
         self.assertFalse(guard.exists())  # no OpenCode role: nothing of OpenCode's is touched
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(guard.read_bytes(), (ROOT / "core" / "harnesses" / "opencode" / "lane-away-guard.js").read_bytes())
         self.assertIn("away-guard opencode", r.stdout)
@@ -468,7 +459,7 @@ class StartTests(Case):
         self.assertEqual(list(runs), ["coordinator"])
 
     def test_opencode_coordinator_starts_with_opencode2_and_its_prompt(self):
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-design-lead")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--no-design-lead")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         s = self.session("coordinator")
         self.assertEqual(s["bin"], "opencode2")
@@ -477,7 +468,7 @@ class StartTests(Case):
         self.assertNotIn("--name", s["argv"])
 
     def test_an_opencode_coordinator_gets_the_project_level_plugin_in_its_checkout(self):
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1",
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1",
                        env_extra={"LANE_OPENCODE_PLUGIN": "project"})
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         plugin = Path(".opencode") / "plugins" / "lane-persona.js"
@@ -488,7 +479,7 @@ class StartTests(Case):
         self.assertIn("/.opencode/plugins/lane-away-guard.js", (self.repo / ".git" / "info" / "exclude").read_text())
 
     def test_a_user_level_opencode_coordinator_needs_nothing_in_its_checkout(self):
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertFalse((self.repo / ".opencode").exists())
         self.assertTrue((self.e.home / ".config" / "opencode" / "plugins" / "lane-persona.js").is_file())
@@ -984,7 +975,7 @@ class RetireDesignLeadTests(Case):
 
 class RefreshTests(Case):
     def test_refresh_rerenders_with_the_stored_pins_and_hooks(self):
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         add = self.repo / ".lane-control" / "additions"
         add.mkdir(parents=True)
@@ -1115,7 +1106,7 @@ class PauseTests(Case):
         self.assertEqual([c for c in self.e.calls() if c.startswith("orca worktree create")], [])
 
     def test_start_resumes_an_opencode_session(self):
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-start")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr)
         rec = session_record(self.e, self.repo, "coordinator", "opencode")
         rec.parent.mkdir(parents=True, exist_ok=True)
@@ -1261,7 +1252,7 @@ class ReviewFixTests(Case):
     def test_a_session_whose_terminal_was_retitled_is_still_found(self):
         # Important 3: the shell (fish) or OpenCode retitles the terminal; the stored handle still finds it.
         self.e.set_state(retitle="fish /home")
-        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--no-design-lead")
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/gw/m1", "--no-design-lead")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(self.titles(), ["fish /home"])
         r = self.e.run(str(self.repo), "--no-design-lead")
@@ -1291,7 +1282,6 @@ class ReviewFixTests(Case):
 
 # --- coordinator's review of PR #39 ----------------------------------------------------------------------------------
 
-LANE_TIER = ROOT / "core" / "scripts" / "lane-tier"
 
 
 def store_bytes(e, repo):
@@ -1300,29 +1290,15 @@ def store_bytes(e, repo):
 
 
 class PinCheckTests(Case):
-    def test_lane_tier_judges_a_model_alone(self):
-        for model, code in (("opus", 0), ("gw/m1", 0), ("opencode-go/x", 4), ("opencode/big-pickle", 4)):
-            r = subprocess.run(["bash", str(LANE_TIER), "--model", model], capture_output=True, text=True)
-            self.assertEqual(r.returncode, code, (model, r.stderr))
-        r = subprocess.run(["bash", str(LANE_TIER), "--model"], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 2)
-
     def test_a_refused_run_leaves_the_store_byte_identical(self):
         # M1: the refusal comes before anything is written.
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
         before = store_bytes(self.e, self.repo)
-        for args in (["--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--permission-mode", "plan"],
-                     ["--coordinator", "opencode/gw/m1", "--own-model", "gw/m1", "--permission-mode", "dontAsk"]):
+        for args in (["--coordinator", "opencode/gw/m1", "--permission-mode", "plan"],
+                     ["--coordinator", "opencode/gw/m1", "--permission-mode", "dontAsk"]):
             r = self.e.run(str(self.repo), *args, "--no-start")
             self.assertEqual(r.returncode, 2, (args, r.stderr))
             self.assertEqual(store_bytes(self.e, self.repo), before, args)
-
-    def test_a_model_lane_tier_refuses_is_refused_whatever_the_harness(self):
-        # m5: lane-tier is asked; it refuses an opencode-go/ model even with claude as the harness.
-        r = self.e.run(str(self.repo), "--coordinator", "claude/opencode-go/x", "--no-start")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("lane-tier", r.stderr)
-        self.assertEqual(self.e.calls(), [])
 
     def edit_store(self, **kw):
         f = self.e.store(self.repo) / "settings.json"
@@ -1337,9 +1313,8 @@ class PinCheckTests(Case):
     def test_stored_pins_are_checked_again_on_pause_and_refresh(self):
         # M1 and m4: a hand-edited store never starts a session the setup would refuse; a clean Fail, no traceback.
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
-        cases = ({"models": {"coordinator": "opencode/gw/m1"}, "own_models": ["gw/m1"], "permission_mode": "plan"},
-                 {"models": {"coordinator": "opencode/opencode-go/x"}},
-                 {"models": {"coordinator": "opencode/gw/m2"}})  # not declared own
+        cases = ({"models": {"coordinator": "opencode/gw/m1"}, "permission_mode": "plan"},
+                 {"models": {"coordinator": "nosuch/x"}})
         for case in cases:
             self.edit_store(**case)
             for run in (lambda: self.e.pause("start", str(self.repo)),
@@ -1669,7 +1644,8 @@ class Round2Tests(Case):
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
         f = self.e.store(self.repo) / "settings.json"
         st = json.loads(f.read_text())
-        st["models"]["coordinator"] = "opencode/opencode-go/x"
+        st["models"]["coordinator"] = "opencode/gw/m1"
+        st["permission_mode"] = "plan"  # the one refusal left: a mode OpenCode does not have
         f.write_text(json.dumps(st))
         r = self.e.pause("start", str(self.repo))
         self.assertEqual(r.returncode, 1)

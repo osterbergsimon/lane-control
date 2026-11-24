@@ -51,8 +51,9 @@ instead (not at the stop step), until it runs `lane-improve drained`; a wrapped-
 Budget gate (budget-state, free), as the machine coordinator's night routine had it: at the no-new-work and
 push-and-handover steps, or with the short window at WINDOW_WARN_PCT (95) or WINDOW_STOP_PCT (98), check-ins still go
 out but only to have coordinators push and write their handover (a `BUDGET push-and-handover` line comes first); at
-the stop step none. When the budget is unknown (no config, no usage feed, a feed that gives no reading) nobody gets a
-check-in: if a coordinator would be due, one BUDGET line says so once a night (stamp
+the stop step none. A config with no metered budget (no budget has a usage feed, e.g. only a self-hosted gateway) has no
+steps: check-ins go out as at step none, the caps being the limit. When the budget is unknown (no config, a metered
+budget whose feed gives no reading) nobody gets a check-in: if a coordinator would be due, one BUDGET line says so once a night (stamp
 ~/.cache/lane-control/night/.budget-unknown, 16 h); otherwise only stderr does, and machine-check reports the unknown
 budget once. Runners are reported either way.
 
@@ -119,8 +120,8 @@ def budget_gate(project: str = "") -> "tuple[str, str]":
     if r.returncode != 0:
         return "unknown", (r.stderr.strip().splitlines() or ["budget-state failed"])[-1].removeprefix("budget-state: ")
     lines = r.stdout.splitlines()
-    if not lines:
-        return "unknown", "no metered budget in the config"
+    if not lines:  # no budget has a usage feed (e.g. only a self-hosted gateway): the caps are the limit
+        return "ok", ""
     for line in lines:
         f = line.split()
         if len(f) > 1 and f[1] == "unknown":

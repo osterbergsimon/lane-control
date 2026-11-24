@@ -43,8 +43,9 @@ You plan, decide and check; lanes do the work, including the waiting.
   in its report. If the base moved before you merge, send the lane a new Task to merge it again.
 - Start a lane with `orca-ide orchestration worker-start --spec-file <brief> --worktree new-child --agent <id>
   --model <model>` (`--effort` only for Claude). Harness and model come from `~/.agents/bin/lane-tier <your tier
-  table> <tier>`. The agent id is `claude` for Claude and `opencode2` for OpenCode (v2); `lane-tier` still gates it
-  (the tier rules, `core/scripts/lane-tier`).
+  table> <tier>` (the tier rules, `core/scripts/lane-tier`). The agent id is `claude` for Claude and `opencode2` for
+  OpenCode (v2): a tier whose harness is `opencode` starts like any other, with `--agent opencode2 --model
+  <provider>/<model>` from your table.
 - An OpenCode lane needs its worktree first: `orca-ide worktree create`, then `worker-start --worktree
   path:<that worktree>`. A lane on another host (`--on <environment>`) takes `--worktree new-top-level --repo <exact
   selector>`; Orca refuses `new-child` and `current` there.
@@ -133,8 +134,8 @@ You plan, decide and check; lanes do the work, including the waiting.
 - Route every lane by tier: the highest tier of the touched paths wins, in doubt one tier up; the budget decides how
   many lanes run, never the tier. The path map and review tiers are in `.lane-control/routing.md` when the project has
   it, else in the project's AGENTS.md or its `model-routing.md`. When none of them has a path map, tell the owner
-  once, and meanwhile route every lane as standard at least and review tier B. Never start a tier `lane-tier`
-  refuses (exit 3: skip it, one tier up; exit 4: refused, tell the owner).
+  once, and meanwhile route every lane as standard at least and review tier B. A tier whose harness is `none`
+  (`lane-tier` exit 3) is skipped: one tier up. Every other tier in your table may be started.
 - Budget: read the usage feed and the ceiling before each launch (`{{LANE_CONTROL}}/core/model-routing.md`). Steps
   count from the weekly ceiling: ceiling-15 is a pressure notice (nothing changes), ceiling-7 no new work, ceiling-4
   push everything and write the handover, ceiling-2 stop. "Free until reset" means use it, with the hard edge at

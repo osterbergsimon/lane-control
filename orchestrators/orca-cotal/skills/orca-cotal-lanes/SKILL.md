@@ -30,9 +30,9 @@ Tier by the paths the task touches (lane-control model-routing: highest tier win
 for prose docs, scripts without private data and CI). Then look the tier up in the tier table file your persona names (the project's `lanes.tsv` in its settings store under
 `~/.config/lane-control/projects/<project>/`, by absolute path, because lane worktrees do not carry it): run `~/.agents/bin/lane-tier <table> <tier>`, which prints the tier's harness, model and permission.
 
-A tier whose harness is `none` is skipped: `lane-tier` exits 3, go one tier up. Exit 4 refuses an OpenCode tier
-(swift on OpenCode is listed only in the table of a project that wants it, started by its Orca coordinator, never by `cotal_spawn`): never start a refused tier with `cotal_spawn` and never edit the table to get past it; go
-one tier up and tell the owner in your next line. Any other non-zero exit: hold the lane and tell the owner what it
+A tier whose harness is `none` is skipped: `lane-tier` exits 3, go one tier up. A tier whose harness is `opencode` is
+started like any other (`agent: opencode`, the table's model, section 2): the table is the owner's, so every tier in it
+may run. Never edit the table to change a tier. Any other non-zero exit: hold the lane and tell the owner what it
 printed. `inherit` means the project's Claude permission mode, which
 your persona names; pass that value.
 
@@ -119,7 +119,7 @@ the lane's report arrives as a DM and wakes you. Reply to a lane with `cotal_dm`
 When your persona says a lane gets a reviewer, start one in the lane's own worktree, so its tab sits in the lane's
 task. It reviews read-only and reports to you by DM.
 
-1. Pick its tier and model as your persona says (a different model from the lane's), from the tier table, with `lane-tier` as in section 1 (a refused tier is never used).
+1. Pick its tier and model as your persona says (a different model from the lane's), from the tier table, with `lane-tier` as in section 1 (a tier with harness `none` is never used).
 2. Read the reviewer persona (the path your persona names) and take its body: everything after the second `---`.
 3. `cotal_spawn`:
    - `name`: `<key-slug>-review`; `role`: `reviewer` (your persona holds `role:reviewer`)

@@ -27,8 +27,9 @@ Do these in order; any that fails holds the lane, and you tell the owner what it
 2. The issue: one beads issue per lane (`bd search` first, add to an existing one). Give it the next lane key
    `<KEY>-<n>` as the label `lane:<KEY>-<n>`, and `bd update <id> --claim` it at launch.
 3. Tier: by the paths the task touches (your persona's path map; highest tier wins, in doubt one tier up). Look it up
-   with `~/.agents/bin/lane-tier <your tier table> <tier>`, which prints harness, model and permission. Exit 3: skip
-   that tier, go one up. Exit 4: refused, never start it and never edit the table; tell the owner.
+   with `~/.agents/bin/lane-tier <your tier table> <tier>`, which prints harness, model and permission. Exit 3: the
+   tier's harness is `none`, skip it and go one up. Any other non-zero exit: hold the lane and tell the owner what it
+   printed. Your table is the owner's: every tier in it may be started, never edit it to change a tier.
 4. Budget: your persona's budget step allows new work (ceiling-7 and past: no new lanes).
 5. Room: run `~/.agents/bin/lane-room`. If it exits non-zero, hold the lane and tell the owner instead of starting it.
 6. Checkout: `git fetch origin`, `git status -sb`, `git rev-list --count HEAD..origin/<default>`. Detached, on
@@ -55,7 +56,8 @@ Start the lane:
 orca-ide orchestration worker-start --spec-file <brief> --worktree new-child --agent <id> --model <model>
 ```
 
-- `<id>` is `claude` for Claude and `opencode2` for OpenCode (v2); `--effort` only for Claude.
+- `<id>` is `claude` for Claude and `opencode2` for OpenCode (v2); `--effort` only for Claude. A tier whose harness
+  is `opencode` starts like any other: `--agent opencode2 --model <provider>/<model>`, the model as your table has it.
 - OpenCode needs its worktree first: `orca-ide worktree create`, then `--worktree path:<that worktree>`.
 - Another host (`--on <environment>`): `--worktree new-top-level --repo <exact selector>` (Orca refuses `new-child`
   and `current` there). Run `orca-ide orchestration check` right after, and on each wake: the wake may not reach you.

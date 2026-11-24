@@ -22,7 +22,8 @@
 # CI's); it counts for one hour, so machine-check runs this every 30 minutes and a dead writer cannot leave CI on away
 # limits. It is never a reason to spend budget: the night manager reads LANE_OWNER_AWAY, not this. A feed that gives
 # no reading is unknown, never assumed stopped; with --project, a project in improve mode started --unmetered reads
-# `<budget> unmetered (...)` instead (a reading, when the feed gives one, still wins).
+# `<budget> unmetered (...)` instead (a reading, when the feed gives one, still wins). A config with no metered budget
+# at all prints nothing on stdout (a note on stderr): no steps apply, which callers read as none, never as unknown.
 # Exit: 0; 2 no config (the marker is removed) or usage.
 set -u
 mark= project=
@@ -60,7 +61,10 @@ for t in ${TIERS:-}; do
 done
 
 all_stopped= any_lane= warned=
-for b in $(metered | sort); do
+budgets=$(metered | sort)
+# no usage feed anywhere (e.g. only a self-hosted gateway): nothing is unknown, the caps are the limit
+[ -n "$budgets" ] || echo "budget-state: no metered budget (no usage feed in the config): no budget steps; the caps are the limit" >&2
+for b in $budgets; do
   reading=$(bash -c "${BUDGET_USAGE[$b]}" 2>/dev/null)
   if ! [[ "$reading" =~ ^[0-9]+\ [0-9]+$ ]]; then
     # no reading is never an unmetered machine's stop: improve mode started --unmetered says so for its projects

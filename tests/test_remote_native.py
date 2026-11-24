@@ -828,17 +828,20 @@ class ReviewRound1Tests(Case):
         # m3: OpenCode v2 is first-class over a host too.
         self.e.saved("box")
         r = self.e.setup(str(self.repo), "box", "--no-design-lead", "--no-desktop-lanes", "--no-machine-setup",
-                         "--coordinator", "opencode/gateway/m1", "--own-model", "gateway/m1",
+                         "--coordinator", "opencode/gateway/m1",
                          env_extra={"LANE_RUN_WAIT": "0"})
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         started = [json.loads(l) for l in (self.e.box / "sessions.log").read_text().splitlines()]
         self.assertEqual([(s["bin"], s["role"]) for s in started], [("opencode2", "coordinator")])
 
-    def test_a_hosted_model_is_refused_here_before_the_host_is_touched(self):
-        r = self.e.setup(str(self.repo), "box", "--no-start", "--coordinator", "opencode/opencode-go/m1")
-        self.assertEqual(r.returncode, 2, r.stderr + r.stdout)
-        self.assertIn("lane-tier", r.stderr)
-        self.assertEqual(self.e.lines(".ssh"), [])
+    def test_a_hosted_model_goes_to_the_host_like_any_other(self):
+        # owner 2026-11-24: no refusal by model; the owner's pin is passed on unchanged
+        self.e.saved("box")
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--no-machine-setup",
+                         "--coordinator", "opencode/opencode-go/m1")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertNotIn("lane-tier", r.stderr)
+        self.assertTrue(any("opencode/opencode-go/m1" in l for l in self.e.lines(".ssh")))
 
     def test_the_host_run_appends_its_own_bin_folders_to_path(self):
         # N11: ~/bin and ~/.local/bin go after the system's PATH, so nothing there shadows git or python3.

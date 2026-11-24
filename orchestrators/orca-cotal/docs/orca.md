@@ -270,7 +270,7 @@ and not in the repo:
 
 - `settings.json`: `root` (the checkout), `name`, `models` (harness/model
   per role: coordinator, reviewer), `permission_mode`, `private` (the `--private`
-  globs), `own_models`, `port` (the broker's) and `claude_setup`. Mode 600 in a 700 folder. Only these names are ever
+  globs), `port` (the broker's) and `claude_setup`. Mode 600 in a 700 folder. Only these names are ever
   written, and never a secret (keys stay in their own files); committed project knowledge stays in `.lane-control/`.
 - `lanes.tsv`: the tier table. Lanes reach it by this absolute path, so worktrees do not matter.
 
@@ -278,7 +278,7 @@ Machine-wide limits (`lane-limits.sh`, `lane-heavy`, `lane-room`) stay in their 
 in `.cotal/agents/`.
 
 A run reads the store: a flag wins over the stored value, which wins over the default, and the flag is stored (`--coordinator`,
-`--reviewer`, `--permission-mode`, `--name`, `--own-model`). `--private` adds to the
+`--reviewer`, `--permission-mode`, `--name`). `--private` adds to the
 stored list and never drops an entry; to remove one, edit `settings.json`. A retired design lead's `design_lead` and
 pin are dropped from the store, said in the output. `--refresh` keeps each persona's own harness and model, takes the mode from the
 store, and fills in what the store lacks from the personas.
@@ -316,7 +316,7 @@ skill. The project's own `lanes.tsv` in the store is never replaced (it names th
 rows are for the owner to copy over). It starts no adapting or reviewing agent, broker, coordinator or worktree, and
 commits nothing. Running agents keep the old persona and skill until restarted, so the last line (`restart: needed
 ...`) names the ones to stop and start again. A reviewer persona from before it existed is created (from `--reviewer`). All personas are checked before any is
-written. Changing an agent's harness or model is not a refresh: `--coordinator`, `--own-model` and
+written. Changing an agent's harness or model is not a refresh: `--coordinator` and
 `--permission-mode` are refused with `--refresh`.
 
 
@@ -362,22 +362,9 @@ Never `orca terminal send` or Orca `orchestration` on agents: those type into th
 ### OpenCode tiers
 Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (in a project whose own tier table lists it). To bring it back, restore it from git history (last in main at b97c919).
 
-Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, only in a project whose own tier table lists it (owner
-2026-11-15). There, that project's Orca coordinator starts it with
-`orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash`; lane-control's own lane
-tools do not start OpenCode. Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare
-(`model-routing.md`, "Sandbox per tier"); re-adding them elsewhere needs the sandbox back first (restore it from
-b97c919). The default tier table's swift row is harness `none`, so its work
-goes one tier up. Each project's own tier table (written by project-setup, outside this repo) says which models it uses: lane-control's default tables carry no China-region hosted models, and a project that wants them lists them in its own table. `lane-tier` refuses every OpenCode tier (exit 4: harness `opencode`, or an `opencode/` or
-`opencode-go/` model whatever the harness cell says), and
-project-setup warns about an OpenCode row in a project's table (on a run, `--refresh` and `--show`): set its harness to
-`none`. A table from before may still have a `sandbox` column; `lane-tier` ignores it.
-
-The agents setup starts itself are narrower: `--coordinator` and `--reviewer` refuse every
-`opencode/<provider>/<model>` unless `--own-model <provider>/<model>` declares it yours, and refuse a hosted `opencode/` or
-`opencode-go/` model outright, as does `--own-model` itself. `--refresh` warns about a persona that already pins a hosted
-one. Marking a model yours is a statement nothing can check: never mark another third party's model (`deepseek/...`)
-with `--own-model`.
+Owner 2026-11-24: no refusals by model or harness ("why refuse anything? let me, per project, define models/tiers myself"). Each project's own tier table (written by project-setup, outside this repo) is the only place that says which models it uses, and a self-hosted gateway (for example LiteLLM, with any models behind it) is first class: project-setup can suggest a table from the gateway's model list for the owner to accept or edit (`--suggest-tiers`, `orchestrators/native-orca/setup.md`). A tier whose harness is `opencode` is started like any other, from that table: `orca-ide orchestration worker-start --agent opencode2 --model <provider>/<model>`. `scripts/lane-tier` refuses nothing (exit 3 only skips a tier whose harness is `none`), and project-setup and machine-setup take any harness and model the owner gives. lane-control's default tables stay as they were: they carry no China-region hosted models (swift and top are `none`). The owner may restrict a project in its own conf: that project's tier table lists only what it may use. On this path a tier whose harness is `opencode` is a Cotal lane like any other
+(`cotal_spawn` with `agent: opencode` and the table's model). A table from before may still have a `sandbox` column;
+`lane-tier` ignores it.
 
 ### Launching OpenCode lanes
 - `OPENCODE_API_KEY` in `mgr`'s environment is forwarded to OpenCode agents.

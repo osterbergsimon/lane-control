@@ -3,7 +3,7 @@
 manager, lane sweep and machine check automations, the presence-based CI limits and the usage feed check.
 
   machine-setup [--host H] [--folder DIR] [--machine-coordinator HARNESS/MODEL] [--permission-mode MODE]
-                [--trust-folder] [--no-start]
+                [--automation-provider claude|opencode] [--trust-folder] [--no-start]
 
 Runs as a normal user on the machine whose coordinators it watches; with --host it copies what it needs to H over
 SSH (~/.local/share/lane-control, as project-setup does) and runs there with the same arguments, so a box gets its own
@@ -24,7 +24,9 @@ precheck and prompt, and never from a lane worktree.
    --permission-mode auto --name "machine coordinator"` (default claude/sonnet; Claude's --name keeps the session
    and terminal title, so peers find it by SendMessage). Claude's first-start folder question: --trust-folder answers
    yes; otherwise it is asked in a terminal, as project-setup does.
-5. Orca automations in that folder (fresh Claude Sonnet sessions; each precheck runs first and costs nothing):
+5. Orca automations in that folder (fresh sessions, each precheck runs first and costs nothing; Claude Sonnet, or on a
+   machine without Claude --automation-provider opencode, the default when the machine coordinator runs on OpenCode:
+   OpenCode v2 on OpenCode's own default model, since Orca takes no model or other extra arguments for it):
    `night manager` hourly at :37 (night-precheck), `lane sweep` every 3 hours (lane-sweep --precheck: new findings
    only, report only) and `machine check` every 30 minutes (machine-check: budget step, memory or runner state
    changed). The machine check's session passes the change on to the machine coordinator, since an automation
@@ -39,7 +41,7 @@ precheck and prompt, and never from a lane worktree.
 7. The ci-presence user timer (every 15 minutes and at boot), if systemd --user works; otherwise a warning and the
    CI limits stay the slice unit's own. An older timer that sets the CI slice (ci-cpu) is reported with the command
    to stop it, and ci-presence is not installed beside it.
-Exit: 0 done (warnings included); 1 a step failed; 2 usage or a refused harness/model.
+Exit: 0 done (warnings included); 1 a step failed; 2 usage or an unknown harness.
 """
 import argparse
 import importlib.machinery
@@ -73,6 +75,7 @@ NOTES_STUB = ("# Machine coordinator notes\n\n"
               "Private: owner decisions, caps, priorities. Never push this folder to a public remote.\n")
 FEED_MAX_AGE_MIN = 60
 AUTOMATION_MODEL = "sonnet"
+AUTOMATION_PROVIDERS = ("claude", "opencode")  # harness -> the agent id Orca starts: harnesses' ORCA_AGENT_ID
 
 
 class Fail(Exception):
@@ -107,14 +110,10 @@ def orca(*args) -> dict:
 
 
 def harness_model(spec: str) -> tuple:
-    """claude/<model> or opencode/<provider/model>; OpenCode's own providers only where lane-tier allows (not here)."""
+    """claude/<model> or opencode/<provider>/<model>, any provider (owner 2026-11-24: no refusal by model)."""
     harness, _, model = spec.partition("/")
     if harness not in harnesses.harnesses_names() or not model:
         raise SystemExit2(f"--machine-coordinator: expected claude/<model> or opencode/<model>, got {spec!r}")
-    if harness == "opencode" and model.startswith(("opencode/", "opencode-go/")):
-        raise SystemExit2(f"--machine-coordinator {spec}: refused, as lane-tier refuses it: OpenCode's own providers "
-                          "(opencode/, opencode-go/) run only where lane-tier allows (model-routing.md, \"Sandbox per "
-                          "tier\"), never for the machine coordinator; choose a provider the owner allows")
     return harness, model
 
 
@@ -147,8 +146,9 @@ def machine_conf():
 
 def usage_feed():
     f = Path.home() / ".claude" / "usage-history.jsonl"
-    how = ("budget steps stay unknown, and night check-ins stay off, until it is: Claude Code's status line must "
-           "append each sample to it (core/machine.md, \"Usage feeds\")")
+    how = ("a metered budget's steps stay unknown, and night check-ins stay off, until it is: Claude Code's status "
+           "line must append each sample to it (core/machine.md, \"Usage feeds\"); a machine with no metered budget "
+           "needs none (every feed empty in the config, e.g. only a self-hosted gateway: the caps are the limit)")
     try:
         mins = int((time.time() - f.stat().st_mtime) // 60)
     except FileNotFoundError:
@@ -262,7 +262,18 @@ OLDER_AUTOMATIONS = {"night manager": ("night-manager",), "lane sweep": ("lane-s
 OLDER_CI_TIMERS = ("ci-cpu.timer", "ci-cpu-mode.timer")
 
 
-def automations_step(folder: Path, from_lane: bool = False):
+def automation_agent(provider: str) -> list:
+    """The agent part of `automations create`: Claude with its model, or OpenCode v2 on its own default model (Orca
+    1.4.268 allows extra agent args for Claude and not for OpenCode, lc-mrz)."""
+    if provider == "claude":
+        return ["--provider", "claude", f"--extra-agent-args=--model {AUTOMATION_MODEL}"]
+    return ["--provider", harnesses.load_harness(provider).ORCA_AGENT_ID]
+
+
+def automations_step(folder: Path, from_lane: bool = False, provider: str = "claude") -> int:
+    """How many automations it created. The first create that Orca refuses stops the step before a second one: Orca
+    checks the provider id before anything is sent, so a wrong id creates nothing (said as failed, the run goes on)."""
+    created = 0
     have = {a.get("name"): a for a in orca("automations", "list").get("automations", []) or []}
     for name, trigger, precheck, timeout, prompt in automation_specs():
         if name in have:
@@ -287,11 +298,26 @@ def automations_step(folder: Path, from_lane: bool = False):
             say(name, "found older", f"automation {o.get('name')!r} ({o['id']}) does this job; not adding a second. "
                                      f"To switch: orca-ide automations remove {o['id']}  then run machine-setup again")
             continue
-        orca("automations", "create", "--name", name, "--trigger", trigger, "--prompt", prompt, "--provider", "claude",
-             f"--extra-agent-args=--model {AUTOMATION_MODEL}", "--precheck", precheck,
-             "--precheck-timeout", str(timeout),
-             "--workspace", f"path:{folder}", "--workspace-mode", "existing", "--enabled")
+        try:
+            orca("automations", "create", "--name", name, "--trigger", trigger, "--prompt", prompt,
+                 *automation_agent(provider), "--precheck", precheck,
+                 "--precheck-timeout", str(timeout),
+                 "--workspace", f"path:{folder}", "--workspace-mode", "existing", "--enabled")
+        except Fail as e:
+            if provider == "claude" or created:
+                raise
+            agent = automation_agent(provider)[1]
+            raise AutomationFail(f"{e} (the agent id {agent} for OpenCode is unverified: it is read from Orca 1.4.268's "
+                                 "own code, its agent catalog, not from a live create; no automation was created. "
+                                 "Use the id `orca-ide automations create --help` or Orca's docs give for OpenCode v2, "
+                                 "or --automation-provider claude)") from None
+        created += 1
         say(name, "created", f"(automation, {trigger}, precheck {precheck})")
+    return created
+
+
+class AutomationFail(Exception):
+    """The automations could not be made; the steps after them still run, and the run exits 1."""
 
 
 def systemctl(*args) -> subprocess.CompletedProcess:
@@ -392,6 +418,8 @@ def main(argv) -> int:
     ap.add_argument("--folder", default="~/machine-coordinator")
     ap.add_argument("--machine-coordinator", default="claude/sonnet", metavar="HARNESS/MODEL")
     ap.add_argument("--permission-mode", default="auto")
+    ap.add_argument("--automation-provider", choices=AUTOMATION_PROVIDERS,
+                    help="the harness the three automations run on (default: the machine coordinator's)")
     ap.add_argument("--trust-folder", action="store_true")
     ap.add_argument("--no-start", action="store_true")
     a = ap.parse_args(argv)
@@ -421,13 +449,27 @@ def main(argv) -> int:
             say(TITLE, "skipped", "(--no-start)")
         else:
             start_step(harness, model, a.permission_mode, folder, persona, a.trust_folder)
-        automations_step(folder, from_lane=bool(warning))
+        provider = a.automation_provider or harness
+        failed = None
+        try:
+            created = automations_step(folder, from_lane=bool(warning), provider=provider)
+        except AutomationFail as e:
+            created, failed = 0, str(e)
+            say("automations", "failed", failed)
+        if provider == "opencode" and created:
+            say("automations", "note", "they run on OpenCode's own default model (Orca passes no model to OpenCode): "
+                "set \"model\" in OpenCode's config to a <provider>/<model>"
+                + (f", such as {model}, the machine coordinator's" if harness == "opencode" else "")
+                + "; without one OpenCode picks a model itself")
         timer_step()
+        if failed:
+            print(f"machine-setup: the automations were not made: {failed}", file=sys.stderr)
+            return 1
     except (Fail, ValueError, OSError) as e:
         print(f"machine-setup: {e}", file=sys.stderr)
         return 1
     print(f"summary: machine coordinator folder {folder} · {harness}/{model} · automations night manager, lane sweep, "
-          "machine check")
+          f"machine check on {provider}")
     return 0
 
 

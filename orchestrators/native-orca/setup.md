@@ -73,6 +73,45 @@ its own heavy targets (a CI script, a make target) through `lane-heavy` so every
 the box's coordinator run lanes here with the desktop's share link (`remote.md`); `project-setup --remove-host
 <host>` undoes the second part.
 
+## OpenCode on a self-hosted LiteLLM gateway
+A self-hosted gateway with any models behind it is first class, and nothing is refused by model or harness (owner
+2026-11-24, `core/model-routing.md`, "Sandbox per tier"); each project's own tier table says which models it uses.
+0. A host set up before this change still has the old copies: `~/.agents/bin/lane-tier`, the lane skills and the
+   rendered personas there refuse an OpenCode tier until they are refreshed. Update the host's lane-control checkout,
+   run `core/scripts/project-setup <repo> --refresh` from it for each project (it reinstalls the lane tools and skills
+   and re-renders the personas), then restart the coordinator (`core/scripts/project-pause stop <repo>`, then `start <repo>`), so it
+   reads the new persona. The suggestion below warns while the installed lane-tier is not the checkout's.
+1. OpenCode's own config on the machine that runs the agents (`~/.config/opencode/opencode.json`) names the gateway
+   as a provider, with the key as a reference to an environment variable, never the key itself:
+   ```json
+   { "provider": { "litellm": { "npm": "@ai-sdk/openai-compatible",
+       "options": { "baseURL": "http://127.0.0.1:4000/v1", "apiKey": "{env:LITELLM_API_KEY}" },
+       "models": { "chat": {}, "code": {} } } } }
+   ```
+   Set the variable where the agents start (the session that starts Orca). The gateway's aliases are then
+   `litellm/chat` in OpenCode, a tier row of harness `opencode` and model `litellm/chat`, and
+   `opencode/litellm/chat` for project-setup's `--coordinator` and `--reviewer`.
+2. `core/scripts/project-setup <repo> --suggest-tiers litellm` reads the gateway's `/v1/models` and, where it answers
+   (LiteLLM), `/model/info`, which gives the model behind each alias; it shows each alias with that model and a
+   suggested table (swift, standard, deep from name hints; top `none`; rows `opencode/<provider>/<alias>`). It leaves
+   out, and names, a model whose LiteLLM `model_info.mode` is not chat (an embedding model, a reranker) and, where
+   OpenCode's config lists the provider's models (`provider.<id>.models`), an alias it does not list, since OpenCode
+   starts only those. The base
+   URL is the provider's `baseURL`, or `--gateway <url>`; the key is the variable its `{env:NAME}` names, or
+   `--gateway-key-env NAME`. A key written in the config itself is never used (it stops and says so). OpenCode's auth
+   files are never read, and the key is never printed, logged, stored or passed as an argument; it goes to the URL
+   given only: no redirect is followed and no proxy is used. In a terminal it asks before it writes the table to the project's settings store; on no,
+   or without a terminal, nothing is written: edit the table it printed and pass it with `--tiers <file>`. A later
+   setup run keeps the table.
+3. A machine without Claude: `core/scripts/machine-setup --machine-coordinator opencode/litellm/chat` (the
+   automations follow the machine coordinator's harness; `--automation-provider opencode` says it outright). The
+   three automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
+   model to OpenCode. With no usage feed (every budget's feed empty in the playbook config) no budget is metered:
+   the caps are the limit, and night check-ins still go out.
+
+The URL, the key's variable and the model names stay in OpenCode's config and the project's settings store: no key,
+host or gateway URL in any repo.
+
 ## A machine
 `core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
 every step says `exists` on a re-run):
@@ -93,7 +132,8 @@ every step says `exists` on a re-run):
 - On a machine set up by hand before: automations named `night-manager` or `lane-sweep` and an older CI timer
   (`ci-cpu`) are reported with the commands to remove them; nothing is doubled or replaced without the owner.
 - The usage feed check: without `~/.claude/usage-history.jsonl` written in the last hour, budget steps are unknown
-  and night check-ins stay off (the night precheck says so once a night).
+  and night check-ins stay off (the night precheck says so once a night), unless no budget in the playbook config has
+  a feed (only a self-hosted gateway, say): then there are no steps, the caps are the limit and check-ins go on.
 
 The owner says they leave or return with `core/scripts/lane-away on|off|status` (or asks the machine coordinator);
 `lane-away on --until-back` has no 14 h expiry, until `lane-away off`.
