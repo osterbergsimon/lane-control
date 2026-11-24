@@ -206,14 +206,23 @@ def _same_dir(a, b) -> bool:
     return os.path.realpath(os.path.expanduser(str(a))) == os.path.realpath(os.path.expanduser(str(b)))
 
 
+class Problem(NamedTuple):
+    """A project (or several, when Orca itself failed) that cannot be named: `why` is short (for a line a reader sees
+    beside the project's name), `text` the whole sentence, with what follows from it."""
+    names: tuple
+    why: str
+    text: str
+
+
 def resolve(coords: list, handles: bool = False, titles: bool = True) -> "tuple[list, list]":
-    """(found, problems): each coordinator as a Where, and one plain sentence per project that cannot be named.
+    """(found, problems): each coordinator as a Where, and a Problem for each project that cannot be named.
 
     A line with both harness and title is taken as it is and Orca is not asked (unless `handles`, which wants the
     terminal handle too and is happy without it; with `titles=False` only the harness is needed, so a line with
     just that is enough, and Where.title may be ""). Otherwise the harness and title come from the single agent
     terminal whose folder is the checkout; none, or several, or Orca failing leaves the project out, with why:
-    nothing is guessed and the caller wakes nobody for it. Orca failing is said once, for all it affects."""
+    nothing is guessed and the caller wakes nobody for it. Orca failing is one Problem for all it affects. A title
+    in machine.conf pins the handle: only a terminal with that title counts for it."""
     found, problems, blind = [], [], []
     terms = None
     orca_failed = ""
@@ -234,33 +243,41 @@ def resolve(coords: list, handles: bool = False, titles: bool = True) -> "tuple[
                 found.append(Where(c.name, c.checkout, c.harness, c.title))
             continue
         here = [t for t in terms if _same_dir(t["worktreePath"], c.checkout)]
-        if c.title and len(here) > 1:  # a title in machine.conf picks the handle, never the harness
-            here = [t for t in here if t.get("title") == c.title] or here
+        if c.title:  # the file names the session: only a terminal with that title is its handle, none is no handle
+            pinned = [t for t in here if t.get("title") == c.title]
+            handle = str(pinned[0].get("handle") or "") if len(pinned) == 1 else ""
+            found.append(Where(c.name, c.checkout, c.harness, c.title, handle))
+            continue
+        if not need and len(here) != 1:  # nothing to look up, and no single terminal to take a handle from
+            found.append(Where(c.name, c.checkout, c.harness, c.title))
+            continue
         if len(here) == 1:
             t = here[0]
             harness = c.harness or harness_of(str(t["agentIdentity"]))
-            title = c.title or str(t.get("title") or "")
+            title = str(t.get("title") or "")
             if not harness:
-                problems.append(f"{c.name}: the agent in {c.checkout} is {t['agentIdentity']!r}, which has no harness "
-                                "adapter here; nobody is woken for it (give its harness and title in machine.conf)")
+                why = f"the agent in {c.checkout} is {str(t['agentIdentity'])!r}, which has no harness adapter here"
+                problems.append(Problem((c.name,), why, f"{c.name}: {why}; nobody is woken for it (give its harness "
+                                                        "and title in machine.conf)"))
             elif not title and titles:
-                problems.append(f"{c.name}: its agent terminal in {c.checkout} has no title in Orca; nobody is woken "
-                                "for it (give its harness and title in machine.conf)")
+                why = f"its agent terminal in {c.checkout} has no title in Orca"
+                problems.append(Problem((c.name,), why, f"{c.name}: {why}; nobody is woken for it (give its harness "
+                                                        "and title in machine.conf)"))
             else:
                 found.append(Where(c.name, c.checkout, harness, title, str(t.get("handle") or "")))
-        elif need:
-            if not here:
-                problems.append(f"{c.name}: no agent terminal in {c.checkout} in Orca; nobody is woken for it (start "
-                                "its coordinator there, or give its harness and title in machine.conf)")
-            else:
-                titles = ", ".join(repr(str(t.get("title") or "?")) for t in here)
-                problems.append(f"{c.name}: {len(here)} agent terminals in {c.checkout} in Orca ({titles}); which one "
-                                "is its coordinator is not guessed, so nobody is woken for it (close the others, or "
-                                "give its harness and title in machine.conf)")
+        elif not here:
+            why = f"no agent terminal in {c.checkout}"
+            problems.append(Problem((c.name,), why, f"{c.name}: {why} in Orca; nobody is woken for it (start its "
+                                                    "coordinator there, or give its harness and title in machine.conf)"))
         else:
-            found.append(Where(c.name, c.checkout, c.harness, c.title))
+            seen = ", ".join(repr(str(t.get("title") or "?")) for t in here)
+            why = f"{len(here)} agent terminals in {c.checkout} ({seen})"
+            problems.append(Problem((c.name,), why, f"{c.name}: {why} in Orca; which one is its coordinator is not "
+                                                    "guessed, so nobody is woken for it (close the others, or give its "
+                                                    "harness and title in machine.conf)"))
     if blind:
-        problems.insert(0, f"Orca could not be asked ({orca_failed}), so {', '.join(blind)} cannot be found there and "
-                           "nobody is woken for them (or give their harness and title in machine.conf)")
+        problems.insert(0, Problem(tuple(blind), f"Orca could not be asked ({orca_failed})",
+                                   f"Orca could not be asked ({orca_failed}), so {', '.join(blind)} cannot be found "
+                                   "there and nobody is woken for them (or give their harness and title in machine.conf)"))
     order = {c.name: i for i, c in enumerate(coords)}
     return sorted(found, key=lambda w: order[w.name]), problems

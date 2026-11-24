@@ -7,10 +7,14 @@ changed, so the automation's agent passes it on to the machine coordinator; anyt
                            CHANGED budget <b>: unknown (...)           the usage feed or the config gives no reading
                            CHANGED memory: low, <n>G available (...)   / ok again
                            CHANGED runners <repo>: offline <a,b> (was none)
+                           WARN coordinator <name>: not found in Orca (<why>)   a COORDINATORS project Orca has no single
+                                                       agent terminal for: the night manager cannot check in on it
+                           CHANGED coordinator <name>: found in Orca again
   machine-check --last   print the changes the last check found (what the automation's agent passes on)
 
 Every run also writes or clears the budget-stopped marker (`budget-state --mark`), which needs a run at least hourly.
-Memory is low below lane-room's minimum (LANE_ROOM_MIN_MEM_GB from lane-limits.sh). Runners are RUNNER_REPOS from
+A coordinator is looked up as night-precheck does (the single agent terminal in its checkout; a paused project is not);
+one it cannot find is a WARN line when it first cannot be found or the reason changes, not on every run. Memory is low below lane-room's minimum (LANE_ROOM_MIN_MEM_GB from lane-limits.sh). Runners are RUNNER_REPOS from
 machine.conf; a runner list gh cannot read keeps the last known state. A first run counts the normal state (step 0,
 memory ok, no runner offline) as the last one. State: ~/.cache/lane-control/machine-check.json.
 Exit: 0 changed (or --last); 1 nothing changed; 2 the state file cannot be written.
@@ -127,6 +131,31 @@ def main(argv) -> int:
             now_txt = f"offline {','.join(off)}" if off else "all online"
             changes.append(f"CHANGED runners {repo}: {now_txt} (was {('offline ' + ','.join(was)) if was else 'none'})")
     new["runners"] = {r: v for r, v in new["runners"].items() if r in repos}
+
+    new["unfound"] = dict(old.get("unfound", {}))
+    try:
+        cos = machineconf.coordinators(machineconf.load())
+    except machineconf.ConfError:
+        cos = None  # no readable machine.conf: what was said stays as it was
+    if cos is not None:
+        active = []
+        for c in cos:
+            try:
+                if machineconf.paused(c.checkout):
+                    continue
+            except machineconf.ConfError:
+                pass  # night-precheck says that one; the lookup still applies
+            active.append(c)
+        _, problems = machineconf.resolve(active, titles=False)
+        now_unfound = {n: pr.why for pr in problems for n in pr.names}
+        for name, why in now_unfound.items():
+            if old.get("unfound", {}).get(name) != why:
+                changes.append(f"WARN coordinator {name}: not found in Orca ({why}); the night manager cannot check in "
+                               "on it and nobody is woken for it")
+        for name in old.get("unfound", {}):
+            if name not in now_unfound and name in {c.name for c in active}:
+                changes.append(f"CHANGED coordinator {name}: found in Orca again")
+        new["unfound"] = now_unfound
 
     new["last"] = ([time.strftime("%Y-%m-%d %H:%M")] + changes) if changes else old.get("last", [])
     try:

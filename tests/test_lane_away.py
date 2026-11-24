@@ -623,6 +623,7 @@ class ImproveDenyTests(ImproveTest):
         self.assertEqual(self.denies(self.blog), [])
         self.assertIn(f"blog: no agent terminal in {self.blog}", r.stderr)
         self.assertIn("deny rules NOT installed", r.stderr)
+        self.assertIn("Start its coordinator, then `lane-improve on --continue --project blog`", r.stderr)
 
     def test_orca_down_installs_none_and_says_so_once(self):
         self.two_columns(self.shop, self.blog)
@@ -637,6 +638,18 @@ class ImproveDenyTests(ImproveTest):
         self.on()
         self.assertTrue(self.denies(self.shop) and self.denies(self.blog))
         self.orca({"down": True})
+        self.run_script("lane-improve", "off")
+        r = self.run_script("lane-improve", "drained", "--all")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.denies(self.shop), self.denies(self.blog)), ([], []))
+
+    def test_the_rules_come_out_whatever_agent_runs_there_by_then(self):
+        # m2: a different agent in the checkout at the end must not leave the first one's rules behind
+        from test_night_precheck import agent_terminal
+        self.two_columns(self.shop, self.blog)
+        self.on()
+        self.assertTrue(self.denies(self.shop) and self.denies(self.blog))
+        self.orca({"terminals": [agent_terminal(self.shop, agent="opencode2"), agent_terminal(self.blog, agent="opencode2", handle="t2")]})
         self.run_script("lane-improve", "off")
         r = self.run_script("lane-improve", "drained", "--all")
         self.assertEqual(r.returncode, 0, r.stderr)

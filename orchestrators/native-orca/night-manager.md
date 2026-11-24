@@ -15,7 +15,10 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    `DUE <name> wrapup idle=<n>min waited=<h>h` line means the period has ended and that coordinator has not yet
    wrapped up (its draft PR and `lane-improve drained`). A `DUE <name> wrapup idle=<n>min
    cap=<items|weekly>:<n>/<max>` line means the owner's cap for that project (`--max-items`, `--stop-at`) is reached: it
-   wraps up like an ended period, while the mode goes on for the others. Exit 1 means nothing is due now: end.
+   wraps up like an ended period, while the mode goes on for the others. An `UNFOUND <name> (<why>)` line means Orca has no single
+   agent terminal in that coordinator's checkout (none, several, or Orca not answering): nobody can be checked in on
+   there, and it is said once a night per project: pass the line to the machine coordinator (step 4). Exit 1 means
+   nothing is due now: end.
 2. **Budget gate.** A `BUDGET push-and-handover` line (the no-new-work or push-and-handover step, or the short
    window at 95 or 98 %) means each check-in asks only to commit and push work in progress, write the handover,
    back beads up (in the beads repo `git push`, then `bd dolt push`) and start nothing new. Run `<lc>/core/scripts/budget-state` once more: if it now shows step 4 stop, or unknown,
@@ -25,23 +28,24 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    <name>`. It prints `<harness> <handle> <title>` (`COORDINATORS` in `~/.config/lane-control/machine.conf` gives only
    `<name> <checkout>`; Orca's single agent terminal in that checkout gives the rest, and a harness and title written
    in the file win). Use that title as the session name below. If it prints nothing and says why (no agent terminal
-   there, several, Orca not answering), send that coordinator nothing, never guess a session, and put the line in your
-   record (step 6) for the owner. Then send it one message:
-   "night manager: check-in (owner away). You have been idle <n> min. Check your lanes (workers done, stuck or
+   there, several, Orca not answering), send that coordinator nothing, never guess a session, run `<lc>/core/scripts/night-precheck
+   --checked <name>` all the same (so it is not due again, and the next run, an hour on, does not start for nothing),
+   and put the line in your record (step 6) for the owner. Then send it one message:
+   "night manager: For the <name> coordinator; if you are not it, ignore this and reply nothing. Check-in (owner away). You have been idle <n> min. Check your lanes (workers done, stuck or
    waiting), CI on your PRs (failures and finished runs to act on) and merge trains, and act on what is ready. If
    nothing needs doing, reply 'nothing' in one line."
    Then run `<lc>/core/scripts/night-precheck --checked <name>`, so it is not due again for two hours.
-   For a `DUE <name> improve` line send this instead: "night manager: improve mode is on for your project and you
+   For a `DUE <name> improve` line send this instead: "night manager: For the <name> coordinator; if you are not it, ignore this and reply nothing. Improve mode is on for your project and you
    have been idle <n> min. Resume your away-improve cycle (load the away-improve skill): check the lane you have
    out, and start the next cycle if none is running and your limits and budget allow. If a lane is running, reply
    'running' in one line." Then run `<lc>/core/scripts/night-precheck --checked <name> improve`, so it is not due
    again for the idle time. You never turn improve mode on or off and never decide what it works on.
-   For a `DUE <name> wrapup` line send: "night manager: the improve period has ended and you have not wrapped up (<h>
+   For a `DUE <name> wrapup` line send: "night manager: For the <name> coordinator; if you are not it, ignore this and reply nothing. The improve period has ended and you have not wrapped up (<h>
    h ago). Finish as the away-improve skill says (section 3): last PR through away-merge, the summary written
    (`lane-improve pr <project> --summary-file <path>`), the summary and that PR's link to the owner, then `lane-improve drained <project>`. If you are waiting on a lane, reply
    'waiting' in one line." For a `cap=` line say "the cap (<cap>) is reached" in place of the hours. Then run `<lc>/core/scripts/night-precheck --checked <name> wrapup`.
    When `waited` is 12 or more, add that line to what you tell the machine coordinator once: the owner should know.
-4. **Runners.** Send each `OFFLINE` line to the machine coordinator. Never restart a runner yourself.
+4. **Runners and coordinators not found.** Send each `OFFLINE` line and each `UNFOUND` line to the machine coordinator. Never restart a runner yourself.
 5. **Lanes.** Before sending the check-ins, run `<lc>/core/scripts/lane-sweep --stuck-hours 2` (report only,
    never `--apply`) and add each `STUCK` line whose `owner=` is a coordinator you check in on to that coordinator's
    check-in. Send nothing else from it: the lane sweep automation routes the rest, once each.

@@ -29,8 +29,10 @@ adapter; Orca's terminal output is no idle signal (status-line redraws keep it f
 
 A coordinator's harness and address are not in machine.conf (`<name> <checkout>`; a third and fourth column, harness
 and terminal title, override): they are looked up from Orca, as the single agent terminal whose folder is the
-checkout. No agent terminal there, several, or Orca not answering is said on stderr (which project, why, Orca once) and
-that coordinator is skipped: nobody is woken on a guess. Orca is asked only when a line lacks its harness or title.
+checkout. No agent terminal there, several, or Orca not answering is said on stderr (which project, why, Orca once) and,
+once a night (a `.unfound` stamp, 16 h, like the unknown budget), as an `UNFOUND <name> (<why>)` line on stdout, which
+the night manager passes to the machine coordinator; that coordinator is skipped: nobody is woken on a guess. Orca is
+asked only when a line lacks its harness or title.
 
 Improve mode (core/improve.py; `lane-improve on`) is separate from presence: it does not make the owner count as away,
 and its nudges go out by day or night whatever presence says (the plain check-ins above wait for the owner to be away).
@@ -259,13 +261,30 @@ def find(name: str) -> int:
         err(f"{name!r} is not a coordinator in {machineconf.path()}")
         return 2
     found, problems = machineconf.resolve(coords, handles=True)
-    for why in problems:
-        err(why)
+    for pr in problems:
+        err(pr.text)
     if not found:
         return 1
     w = found[0]
     print(f"{w.harness} {w.handle or '-'} {w.title}")
     return 0
+
+
+def unfound_lines(unfound: list, now: float) -> list:
+    """`UNFOUND <name> (<why>)` for each project Orca could not name that has not been said tonight: stderr alone
+    reaches nobody (an exit-1 run starts no agent), so this goes where the night manager reads."""
+    out = []
+    for name, why in unfound:
+        stamp = stamp_dir() / f"{name}.unfound"
+        try:
+            if now - stamp.stat().st_mtime < UNKNOWN_QUIET_H * 3600:
+                continue
+        except FileNotFoundError:
+            pass
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+        out.append(f"UNFOUND {name} ({why})")
+    return out
 
 
 def recently_checked(name: str, recheck_min: int, now: float) -> bool:
@@ -322,8 +341,10 @@ def main(argv: list) -> int:
             continue
         active.append(c)
     located, problems = machineconf.resolve(active, titles=False)  # Orca is asked only for a line without its harness and title
-    for why in problems:
-        err(why)
+    unfound = []
+    for pr in problems:
+        err(pr.text)
+        unfound += [(n, pr.why) for n in pr.names]
     for c in located:
         try:
             idle = harnesses.load_harness(c.harness).idle_minutes(c.checkout, now, "coordinator")
@@ -390,6 +411,7 @@ def main(argv: list) -> int:
         due += wrapup_lines(wrap, drain, now)
     if capwrap:
         due += cap_wrapup_lines(capwrap, istate)
+    due += unfound_lines(unfound, now)
     for repo in machineconf.runner_repos(conf) if owner_away else []:  # improve's nudges by day do not bring runner lines
         try:
             off = machineconf.offline_runners(repo)

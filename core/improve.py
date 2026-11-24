@@ -1144,8 +1144,10 @@ def install_denies(cos: list, integrations: dict) -> "tuple[list, list]":
     import machineconf
     notes, warns = [], []
     found, problems = machineconf.resolve(cos, titles=False)
-    for why in problems:
-        warns.append(f"lane-improve: deny rules NOT installed ({why}); away-merge is the only guard on its merge route")
+    for pr in problems:
+        again = " ".join(f"--project {n}" for n in pr.names)
+        warns.append(f"lane-improve: deny rules NOT installed ({pr.text}); away-merge is the only guard on its merge "
+                     f"route. Start its coordinator, then `lane-improve on --continue {again}`")
     for c in found:
         try:
             mod = harnesses.load_harness(c.harness)
@@ -1161,16 +1163,13 @@ def install_denies(cos: list, integrations: dict) -> "tuple[list, list]":
 
 
 def remove_denies(cos: list) -> list:
-    """Take the deny rules out of every coordinator's checkout; returns warnings for what could not be removed. A
-    coordinator whose harness machine.conf does not give and Orca cannot name gets every harness adapter asked: each
-    removes only what lane-control itself recorded for that checkout, so the others find nothing."""
+    """Take the deny rules out of every coordinator's checkout; returns warnings for what could not be removed. Every
+    harness adapter is asked, whatever harness runs there now (it may have changed since the rules went in): each
+    removes only what lane-control recorded for that checkout and harness, and has nothing to do without its record."""
     import harnesses
-    import machineconf
     warns = []
-    known = {w.name: w.harness for w in machineconf.resolve(cos, titles=False)[0]}
     for c in cos:
-        mods = [known.get(c.name) or c.harness] if known.get(c.name) or c.harness else harnesses.harnesses_names()
-        for name in mods:
+        for name in harnesses.harnesses_names():
             try:
                 harnesses.load_harness(name).remove_away_denies(c.checkout)
             except (ValueError, OSError) as e:
