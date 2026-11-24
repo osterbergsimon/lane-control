@@ -83,7 +83,7 @@ The one thing you write is the **summary** of the whole period: what was done, w
 drop if unsure, what was skipped, in a few plain lines. Write it to a file outside the project (the scratchpad or a temp
 file; never a file in the repo), at the wrap-up (section 3) or any time before, and run
 `lane-improve pr <your project> --summary-file <path>`: the summary PR keeps it, and every `away-merge` after it keeps it
-too. You edit no file in the project for this. The summary is scanned like a diff; if the owner edits the summary PR by hand, their text lives between the summary markers, and a body edited elsewhere is left as it is with a warning (the fix is in the warning).
+too. You edit no file in the project for this. The summary is scanned like a diff; the body is generated and a refresh overwrites it, so owner notes belong in a PR comment; a body edited by hand anywhere (outside the generated parts or inside a region) is left as it is with a warning, and so is a `--summary-file` over it (the fix, `To go on:`, is in the warning).
 
 ## 3. Stopping and the owner's return
 Stop starting cycles at: the end time or `lane-improve off`; no-new-work on a metered budget (`budget-state --project`;

@@ -38,6 +38,7 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import hashlib
 import html
 import json
 import os
@@ -693,10 +694,13 @@ def resolve_branches(cos: list, cont: bool, today: dt.date, warns: "list | None"
 GH_WRITE_TIMEOUT = 60
 BODY_LIMIT = 60000        # GitHub refuses a PR body of more than 65536 characters; this keeps a margin
 SUMMARY_LIMIT = 8000      # the coordinator's summary is short; a longer one is refused, not cut
-SUMMARY_START = "<!-- away-summary -->"
+# The generated regions of the body sit between markers. A start marker carries a digest of what lane-improve wrote between
+# them (`<!-- away-items sha256=... -->`), so a refresh can tell that someone edited inside a region.
+SUMMARY_START = "<!-- away-summary"   # the start of the marker; the full one is `<!-- away-summary sha256=<16 hex> -->`
 SUMMARY_END = "<!-- /away-summary -->"
-ITEMS_START = "<!-- away-items -->"
+ITEMS_START = "<!-- away-items"
 ITEMS_END = "<!-- /away-items -->"
+_ANY_MARKER = re.compile(r"<!--[ \t]*/?away-(?:summary|items)\b[^>]*(?:-->)?")
 NO_SUMMARY = ("No summary yet: the coordinator writes one at wrap-up (`lane-improve pr <project> --summary-file <path>`).")
 # The headings every item PR's body must have; away-merge copies them into the merge commit's message.
 ENTRY_HEADINGS = ("What", "Why", "Builds on", "Existing work checked", "How to try it", "How to drop it", "Tests")
@@ -727,7 +731,8 @@ def _placeholder(line: str) -> bool:
     """A line that is only a `<...>` placeholder of the entry template (several words in angle brackets, not an HTML tag)."""
     t = line.strip()
     m = re.match(r"^<([A-Za-z][\w-]*)[ ,;:].*>$", t)
-    return bool(m) and m.group(1).lower() not in _TAGS
+    # several words: a line that is only a link in angle brackets (`<https://...>`, `<name@host>`) is content
+    return bool(m) and m.group(1).lower() not in _TAGS and bool(re.search(r"\s", t))
 
 
 def _fence_close(open_fence: str, line: str) -> bool:
@@ -781,8 +786,8 @@ def entry_problems(body: "str | None") -> "tuple[str, list, list]":
         elif not "\n".join(found[name]).strip():
             empty.append(name)
     for name in ENTRY_HEADINGS:
-        text = "\n".join(found.get(name, [])).strip()
-        if text:
+        text = re.sub(r"\A(?:[ \t]*\n)+", "", "\n".join(found.get(name, []))).rstrip()  # blank lines go, indentation stays
+        if text.strip():
             if _open_fence(text):
                 text += "\n" + _open_fence(text)
             parts.append(f"## {name}\n{text}")
@@ -833,25 +838,42 @@ class BodyKept(PrError):
         self.number, self.url = number, url
 
 
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.replace("\r\n", "\n").strip().encode("utf-8")).hexdigest()[:16]
+
+
+def _start(prefix: str, region: str) -> str:
+    """A start marker holding the digest of `region`, the text written between it and its end marker."""
+    return f"{prefix} sha256={_digest(region)} -->"
+
+
 def read_body(body: "str | None", project: str, branch: str, integration: str) -> "tuple[str | None, str | None]":
     """(summary, problem) from a summary PR's current body. An empty body is fine (nothing there to lose). Otherwise it must be
-    the body this module writes: each marker once, in order, nothing but the fixed head and foot outside the regions
-    (the coordinator's summary is inside its markers and is kept, however it was edited). `problem` says what is wrong and how
-    to fix it; the body is then not to be rewritten. Line endings are normalised first: a browser saves CRLF."""
+    the body this module writes: each marker once, in order, nothing but the fixed head and foot outside the regions, and each
+    region still what was last written (its digest, in its start marker, matches): text added or changed anywhere would be
+    overwritten by the next refresh, so the body is then not to be rewritten, and `problem` says what and how to go on. Line
+    endings are normalised first: a browser saves CRLF."""
     text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
     if not text.strip():
         return None, None
-    marks = [SUMMARY_START, SUMMARY_END, ITEMS_START, ITEMS_END]
-    pos = [text.find(m) for m in marks]
-    if any(text.count(m) != 1 for m in marks) or pos != sorted(pos):
+    starts = [re.search(re.escape(SUMMARY_START) + r" sha256=([0-9a-f]{16}) -->", text),
+              re.search(re.escape(ITEMS_START) + r" sha256=([0-9a-f]{16}) -->", text)]
+    ends = [text.find(SUMMARY_END), text.find(ITEMS_END)]
+    if (any(m is None for m in starts) or text.count(SUMMARY_START) != 1 or text.count(ITEMS_START) != 1
+            or text.count(SUMMARY_END) != 1 or text.count(ITEMS_END) != 1
+            or not (starts[0].start() < ends[0] < starts[1].start() < ends[1])):
         return None, ("its markers are missing, repeated or out of order (a body from before the log moved into PRs, or one "
                       "edited by hand)")
     head, foot = generated_parts(project, branch, integration)
-    outside = (text[:pos[0]], text[pos[1] + len(SUMMARY_END):pos[2]], text[pos[3] + len(ITEMS_END):])
+    outside = (text[:starts[0].start()], text[ends[0] + len(SUMMARY_END):starts[1].start()], text[ends[1] + len(ITEMS_END):])
     norm = lambda t: " ".join(t.split())  # noqa: E731
     if norm(outside[0]) != norm(head) or norm(outside[1]) or norm(outside[2]) != norm(foot):
-        return None, "it has text outside the generated parts (put your own text inside the summary markers to keep it)"
-    summary = text[pos[0] + len(SUMMARY_START):pos[1]].strip()
+        return None, "it has text outside the generated parts"
+    summary = text[starts[0].end():ends[0]].strip()
+    items_region = text[starts[1].end():ends[1]]
+    for what, region, m in (("summary", summary, starts[0]), ("items", items_region, starts[1])):
+        if _digest(region) != m.group(1):
+            return None, (f"its {what} region was edited since lane-improve wrote it, and a refresh would overwrite the edit")
     if not summary or summary == NO_SUMMARY.replace("<project>", project):
         return None, None
     return summary, None
@@ -860,22 +882,29 @@ def read_body(body: "str | None", project: str, branch: str, integration: str) -
 def existing_summary(body: "str | None") -> "str | None":
     """The coordinator's summary as it stands in a summary PR's body (between the markers; line endings normalised), or None."""
     text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
-    m = re.search(re.escape(SUMMARY_START) + r"\n(.*?)\n" + re.escape(SUMMARY_END), text, re.S)
+    m = re.search(re.escape(SUMMARY_START) + r"[^>]*-->\n(.*?)\n" + re.escape(SUMMARY_END), text, re.S)
     got = (m.group(1).strip() or None) if m else None
     return None if got and got.startswith("No summary yet:") else got
+
+
+def strip_markers(text: str) -> str:
+    """`text` without any of this body's markers (a summary or an entry that holds one must not become one)."""
+    return _ANY_MARKER.sub("", text)
 
 
 def pr_body(project: str, branch: str, integration: str, summary: "str | None", items: "list | None") -> str:
     """The summary PR's text: the coordinator's summary (between markers), the merged items (`merged_items`: a list, or None
     when git could not be read) and each item's log entry (between markers). Never longer than BODY_LIMIT: entries are
     shortened first (and it says so), then the list is cut."""
-    summary = (summary or "").strip()
-    for m in (SUMMARY_START, SUMMARY_END, ITEMS_START, ITEMS_END):
-        summary = summary.replace(m, "")
+    summary = strip_markers(summary or "").strip() or NO_SUMMARY.replace("<project>", project)
     head, foot = generated_parts(project, branch, integration)
-    top = (f"{head}\n\n{SUMMARY_START}\n{summary or NO_SUMMARY.replace('<project>', project)}\n{SUMMARY_END}\n\n{ITEMS_START}\n")
+    top = f"{head}\n\n{_start(SUMMARY_START, summary)}\n{summary}\n{SUMMARY_END}\n\n"
     bottom = f"\n{ITEMS_END}\n\n{foot}\n"
-    room = BODY_LIMIT - len(top) - len(bottom)
+    room = BODY_LIMIT - len(top) - len(bottom) - len(_start(ITEMS_START, "")) - 1
+
+    def whole(inner: str) -> str:
+        return f"{top}{_start(ITEMS_START, inner)}\n{inner}{bottom}"
+
     listing = items_text(items)
     entries = [(t, e) for t, _pr, _sha, _rev, e in items or [] if e]
     for cap in (None, 700, 200, 0):
@@ -887,10 +916,10 @@ def pr_body(project: str, branch: str, integration: str, summary: "str | None", 
                       "and in the item's PR.")
         inner = listing + notice + (("\n\n" + text) if text else "")
         if len(inner) <= room:
-            return top + inner + bottom
+            return whole(inner)
     cut = ("\n\n(The list is cut here to fit GitHub's 65536-character limit on a PR body: the rest of the items are the "
            "branch's merge commits, `git log --first-parent --merges`.)")
-    return top + listing[:max(room - len(cut), 0)].rstrip() + cut + bottom
+    return whole(listing[:max(room - len(cut), 0)].rstrip() + cut)
 
 
 def _cut(text: str, cap: int) -> str:
@@ -934,7 +963,7 @@ def _entries_text(entries: list, cap: "int | None") -> str:
         text = _demote(entry.strip())
         if cap is not None:
             text = _cut(text, cap)
-        out.append(f"<details>\n<summary>{html.escape(_neutral(title))}</summary>\n\n{_neutral(text)}\n\n</details>")
+        out.append(f"<details>\n<summary>{html.escape(title)}</summary>\n\n{_neutral(text)}\n\n</details>")
     return "\n\n".join(out)
 
 
@@ -1061,8 +1090,9 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
         old_body = info.get("body")
     kept, problem = read_body(old_body if isinstance(old_body, str) else None, project, branch, integration)
     if problem:
-        raise BodyKept(f"summary PR #{number}'s body is left as it is: {problem}. To let lane-improve write it again, clear the "
-                       f"body (keep your own text somewhere else), then run `lane-improve pr {project}`", number, url)
+        raise BodyKept(f"summary PR #{number}'s body is left as it is: {problem}. To go on: copy what you want to keep (the "
+                       "summary into a file; notes belong in a comment on the PR), clear the PR body, then run "
+                       f"`lane-improve pr {project} --summary-file <file>`", number, url)
     summary = summary or kept
     if summary and len(summary) > SUMMARY_LIMIT:
         raise BodyKept(f"summary PR #{number}'s body is left as it is: its summary is {len(summary)} characters, over the "
@@ -1461,7 +1491,7 @@ def read_summary_file(ref: str) -> str:
     if len(text) > SUMMARY_LIMIT:
         raise ValueError(f"--summary-file {ref} is {len(text)} characters; the summary is short (at most {SUMMARY_LIMIT}): "
                          "the items' entries are listed below it already")
-    return text.replace(SUMMARY_START, "").replace(SUMMARY_END, "")
+    return strip_markers(text)
 
 
 def cmd_pr(a) -> int:

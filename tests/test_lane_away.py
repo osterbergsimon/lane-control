@@ -974,13 +974,43 @@ class SummaryPrTests(ImproveTest):
         self.assertEqual(self.run_script("lane-improve", "pr", "shop").returncode, 0)
         self.assertIn("Done: the x feature", self.summary_prs(self.shop)[n]["body"])
 
-    def test_a_summary_edited_by_hand_inside_the_markers_is_kept(self):
+    def test_a_summary_edited_by_hand_is_never_replaced_silently(self):  # R2-01
         self.on("--project", "shop")
         n = str(self.state()["prs"]["shop"])
         self.run_script("lane-improve", "pr", "shop", "--summary-file", self.summary_file())
-        self.set_body(n, self.summary_prs(self.shop)[n]["body"].replace("the x feature", "the x feature, fixed by the owner"))
+        edited = self.summary_prs(self.shop)[n]["body"].replace("the x feature", "the x feature, OWNER: fixed")
+        self.set_body(n, edited)
+        (self.tmp / "gh.log").write_text("")
+        for extra in ((), ("--summary-file", self.summary_file("- Done: new\n", "new.md"))):
+            r = self.run_script("lane-improve", "pr", "shop", *extra)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+            self.assertIn("summary region was edited", r.stderr)
+            self.assertIn("To go on:", r.stderr)
+            self.assertIn("--summary-file <file>", r.stderr)
+        self.assertEqual(self.summary_prs(self.shop)[n]["body"], edited)
+        self.assertEqual(self.edits(), [])
+
+    def test_an_edit_in_the_items_region_is_left_by_the_refresh_too(self):  # R2-01
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        self.merge_item(self.shop, self.state()["branches"]["shop"])
         self.assertEqual(self.run_script("lane-improve", "pr", "shop").returncode, 0)
-        self.assertIn("fixed by the owner", self.summary_prs(self.shop)[n]["body"])
+        edited = self.summary_prs(self.shop)[n]["body"].replace("- Add the x feature", "- OWNER: DROP THIS: Add the x feature")
+        self.assertNotEqual(edited, self.summary_prs(self.shop)[n]["body"])
+        self.set_body(n, edited)
+        r = self.run_script("lane-improve", "pr", "shop")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("items region was edited", r.stderr)
+        self.assertEqual(self.summary_prs(self.shop)[n]["body"], edited)
+
+    def test_a_clean_body_takes_a_new_summary(self):
+        self.on("--project", "shop")
+        n = str(self.state()["prs"]["shop"])
+        self.run_script("lane-improve", "pr", "shop", "--summary-file", self.summary_file())
+        self.assertEqual(self.run_script("lane-improve", "pr", "shop", "--summary-file",
+                                         self.summary_file("- Done: next\n", "next.md")).returncode, 0)
+        self.assertIn("Done: next", self.summary_prs(self.shop)[n]["body"])
 
     def test_text_added_outside_the_markers_is_never_rewritten_away(self):
         self.on("--project", "shop")

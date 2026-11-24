@@ -839,6 +839,18 @@ class AwayMergeSummaryTests(AwayMergeTest):
         self.assertIn("Items merged", self.body())
         self.assertTrue(self.summary_prs(self.shop)[self.number()]["draft"])
 
+    def test_a_body_edited_inside_a_region_keeps_the_merge_and_is_left_as_it_is(self):  # R2-01
+        db = json.loads((self.tmp / "gh-summary.json").read_text())
+        db["prs"][self.number()]["body"] = db["prs"][self.number()]["body"].replace("Items merged", "OWNER: DROP 2. Items merged")
+        (self.tmp / "gh-summary.json").write_text(json.dumps(db))
+        before = self.body()
+        r = self.merge()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("merged PR 7", r.stdout)
+        self.assertIn("items region was edited", r.stderr)
+        self.assertIn("lane-improve pr shop", r.stderr)
+        self.assertEqual(self.body(), before)
+
     def test_a_closed_summary_pr_is_left_alone(self):
         db = json.loads((self.tmp / "gh-summary.json").read_text())
         db["prs"][self.number()]["state"] = "CLOSED"

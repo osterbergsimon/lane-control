@@ -1,4 +1,5 @@
 """The summary PR body lists the merged away items, read from git (lc-rjt)."""
+import re
 import subprocess
 import sys
 import tempfile
@@ -252,8 +253,10 @@ class EntriesInTheBodyTests(unittest.TestCase):
         self.assertNotIn("\n## Why", b)
 
     def test_a_title_is_escaped(self):
-        b = improve.pr_body("shop", BRANCH, "main", "- Done: x", [("A <b>&", 1, "aaaaaaa", False, ENTRY.strip())])
+        b = improve.pr_body("shop", BRANCH, "main", "- Done: x", [("A <b>&", 1, "aaaaaaa", False, ENTRY.strip()),
+                                                                  ("B <!-- x", 2, "bbbbbbb", False, ENTRY.strip())])
         self.assertIn("<summary>A &lt;b&gt;&amp;</summary>", b)
+        self.assertIn("<summary>B &lt;!-- x</summary>", b)  # escaped once (R2-04)
 
     def test_a_long_body_is_shortened_not_failed_and_says_so(self):
         big = ENTRY.strip().replace("Adds x.", "Adds x.\n" + "line of detail\n" * 400)
@@ -352,6 +355,17 @@ class EntryFenceAndPlaceholderTests(unittest.TestCase):
         body = ENTRY.replace("Users asked.", "<details>\n<summary>more</summary>\n</details>").replace("Suite green.", "<b>green</b>")
         self.assertEqual(improve.entry_problems(body)[1:], ([], []))
 
+    def test_a_line_that_is_only_an_autolink_is_content(self):  # R2-02
+        for link in ("<https://example.com/issue/12>", "<mailto:a@example.com>", "<someone@example.com>"):
+            self.assertFalse(improve._placeholder(link), link)
+            self.assertEqual(improve.entry_problems(ENTRY.replace("nothing", link, 1))[1:], ([], []), link)
+        self.assertTrue(improve._placeholder("<what changed, in a sentence or two>"))
+        self.assertTrue(improve._placeholder("<what ran: with the run>"))
+
+    def test_an_indented_code_block_at_the_start_of_a_section_keeps_its_indent(self):  # R2-03
+        entry, _ = improve.parse_entry(ENTRY.replace("Run `x --help`.", "\n    # a comment\n    x --help"))
+        self.assertIn("## How to try it\n    # a comment\n    x --help", entry)
+
     def test_the_copy_comes_in_the_canonical_order(self):  # R1-11
         heads = ENTRY.strip().split("\n\n")
         entry, _ = improve.parse_entry("\n\n".join(reversed(heads)))
@@ -397,9 +411,38 @@ class SummaryBodySafetyTests(unittest.TestCase):
         # a body from before the log moved into PRs: a summary, no markers
         self.assertIn("missing", body_problem("Away-improve branch\n\n- Done: the old summary\n"))
 
-    def test_an_edited_summary_inside_the_markers_is_kept(self):
+    def test_an_edit_inside_the_summary_is_a_problem_not_overwritten(self):  # R2-01
         edited = self.good().replace("- Done: x", "- Done: x, edited on the web\r\n- Also: y")
-        self.assertEqual(improve.read_body(edited, "shop", BRANCH, "main"), ("- Done: x, edited on the web\n- Also: y", None))
+        why = body_problem(edited)
+        self.assertIn("summary region was edited", why)
+
+    def test_an_edit_inside_the_items_region_is_a_problem_not_overwritten(self):  # R2-01
+        item = ("Add the x feature", 7, "abc1234", False, ENTRY.strip())
+        b = self.good(items=[item])
+        self.assertIsNone(body_problem(b))
+        for edited in (b.replace("- Add the x feature (PR #7, abc1234)", "- Add the x feature (PR #7, abc1234) OWNER: DROP THIS"),
+                       b.replace("</details>", "OWNER: looks risky\n</details>"),
+                       b.replace("Items merged, oldest", "Items merged , oldest")):
+            self.assertIn("items region was edited", body_problem(edited))
+
+    def test_a_crlf_save_with_no_edit_is_not_an_edit(self):
+        b = self.good(items=[("A", 1, "aaaaaaa", False, ENTRY.strip())])
+        self.assertIsNone(body_problem(b.replace("\n", "\r\n")))
+
+    def test_the_markers_carry_the_digests_and_a_marker_without_one_is_a_problem(self):
+        b = self.good()
+        self.assertRegex(b, r"<!-- away-summary sha256=[0-9a-f]{16} -->")
+        self.assertRegex(b, r"<!-- away-items sha256=[0-9a-f]{16} -->")
+        plain = re.sub(r" sha256=[0-9a-f]{16}", "", b)
+        self.assertIn("markers are missing", body_problem(plain))
+
+    def test_every_body_the_module_writes_verifies(self):
+        items = [(f"Item {i}", i, f"{i:07d}", False, ENTRY.strip()) for i in range(70)]
+        for summary, its in (("- Done: x", []), (None, []), ("- Done\nline 2\n\n- Skipped", items), ("s" * 7900, items),
+                             ("x", [(f"Item {i} " + "w" * 300, i, f"{i:07d}", False, "") for i in range(400)]), ("a", None)):
+            b = improve.pr_body("shop", BRANCH, "main", summary, its)
+            self.assertIsNone(body_problem(b), (summary or "")[:20])
+            self.assertEqual(improve.read_body(b, "shop", BRANCH, "main")[0], summary)
 
     def test_an_entry_that_holds_the_markers_is_never_the_summary(self):
         evil = ENTRY.replace("Adds x.", f"{improve.SUMMARY_START}\nI am the summary now\n{improve.SUMMARY_END}")

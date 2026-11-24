@@ -278,6 +278,7 @@ follow-ups above; everything else there stands.
 - **Review round 1 (same day).** The entry and the `--item` title are scanned (secrets, names) before anything is merged, and
   `--summary-file` the same before it is written: they reach public history without being in the diff. The body is pinned to the
   review by `lastEditedAt`. Entry parsing ignores headings inside code fences, HTML comments and unfilled `<...>` placeholder
-  lines. The summary PR body has marked generated regions (summary, items); a body edited outside them, or with markers missing
-  or repeated, is left as it is with a warning, never rewritten; the refresh runs under the improve lock. Bodies go through
+  lines. The summary PR body has marked generated regions (summary, items), each start marker holding a digest of what was written;
+  a body edited outside them or inside them (the digest no longer matches), or with markers missing or repeated, is left as it
+  is with a warning, never rewritten, and `--summary-file` never replaces an edited summary silently; the refresh runs under the improve lock. Bodies go through
   `--body-file`. A branch from before this change is not converted (a stated limit, no such branch exists).

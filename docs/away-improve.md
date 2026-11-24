@@ -130,14 +130,15 @@ the branch, not from a file on it:
   not fit they are shortened to their first lines, then left out, and the body says so (the whole entry stays in the
   merge commit, `git show <sha>`, and in the item's PR).
 
-The generated parts of the body sit between markers (HTML comments, invisible on the page): the summary between
-`<!-- away-summary -->` markers and the items and entries between `<!-- away-items -->` markers. `away-merge` rebuilds it after
-every merge (and opens it first if it was not open), under the improve lock, so nobody has to remember to. **To change the
-summary by hand, edit it between its markers**: it is kept, line endings and all. **A body with text outside the generated
-parts, or with a marker missing or repeated, is not rewritten**: the refresh leaves it, prints one warning line (`away-merge`
-after the merge, which stays done; `lane-improve pr` exits 1) and says how to fix it: clear the body, or move your text
-inside the summary markers, then run `lane-improve pr <project>`. A summary of more than 8000 characters is refused the same way.
-An empty body is written. A summary PR opened by hand with its own text is recorded by `on` but not rewritten. It stays a
+The body is generated, and **a refresh overwrites it**: the summary between the `away-summary` markers, and the items and entries
+between the `away-items` markers (HTML comments, invisible on the page; each start marker holds a digest of what was last
+written). `away-merge` rebuilds it after every merge (and opens it first if it was not open), under the improve lock, so
+nobody has to remember to. **Put your own notes in a comment on the PR, not in the body.** The body is never rewritten over an
+edit: when someone has changed text outside the generated parts, inside either region (the summary, the items), or has removed
+or repeated a marker, the refresh leaves the body as it is, prints one warning line (`away-merge` after the merge, which stays
+done; `lane-improve pr`, also with `--summary-file`, exits 1) and says how to go on: copy what you want to keep (the summary
+into a file), clear the PR body, then run `lane-improve pr <project> --summary-file <file>`. Line endings do not count as an
+edit (a browser saves CRLF). A summary of more than 8000 characters is refused the same way. An empty body is written. A summary PR opened by hand with its own text is recorded by `on` but not rewritten. It stays a
 draft: **no agent merges it, marks it ready or closes it**; you merge it (to adopt the whole branch) or name the items to
 drop. A PR you closed is left alone.
 
