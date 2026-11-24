@@ -34,12 +34,10 @@ If not: on Linux, Orca's CLI is `orca-ide`; plain `orca` may be another program.
 connect, start the Orca app first. For bd, `machine-setup` (step 3) says how to fix it and never installs it. The
 full list is in [the native Orca setup](../orchestrators/native-orca/setup.md).
 
-**Claude is needed to onboard a new project, even when every role runs on OpenCode.** The agents that adapt a
-project's files and review them always run on Claude (`claude -p`), because they read the whole project. So the
-machine where you first run `project-setup` on a project needs `claude` installed and signed in. Once a project is
-onboarded (its `.lane-control/` files and `AGENTS.lane-control.md` committed and pushed), any machine can set it up
-again without Claude. A machine with only OpenCode does that: onboard the project once on a machine with Claude, push
-it, and clone it on the OpenCode machine. Step 4B has the details.
+**Onboarding runs on Claude or OpenCode.** The agents that adapt a project's files and review them run on Claude
+(`claude -p`) by default, or on OpenCode when you pass OpenCode models for them (`--adapter`, `--adapt-reviewer`).
+A machine needs only the engine its roles use, so a machine with only OpenCode can set up a new project. Step 4B has
+the details.
 
 ## 2. Get lane-control, its tools and your engine config
 
@@ -93,7 +91,8 @@ cp ~/code/lane-control/core/templates/budget-ceiling.json ~/.config/claude-usage
 Edit `"ceiling"` in it (the template says 40). The usage file, `~/.claude/usage-history.jsonl`, must be written by
 Claude Code's status line ([core/machine.md](../core/machine.md), "Usage feeds"). Then `budget-state` prints one line
 per budget, `main weekly=<w> window=<s> ceiling=<c> step=<n> <name> window_step=<m>`, or `main unknown` when the usage
-file is missing or stale.
+file is missing or empty. An old file still gives a reading, whatever its age: `machine-setup` (step 3) warns
+`usage feed: stale` for that.
 
 **With no usage feed at all** (only a self-hosted gateway): there is no budget to meter and the caps are the limit.
 In the copy, set the feed under `BUDGET_USAGE` to empty (`[main]=""`). Then `budget-state` prints
@@ -254,26 +253,23 @@ harness, and the table is yours to edit.
 
    ```bash
    project-setup ~/code/<project> \
-     --coordinator opencode/litellm/chat --reviewer opencode/litellm/code
+     --coordinator opencode/litellm/chat --reviewer opencode/litellm/code \
+     --adapter opencode/litellm/code --adapt-reviewer opencode/litellm/chat
    ```
 
-   A later run keeps the table you accepted. Do not pass `--adapter` or `--adapt-reviewer`: they must be Claude models
-   (the defaults, `claude/sonnet` and `claude/opus`), and project-setup refuses anything else with exit 2: `--adapter
-   and --adapt-reviewer must be claude/<model>`.
+   A later run keeps the table you accepted. `--adapter` and `--adapt-reviewer` are the onboarding agents: the
+   adapting agent and its reviewer, which must be different models. Without them they are Claude (`claude/sonnet` and
+   `claude/opus`), and a machine without Claude then stops with `claude not on PATH, but the onboarding agents use it`.
 
-**Onboarding a new project needs Claude on that machine.** The adapting agent and its reviewer are always Claude, so
-the first `project-setup` of a project fails with `claude not on PATH, but the onboarding agents use it` on a machine
-without it. (Making onboarding run on OpenCode is planned work; this step will change when it lands.) What a machine
-with only OpenCode can do today:
-
-- **The project is already onboarded** (its `.lane-control/` files and `AGENTS.lane-control.md` are committed on the
-  default branch). Clone or pull it and run the command above. You should see `adapt: exists .lane-control/ is
-  committed`, and no Claude is needed.
-- **The project is new.** Onboard it once on a machine with Claude: `project-setup ~/code/<project> --no-start`, answer
-  `y` to the commit and the push. Then pull it on the OpenCode machine and run the command above.
-- **No machine with Claude at all.** `--skip-adapt` runs the rest of the setup without Claude, but it writes none of
-  the project's lane-control files (no path map, no `AGENTS.lane-control.md`), and the coordinator is told to read
-  them. That is a stopgap, not a setup. (Read from the source; not run.)
+**Onboarding on OpenCode.** On a project not onboarded yet, each onboarding agent runs as `opencode2 run` in the repo,
+with the same prompts, checks and review round as on Claude. It reads the project but not its private files (`.git`,
+git-ignored paths, `.env*`, `--private` globs, and symlinks that lead out of the repo or into those), has no shell, no
+grep and no web, and only the adapter writes, only under `.lane-control/`. The project's own OpenCode config and
+plugins are not loaded. Pass the flags again on a later `--readapt`: project-setup does not keep them. An onboarded
+project (its `.lane-control/` files and `AGENTS.lane-control.md` committed on the default branch) says `adapt: exists
+.lane-control/ is committed` and runs no onboarding agent, so the flags make no difference there. The details, and how
+it differs from Claude's run, are in [the native Orca setup](../orchestrators/native-orca/setup.md), "OpenCode on a
+self-hosted LiteLLM gateway".
 
 ### What the setup does, and what you should see
 
@@ -286,9 +282,10 @@ In order, roughly:
    Yes to both creates the private repo, copies the folder there, pushes it and links `.beads` to it; the old folder
    is kept beside it. No to either changes nothing, and beads stays local with no off-machine copy (the setup says so).
    With no beads and a private beads repo already on GitHub it offers `Restore beads: ...? [y/N]` instead.
-3. On a project not onboarded yet, an adapting agent (Claude) writes the project's lane files, and a reviewer checks
-   them. Then it asks `Commit these files and run the Orca setup? [y/N]`. Answer `y`; on no, or without a terminal,
-   nothing more runs and it exits 3. An onboarded project says `adapt: exists` and skips this.
+3. On a project not onboarded yet, an adapting agent (Claude, or OpenCode with `--adapter`) writes the project's lane
+   files, and a reviewer checks them. Then it asks `Commit these files and run the Orca setup? [y/N]`. Answer `y`; on
+   no, or without a terminal, nothing more runs and it exits 3. An onboarded project says `adapt: exists` and skips
+   this.
 4. It may ask to commit a drafted `orca.yaml` and to push the default branch. Say yes to the push: Orca cuts lane
    worktrees from `origin/<branch>`.
 5. `orca-repo: created ...`, `lane-tools: created ...` and the skills (`native-orca-lanes`, `component-gallery`,
@@ -417,7 +414,8 @@ Why each step:
 - `git pull` updates the checkout the scripts run from.
 - `--refresh` copies the current lane tools and skills over the old ones and renders the personas again. It keeps each
   persona's engine and model and the project's tier table, starts nothing and commits nothing, and says which running
-  agents need a restart. It ignores `--coordinator` (project-setup says so).
+  agents need a restart. It refuses `--coordinator` and `--permission-mode` (exit 2): to change engines, see
+  [moving a project to the gateway](#a-project-that-runs-on-claude-and-should-move-to-the-gateway).
 - `project-pause stop` asks the coordinator for its handover, waits for it (up to 10 minutes) and closes its terminal. It
   refuses while a lane or reviewer runs, and it runs from an Orca terminal. `start` opens the coordinator again,
   resuming its session, with the new persona.
@@ -460,11 +458,15 @@ cd ~/code/lane-control && git pull
 project-setup <repo on the host> example-host --refresh
 ```
 
-The box's copy is refreshed and the box's own `--refresh` runs there (lane tools, skills, personas). The copy holds only
-what `project-setup` needs, so on the box there is no `project-pause` and no `--suggest-tiers`. To restart the box's
-coordinator, tell it in its terminal to write its handover, close its terminal in Orca (it shows in your window), then
-run `project-setup <repo on the host> example-host` again: it starts the missing coordinator, which reads
-`handover-latest`. (From the source; not run.) Without a restart the coordinator reads the new persona at its next
+The box's copy is refreshed and the box's own `--refresh` runs there (lane tools, skills, personas). That copy holds
+only what `project-setup` needs. A full `project-setup <repo> example-host` run also runs `machine-setup --host
+example-host` (unless `--no-machine-setup`), which adds all of lane-control's `core` to the same folder, `project-pause`
+and the `--suggest-tiers` code among them. `--refresh` does not run it, so those are from the last `machine-setup`,
+and missing on a box set up with `--no-machine-setup`. Run `machine-setup --host example-host` to update them; then
+from an Orca terminal of the box, `~/.local/share/lane-control/core/scripts/project-pause stop <repo>` and `start
+<repo>` restart its coordinator. Without them: tell the coordinator in its terminal to write its handover, close its
+terminal in Orca (it shows in your window), then run `project-setup <repo on the host> example-host` again: it starts
+the missing coordinator, which reads `handover-latest`. (From the source; not run.) Without a restart the coordinator reads the new persona at its next
 compaction. To move a box to a gateway, the simpler way is a lane-control checkout on the box itself: clone it there and
 use the second case.
 
