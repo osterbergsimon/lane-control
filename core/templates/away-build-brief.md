@@ -17,7 +17,7 @@ item (picked by <PARENT>, who says why): <ITEM>. Why it was picked: <WHY_PICKED>
 - Write your entry in `AWAY-LOG.md` at the root of the branch (the branch's start commit made it; start the file from the template at
   `<LANE_CONTROL>/core/templates/AWAY-LOG.md` only if it is missing), in the same PR, and update the summary lines
   <PARENT> gives you here: <SUMMARY_UPDATE>. The entry has: what, why, what it builds on, existing work checked,
-  how to try it, how to drop it (the merge titled `away: <item>`, which <PARENT> fills in with its commit once it is merged, and which later items depend on it), test results.
+  how to try it, how to drop it (the merge titled `away: <item>`; once it is merged the summary PR lists it with its revert command, so write no commit hash; say which later items depend on it), test results.
   Plain, short words, for an owner who was not here.
 - Tests green before you report (through `lane-heavy` for the full suite). Nothing private in anything you commit
   (hostnames, usernames, private paths, keys): the branch is public if the repository is.

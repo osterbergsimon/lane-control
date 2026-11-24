@@ -740,12 +740,52 @@ def log_summary(text: "str | None") -> "str | None":
     return body or None
 
 
-def pr_body(project: str, branch: str, integration: str, log: "str | None") -> str:
+def pr_body(project: str, branch: str, integration: str, log: "str | None", items: "list | None") -> str:
+    """The summary PR's text: the log's summary, then the merged items (`merged_items`: a list, or None when git could not be read)."""
     summary = log_summary(log) or ("No summary yet: the log has none until the first item is merged into the branch.")
     return (f"Away-improve branch for {project}: `{branch}` into `{integration}`. A draft, never merged by an agent: merge "
             f"this PR yourself to adopt the whole branch, or name the items to drop first.\n\n{summary}\n\n"
+            f"{items_text(items)}\n\n"
             f"The full log is `{LOG_FILE}` on the branch. This text is refreshed from its summary after every "
             "`away-merge`.\n")
+
+
+def items_text(items: "list | None") -> str:
+    """The "Items merged" part of the PR body: one line per item with its revert command (oldest merge first)."""
+    if items is None:
+        return f"Items merged: could not be read from git just now; they are in `{LOG_FILE}`. The next `away-merge` tries again."
+    if not items:
+        return "Items merged: none yet."
+    lines = ["Items merged, oldest first. To drop one, run its command (latest first if later items build on it):"]
+    for title, pr, sha in items:
+        lines.append(f"- {title} ({f'PR #{pr}, ' if pr else ''}{sha}): `git revert -m 1 {sha}`")
+    return "\n".join(lines)
+
+
+def merged_items(repo: Path, branch: str, integration: str) -> "list | None":
+    """The items merged into origin's `branch` so far, oldest first, as (title, PR number or None, short sha), read from git: the
+    first-parent merge commits on the branch that the integration branch does not have, whose subject is `away: <title>` (the
+    start commit is not a merge and is skipped by its subject too). The PR number is the `Pull request #<n>` line `away-merge`
+    puts in the merge message (None for a merge made without it). Reading git, not the period record, keeps this right across
+    periods and after a lost record. None when the refs cannot be fetched or read."""
+    try:
+        if _git(repo, "fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+                f"+refs/heads/{integration}:refs/remotes/origin/{integration}").returncode:
+            return None
+        r = _git(repo, "log", "--first-parent", "--merges", "--reverse", "--format=%h%x1f%s%x1f%b%x1e",
+                 f"refs/remotes/origin/{branch}", "--not", f"refs/remotes/origin/{integration}")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode:
+        return None
+    items = []
+    for rec in r.stdout.split("\x1e"):
+        parts = rec.strip("\n").split("\x1f")
+        if len(parts) != 3 or not parts[1].startswith("away: ") or parts[1].startswith(START_PREFIX):
+            continue
+        m = re.search(r"^Pull request #(\d+)[ \t]*$", parts[2], re.M)
+        items.append((parts[1][len("away: "):].strip(), int(m.group(1)) if m else None, parts[0].strip()))
+    return items
 
 
 def read_log(repo: Path, branch: str) -> "str | None":
@@ -794,7 +834,7 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
     integration branch counts (`gh pr list --head` matches the branch NAME, forks' PRs included), else a draft one is
     opened. The only gh writes in the whole mode besides away-merge's merge: `pr create --draft` and `pr edit --body`.
     PrError says why it could not be done."""
-    body = pr_body(project, branch, integration, read_log(repo, branch))
+    body = pr_body(project, branch, integration, read_log(repo, branch), merged_items(repo, branch, integration))
     if number is None:
         found = _gh_json(repo, list, "pr", "list", "--head", branch, "--state", "open", "--json",
                          "number,url,isCrossRepository,baseRefName,isDraft")

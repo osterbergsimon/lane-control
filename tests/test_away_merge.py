@@ -113,7 +113,7 @@ class AwayMergeTests(AwayMergeTest):
     def test_merges_with_subject(self):
         r = self.merge()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --match-head-commit {OID}"])
+        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --body Pull request #7 --match-head-commit {OID}"])
         self.assertIn("abc1234", r.stdout)
         self.assertNotIn("--squash", " ".join(self.gh_calls()))
         self.assertNotIn("--rebase", " ".join(self.gh_calls()))
@@ -537,7 +537,7 @@ class AwayMergeSummaryTests(AwayMergeTest):
 
     def test_the_summary_pr_is_never_merged_and_stays_a_draft(self):
         self.merge()
-        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --match-head-commit {OID}"])
+        self.assertEqual(self.merged(), [f"pr merge 7 --merge --subject away: Add the x feature --body Pull request #7 --match-head-commit {OID}"])
         self.assertTrue(self.summary_prs(self.shop)[self.number()]["draft"])
         self.assertNotRegex(" ".join(self.gh_calls()), r"pr (ready|close)")
 

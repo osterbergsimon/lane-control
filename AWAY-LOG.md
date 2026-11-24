@@ -11,6 +11,7 @@ Projects in this period: this project only.
 - Done:
   - three small fixes: the item cap holds under concurrent merges, a clear message when a draining period loses its record, and --yes under the ! prefix (lc-jpg, lc-kbb, lc-7xh)
   - away-merge's secret scan now checks hostnames, usernames and project names too (lc-1dk)
+  - the summary PR lists each merged item with its revert command (lc-rjt)
 - Worth looking at first: away-merge's secret scan now checks hostnames, usernames and project names too (lc-1dk): put the names the machine cannot know in `~/.config/lane-control/private-names.txt` and read the `name scan:` line of the next merge
 - Drop if unsure: nothing yet
 - Skipped: nothing yet
@@ -52,3 +53,29 @@ Projects in this period: this project only.
 - **How to drop it:** revert the merge titled `away: <item>` (filled in by the coordinator once merged). Nothing later
   depends on it yet.
 - **Tests:** `tests/test_privatenames.py` (new) and `tests/test_away_merge.py`; full suite through lane-heavy: 1755 tests, OK (9 skipped).
+
+### lc-rjt: the summary PR lists each merged item with its revert command
+
+- **What:** the summary PR body now has an "Items merged" list under the summary: one line per merged item with its title,
+  PR number, short sha and `git revert -m 1 <sha>`, oldest first. It is read from git: the first-parent merge commits on
+  the away branch that the integration branch lacks, titled `away: <item>` (the start commit is left out). `away-merge`
+  now puts `Pull request #<n>` in the merge message so the number is in git; merges made before this show no number.
+  The build brief, the log template, the skill and the docs now say the summary PR lists the revert command, so a lane or
+  the coordinator no longer fills in a merge commit by hand.
+- **Why:** on return, dropping an item is a copy and paste. Before, the "How to drop" lines said "filled in at merge", a step
+  the coordinator (who never edits files) cannot do, so they stayed as `<sha>`.
+- **Builds on:** `pr_body()` and `read_log()` in `core/improve.py` (every `away-merge` and `lane-improve pr` already
+  refresh the body); `away-merge`'s `--subject away: <item>` merge.
+- **Existing work checked:** issues lc-rjt, lc-2nz, lc-bmq, lc-509 and the open and merged PRs (#51, #52, #55, #56 and the
+  summary PR #54): none lists merged items; `core/improve.py`, `core/scripts/away-merge`, the build brief, the log template,
+  `docs/away-improve.md` and this log. The period record (`improve-period.json`) holds merge shas but is per period and can
+  be lost, so it is not used.
+- **How to try:** `python3 -m unittest tests.test_improve_items tests.test_lane_away`; or after the next merge, read the
+  "Items merged" part of the summary PR (`lane-improve pr <project>` refreshes it).
+- **Limits:** the two merges made before this item (AW-1, AW-2) show a sha but no PR number. If git cannot be read, the body
+  says so and points to this log. Reverting an item whose later items build on it needs those reverted first (the list says
+  "latest first").
+- **How to drop it:** revert the merge titled `away: <item>` (the summary PR lists it with its revert command once it is
+  merged); nothing later depends on it.
+- **Tests:** `tests/test_improve_items.py` (new), plus changed tests in `test_away_merge`, `test_lane_away` and
+  `test_content`; each failed before the change. Full suite through lane-heavy: 1771 tests, OK (9 skipped).
