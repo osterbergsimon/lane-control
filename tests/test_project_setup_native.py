@@ -1307,6 +1307,14 @@ class PinCheckTests(Case):
         r = subprocess.run(["bash", str(LANE_TIER), "--model"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
 
+    def test_a_project_setting_never_lets_a_standing_role_run_a_hosted_model(self):
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        self.edit_store(global_region_models=True)
+        for args in (["--coordinator", "claude/opencode-go/x"], ["--reviewer", "claude/opencode/x"],
+                     ["--coordinator", "opencode/opencode-go/x", "--own-model", "opencode-go/x"]):
+            r = self.e.run(str(self.repo), *args, "--no-start")
+            self.assertEqual(r.returncode, 2, (args, r.stderr))
+
     def test_a_refused_run_leaves_the_store_byte_identical(self):
         # M1: the refusal comes before anything is written.
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)

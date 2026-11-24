@@ -669,4 +669,4 @@ Decisions for the owner:
    Recommended: yes, for the reason in section 0.
 3. The adapting agent and its reviewer run only on trusted tiers, never a third-party one. Recommended: yes.
 
-Out of scope, as the issue says: runner modularization; pasteur.
+Out of scope, as the issue says: runner modularization; one project's own work.

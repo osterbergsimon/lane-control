@@ -1289,7 +1289,7 @@ class RecordTests(unittest.TestCase):
     def test_records_are_public_safe(self):
         for f in HARNESSES.glob("*/record.md"):
             text = f.read_text()
-            for private in ("/home/", "/mnt/", "/nix/store", "~/code/", "tux"):
+            for private in ("/home/", "/mnt/", "/nix/store", "~/code/"):  # machine and project names: test_content.PrivateNamesTests
                 self.assertNotIn(private, text, (f, private))
 
     def test_checklist_has_harness_points(self):

@@ -205,7 +205,7 @@ def free_port(start: int) -> int:
 
 SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "own_models", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
-                "paired_environment", "beads_repo")  # all that is ever written: names and choices, never a secret
+                "paired_environment", "beads_repo", "global_region_models")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -1098,13 +1098,24 @@ def check_tier_table(text: str) -> list:
     return [tuple(l.split()) for l in r.stdout.splitlines() if l.strip()]
 
 
-def opencode_rows_note(tier_text: str):
-    """Warns about the OpenCode rows of a project's table: lane-tier refuses them, so their work goes one tier up."""
+def region_models_on(repo: Path) -> bool:
+    """Whether the project's settings.json sets global_region_models to the JSON true (default off; anything unreadable
+    is off). The one setting that lets lane-tier pass a hosted OpenCode tier; no standing role ever runs on one."""
+    try:
+        return json.loads((store_dir(repo) / "settings.json").read_text()).get("global_region_models") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def opencode_rows_note(tier_text: str, repo: "Path | None" = None):
+    """Warns about the OpenCode rows of a project's table: lane-tier refuses them (one tier up) unless the project's
+    settings turn global-region models on, which only `repo` can say."""
     rows = [t for t, h, m in check_tier_table(tier_text) if h == "opencode" or m.startswith(HOSTED_OPENCODE)]
-    if rows:
-        print(f"warning: {', '.join(rows)} is an OpenCode tier: lane-tier refuses it (swift on OpenCode runs only in "
-              "calvin, through calvin's Orca coordinator; model-routing.md). Set its harness to none in the project's "
-              "lanes.tsv.", file=sys.stderr, flush=True)
+    if rows and not (repo is not None and region_models_on(repo)):
+        print(f"warning: {', '.join(rows)} is an OpenCode tier: lane-tier refuses it (hosted global-region models run "
+              "only in a project whose settings.json sets global_region_models; model-routing.md). Set its harness to "
+              "none in the project's lanes.tsv, or set global_region_models if the owner decided this project may.",
+              file=sys.stderr, flush=True)
 
 
 def usable_own_model(name: str) -> bool:
@@ -1141,7 +1152,7 @@ def personas_and_tiers(repo: Path, project: str, coord, reviewer, mode: str, tie
         if state == "updated" and not (h == "opencode" and m.startswith(HOSTED_OPENCODE)):
             changed.append(name)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
-    opencode_rows_note(tier_text)
+    opencode_rows_note(tier_text, repo)
     say("gitignore", ignore_cotal(repo), ".cotal/")
     return changed
 
@@ -1227,7 +1238,7 @@ def refresh(repo: Path, project: str, mode: str, tiers: Path, reviewer: tuple) -
             f"only in the defaults: {key(theirs)}")
     if own_text is not None:
         try:
-            opencode_rows_note(own_text)
+            opencode_rows_note(own_text, repo)
         except Fail as e:
             print(f"warning: {e}: lane-tier refuses every tier until it is fixed", file=sys.stderr, flush=True)
     changed = []
@@ -2673,7 +2684,8 @@ def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "own_models": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
+            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool,
+            "global_region_models": bool}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
@@ -2806,7 +2818,7 @@ def show(repo: Path) -> int:
         tiers = [l.split("\t")[0] for l in tab.read_text().splitlines() if l.strip() and not l.startswith("#")][1:]
         print(f"lanes.tsv: {tab} (tiers: {', '.join(tiers) or 'none'})")
         try:
-            opencode_rows_note(tab.read_text())
+            opencode_rows_note(tab.read_text(), repo)
         except Fail as e:
             print(f"warning: {e}", file=sys.stderr, flush=True)
     except (OSError, UnicodeDecodeError):

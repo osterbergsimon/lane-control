@@ -3113,6 +3113,23 @@ class RefreshTests(unittest.TestCase):
         self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
         self.assertNotIn("sandbox required", r.stderr)
 
+    def test_refresh_does_not_warn_in_a_project_whose_settings_allow_opencode_tiers(self):
+        self.setup_project("--tiers", str(self._old_table()))
+        store = self.e.store(self.repo) / "settings.json"
+        st = json.loads(store.read_text())
+        self.assertNotIn("global_region_models", st)  # default off: nothing is written for it
+        st["global_region_models"] = True
+        store.write_text(json.dumps(st))
+        r = self.refresh()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("is an OpenCode tier", r.stderr)
+        self.assertTrue(json.loads(store.read_text())["global_region_models"])  # a refresh keeps it
+        st["global_region_models"] = "yes"
+        store.write_text(json.dumps(st))
+        r = self.refresh()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("global_region_models must be a bool", r.stderr)
+
     def _old_table(self):
         f = self.e.home / "old.tsv"
         f.write_text("tier\tharness\tmodel\tpermission\nswift\topencode\tgw/m\t-\ndeep\tclaude\topus\tinherit\n")
@@ -3217,9 +3234,49 @@ class LaneTierTests(unittest.TestCase):
             r = self.tier(f"{self.HEAD}\nswift\topencode\t{model}\t-\n", "swift")
             self.assertEqual(r.returncode, 4, model)
             self.assertEqual(r.stdout, "")
-            for word in ("refused", "only in calvin", "Orca coordinator", "one tier up", "cotal_spawn", str(self.table)):
+            for word in ("refused", "global_region_models", "Orca coordinator", "one tier up", "cotal_spawn", str(self.table)):
                 self.assertIn(word, r.stderr)
             self.assertNotIn("removed", r.stderr)
+
+    def settings(self, text):
+        (self.table.parent / "settings.json").write_text(text)
+
+    def test_the_project_setting_lets_an_opencode_tier_through_and_only_the_json_true_does(self):
+        for model in ("opencode/deepseek-v4.1-flash", "opencode-go/kimi", "gw/m"):
+            for harness in ("opencode", "claude"):
+                if harness == "claude" and model == "gw/m":
+                    continue
+                self.settings('{"global_region_models": true}')
+                r = self.tier(f"{self.HEAD}\nswift\t{harness}\t{model}\t-\n", "swift")
+                self.assertEqual(r.returncode, 0, (harness, model, r.stderr))
+                self.assertEqual(r.stdout, f"harness={harness} model={model} permission=-\n")
+                self.assertIn("cotal_spawn", r.stderr)
+        for off in ('{"global_region_models": false}', '{"global_region_models": "true"}', '{"global_region_models": 1}',
+                    '{"global_region_models": [true]}', '{"global_region_models": null}', "{}", "[true]", "", "{not json",
+                    '{"global_region_models": true', '"global_region_models"'):
+            self.settings(off)
+            r = self.tier(f"{self.HEAD}\nswift\topencode\topencode-go/x\t-\n", "swift")
+            self.assertEqual((r.returncode, r.stdout), (4, ""), off)
+            self.assertIn("global_region_models", r.stderr)
+
+    def test_without_a_settings_file_or_beside_another_table_name_the_opencode_tier_stays_refused(self):
+        row = f"{self.HEAD}\nswift\topencode\topencode-go/x\t-\n"
+        self.assertEqual(self.tier(row, "swift").returncode, 4)  # no settings.json at all
+        self.settings('{"global_region_models": true}')
+        self.table = self.table.parent / "tiers.tsv"  # the setting belongs to the project's lanes.tsv only
+        self.assertEqual(self.tier(row, "swift").returncode, 4)
+        self.table = self.table.parent / "lanes.tsv"
+        self.assertEqual(self.tier(row, "swift").returncode, 0)
+        r = subprocess.run([str(TIER_TOOL), "--check", "/dev/stdin"], input=row, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)  # --check only lists
+
+    def test_the_setting_changes_nothing_for_a_standing_role_or_another_tier(self):
+        self.settings('{"global_region_models": true}')
+        r = subprocess.run([str(TIER_TOOL), "--model", "opencode-go/x"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 4)  # --model has no project: a coordinator or reviewer never runs a hosted model
+        self.assertIn("global_region_models", r.stderr)
+        r = self.tier(f"{self.HEAD}\nstandard\tclaude\tsonnet\tinherit\ntop\tnone\t-\t-\n", "top")
+        self.assertEqual(r.returncode, 3)
 
     def test_a_hosted_opencode_model_is_refused_whatever_the_harness_cell_says(self):
         for harness in ("claude", "OpenCode", "opencode2", "oc"):
@@ -3718,7 +3775,7 @@ class TierChoiceTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), tiers.read_text())
         self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
-        self.assertIn("only in calvin", r.stderr)
+        self.assertIn("global_region_models", r.stderr)
 
     def test_a_misspelled_harness_on_a_hosted_model_is_warned_about(self):
         tiers = self.e.home / "t.tsv"

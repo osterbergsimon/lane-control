@@ -28,7 +28,7 @@ is silent).
 - Claude and OpenCode are first-class for every role, coordinator included; every feature has both forms and both
   are tested. The targets are Claude Code and OpenCode v2 (`opencode2`) (owner, 2026-11-19).
 - Owner model rule: OpenCode with `opencode/` or `opencode-go/` models only where `core/scripts/lane-tier` allows
-  (calvin only today); `project-setup` refuses a role/model pair lane-tier refuses.
+  (one project only today, by its settings); `project-setup` refuses a role/model pair lane-tier refuses.
 - Never privileged containers, extra capabilities or device passthrough; ports on 127.0.0.1 only.
 - Never copy credentials. The share link (phase 6) is read from hidden input, never stored or logged.
 - Orca CLI is `orca-ide` (plain `orca` may be another program); tests stub it (`tests/stubs/`).

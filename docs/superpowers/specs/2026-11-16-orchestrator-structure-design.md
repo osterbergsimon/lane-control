@@ -26,7 +26,7 @@ Goals:
 Non-goals (this pass):
 - Working adapters for parked orchestrators (Rove, wsp) or untested ones (Herdr). They get records and their kept
   scripts; an adapter is written when one is retested.
-- Changing how the project repos (calvin, pasteur, vellum) work today. They run native Orca; this pass does not touch
+- Changing how the project repos (the three projects) work today. They run native Orca; this pass does not touch
   them. Using the command on them is a later, owner-approved step.
 - New features in the shared core (budget, heavy-work gate). Those move, they do not change.
 
@@ -93,7 +93,7 @@ bin/ (or scripts/)    the command entry point
 ```
 
 Moves keep git history (`git mv`). Paths other tools use today must keep working until their users are updated:
-vellum's `scripts/ci.sh` calls `~/.agents/bin/lane-heavy`, which links into this repo's `scripts/lane-heavy`. Leave
+a project's `scripts/ci.sh` calls `~/.agents/bin/lane-heavy`, which links into this repo's `scripts/lane-heavy`. Leave
 a symlink or wrapper at every old path a live machine uses, and list them in the PR.
 
 ## 6. The command
@@ -125,13 +125,13 @@ Rules:
 
 References for the two adapters (the project repos are private; read them with `gh`, do not copy project
 content into this public repo):
-- `strip --orchestrator orca-cotal`: what the strip PRs removed: calvin #360 and #362, pasteur #254 and #255,
-  vellum #173 and #174 (#142 is what vellum's setup once added). From these, write down per adapter the marker
+- `strip --orchestrator orca-cotal`: what the strip PRs removed: project A #360 and #362, project B #254 and #255,
+  project C #173 and #174 (#142 is what project C's setup once added). From these, write down per adapter the marker
   files and instruction lines it owns; `status` detects by those and `strip` removes exactly those.
 - `setup --orchestrator native-orca`: lane-control owns a new template for it (none exists yet). It holds the
   minimum the fresh 2026-11-15 coordinators needed: a short AGENTS.md section for a coordinator on Orca's
   orchestration (run, task, worker start, check; workers in their own worktrees), the heavy-work rule (builds and
-  test suites through `lane-heavy`; calvin #363 is an example of routing a project's heavy targets through it), and
+  test suites through `lane-heavy`; project A #363 is an example of routing a project's heavy targets through it), and
   where the handovers live (beads memories `handover-latest` and the old orchestrator's dated handover). Generic
   wording only; the projects' own facts stay in their AGENTS.md.
 
@@ -181,7 +181,7 @@ with evidence kept out of the public repo where it holds private data.
   they check moved or de-named wording or paths; an assertion that checks behaviour must keep passing unchanged.
 - **Live paths:** treat every path that `machine.md`, `scripts/orca-host-install`,
   `scripts/machine-coordinator-setup`, `scripts/window-guard-install` and `scripts/lib.sh` install, link or source
-  as live, plus `~/.agents/bin/lane-heavy` and `~/.agents/bin/lane-limits.sh` (vellum's and calvin's build
+  as live, plus `~/.agents/bin/lane-heavy` and `~/.agents/bin/lane-limits.sh` (two projects' build
   scripts call lane-heavy). Each gets a symlink at its old path. List them in the PR.
 - **Classification:** `scripts/wsp-owner-code.mjs` goes with wsp. `cotal-agent`, `orca-cotal-task`,
   `project-setup`, `project-pause`, `machine-coordinator-setup`, `skills/orca-cotal-lanes` and the Cotal-flavoured

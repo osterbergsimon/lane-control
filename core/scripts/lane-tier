@@ -8,22 +8,34 @@
 #
 # Exit: 0 the tier may be started; 2 usage, a bad table or an unknown tier; 3 the tier's harness is none (skip it, one
 # tier up); 4 refused: an OpenCode tier (harness opencode, or an opencode/ or opencode-go/ model whatever the harness
-# cell says). Swift on OpenCode runs unsandboxed only in calvin, started by calvin's Orca coordinator, never through
-# lane-tier; everywhere else there are no OpenCode lanes until the sandbox is back (model-routing.md, "Sandbox per
-# tier"). Columns other than tier, harness, model and permission are ignored (a table from before may still have a
-# sandbox column). The check is what the orca-cotal-lanes skill runs before cotal_spawn; --check only lists the rows.
+# cell says) in a project that has not turned global-region models on. That is the project's own setting,
+# `"global_region_models": true` in the settings.json beside its lanes.tsv (default off; anything but the JSON true,
+# an unreadable file, a table that is not named lanes.tsv or has no settings.json beside it all count as off). Only
+# an Orca coordinator starts such a lane (worker-start), never cotal_spawn, and never a standing role: --model
+# refuses a hosted model whatever a project says (model-routing.md, "Sandbox per tier"). Columns other than tier,
+# harness, model and permission are ignored (a table from before may still have a sandbox column). The check is what
+# the orca-cotal-lanes skill runs before cotal_spawn; --check only lists the rows.
 set -u
 
 die() { echo "lane-tier: $*" >&2; exit 2; }
+
+# Whether the project turned global-region models on: global_region_models is the JSON true in the settings.json beside
+# its lanes.tsv. Anything else (no file, a bad one, another value, another table name, no python3) is off.
+region_models_on() {
+  [ "$(basename -- "$table")" = lanes.tsv ] || return 1
+  [ -r "$(dirname -- "$table")/settings.json" ] || return 1
+  python3 -I -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("global_region_models") is True else 1)' \
+    "$(dirname -- "$table")/settings.json" 2>/dev/null
+}
 
 if [ "${1:-}" = "--model" ]; then
   [ $# -eq 2 ] && [ -n "$2" ] || die "usage: lane-tier --model <model>"
   case $2 in
     opencode/*|opencode-go/*)
       cat >&2 <<MSG
-lane-tier: refused: $2 is a hosted OpenCode model (opencode/ or opencode-go/). It runs unsandboxed only in calvin,
-started there by calvin's Orca coordinator, never through lane-tier or project-setup (model-routing.md, "Sandbox per
-tier").
+lane-tier: refused: $2 is a hosted OpenCode model (opencode/ or opencode-go/). It runs only as a swift lane in a
+project whose settings.json sets global_region_models, started there by that project's Orca coordinator; it never
+runs as a standing role or through project-setup (model-routing.md, "Sandbox per tier").
 MSG
       exit 4 ;;
   esac
@@ -90,12 +102,17 @@ opencode_tier=
 [ "$harness" = opencode ] && opencode_tier=1
 case $model in opencode/*|opencode-go/*) opencode_tier=1 ;; esac
 if [ -n "$opencode_tier" ]; then
-  cat >&2 <<MSG
+  if region_models_on; then
+    echo "lane-tier: note: tier $tier is an OpenCode tier; this project's settings allow it. Only its Orca coordinator starts it (worker-start), never cotal_spawn." >&2
+  else
+    cat >&2 <<MSG
 lane-tier: refused: tier $tier is an OpenCode tier (harness $harness, model $model).
-Swift on OpenCode runs unsandboxed only in calvin, where calvin's Orca coordinator starts it as an Orca worker;
-lane-tier never starts it, and outside calvin no hosted global-region model runs bare (model-routing.md, "Sandbox per
-tier"). Do not start it with cotal_spawn: go one tier up, and tell the owner that $table still has this row.
+A hosted global-region model runs only in a project whose settings.json sets global_region_models (default off; this
+one has not), started by that project's Orca coordinator as an Orca worker; no other project runs one bare
+(model-routing.md, "Sandbox per tier"). Do not start it with cotal_spawn: go one tier up, and tell the owner that
+$table still has this row.
 MSG
-  exit 4
+    exit 4
+  fi
 fi
 printf 'harness=%s model=%s permission=%s\n' "$harness" "$model" "$permission"
