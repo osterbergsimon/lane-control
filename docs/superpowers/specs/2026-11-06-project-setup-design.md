@@ -1,6 +1,6 @@
 # project-setup: Orca + Cotal projects with a coordinator and a frontend design lead
 
-Status: approved design, 2026-11-06. bd: tux-1vm.
+Status: approved design, 2026-11-06.
 
 ## Intent
 

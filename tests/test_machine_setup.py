@@ -1700,7 +1700,7 @@ class NightManagerDocTests(unittest.TestCase):
                        "stand down", "BUDGET push-and-handover"):
             self.assertIn(needle, text)
         self.assertNotIn("--apply", text.replace("never `--apply`", "").replace("never --apply", ""))
-        for private in ("vellum", "calvin", "pasteur", "osterberg", "/home/", "10.10."):
+        for private in ("/home/", "10.10.", "alice", "shop-vps"):  # made-up names, so this runs in CI; the real ones: test_content.PrivateNamesTests
             self.assertNotIn(private, text.lower())
 
 if __name__ == "__main__":

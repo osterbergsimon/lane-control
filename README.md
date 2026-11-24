@@ -10,7 +10,7 @@ Three layers of agents, each run by the orchestrator you use:
 - **Project coordinator** (one per repo): queues work in beads (`bd`), writes briefs, launches worker lanes, reruns the gates, reviews, merges, raises owner decisions to you.
 - **Worker lanes**: one issue, one branch, one PR each, on a **tier**, each in its own worktree.
 
-Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so other engines and Claude models can mix. Any tier may be "none". Swift on OpenCode runs unsandboxed only in calvin for now, through calvin's Orca coordinator; for every other project swift is `none` ("Sandbox" below).
+Tiers are roles (swift, standard, deep, top), not model names. One config file maps each tier to an engine, command, model and budget, so other engines and Claude models can mix. Any tier may be "none". Which models a project uses is in its own tier table, outside this repo; the default tables carry no China-region hosted models ("Sandbox" below), and the default swift row is `none`.
 
 Why: the real constraint is a budget (say a weekly plan limit), not attention. Work is routed by the paths it touches (each project's path map, `.lane-control/routing.md` where the orchestrator uses lane-control's lane files), reviewed by risk, and throttled by lane count, never by lowering the tier. The owner sees one report and a short list of decisions.
 
@@ -73,7 +73,7 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 - **Every failure with a durable fix** goes into `core/reliability.md`.
 
 ## Sandbox
-Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at b97c919). Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin for now (owner 2026-11-15). There, calvin's Orca coordinator starts it with `orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash`; lane-control's own lane tools do not start OpenCode. Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare: `scripts/lane-tier` refuses every OpenCode tier (exit 4), the default tier table's swift row is `none` (the default for every project but calvin), and re-adding OpenCode lanes elsewhere needs the sandbox back first (restore it from b97c919).
+Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (in a project whose own tier table lists it). To bring it back, restore it from git history (last in main at b97c919). Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, only in a project whose own tier table lists it (owner 2026-11-15). There, that project's Orca coordinator starts it with `orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash`; lane-control's own lane tools do not start OpenCode. Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare: `scripts/lane-tier` refuses every OpenCode tier (exit 4), the default tier table's swift row is `none` (every project's own table says which models it uses), and re-adding OpenCode lanes elsewhere needs the sandbox back first (restore it from b97c919).
 
 ## License
 MIT, see `LICENSE`.

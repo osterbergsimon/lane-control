@@ -205,8 +205,8 @@ each old `scripts/<name>`; path updates inside `project-setup` (`HERE / "persona
 **Files:** `orchestrators/orca-cotal/adapter.py`; test `tests/test_orch_orca_cotal.py`; fixtures
 `tests/fixtures/orca-cotal-project/` (a synthetic project, no real project content).
 
-- [ ] **Step 1:** Read the strip PRs with `gh pr diff`: calvin #360 #362, pasteur #254 #255, vellum #173 #174,
-  and vellum #142 (what setup added). Write the union of what they removed as a `MARKERS` list in the adapter:
+- [ ] **Step 1:** Read the strip PRs with `gh pr diff`: project A #360 #362, project B #254 #255, project C #173 #174,
+  and project C #142 (what setup added). Write the union of what they removed as a `MARKERS` list in the adapter:
   file and folder paths (for example `.cotal/`, `.lane-control/` and its settings files, the `.gitignore` lines)
   and the AGENTS.md section headings. Generic names only; no project-specific text.
 - [ ] **Step 2:** Tests: `test_detect_finds_markers`, `test_strip_removes_markers_only` (other files and other

@@ -3217,7 +3217,7 @@ class LaneTierTests(unittest.TestCase):
             r = self.tier(f"{self.HEAD}\nswift\topencode\t{model}\t-\n", "swift")
             self.assertEqual(r.returncode, 4, model)
             self.assertEqual(r.stdout, "")
-            for word in ("refused", "only in calvin", "Orca coordinator", "one tier up", "cotal_spawn", str(self.table)):
+            for word in ("refused", "own Orca coordinator", "Orca coordinator", "one tier up", "cotal_spawn", str(self.table)):
                 self.assertIn(word, r.stderr)
             self.assertNotIn("removed", r.stderr)
 
@@ -3718,7 +3718,7 @@ class TierChoiceTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.table.read_text(), tiers.read_text())
         self.assertIn("warning: swift is an OpenCode tier: lane-tier refuses it", r.stderr)
-        self.assertIn("only in calvin", r.stderr)
+        self.assertIn("own Orca coordinator", r.stderr)
 
     def test_a_misspelled_harness_on_a_hosted_model_is_warned_about(self):
         tiers = self.e.home / "t.tsv"

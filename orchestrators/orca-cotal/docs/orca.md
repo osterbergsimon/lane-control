@@ -360,15 +360,15 @@ The coordinator follows the `orca-cotal-lanes` skill:
 Never `orca terminal send` or Orca `orchestration` on agents: those type into the composer.
 
 ### OpenCode tiers
-Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (calvin, for now). To bring it back, restore it from git history (last in main at b97c919).
+Owner 2026-11-15: the OpenCode sandbox is removed to keep things simple; OpenCode may run unsandboxed (in a project whose own tier table lists it). To bring it back, restore it from git history (last in main at b97c919).
 
-Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, allowed only in calvin for now (owner
-2026-11-15). There, calvin's Orca coordinator starts it with
+Swift still exists: OpenCode on `opencode-go/deepseek-v4.1-flash`, unsandboxed, only in a project whose own tier table lists it (owner
+2026-11-15). There, that project's Orca coordinator starts it with
 `orca-ide orchestration worker-start --agent opencode2 --model opencode-go/deepseek-v4.1-flash`; lane-control's own lane
 tools do not start OpenCode. Everywhere else there are no OpenCode lanes and no hosted global-region model runs bare
 (`model-routing.md`, "Sandbox per tier"); re-adding them elsewhere needs the sandbox back first (restore it from
-b97c919). The default tier table's swift row is harness `none`, the default for every project but calvin, so its work
-goes one tier up. `lane-tier` refuses every OpenCode tier (exit 4: harness `opencode`, or an `opencode/` or
+b97c919). The default tier table's swift row is harness `none`, so its work
+goes one tier up. Each project's own tier table (written by project-setup, outside this repo) says which models it uses: lane-control's default tables carry no China-region hosted models, and a project that wants them lists them in its own table. `lane-tier` refuses every OpenCode tier (exit 4: harness `opencode`, or an `opencode/` or
 `opencode-go/` model whatever the harness cell says), and
 project-setup warns about an OpenCode row in a project's table (on a run, `--refresh` and `--show`): set its harness to
 `none`. A table from before may still have a `sandbox` column; `lane-tier` ignores it.
