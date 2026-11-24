@@ -100,8 +100,9 @@ UNKNOWN_DETAIL = ("(no lane worktree yet, and the preview shows no rule for a ma
                   f"once a lane exists, or look in Orca: {WHERE_RULE})")
 
 
-WORKERS_WHY = ("lane-control lanes run as supervised workers, and a worker is released only after its lane's merge, "
-               "so this rule removes a merged lane's worktree without Orca's pull request cache")
+WORKERS_WHY = ("lane-control lanes run as supervised workers, and Orca removes a released worker's workspace only once "
+               "Git finds its HEAD in the default branch or a merged review, so an unmerged lane's worktree stays and a "
+               "merged lane's goes without Orca's pull request cache")
 WORKERS_ON = "(the released-workers rule is on: a released worker's row matched it)"
 
 

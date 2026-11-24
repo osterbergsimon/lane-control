@@ -36,10 +36,12 @@ A workspace has the reason `merged` when either of these holds:
    (`reason: merged` on its row).
 
 The companion rule **"Delete released orchestration worker workspaces"** ("Workspaces an orchestration worker used,
-once the coordinator has released it") is **recommended**: lane-control lanes run as supervised workers and a worker is
-released only after its lane's merge, so a released worker's workspace is a merged lane's. It needs no PR cache: it
-matches a workspace a worker start created, whose worker was released and whose HEAD Git finds in the default branch,
-a merged review or the coordinator's branch (the row's reason is `orchestration-worker`). Turn it on beside the merged
+once the coordinator has released it") is **recommended**: lane-control lanes run as supervised workers, and Orca
+removes a released worker's workspace only once Git finds its HEAD in the default branch or a merged review, so an
+unmerged lane's worktree stays. It needs no PR cache: it matches a workspace a worker start created, whose worker was
+released and whose HEAD Git finds in the default branch, a merged review or the coordinator's branch (the row's reason
+is `orchestration-worker`). The coordinator releases a lane's worker after its merge; Orca's own check, not the
+release, is what keeps an unmerged lane's worktree. Turn it on beside the merged
 rule; turning it on is the owner's, and lane-control only says so.
 
 A workspace with no commits beyond the default branch is `unchanged`, a different rule, not `merged`.

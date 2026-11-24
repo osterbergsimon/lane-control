@@ -168,7 +168,9 @@ class ReleasedWorkersRuleTests(Stubs):
         self.assertEqual(what, "off")
         self.assertIn("recommended", detail)
         self.assertIn(WORKERS, detail)
-        self.assertIn("released only after its lane's merge", detail)
+        self.assertIn("only once Git finds its HEAD in the default branch or a merged review", detail)
+        self.assertIn("an unmerged lane's worktree stays", detail)
+        self.assertNotIn("released only after", detail)
         self.assertIn("lane-control does not change Orca's settings", detail)
 
     def test_project_off_names_the_project_page_then_the_rule(self):

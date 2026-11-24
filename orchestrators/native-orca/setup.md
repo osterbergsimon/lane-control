@@ -34,7 +34,8 @@ A merged lane's worktree is removed by Orca's own cleanup rule "Delete merged wo
 (`docs/orca-cleanup.md`). `project-setup` and `machine-setup` read `orca-ide workspace cleanup preview` and say
 plainly when no rule is on or the project has cleanup off, with where to turn it on in Orca (Settings -> Workspace
 Cleanup -> Cleanup rules); they also report the recommended rule "Delete released orchestration worker workspaces"
-(lane-control lanes run as supervised workers, released only after their merge), and say "cannot tell" when the preview
+(lane-control lanes run as supervised workers; Orca removes a released worker's workspace only once Git finds its HEAD
+in the default branch or a merged review, so an unmerged lane's worktree stays), and say "cannot tell" when the preview
 shows no row it matched; they never change Orca's settings. `project-setup` also turns on GitHub's "Automatically
 delete head branches" in a terminal (recommended: Enter, y or yes turns it on, anything else leaves it off; without a
 terminal it only says so; a re-run says `exists`).
@@ -43,8 +44,8 @@ terminal it only says so; a re-run says `exists`).
 - **Run and tasks:** the coordinator makes a run and its tasks (with dependencies), then starts every ready task
   itself: a run never schedules work.
 - **Workers:** `orca-ide orchestration worker-start` starts a worker in its own worktree and branch, with its brief as
-  the first message. Reusing a kept-open terminal is much faster than a fresh one; release kept-open terminals when
-  done.
+  the first message. Reusing a kept-open terminal is much faster than a fresh one; release a worker after its
+  merge.
 - **Messages:** `send`, `ask`, `reply` and `check` (a coordinator never uses `check --wait`: waits are lane work).
   A message reaches the agent as a one-line prompt in its composer telling it to run `check`; the content shows only
   after it does. If a worker that also coordinates its own run seems not to get a reply, nudge it to run `check`

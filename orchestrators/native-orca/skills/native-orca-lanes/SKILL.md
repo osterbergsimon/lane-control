@@ -148,7 +148,8 @@ lane's worktree, `evaluation.reason` and `evaluation.cause`), not the project's 
   cleanup' page in Settings. `unchanged` or `no-rule-matched` with the rule on means Orca has not seen the PR as merged
   (it reads merge-commit merges from its own PR cache, which the app refreshes). The Git-only rule "Delete released
   orchestration worker workspaces" in the same Cleanup rules list does not need that cache. It is recommended: lanes run
-  as supervised workers, and a worker is released only after its merge. Setup reports it (project-setup's `orca cleanup
+  as supervised workers, and Orca removes a released worker's workspace only once Git finds its HEAD in the default
+  branch or a merged review, so an unmerged lane's worktree stays. Setup reports it (project-setup's `orca cleanup
   workers` line); turning it on is still the owner's.
 
 The fallback, right after the merge and the worker release, with no ask when every check passes. Before any

@@ -173,8 +173,8 @@ def bd_version_step():
 
 
 def cleanup_step():
-    """Whether Orca's workspace cleanup has the merged rule on for lane worktrees, machine-wide. Report only: Orca's
-    settings are never changed (core/cleanup.py)."""
+    """Whether Orca's workspace cleanup has the merged rule, and the recommended released-workers rule, on for lane
+    worktrees, machine-wide. Report only: Orca's settings are never changed (core/cleanup.py)."""
     for step, what, detail in cleanup.orca_report(machineconf.orca_cli()):
         say(step, what, detail)
 

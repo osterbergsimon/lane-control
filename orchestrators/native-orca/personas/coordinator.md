@@ -62,7 +62,8 @@ You plan, decide and check; lanes do the work, including the waiting.
   is on its branch: read the lane's branch, ask the owner before you abandon it, then run `orca-ide orchestration
   worker-abandon --dispatch <dispatch>` and `orca-ide orchestration worker-release --dispatch <dispatch>` (if it answers
   `retained` and the worker's terminal is still open, close the terminal yourself with `orca-ide terminal close
-  --terminal <handle>`, the handle from `worker-show`), and start the work again with `orca-ide orchestration
+  --terminal <handle>`, the handle from `worker-show`; this is the one release before a merge, and Orca keeps an
+  unmerged lane's worktree), and start the work again with `orca-ide orchestration
   worker-start --task <task> --retry-of <dispatch>` (placement, `--agent` and `--model` as for any lane). `orca-ide
   orchestration worker-show --dispatch <dispatch>` says what Orca knows of a worker; silence alone never proves it gone.
 - When this machine is a box paired with another machine (its environment name is `paired_environment` in the
@@ -111,7 +112,8 @@ You plan, decide and check; lanes do the work, including the waiting.
   `project-off`, `unchanged` or `no-rule-matched`) is closed by the fallback below, and when it is `rules-off` or
   `project-off` tell the owner where to turn the rule on; for the others tell the owner too that Orca has not seen the
   merge (the rule reads merge-commit merges from its PR cache) and that the Git-only rule "Delete released
-  orchestration worker workspaces" is recommended (a worker is released only after its merge) and theirs to turn on.
+  orchestration worker workspaces" is recommended (Orca takes a released worker's workspace only once Git finds its HEAD in the default branch or a merged
+  review, so an unmerged lane's worktree stays) and theirs to turn on.
 - The fallback, right after the merge and the worker release, with no ask when every check passes: `git -C <W> status
   --porcelain --ignored` shows only known build output and the `.beads` link (ignored files such as `.env` stop it:
   `worktree rm` removes them without `--force`), `git fetch origin`, and `git -C <W> merge-base --is-ancestor HEAD
