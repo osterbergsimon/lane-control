@@ -21,8 +21,12 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    back beads up (in the beads repo `git push`, then `bd dolt push`) and start nothing new. Run `<lc>/core/scripts/budget-state` once more: if it now shows step 4 stop, or unknown,
    stand down: send no check-in, but run `--checked <name>` (step 3) for each due coordinator all the same, so it is
    not due again for two hours.
-3. **Check-ins.** For each `DUE` coordinator, find its line in `~/.config/lane-control/machine.conf`
-   (`COORDINATORS`: name, checkout, harness, terminal title) and send it one message:
+3. **Check-ins.** For each `DUE` coordinator, find where to send it: run `<lc>/core/scripts/night-precheck --find
+   <name>`. It prints `<harness> <handle> <title>` (`COORDINATORS` in `~/.config/lane-control/machine.conf` gives only
+   `<name> <checkout>`; Orca's single agent terminal in that checkout gives the rest, and a harness and title written
+   in the file win). Use that title as the session name below. If it prints nothing and says why (no agent terminal
+   there, several, Orca not answering), send that coordinator nothing, never guess a session, and put the line in your
+   record (step 6) for the owner. Then send it one message:
    "night manager: check-in (owner away). You have been idle <n> min. Check your lanes (workers done, stuck or
    waiting), CI on your PRs (failures and finished runs to act on) and merge trains, and act on what is ready. If
    nothing needs doing, reply 'nothing' in one line."
@@ -46,9 +50,10 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
 
 ## Messages
 - A Claude coordinator, and the machine coordinator (session `machine coordinator`): Claude Code's SendMessage,
-  addressed by the session name (its terminal title; ListAgents lists them).
+  addressed by the session name (the `<title>` `night-precheck --find` printed, its terminal title; ListAgents lists
+  them).
 - An OpenCode coordinator on this machine: find its Run in `orca-ide orchestration run-list --json` (the objective is
-  its terminal title), then `orca-ide orchestration send --to run:<id> --subject "night manager" --body "<message>"`.
+  its terminal title, the `<title>` from `--find`), then `orca-ide orchestration send --to run:<id> --subject "night manager" --body "<message>"`.
 - A coordinator on another host: a `run:` target does not cross hosts (without `--on` it goes to your own Orca, where
   that Run does not exist; with `--on` the server refuses it). First check that both servers are 1.4.256 or newer:
   `runtime.appVersion` in `orca-ide status --json` and in `orca-ide status --environment <environment> --json`. Then

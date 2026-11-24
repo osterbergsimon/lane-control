@@ -601,6 +601,47 @@ class ImproveDenyTests(ImproveTest):
         self.assertTrue(self.improve_file().exists())
         self.assertEqual(self.settings(self.shop).read_text(), "{not json")
 
+    def two_columns(self, *terminals):
+        """machine.conf with `<name> <checkout>` only; Orca has these agent terminals (lc-5w1)."""
+        from test_night_precheck import agent_terminal
+        self.machine_conf(f'COORDINATORS="\nshop {self.shop}\nblog {self.blog}\n"\n')
+        self.orca({"terminals": [agent_terminal(c, title=f"{c.name} coordinator", handle=f"term_{i}")
+                                 for i, c in enumerate(terminals, 1)]})
+
+    def test_two_column_lines_get_their_denies_through_orca(self):
+        self.two_columns(self.shop, self.blog)
+        r = self.on()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.denies(self.shop) and self.denies(self.blog))
+        self.assertNotIn("NOT installed", r.stderr)
+
+    def test_a_coordinator_orca_cannot_find_gets_no_rules_and_the_reason(self):
+        self.two_columns(self.shop)  # no agent terminal for blog
+        r = self.on()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.denies(self.shop))
+        self.assertEqual(self.denies(self.blog), [])
+        self.assertIn(f"blog: no agent terminal in {self.blog}", r.stderr)
+        self.assertIn("deny rules NOT installed", r.stderr)
+
+    def test_orca_down_installs_none_and_says_so_once(self):
+        self.two_columns(self.shop, self.blog)
+        self.orca({"down": True})
+        r = self.on()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.denies(self.shop), self.denies(self.blog)), ([], []))
+        self.assertEqual(r.stderr.count("Orca could not be asked"), 1, r.stderr)
+
+    def test_the_rules_come_out_even_when_orca_cannot_say_whose_they_are(self):
+        self.two_columns(self.shop, self.blog)
+        self.on()
+        self.assertTrue(self.denies(self.shop) and self.denies(self.blog))
+        self.orca({"down": True})
+        self.run_script("lane-improve", "off")
+        r = self.run_script("lane-improve", "drained", "--all")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.denies(self.shop), self.denies(self.blog)), ([], []))
+
     def test_an_opencode_coordinator_gets_the_guard_plugin_record_and_is_told_so(self):
         self.machine_conf('COORDINATORS="\nshop %s claude shop coordinator\nblog %s opencode blog coordinator\n"\n'
                           % (self.shop, self.blog))

@@ -2,13 +2,19 @@
 # writes it from this example; fill it in by hand. Shell-sourceable KEY=value. Read by night-precheck, machine-check,
 # lane-sweep and lane-limits.sh (night hours and the away file's life; only plain KEY=<number> lines there).
 
-# Coordinators on this machine, one per line: <name> <checkout path> <harness> <Orca terminal title>
-#   name      a short name, used in check-ins and stamps (letters, digits, . _ -)
+# Coordinators on this machine, one per line: <name> <checkout path>
+#   name      a stable project key, used in check-ins and stamps (letters, digits, . _ -)
 #   checkout  the project's main checkout, where its coordinator runs (no spaces)
-#   harness   claude or opencode: whose session store gives the idle time
-#   title     its Orca terminal title, also its session name for SendMessage ("<project> coordinator")
+# This list is the owner's choice of whom the night manager may wake; the rest comes from Orca when it is needed.
+# A coordinator's harness (claude or opencode: whose session store gives the idle time) and address (its Orca terminal:
+# handle and title, also its session name for SendMessage) are its agent terminal, the single one in Orca whose folder is
+# the checkout. None, or more than one: the output says which project and why, and nobody is woken for it; Orca not
+# answering is said once. Nothing is guessed.
+# To pick them yourself, add the third and fourth column: <name> <checkout path> <harness> <Orca terminal title>
+# (the title may have spaces; a line with both never asks Orca).
 # Example:
-#   myproject ~/code/myproject claude myproject coordinator
+#   myproject ~/code/myproject
+#   other ~/code/other claude other coordinator
 COORDINATORS="
 "
 

@@ -74,7 +74,9 @@ the box's coordinator run lanes here with the desktop's share link (`remote.md`)
 `core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
 every step says `exists` on a re-run):
 - `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators
-  (name, checkout, harness, terminal title), the runner repos it watches, night hours, idle and recheck minutes, and
+  (`<name> <checkout>` each: the owner's list of whom the night manager may wake; Orca gives each one's harness and
+  session name, the single agent terminal in that checkout, and a harness and terminal title written after the checkout
+  override it), the runner repos it watches, night hours, idle and recheck minutes, and
   how long `lane-away on` lasts. Fill it in by hand; no value from it goes in a repo.
 - The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an
   Orca terminal titled `machine coordinator` with its persona and hook.

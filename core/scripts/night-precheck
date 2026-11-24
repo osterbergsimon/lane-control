@@ -17,12 +17,20 @@ else = skip the run, which costs nothing.
   night-precheck --checked <name> improve|wrapup
                                    the same for an improve or wrap-up line: not due again for IMPROVE_IDLE_MIN minutes,
                                    then for as long as it stays idle (the wait doubles, at most 8 h)
+  night-precheck --find <name>   where to send <name> its check-in: `<harness> <handle> <title>` on one line (title
+                                   last, it may have spaces; the handle is `-` when Orca has none to give). Exit 1 and
+                                   the reason on stderr when it cannot be found: send it nothing.
 
 Due only while the owner counts as away (LANE_OWNER_AWAY from lane-limits.sh: night, NIGHT_START-NIGHT_END, or the
 away file; a stopped budget never counts, since a check-in spends budget), and then for a coordinator idle at least
 IDLE_MIN minutes and not checked in on for RECHECK_MIN minutes, or a runner of RUNNER_REPOS offline. Idle is the
 newest write of the coordinator's own session (the one started with LANE_ROLE/LANE_PERSONA), read by its harness
 adapter; Orca's terminal output is no idle signal (status-line redraws keep it fresh).
+
+A coordinator's harness and address are not in machine.conf (`<name> <checkout>`; a third and fourth column, harness
+and terminal title, override): they are looked up from Orca, as the single agent terminal whose folder is the
+checkout. No agent terminal there, several, or Orca not answering is said on stderr (which project, why, Orca once) and
+that coordinator is skipped: nobody is woken on a guess. Orca is asked only when a line lacks its harness or title.
 
 Improve mode (core/improve.py; `lane-improve on`) is separate from presence: it does not make the owner count as away,
 and its nudges go out by day or night whatever presence says (the plain check-ins above wait for the owner to be away).
@@ -240,6 +248,26 @@ def improve_lines(nudge: list, istate: dict, now: float) -> list:
     return out
 
 
+def find(name: str) -> int:
+    """`--find`: print `<harness> <handle> <title>` for the coordinator, or say on stderr why it cannot be found."""
+    try:
+        coords = [c for c in machineconf.coordinators(machineconf.load()) if c.name == name]
+    except machineconf.ConfError as e:
+        err(str(e))
+        return 2
+    if not coords:
+        err(f"{name!r} is not a coordinator in {machineconf.path()}")
+        return 2
+    found, problems = machineconf.resolve(coords, handles=True)
+    for why in problems:
+        err(why)
+    if not found:
+        return 1
+    w = found[0]
+    print(f"{w.harness} {w.handle or '-'} {w.title}")
+    return 0
+
+
 def recently_checked(name: str, recheck_min: int, now: float) -> bool:
     try:
         return now - (stamp_dir() / name).stat().st_mtime < recheck_min * 60
@@ -250,17 +278,20 @@ def recently_checked(name: str, recheck_min: int, now: float) -> bool:
 def main(argv: list) -> int:
     if argv[:1] == ["--checked"] and len(argv) in (2, 3):
         return checked(*argv[1:])
+    if argv[:1] == ["--find"] and len(argv) == 2:
+        return find(argv[1])
     if argv[:1] in (["-h"], ["--help"]):
         print(__doc__.strip())
         return 0
     if argv:
-        err("usage: night-precheck [--checked <name> [improve]]")
+        err("usage: night-precheck [--checked <name> [improve|wrapup] | --find <name>]")
         return 2
     try:
         conf = machineconf.load()
         coords = machineconf.coordinators(conf)
         for c in coords:
-            harnesses.load_harness(c.harness)
+            if c.harness:  # one given in machine.conf; the others are looked up from Orca, per project
+                harnesses.load_harness(c.harness)
         away = machineconf.presence()
     except (machineconf.ConfError, ValueError) as e:
         err(str(e))
@@ -280,6 +311,7 @@ def main(argv: list) -> int:
     eff = {}    # (name, kind) -> the idle time a nudge counts (see nudge_state)
     if not coords:
         err(f"{machineconf.path()} lists no coordinators (is it still the unfilled example?): nobody to check in on")
+    active = []
     for c in coords:
         try:
             if machineconf.paused(c.checkout):
@@ -288,6 +320,11 @@ def main(argv: list) -> int:
         except machineconf.ConfError as e:
             err(f"{c.name}: {e}; no check-in")
             continue
+        active.append(c)
+    located, problems = machineconf.resolve(active, titles=False)  # Orca is asked only for a line without its harness and title
+    for why in problems:
+        err(why)
+    for c in located:
         try:
             idle = harnesses.load_harness(c.harness).idle_minutes(c.checkout, now, "coordinator")
         except (OSError, sqlite3.Error) as e:

@@ -62,7 +62,7 @@ nothing: when nothing needs action, keep the turn short and end it.
 - Your own Run is your Orca address: if `orca-ide orchestration run-current` shows none, create it from your own
   terminal with `orca-ide orchestration run-create --objective "<your session name>"`. Mail to it arrives as Orca's
   one-line message prompt (it waits while you are busy): then run `orca-ide orchestration check`.
-- Claude to Claude on this machine (each coordinator's session, `<project> coordinator`; `machine.conf` lists them):
+- Claude to Claude on this machine (each coordinator's session, `<project> coordinator`; `machine.conf` lists them, and `night-precheck --find <name>` gives one's session name):
   Claude Code's SendMessage, addressed by session name (ListAgents lists them). Ask for a one-word ack on an order: a
   send is not a read.
 - An OpenCode session on this machine: find its Run in `orca-ide orchestration run-list` (the objective is its session

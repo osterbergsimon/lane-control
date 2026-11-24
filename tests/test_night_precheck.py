@@ -8,6 +8,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_machine_setup import MachineTest, age  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
+import machineconf  # noqa: E402
+
 
 class PrecheckBase(MachineTest):
     def setUp(self):
@@ -423,6 +426,219 @@ class CapPrecheckTests(PrecheckBase):
         self.improve_on(projects=["a"], max_items=1, stop_at=None)
         self.period({"a": 1})
         self.assertEqual(self.pre().stdout, "DUE a wrapup idle=31min cap=items:1/1\n")
+
+
+def agent_terminal(checkout, title="proj coordinator", agent="claude", handle="term_1", **kw) -> dict:
+    """A terminal as Orca 1.4.268's `terminal list --json` gives it (agentIdentity is absent for a plain shell)."""
+    t = {"handle": handle, "title": title, "worktreePath": str(checkout), "agentIdentity": agent, "connected": True,
+         "orphaned": False, "writable": True, "executionHostId": "local"}
+    t.update(kw)
+    return {k: v for k, v in t.items() if v is not None}
+
+
+class CoordinatorLookupTests(PrecheckBase):
+    """A COORDINATORS line is `<name> <checkout>`: harness and address come from Orca's agent terminal in that checkout
+    (lc-5w1). A third and fourth column, harness and terminal title, stay as an explicit override."""
+
+    def lines(self, *rows):
+        """rows: (name, idle, columns) with columns "" (name and checkout only), "claude" or "claude <title>"."""
+        out = []
+        for n, idle, cols in rows:
+            out.append(f"{n} {self.claude_coordinator(n, idle)} {cols}".rstrip())
+        self.machine_conf('COORDINATORS="\n' + "\n".join(out) + '\n"\nRUNNER_REPOS=""\n')
+
+    def checkout(self, name) -> Path:
+        return self.home / "code" / name
+
+    def test_a_two_column_line_finds_its_harness_from_the_agent_terminal(self):
+        self.lines(("proj", 60, ""))
+        self.orca({"terminals": [agent_terminal(self.checkout("proj"))]})
+        r = self.pre(hour="2")
+        self.assertEqual((r.returncode, r.stdout), (0, "DUE proj idle=60min\n"), r.stderr)
+        self.assertEqual([c[:2] for c in self.orca_calls()], [["terminal", "list"]])  # asked once
+
+    def test_a_four_column_line_never_asks_orca(self):
+        self.conf(("proj", 60))  # `proj <checkout> claude proj coordinator`
+        self.orca({"down": True})  # would fail if it were asked
+        r = self.pre(hour="2")
+        self.assertEqual((r.returncode, r.stdout), (0, "DUE proj idle=60min\n"), r.stderr)
+        self.assertEqual(self.orca_calls(), [])
+        self.assertEqual(r.stderr, "")
+
+    def test_a_harness_column_alone_is_enough_for_the_precheck(self):
+        self.lines(("proj", 60, "claude"))
+        self.orca({"down": True})
+        r = self.pre(hour="2")
+        self.assertEqual((r.returncode, r.stdout), (0, "DUE proj idle=60min\n"), r.stderr)
+        self.assertEqual(self.orca_calls(), [])
+
+    def test_the_harness_is_the_agents_own_not_a_default(self):
+        self.lines(("oc", 60, ""))
+        self.opencode_coordinator("oc2", 60)  # a store for another project: the lookup must not use it
+        (self.home / "code" / "oc").mkdir(exist_ok=True)
+        oc = self.home / "code" / "oc"
+        # an OpenCode session recorded for oc's checkout, and Orca says OpenCode runs there (its id is `opencode2`)
+        import sqlite3, time
+        from test_machine_setup import OPENCODE_SCHEMA
+        db = self.home / ".local" / "share" / "opencode" / "opencode.db"
+        c = sqlite3.connect(db)
+        c.execute("INSERT INTO session_v2 VALUES (?, ?, ?, ?)", ("ses_oc9", None, str(oc), int((time.time() - 3600) * 1000)))
+        c.commit()
+        c.close()
+        self.record_session(oc, "opencode", "ses_oc9")
+        self.orca({"terminals": [agent_terminal(oc, title="oc coordinator", agent="opencode2")]})
+        r = self.pre(hour="2")
+        self.assertEqual((r.returncode, r.stdout), (0, "DUE oc idle=60min\n"), r.stderr)
+
+    def test_a_plain_shell_in_the_checkout_is_not_an_agent(self):
+        self.lines(("proj", 60, ""))
+        co = self.checkout("proj")
+        self.orca({"terminals": [agent_terminal(co, title="~/c/proj", agent=None, handle="term_2"),
+                                 agent_terminal(co)]})
+        self.assertEqual(self.pre(hour="2").stdout, "DUE proj idle=60min\n")
+
+    def test_no_agent_terminal_says_which_project_and_wakes_nobody(self):
+        self.lines(("proj", 60, ""), ("other", 60, ""))
+        self.orca({"terminals": [agent_terminal(self.checkout("other"), title="other coordinator")]})
+        r = self.pre(hour="2")
+        self.assertEqual(r.stdout, "DUE other idle=60min\n")  # the found one is still woken
+        self.assertIn(f"proj: no agent terminal in {self.checkout('proj')}", r.stderr)
+        self.assertIn("nobody is woken for it", r.stderr)
+        self.assertNotIn("other:", r.stderr)
+
+    def test_several_agent_terminals_are_not_guessed_between(self):
+        self.lines(("proj", 60, ""))
+        co = self.checkout("proj")
+        self.orca({"terminals": [agent_terminal(co, title="proj coordinator"),
+                                 agent_terminal(co, title="proj helper", handle="term_2")]})
+        r = self.pre(hour="2")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("proj: 2 agent terminals", r.stderr)
+        self.assertIn("'proj coordinator', 'proj helper'", r.stderr)
+        self.assertIn("not guessed", r.stderr)
+
+    def test_an_orphaned_disconnected_or_remote_terminal_does_not_count(self):
+        self.lines(("proj", 60, ""))
+        co = self.checkout("proj")
+        self.orca({"terminals": [agent_terminal(co, orphaned=True, handle="term_2"),
+                                 agent_terminal(co, connected=False, handle="term_3"),
+                                 agent_terminal(co, executionHostId="box", handle="term_4"),
+                                 agent_terminal(co)]})
+        self.assertEqual(self.pre(hour="2").stdout, "DUE proj idle=60min\n")
+
+    def test_an_agent_without_a_harness_adapter_is_said_and_skipped(self):
+        self.lines(("proj", 60, ""))
+        self.orca({"terminals": [agent_terminal(self.checkout("proj"), agent="gemini")]})
+        r = self.pre(hour="2")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("proj: the agent in", r.stderr)
+        self.assertIn("'gemini'", r.stderr)
+
+    def test_orca_down_is_said_once_and_a_complete_line_still_works(self):
+        self.lines(("a", 60, ""), ("b", 60, ""), ("c", 60, "claude c coordinator"))
+        self.orca({"down": True})
+        r = self.pre(hour="2")
+        self.assertEqual(r.stdout, "DUE c idle=60min\n")
+        self.assertEqual(r.stderr.count("Orca could not be asked"), 1, r.stderr)
+        self.assertIn("a, b cannot be found", r.stderr)
+        self.assertIn("runtime not reachable", r.stderr)
+        self.assertEqual(len(self.orca_calls()), 1)  # not asked again for the second project
+
+    def test_a_cut_short_terminal_list_is_not_trusted(self):
+        self.lines(("proj", 60, ""))
+        self.orca({"terminals": [agent_terminal(self.checkout("proj"))], "truncated": True})
+        r = self.pre(hour="2")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("cut short", r.stderr)
+
+    def test_nothing_is_asked_while_nothing_can_be_due(self):
+        self.lines(("proj", 60, ""))
+        self.orca({"terminals": [agent_terminal(self.checkout("proj"))]})
+        self.assertEqual(self.pre(hour="12").returncode, 1)  # day, owner present, improve off
+        self.assertEqual(self.orca_calls(), [])
+
+    def test_a_paused_project_is_not_looked_up(self):
+        self.lines(("proj", 60, ""))
+        self.orca({"terminals": []})
+        import hashlib
+        co = self.checkout("proj").resolve()
+        key = f"{co.name}-{hashlib.sha256(str(co).encode()).hexdigest()[:10]}"
+        f = self.conf_dir / "projects" / key / "settings.json"
+        f.parent.mkdir(parents=True)
+        f.write_text('{"paused": true}')
+        r = self.pre(hour="2")
+        self.assertIn("paused", r.stderr)
+        self.assertNotIn("no agent terminal", r.stderr)
+        self.assertEqual(self.orca_calls(), [])
+
+    def test_the_improve_nudge_finds_its_coordinator_the_same_way(self):
+        self.lines(("proj", 31, ""))
+        self.orca({"terminals": [agent_terminal(self.checkout("proj"))]})
+        self.improve_on()
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
+
+    def test_find_prints_harness_handle_and_title(self):
+        self.lines(("proj", 60, ""))
+        self.orca({"terminals": [agent_terminal(self.checkout("proj"), title="proj coordinator", handle="term_7")]})
+        r = self.pre("--find", "proj")
+        self.assertEqual((r.returncode, r.stdout), (0, "claude term_7 proj coordinator\n"), r.stderr)
+
+    def test_find_with_a_title_in_the_file_keeps_it_and_takes_the_handle_from_orca(self):
+        self.lines(("proj", 60, "claude the proj session"))
+        self.orca({"terminals": [agent_terminal(self.checkout("proj"), title="renamed", handle="term_7")]})
+        self.assertEqual(self.pre("--find", "proj").stdout, "claude term_7 the proj session\n")
+
+    def test_find_with_a_full_line_works_without_orca(self):
+        self.conf(("proj", 60))
+        self.orca({"down": True})
+        r = self.pre("--find", "proj")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "claude - proj coordinator\n", ""))
+
+    def test_find_says_why_when_it_cannot(self):
+        self.lines(("proj", 60, ""))
+        self.orca({"terminals": []})
+        r = self.pre("--find", "proj")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("proj: no agent terminal", r.stderr)
+        self.assertEqual(self.pre("--find", "nope").returncode, 2)
+
+    def test_the_example_and_the_night_manager_say_how_it_is_found(self):
+        root = Path(__file__).resolve().parent.parent
+        example = (root / "core" / "templates" / "machine.conf.example").read_text()
+        self.assertIn("<name> <checkout path>", example)
+        self.assertIn("one per line: <name> <checkout path>\n", example)  # two columns are the form; four an override
+        text = " ".join((root / "orchestrators" / "native-orca" / "night-manager.md").read_text().split())
+        self.assertIn("night-precheck --find <name>", text)
+        self.assertNotIn("(`COORDINATORS`: name, checkout, harness, terminal title)", text)
+
+
+class CoordinatorLineTests(unittest.TestCase):
+    def test_a_missing_orca_cli_is_an_orca_error_not_a_crash(self):
+        from unittest import mock
+        with mock.patch.object(machineconf, "orca_cli", return_value="/nonexistent/orca-ide"):
+            with self.assertRaises(machineconf.OrcaError) as cm:
+                machineconf.agent_terminals()
+        self.assertIn("orca-ide did not run", str(cm.exception))
+        found, problems = [], []
+        with mock.patch.object(machineconf, "orca_cli", return_value="/nonexistent/orca-ide"):
+            found, problems = machineconf.resolve([machineconf.Coordinator("a", Path("/x")),
+                                                   machineconf.Coordinator("b", Path("/y"))])
+        self.assertEqual(found, [])
+        self.assertEqual(len(problems), 1)  # said once
+        self.assertIn("a, b cannot be found", problems[0])
+
+    def parse(self, text):
+        return machineconf.coordinators({"COORDINATORS": text})
+
+    def test_two_three_and_four_columns(self):
+        got = self.parse("a /x\nb /y claude\nc /z opencode c coordinator\n# note\n\n")
+        self.assertEqual([(c.name, str(c.checkout), c.harness, c.title) for c in got],
+                         [("a", "/x", "", ""), ("b", "/y", "claude", ""), ("c", "/z", "opencode", "c coordinator")])
+
+    def test_a_name_alone_or_a_bad_name_is_refused(self):
+        for bad in ("a", "-a /x", "a b"[:0] + "bad/name /x"):
+            with self.assertRaises(machineconf.ConfError, msg=bad):
+                self.parse(bad)
 
 
 class NightManagerImproveDocTests(unittest.TestCase):
