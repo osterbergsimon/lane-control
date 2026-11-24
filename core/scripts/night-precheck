@@ -17,8 +17,8 @@ else = skip the run, which costs nothing.
   night-precheck --checked <name> improve|wrapup
                                    the same for an improve or wrap-up line: not due again for IMPROVE_IDLE_MIN minutes,
                                    then for as long as it stays idle (the wait doubles, at most 8 h)
-  night-precheck --find <name>   where to send <name> its check-in: `<harness> <handle> <title>` on one line (title
-                                   last, it may have spaces; the handle is `-` when Orca has none to give). Exit 1 and
+  night-precheck --find <name>   where to send <name> its check-in: `<harness> <handle> <checkout> <title>` on one line
+                                   (title last, it may have spaces; the handle is `-` when Orca has none to give). Exit 1 and
                                    the reason on stderr when it cannot be found: send it nothing.
 
 Due only while the owner counts as away (LANE_OWNER_AWAY from lane-limits.sh: night, NIGHT_START-NIGHT_END, or the
@@ -251,7 +251,7 @@ def improve_lines(nudge: list, istate: dict, now: float) -> list:
 
 
 def find(name: str) -> int:
-    """`--find`: print `<harness> <handle> <title>` for the coordinator, or say on stderr why it cannot be found."""
+    """`--find`: print `<harness> <handle> <checkout> <title>` for the coordinator, or say on stderr why it cannot be found."""
     try:
         coords = [c for c in machineconf.coordinators(machineconf.load()) if c.name == name]
     except machineconf.ConfError as e:
@@ -266,7 +266,7 @@ def find(name: str) -> int:
     if not found:
         return 1
     w = found[0]
-    print(f"{w.harness} {w.handle or '-'} {w.title}")
+    print(f"{w.harness} {w.handle or '-'} {w.checkout} {w.title}")
     return 0
 
 

@@ -586,27 +586,27 @@ class CoordinatorLookupTests(PrecheckBase):
         self.lines(("proj", 60, ""))
         self.orca({"terminals": [agent_terminal(self.checkout("proj"), title="proj coordinator", handle="term_7")]})
         r = self.pre("--find", "proj")
-        self.assertEqual((r.returncode, r.stdout), (0, "claude term_7 proj coordinator\n"), r.stderr)
+        self.assertEqual((r.returncode, r.stdout), (0, f"claude term_7 {self.checkout('proj')} proj coordinator\n"), r.stderr)
 
     def test_find_with_a_title_in_the_file_takes_the_handle_of_that_title_only(self):
         self.lines(("proj", 60, "claude the proj session"))
         co = self.checkout("proj")
         self.orca({"terminals": [agent_terminal(co, title="the proj session", handle="term_7"),
                                  agent_terminal(co, title="other", handle="term_8")]})
-        self.assertEqual(self.pre("--find", "proj").stdout, "claude term_7 the proj session\n")
+        self.assertEqual(self.pre("--find", "proj").stdout, f"claude term_7 {self.checkout('proj')} the proj session\n")
 
     def test_find_does_not_hand_out_another_agents_handle_for_a_title_in_the_file(self):
         # m1: the file's title pins the match; a single other agent in the checkout is not it
         self.lines(("proj", 60, "claude the proj session"))
         self.orca({"terminals": [agent_terminal(self.checkout("proj"), title="a helper", handle="term_9")]})
         r = self.pre("--find", "proj")
-        self.assertEqual((r.returncode, r.stdout), (0, "claude - the proj session\n"), r.stderr)
+        self.assertEqual((r.returncode, r.stdout), (0, f"claude - {self.checkout('proj')} the proj session\n"), r.stderr)
 
     def test_find_with_a_full_line_works_without_orca(self):
         self.conf(("proj", 60))
         self.orca({"down": True})
         r = self.pre("--find", "proj")
-        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "claude - proj coordinator\n", ""))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, f"claude - {self.checkout('proj')} proj coordinator\n", ""))
 
     def test_find_says_why_when_it_cannot(self):
         self.lines(("proj", 60, ""))
@@ -676,13 +676,36 @@ class CoordinatorLookupTests(PrecheckBase):
         # M3: a session found by folder alone may be the wrong one, so every message tells it what to do then
         text = " ".join((Path(__file__).resolve().parent.parent / "orchestrators" / "native-orca" / "night-manager.md")
                         .read_text().split())
-        said = 'night manager: For the <name> coordinator; if you are not it, ignore this and reply nothing.'
+        said = 'night manager: For the coordinator of <checkout> (<name>); if you are not it, ignore this and reply nothing.'
         sent = [m for m in text.split('"night manager:')[1:]]
         self.assertEqual(len(sent), 3)  # the check-in, the improve nudge, the wrap-up nudge
         for m in sent:
             self.assertTrue(('night manager:' + m).startswith(said), m[:80])
         self.assertIn("UNFOUND <name> (<why>)", text)
         self.assertIn("night-precheck --checked <name>", text.split("--find")[1])  # also after a failed --find
+
+    def test_the_machine_coordinator_is_told_the_two_routes_are_one_piece_of_news(self):
+        # n1-r2: machine-check's WARN and the night manager's UNFOUND reach it for the same project
+        text = " ".join((Path(__file__).resolve().parent.parent / "orchestrators" / "native-orca" / "personas"
+                         / "machine-coordinator.md").read_text().split())
+        self.assertIn("`WARN coordinator <name>: not found in Orca (<why>)`", text)
+        self.assertIn("`UNFOUND <name> (<why>)` are the same news: tell the owner once per project and reason", text)
+
+    def test_a_failed_find_stops_each_kind_of_line_coming_back(self):
+        # m2-r2: an improve or wrap-up line is timed by its own stamp, so the plain --checked would not hold it
+        text = " ".join((Path(__file__).resolve().parent.parent / "orchestrators" / "native-orca" / "night-manager.md")
+                        .read_text().split())
+        failed = text.split("If it prints nothing")[1].split("Then send it one message")[0]
+        self.assertIn("the `--checked` that line's kind takes", failed)
+        self.assertIn("` improve` or ` wrapup`", failed)
+        # and the stamps really are per kind: --checked <name> alone leaves an improve line due
+        self.lines(("proj", 31, ""))
+        self.orca({"terminals": [agent_terminal(self.checkout("proj"))]})
+        self.improve_on()
+        self.assertEqual(self.pre("--checked", "proj").returncode, 0)
+        self.assertEqual(self.pre().stdout, "DUE proj improve idle=31min\n")
+        self.assertEqual(self.pre("--checked", "proj", "improve").returncode, 0)
+        self.assertEqual(self.pre().returncode, 1)
 
     def test_the_example_and_the_night_manager_say_how_it_is_found(self):
         root = Path(__file__).resolve().parent.parent

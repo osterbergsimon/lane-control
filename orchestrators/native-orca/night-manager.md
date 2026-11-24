@@ -25,22 +25,23 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    stand down: send no check-in, but run `--checked <name>` (step 3) for each due coordinator all the same, so it is
    not due again for two hours.
 3. **Check-ins.** For each `DUE` coordinator, find where to send it: run `<lc>/core/scripts/night-precheck --find
-   <name>`. It prints `<harness> <handle> <title>` (`COORDINATORS` in `~/.config/lane-control/machine.conf` gives only
+   <name>`. It prints `<harness> <handle> <checkout> <title>` (`COORDINATORS` in `~/.config/lane-control/machine.conf` gives only
    `<name> <checkout>`; Orca's single agent terminal in that checkout gives the rest, and a harness and title written
-   in the file win). Use that title as the session name below. If it prints nothing and says why (no agent terminal
-   there, several, Orca not answering), send that coordinator nothing, never guess a session, run `<lc>/core/scripts/night-precheck
-   --checked <name>` all the same (so it is not due again, and the next run, an hour on, does not start for nothing),
+   in the file win). Use that title as the session name below and that checkout in the message's first words. If it prints nothing and says why (no agent terminal
+   there, several, Orca not answering), send that coordinator nothing, never guess a session, run the `--checked` that line's kind
+   takes (`<lc>/core/scripts/night-precheck --checked <name>`, with ` improve` or ` wrapup` after the name for those
+   lines) all the same, so it is not due again and the next run, an hour on, does not start for nothing,
    and put the line in your record (step 6) for the owner. Then send it one message:
-   "night manager: For the <name> coordinator; if you are not it, ignore this and reply nothing. Check-in (owner away). You have been idle <n> min. Check your lanes (workers done, stuck or
+   "night manager: For the coordinator of <checkout> (<name>); if you are not it, ignore this and reply nothing. Check-in (owner away). You have been idle <n> min. Check your lanes (workers done, stuck or
    waiting), CI on your PRs (failures and finished runs to act on) and merge trains, and act on what is ready. If
    nothing needs doing, reply 'nothing' in one line."
    Then run `<lc>/core/scripts/night-precheck --checked <name>`, so it is not due again for two hours.
-   For a `DUE <name> improve` line send this instead: "night manager: For the <name> coordinator; if you are not it, ignore this and reply nothing. Improve mode is on for your project and you
+   For a `DUE <name> improve` line send this instead: "night manager: For the coordinator of <checkout> (<name>); if you are not it, ignore this and reply nothing. Improve mode is on for your project and you
    have been idle <n> min. Resume your away-improve cycle (load the away-improve skill): check the lane you have
    out, and start the next cycle if none is running and your limits and budget allow. If a lane is running, reply
    'running' in one line." Then run `<lc>/core/scripts/night-precheck --checked <name> improve`, so it is not due
    again for the idle time. You never turn improve mode on or off and never decide what it works on.
-   For a `DUE <name> wrapup` line send: "night manager: For the <name> coordinator; if you are not it, ignore this and reply nothing. The improve period has ended and you have not wrapped up (<h>
+   For a `DUE <name> wrapup` line send: "night manager: For the coordinator of <checkout> (<name>); if you are not it, ignore this and reply nothing. The improve period has ended and you have not wrapped up (<h>
    h ago). Finish as the away-improve skill says (section 3): last PR through away-merge, the summary written
    (`lane-improve pr <project> --summary-file <path>`), the summary and that PR's link to the owner, then `lane-improve drained <project>`. If you are waiting on a lane, reply
    'waiting' in one line." For a `cap=` line say "the cap (<cap>) is reached" in place of the hours. Then run `<lc>/core/scripts/night-precheck --checked <name> wrapup`.

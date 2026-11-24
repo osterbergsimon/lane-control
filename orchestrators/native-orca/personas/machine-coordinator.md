@@ -29,6 +29,9 @@ nothing: when nothing needs action, keep the turn short and end it.
   it, with the hard edge at 100 %.
 - Allowance: set each project's allowance per tier from the owner's priorities in `model-routing.md`; adjust when a
   project idles or is blocked.
+- A coordinator Orca cannot find: the machine check's `WARN coordinator <name>: not found in Orca (<why>)` and the night
+  manager's `UNFOUND <name> (<why>)` are the same news: tell the owner once per project and reason (nobody is woken for
+  it until someone closes the other agent in its checkout or starts its coordinator there).
 - Machine: load (`/proc/loadavg`), memory (`free -g`) and heavy processes (`ps`). When short, decide which lane
   yields and ask that project's coordinator to pause or serialize it. The owner's own work is never throttled, and
   never kill another project's process yourself.
