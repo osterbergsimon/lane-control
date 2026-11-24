@@ -19,5 +19,5 @@ each item adds one entry.
 - Builds on: <earlier items on this branch, issues, or "nothing">
 - Existing work checked: <what already exists nearby (files, issues, PRs, docs) and why this is not a duplicate>
 - How to try: <the commands or steps to see it working>
-- How to drop: <the merge commit to revert (`git revert -m 1 <sha>`), and which later items depend on it>
+- How to drop: <the merge commit titled `away: <item>` (the summary PR lists its `git revert -m 1 <sha>` once it is merged; write no hash), and which later items depend on it>
 - Tests: <what ran and passed; CI green, or the full suite through lane-heavy when CI was failing for reasons outside the change, with the run>

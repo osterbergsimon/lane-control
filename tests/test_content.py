@@ -2268,6 +2268,12 @@ class AwayImproveContentTests(unittest.TestCase):
         self.assertIn("the merge titled `away: <item>`", b)
         self.assertNotIn("the merge commit to revert", b)
 
+    def test_build_brief_points_at_the_summary_pr_list_for_the_revert_command(self):
+        b = flat(AWAY_TEMPLATES / "away-build-brief.md")
+        self.assertIn("the summary PR lists it with its revert command", b)
+        self.assertNotIn("fills in with its commit", b)
+        self.assertNotIn("<PARENT> fills in", b)
+
     def test_machine_presence_line_keeps_plain_on_plain(self):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
         self.assertIn("never start improve mode", mc)

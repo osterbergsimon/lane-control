@@ -740,12 +740,56 @@ def log_summary(text: "str | None") -> "str | None":
     return body or None
 
 
-def pr_body(project: str, branch: str, integration: str, log: "str | None") -> str:
+def pr_body(project: str, branch: str, integration: str, log: "str | None", items: "list | None") -> str:
+    """The summary PR's text: the log's summary, then the merged items (`merged_items`: a list, or None when git could not be read)."""
     summary = log_summary(log) or ("No summary yet: the log has none until the first item is merged into the branch.")
     return (f"Away-improve branch for {project}: `{branch}` into `{integration}`. A draft, never merged by an agent: merge "
             f"this PR yourself to adopt the whole branch, or name the items to drop first.\n\n{summary}\n\n"
+            f"{items_text(items)}\n\n"
             f"The full log is `{LOG_FILE}` on the branch. This text is refreshed from its summary after every "
-            "`away-merge`.\n")
+            "`away-merge` (the summary and the branch's merges, read from git).\n")
+
+
+def items_text(items: "list | None") -> str:
+    """The "Items merged" part of the PR body: one line per item with its revert command (oldest merge first)."""
+    if items is None:
+        return f"Items merged: could not be read from git just now; they are in `{LOG_FILE}`. The next `away-merge` tries again."
+    if not items:
+        return "Items merged: none yet."
+    lines = ["Items merged, oldest first. To drop one, run its command on the away branch and push, or name it to the "
+             "coordinator (latest first if later items build on it):"]
+    for title, pr, sha, reverted in items:
+        what = "already reverted" if reverted else f"`git revert -m 1 {sha}`"
+        lines.append(f"- {title} ({f'PR #{pr}, ' if pr else ''}{sha}): {what}")
+    return "\n".join(lines)
+
+
+def merged_items(repo: Path, branch: str, integration: str) -> "list | None":
+    """The items merged into origin's `branch` so far, oldest first, as (title, PR number or None, short sha, reverted): the
+    first-parent merge commits on the branch that the integration branch does not have, whose subject is `away: <title>`
+    (the start commit has one parent, so it is not a merge). The PR number is the `Pull request #<n>` line `away-merge`
+    puts in the merge message (None for a merge made without it). `reverted` is true when a commit on the branch says
+    `This reverts commit <the merge's sha>` (a plain `git revert`, alone or inside a merged lane PR). Reading git, not the
+    period record, keeps this right across periods and after a lost record. None when git cannot be read."""
+    ref, base = f"refs/remotes/origin/{branch}", f"refs/remotes/origin/{integration}"
+    try:
+        if _git(repo, "fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}", f"+refs/heads/{integration}:{base}").returncode:
+            return None
+        r = _git(repo, "log", "--first-parent", "--merges", "--reverse", "--format=%H%x1f%h%x1f%s%x1f%b%x1e", ref, "--not", base)
+        every = _git(repo, "log", "--format=%B%x1e", ref, "--not", base)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode or every.returncode:
+        return None
+    undone = set(re.findall(r"^This reverts commit ([0-9a-f]{40})", every.stdout, re.M))
+    items = []
+    for rec in r.stdout.split("\x1e"):
+        parts = rec.strip("\n").split("\x1f")
+        if len(parts) != 4 or not parts[2].startswith("away: "):
+            continue
+        m = re.search(r"^Pull request #(\d+)[ \t]*$", parts[3], re.M)
+        items.append((parts[2][len("away: "):].strip(), int(m.group(1)) if m else None, parts[1].strip(), parts[0].strip() in undone))
+    return items
 
 
 def read_log(repo: Path, branch: str) -> "str | None":
@@ -794,7 +838,7 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
     integration branch counts (`gh pr list --head` matches the branch NAME, forks' PRs included), else a draft one is
     opened. The only gh writes in the whole mode besides away-merge's merge: `pr create --draft` and `pr edit --body`.
     PrError says why it could not be done."""
-    body = pr_body(project, branch, integration, read_log(repo, branch))
+    body = pr_body(project, branch, integration, read_log(repo, branch), merged_items(repo, branch, integration))
     if number is None:
         found = _gh_json(repo, list, "pr", "list", "--head", branch, "--state", "open", "--json",
                          "number,url,isCrossRepository,baseRefName,isDraft")

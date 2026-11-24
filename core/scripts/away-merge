@@ -397,7 +397,7 @@ def run(a) -> int:
             return 1
         sha = None
         try:
-            gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--match-head-commit", head], checkout)
+            gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--body", f"Pull request #{a.pr}", "--match-head-commit", head], checkout)
         except Refuse as e:
             # gh can fail after GitHub merged (a timeout, a 5xx): look once, and count the merge when it happened
             try:

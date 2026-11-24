@@ -116,8 +116,10 @@ that reverts those merges (they are titled `away: <item>`), keeping to the depen
 
 `lane-improve on` opens, for each project whose away branch it cuts or continues, a **draft PR** from `away/<date>` into
 the integration branch, titled `away: <date> (<project>)`, and records its number in `improve.json`. Its body is the
-summary at the top of `AWAY-LOG.md`; `away-merge` brings it up to date after every merge (and opens it first if it was
-not open), so nobody has to remember to. It stays a draft: **no agent merges it, marks it ready or closes it**; you
+summary at the top of `AWAY-LOG.md`, then **Items merged**: one line per merged item (title, PR number, short sha) with its
+`git revert -m 1 <sha>` (or "already reverted" when a later commit reverts it), read from git (the first-parent merges titled `away: <item>`, not the period record), oldest first;
+revert the latest first when later items build on it. `away-merge` brings it up to date after every merge (and opens it
+first if it was not open), so nobody has to remember to. It stays a draft: **no agent merges it, marks it ready or closes it**; you
 merge it (to adopt the whole branch) or name the items to drop. A PR you closed is left alone.
 
 GitHub opens no PR for a branch with nothing beyond its base, so `on` gives each new branch one start commit, `away: start
