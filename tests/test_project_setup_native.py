@@ -414,6 +414,255 @@ class NativeOnboardingTests(Case):
         self.assertIn("Read docs/plan.md.", (self.repo / ".lane-control" / "coordinator.md").read_text())
 
 
+FAKE_AGENT = ROOT / "tests" / "stubs" / "fake_agent.py"
+OC_ADAPTER, OC_REVIEWER = "litellm/code", "litellm/deep"
+ALL_OPENCODE = ("--adapter", f"opencode/{OC_ADAPTER}", "--adapt-reviewer", f"opencode/{OC_REVIEWER}",
+                "--coordinator", "opencode/litellm/chat", "--reviewer", "opencode/litellm/deep", "--no-start")
+GATEWAY_KEY = "sk-example-gateway-key-0000"
+
+
+class OpenCodeOnboardingTests(Case):
+    """LIT-2 (lc-8h1): --adapter and --adapt-reviewer take opencode/<provider>/<model> and run `opencode2 run`, on a
+    machine that may have no Claude at all (a self-hosted gateway only)."""
+
+    def opencode_agents(self, steps: dict, claude=False):
+        """opencode2 becomes the agent stub (tests/stubs/fake_agent.py); claude is taken off PATH unless asked for."""
+        (self.e.bin / "opencode2").unlink()
+        (self.e.bin / "opencode2").symlink_to(FAKE_AGENT)
+        if claude:
+            (self.e.bin / "claude").unlink()
+            (self.e.bin / "claude").symlink_to(FAKE_AGENT)
+        else:
+            (self.e.bin / "claude").unlink()
+        self.e.set_state(agent_steps=steps)
+
+    def setup(self, *args, answer="y", env_extra=None):
+        m = load()
+        with mock.patch.dict(os.environ, {**self.e.env, **(env_extra or {})}, clear=True), \
+                mock.patch("sys.stdin", Tty()), mock.patch("builtins.input", return_value=answer), \
+                contextlib.redirect_stdout(Tty()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            status = m.main([str(self.repo), *args])
+        self.out, self.err = out.getvalue(), err.getvalue()
+        return status
+
+    def config(self, run):
+        return json.loads(run["env"]["OPENCODE_CONFIG_CONTENT"])["agents"]["lane-onboard"]
+
+    def rules(self, run):
+        return [(r["action"], r["resource"], r["effect"]) for r in self.config(run)["permissions"]]
+
+    def test_an_all_opencode_setup_onboards_with_no_claude_on_path(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        status = self.setup(*ALL_OPENCODE, env_extra={"LITELLM_API_KEY": GATEWAY_KEY, "LANE_ROLE": "coordinator",
+                                                      "LANE_PERSONA": "/elsewhere/coordinator.md"})
+        self.assertEqual(status, 0, self.err + self.out)
+        self.assertNotIn("claude not on PATH", self.err)
+        runs = self.e.agent_runs()
+        self.assertEqual([(r["tool"], r["model"]) for r in runs], [("opencode2", OC_ADAPTER), ("opencode2", OC_REVIEWER)])
+        for r in runs:
+            with self.subTest(model=r["model"]):
+                # OpenCode's own non-interactive form; the prompt on stdin (an argument starting with - would be
+                # read as a flag), the repo as the working folder, a private server so this config reaches it
+                self.assertEqual(r["argv"], ["run", "--standalone", "--model", r["model"], "--agent", "lane-onboard",
+                                             "--format", "json"])
+                self.assertEqual(Path(r["cwd"]).resolve(), self.repo.resolve())
+                self.assertIn("lane-control", r["prompt"])
+                self.assertEqual(r["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")  # no project plugin or config
+                self.assertIsNone(r["env"]["LANE_ROLE"])  # never a coordinator's persona or guard
+                self.assertIsNone(r["env"]["LANE_PERSONA"])
+                self.assertEqual(self.config(r)["model"], r["model"])
+                self.assertEqual(self.config(r)["mode"], "primary")
+                # the key reaches OpenCode by its own variable only: never an argument, never in the config
+                self.assertEqual(r["env"]["LITELLM_API_KEY"], GATEWAY_KEY)
+                self.assertNotIn(GATEWAY_KEY, " ".join(r["argv"]))
+                self.assertNotIn(GATEWAY_KEY, r["env"]["OPENCODE_CONFIG_CONTENT"])
+        committed = git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
+        self.assertIn(ADDITION, committed)
+
+    def test_permissions_read_the_repo_write_only_lane_control_and_nothing_else(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        (self.repo / ".gitignore").write_text("data/\n")
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "x.csv").write_text("private\n")
+        (self.repo / ".env").write_text("SECRET=1\n")
+        (self.repo / "docs.md").symlink_to("/etc/hostname")  # OpenCode follows a link out of the repo
+        (self.repo / "keys").symlink_to(".env")  # or into a private file
+        (self.repo / "CLAUDE.md").write_text("# rules\n")
+        (self.repo / "rules.md").symlink_to("CLAUDE.md")  # a link to a readable file stays readable
+        git("add", ".gitignore", "docs.md", "keys", "CLAUDE.md", "rules.md", cwd=self.repo)
+        git("commit", "-qm", "files", cwd=self.repo)
+        self.assertEqual(self.setup(*ALL_OPENCODE, "--private", "shots/**"), 0, self.err + self.out)
+        adapter, reviewer = self.e.agent_runs()
+        for r in (adapter, reviewer):
+            rules = self.rules(r)
+            with self.subTest(model=r["model"]):
+                self.assertEqual(rules[0], ("*", "*", "deny"))  # shell, web, MCP, sub-agents, questions: all off
+                self.assertIn(("read", "*", "allow"), rules)
+                self.assertIn(("glob", "*", "allow"), rules)
+                self.assertNotIn("grep", [a for a, _, e in rules if e == "allow"])  # it reads a denied file
+                for private in (".git/**", "**/.git/**", "data/**", "data", ".env", "shots/**", "docs.md",
+                                "docs.md/**", "keys"):
+                    self.assertIn(("read", private, "deny"), rules)
+                    # the last rule that matches wins: every deny comes after the allows
+                    self.assertGreater(rules.index(("read", private, "deny")), rules.index(("read", "*", "allow")))
+                self.assertNotIn(("read", "rules.md", "deny"), rules)
+                self.assertNotIn(("read", "CLAUDE.md", "deny"), rules)
+        self.assertIn(("edit", ".lane-control/**", "allow"), self.rules(adapter))
+        self.assertIn(("edit", "docs.md", "deny"), self.rules(adapter))
+        self.assertNotIn("edit", [a for a, _, e in self.rules(reviewer) if e == "allow"])
+        self.assertEqual(self.config(adapter)["steps"], 81)  # 80 turns, then OpenCode's forced last answer
+        self.assertEqual(self.config(reviewer)["steps"], 61)
+
+    def test_the_reviewer_round_runs_on_opencode_too(self):
+        fix = {"say": "project.md names the wrong command.\nVERDICT: FIX"}
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE, {"write": {".lane-control/project.md": "fixed\n"}}],
+                              OC_REVIEWER: [fix, PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)
+        runs = self.e.agent_runs()
+        self.assertEqual([r["model"] for r in runs], [OC_ADAPTER, OC_REVIEWER, OC_ADAPTER, OC_REVIEWER])
+        self.assertIn("project.md names the wrong command", runs[2]["prompt"])  # the findings reach the fix round
+        self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "fixed\n")
+
+    def test_a_failed_opencode_run_says_what_opencode_said(self):
+        self.opencode_agents({OC_ADAPTER: [{"error": "ECONNREFUSED: Unable to connect.", "exit": 1}]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+        self.assertIn("opencode2 run --model failed: ECONNREFUSED: Unable to connect.", self.err)
+        self.assertIn("Nothing was committed", self.err)
+
+    def test_an_opencode_reviewer_out_of_steps_is_a_clean_fail(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [{"steps": 60, "say": "I ran out."}]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+        self.assertIn("the reviewer used all 60 turns", self.err)
+
+    def test_opencode2_missing_is_named_before_any_agent(self):
+        self.opencode_agents({})
+        (self.e.bin / "opencode2").unlink()
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+        self.assertIn("opencode2 not on PATH, but the onboarding agents run on opencode", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_a_claude_role_still_needs_claude(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+        self.assertEqual(self.setup("--adapter", f"opencode/{OC_ADAPTER}", "--no-start"), 1)  # reviewer: claude/opus
+        self.assertIn("claude not on PATH, but the onboarding agents use it", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_mixed_harnesses_each_run_their_own(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], "opus": [PASS]}, claude=True)
+        self.assertEqual(self.setup("--adapter", f"opencode/{OC_ADAPTER}", "--no-start"), 0, self.err + self.out)
+        self.assertEqual([(r["tool"], r["model"]) for r in self.e.agent_runs()],
+                         [("opencode2", OC_ADAPTER), ("claude", "opus")])
+
+    def test_refresh_of_an_opencode_project_needs_no_claude(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)  # adapt: no --skip-adapt, which --refresh refuses
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertNotIn("claude", r.stderr)
+        self.assertEqual(len(self.e.agent_runs()), 2)  # a refresh adapts nothing
+
+
+
+@unittest.skipUnless(os.environ.get("LANE_LIVE_OPENCODE") and shutil.which("opencode2"), "opt-in: LANE_LIVE_OPENCODE=1")
+class OpenCodeOnboardingLiveTests(unittest.TestCase):
+    """The real opencode2 (2.x) run as project-setup runs an onboarding agent (opencode_agent: its argv, its config, the
+    prompt on stdin), in temp HOME/XDG folders, against tests/stubs/fake_tool_llm.py on 127.0.0.1 (no real provider,
+    no sign-in), which asks for one tool call per run. The owner's own config allows everything and names another
+    default agent, and the repo has its own OpenCode plugin: the run's rules still hold and the plugin never loads.
+    About 10 s. Run: LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p test_project_setup_native.py
+    -k OpenCodeOnboardingLiveTests"""
+
+    def setUp(self):
+        import tempfile
+        v = subprocess.run(["opencode2", "--version"], capture_output=True, text=True, timeout=30).stdout.strip()
+        if "v2." not in v and not v.startswith("2."):
+            self.skipTest(f"opencode2 is not 2.x: {v}")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.t = Path(tmp.name)
+        for d in ("home", "config/opencode", "data", "state", "cache"):
+            (self.t / d).mkdir(parents=True)
+        self.repo = self.t / "repo"
+        self.repo.mkdir()
+        git("init", "-q", "-b", "main", cwd=self.repo)
+        (self.repo / "AGENTS.md").write_text("readable\n")
+        (self.repo / ".gitignore").write_text("data/\n")
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "x.csv").write_text("PRIVATE-DATA\n")
+        (self.repo / ".env").write_text("SECRET=1\n")
+        (self.t / "outside.txt").write_text("OUTSIDE\n")
+        (self.repo / "link.txt").symlink_to(self.t / "outside.txt")
+        (self.repo / ".opencode" / "plugins").mkdir(parents=True)
+        (self.repo / ".opencode" / "plugins" / "p.js").write_text(
+            f'import fs from "fs"\nfs.writeFileSync({json.dumps(str(self.t / "plugin-ran"))}, "x")\n'
+            'export default { id: "p", setup() {} }\n')
+        git("add", "AGENTS.md", ".gitignore", "link.txt", cwd=self.repo)
+        git("commit", "-qm", "init", cwd=self.repo)
+        self.m = load()
+
+    def call(self, tool: str, args: dict, write: bool):
+        """One onboarding run whose model asks for `tool` with `args`; returns (tool result, run text, status)."""
+        log = self.t / "requests.jsonl"
+        log.write_text("")
+        fake = subprocess.Popen([sys.executable, str(ROOT / "tests" / "stubs" / "fake_tool_llm.py"), str(log)],
+                                stdout=subprocess.PIPE, text=True,
+                                env={**os.environ, "LANE_FAKE_TOOL": tool, "LANE_FAKE_ARGS": json.dumps(args)})
+        self.addCleanup(fake.stdout.close)
+        self.addCleanup(fake.wait, 15)
+        self.addCleanup(fake.terminate)
+        port = int(fake.stdout.readline())
+        (self.t / "config" / "opencode" / "opencode.json").write_text(json.dumps({
+            "permission": {"*": "allow"}, "default_agent": "plan",
+            "provider": {"lanetest": {"npm": "@ai-sdk/openai-compatible", "name": "lanetest", "models": {"m": {}},
+                                      "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "unused"}}}}))
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.t / "home"), "XDG_CONFIG_HOME": str(self.t / "config"),
+               "XDG_DATA_HOME": str(self.t / "data"), "XDG_STATE_HOME": str(self.t / "state"),
+               "XDG_CACHE_HOME": str(self.t / "cache"), "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               "OPENCODE_DISABLE_AUTOUPDATE": "1", "LANE_ROLE": "coordinator"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            deny = tuple(self.m.private_rules(self.repo, links=True))
+            cmd, run_env = self.m.opencode_agent("lanetest/m", write, deny)
+        p = subprocess.run(cmd, cwd=self.repo, env=run_env, input="- RUN-TOOL check", capture_output=True,
+                           text=True, timeout=180)
+        text, _, error = self.m.opencode_result(p.stdout)
+        results = [m["content"] for line in log.read_text().splitlines()
+                   for m in json.loads(json.loads(line)["body"]).get("messages", []) if m.get("role") == "tool"]
+        self.assertEqual((p.returncode, error), (0, ""), p.stderr[-2000:])
+        return (str(results[-1]) if results else ""), text
+
+    def test_reads_the_repo(self):
+        got, text = self.call("read", {"path": "AGENTS.md"}, write=False)
+        self.assertIn("readable", got)
+        self.assertEqual(text, "done")  # the last message's text, as claude -p prints it
+        self.assertFalse((self.t / "plugin-ran").exists())  # the project's own plugin never ran
+
+    def test_private_paths_and_links_out_are_denied(self):
+        for args in ({"path": ".env"}, {"path": "data/x.csv"}, {"path": ".git/config"}, {"path": "link.txt"},
+                     {"path": str(self.t / "outside.txt")}):
+            with self.subTest(**args):
+                got, _ = self.call("read", args, write=False)
+                self.assertIn("Permission denied", got)
+                self.assertNotIn("SECRET", got)
+                self.assertNotIn("OUTSIDE", got)
+                self.assertNotIn("PRIVATE-DATA", got)
+
+    def test_no_shell_grep_or_web(self):
+        for tool, args in (("shell", {"command": f"touch {self.t / 'ran'}"}), ("grep", {"pattern": "SECRET", "path": ".env"}),
+                           ("webfetch", {"url": "http://127.0.0.1:9/"})):
+            with self.subTest(tool=tool):
+                got, _ = self.call(tool, args, write=True)
+                self.assertIn("No tool named", got)
+        self.assertFalse((self.t / "ran").exists())
+
+    def test_the_adapter_writes_only_lane_control(self):
+        got, _ = self.call("write", {"path": "AGENTS.md", "content": "changed"}, write=True)
+        self.assertIn("Permission denied", got)
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), "readable\n")
+        got, _ = self.call("write", {"path": ".lane-control/project.md", "content": "facts"}, write=True)
+        self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "facts")
+        got, _ = self.call("write", {"path": ".lane-control/project.md", "content": "x"}, write=False)
+        self.assertIn("Permission denied", got)  # the reviewer writes nothing
+
 # --- Task 3.3 ------------------------------------------------------------------------------------------------------
 
 class StartTests(Case):

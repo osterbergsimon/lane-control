@@ -108,6 +108,24 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    three automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
    model to OpenCode. With no usage feed (every budget's feed empty in the playbook config) no budget is metered:
    the caps are the limit, and night check-ins still go out.
+4. Setting a project up on such a machine: the onboarding agents run on either harness, so pass OpenCode ones,
+   `core/scripts/project-setup <repo> --adapter opencode/litellm/code --adapt-reviewer opencode/litellm/deep
+   --coordinator opencode/litellm/chat --reviewer opencode/litellm/deep` (the defaults stay `claude/sonnet` and
+   `claude/opus`; only a harness a role uses must be on PATH, so a box without Claude needs no `claude`). Each runs
+   `opencode2 run --standalone --model <provider>/<model> --agent lane-onboard --format json` in the repo, the prompt
+   on stdin, with the same prompts, checks and review round as Claude. Its rules, in `OPENCODE_CONFIG_CONTENT` (an
+   agent of its own, so the owner's agents and `default_agent` do not apply): every tool off, then read and glob on,
+   edit only under `.lane-control/` and only for the adapter, then the same private paths off as for Claude
+   (`orchestrators/orca-cotal/docs/orca.md`, "Private files during onboarding"). It differs from Claude's run in
+   these ways: grep is off (OpenCode's grep reads a file it is pointed at even when read denies it); glob and a
+   folder read show the names of private paths, never their contents; OpenCode follows symlinks, so a link out of
+   the repo or into a private path is denied by name; the project's own OpenCode config and plugins are not loaded
+   (`OPENCODE_DISABLE_PROJECT_CONFIG=1`); the session is kept in OpenCode's own store (it has no switch to keep
+   none); the owner's MCP servers start, with their tools off by the first rule (not checked with a real MCP
+   server). A run that uses all its steps (80 for the adapter, 60 for the reviewer) fails as a Claude run out of
+   turns does. `--refresh` runs no agent and needs no Claude either.
+   The opt-in live check: `LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p
+   test_project_setup_native.py -k OpenCodeOnboardingLiveTests`.
 
 The URL, the key's variable and the model names stay in OpenCode's config and the project's settings store: no key,
 host or gateway URL in any repo.

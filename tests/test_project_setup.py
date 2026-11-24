@@ -2117,15 +2117,14 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Glob,Grep")
         self.assertNotIn("Edit", " ".join(cmd[:-1]))
 
-    def test_onboarding_agents_are_claude_only(self):
-        # They read the whole project, and a third-party lane may not read private data.
-        self.e.script_agents()
-        for flag in ("--adapter", "--adapt-reviewer"):
-            with self.subTest(flag=flag):
-                r = self.e.run(str(self.repo), flag, "opencode/x/y", adapt=True)
-                self.assertEqual(r.returncode, 2)
-                self.assertIn("claude/<model>", r.stderr)
-        self.assertEqual(self.e.agent_runs(), [])
+    def test_onboarding_agents_run_on_opencode_too(self):
+        # Owner 2026-11-24 (LIT-2): nothing is refused by harness; an OpenCode role runs `opencode2 run`.
+        self.e.script_agents(**{"x/y": [WRITE], "opus": [PASS]})
+        (self.e.bin / "opencode2").symlink_to(FAKE_AGENT)
+        r = self.e.run(str(self.repo), "--adapter", "opencode/x/y", adapt=True)
+        self.assertEqual(r.returncode, 3, r.stderr)  # no terminal for the yes: stopped before the commit
+        self.assertNotIn("claude/<model>", r.stderr)
+        self.assertEqual([(a["tool"], a["model"]) for a in self.e.agent_runs()], [("opencode2", "x/y"), ("claude", "opus")])
 
     # --- .gitignore ------------------------------------------------------------------------------------------
     def test_gitignore_is_listed_and_committed_before_the_agent_runs(self):
