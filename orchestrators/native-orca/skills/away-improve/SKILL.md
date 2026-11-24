@@ -1,6 +1,6 @@
 ---
 name: away-improve
-description: Run away-improve mode for your project: keep improving the product on its own away/<date> branch, cycle after cycle, spending the owner's usage on it. Use only when `lane-improve status` says `improve: on` for your project; it holds the cycle, the scout and build briefs, the AWAY-LOG.md format and the merge rules.
+description: Run away-improve mode for your project: keep improving the product on its own away/<date> branch, cycle after cycle, spending the owner's usage on it. Use only when `lane-improve status` says `improve: on` for your project; it holds the cycle, the scout and build briefs, the log entry format and the merge rules.
 ---
 
 # Away-improve mode
@@ -44,14 +44,13 @@ stop (section 3).
    shortlist of 3-5 candidates (what and why, the gain, what exists nearby, what it builds on, rough size, any clash
    with the limits), research items included. Close it when it has reported.
 3. **Pick one item** from the shortlist and write down why you picked it (it goes into the build brief and so into
-   the log). Prefer items that build on the branch and on the open issue backlog; owner-filed issues first when they
+   the lane's log entry). Prefer items that build on the branch and on the open issue backlog; owner-filed issues first when they
    fit. An item that may clash with the limits is skipped and logged as skipped. Nothing within the limits is a
-   result too: stop (section 3). Check that it is not already there: `bd search`, the log, the code.
+   result too: stop (section 3). Check that it is not already there: `bd search`, the merged away items (`git log --first-parent --merges origin/<away branch>`), the code.
 4. **Build lane.** An ordinary lane (issue, tier by paths, `lane-room`, claim), cut from the away branch's current
    head: BASE is `away/<date>` and its PR goes into it. Its brief is `brief.md`, then `away-innovation.md`, then
-   `away-build-brief.md`, filled in with the item, why picked, the owner's limits verbatim, the deny paths, the log
-   entry it must write and the summary lines it must update (you dictate them; you do not edit files yourself, the
-   lane commits the log). A frontend lane also gets `frontend-brief.md`.
+   `away-build-brief.md`, filled in with the item, why picked, the owner's limits verbatim and the deny paths. The lane writes its
+   log entry in its PR body (section 2); you edit no file yourself. A frontend lane also gets `frontend-brief.md`.
 5. **Review.** A reviewer on a different model, as for any lane, who also checks the owner's limits, duplication and
    that a big change justifies itself, as well as correctness. At most two rounds. After the reviewer's clean round
    you write `Review: passed <head sha>` on its own line in a comment (`gh pr comment <n> --body "Review: passed
@@ -61,11 +60,10 @@ stop (section 3).
    keep, not something the script can enforce.
 6. **Merge with `away-merge`.** `away-merge --project <your project> --pr <n> --item "<item title>"` (in `core/scripts/` of the lane-control
    checkout your persona names). It checks improve is on for you (or draining, section 3), the PR's base is exactly
-   your away branch, the review comment, CI green, a secret and private-data scan, and the deny paths from the diff; then it merges with a merge commit titled `away: <item>`
-   (never squashed), pinned to the head it checked, and prints the commit. When CI itself is failing or unavailable for reasons outside the change,
-   run the full suite through a lane and `lane-heavy`, pass `--local-suite-ok <the log file of that run>` (its last line must show a pass; any other string is refused), and have AWAY-LOG.md say so. After the merge it records the merge (that is what `--max-items` counts) and brings the **draft summary PR**
-   (`away/<date>` into the integration branch, opened when the mode started) up to date: its body becomes the log's summary
-   on the branch, and the PR is opened first if it could not be opened at the start. You have nothing to remember; if it says the PR was not
+   your away branch, the review comment, the log entry in the PR body (filled in, scanned for secrets and private names like the diff, and not edited since the review), CI green, a secret and private-data scan, and the deny paths from the diff; then it marks the PR ready when it is still a draft (lane PRs open as drafts and GitHub will not merge one; it never touches the summary PR) and merges with a merge commit titled `away: <item>`
+   (never squashed), whose message body is `Pull request #<n>` and the item's log entry, pinned to the head it checked, and prints the commit. When CI itself is failing or unavailable for reasons outside the change,
+   run the full suite through a lane and `lane-heavy`, pass `--local-suite-ok <the log file of that run>` (its last line must show a pass; any other string is refused), and have the PR body's Tests section say so. After the merge it records the merge (that is what `--max-items` counts) and rebuilds the **draft summary PR**
+   (`away/<date>` into the integration branch, opened when the mode started): its body is built from the branch's merge commits (each item's entry) plus the summary you wrote (section 2, it keeps it), and the PR is opened first if it could not be opened at the start. You have nothing to remember; if it says the PR was not
    refreshed, run `lane-improve pr <your project>`. That PR stays a draft and you never merge it, mark it ready or close
    it: only the owner decides. A refusal is a finding: fix what it names, never around it. Never use `gh pr merge`, a merge by hand or a push to the integration branch (your session has deny rules, or on OpenCode a guard plugin, for the first and last: a backstop, not a wall. `git -C <repo> push ...`, `feature:main`
    refspecs, `gh api` and a lane's own shell go past them, and a lane's worktree has no rules at all. The real
@@ -73,14 +71,19 @@ stop (section 3).
 7. **Next cycle at once.** Close the lane (its worktree is clean and merged), then start the next cycle from the
    top. Do not wait for the night manager, the owner or a timer.
 
-## 2. The log: AWAY-LOG.md
-`AWAY-LOG.md` at the root of the away branch (removed when the branch is adopted), format `AWAY-LOG.md` next to this
-skill. Starting the mode committed its first version as the branch's start commit, `away: start <date>` (header, the
-owner's limits, an empty summary, no items); lanes fill it in. A summary at the top, kept current: what was done, what is worth looking at first, what to drop if unsure,
-what was skipped. Then one entry per item: what, why, what it builds on, existing work checked, how to try it, how to
-drop it (the merge titled `away: <item>`, whose revert command the summary PR lists, and which later items depend on it), test results. A dependency between items is
-recorded so a revert never surprises the owner. Lanes write entries; summary changes ride in the build lane's PR, or
-in a small docs lane when nothing else is open. Plain, short words, like the owner's answer card.
+## 2. The log: in PRs and merge commits
+There is no log file on the away branch. Each item's entry is in its build lane's PR body, under the headings What, Why,
+Builds on, Existing work checked, How to try it, How to drop it (the merge titled `away: <item>`, whose revert command the
+summary PR lists, and which later items depend on it), Tests (template `away-entry.md` next to this skill; the build brief
+tells the lane). `away-merge` refuses a PR whose body lacks one, and copies the entry into the merge commit's message; the
+draft summary PR is built from those messages. A dependency between items is recorded in the entry so a revert never
+surprises the owner. Plain, short words, like the owner's answer card.
+
+The one thing you write is the **summary** of the whole period: what was done, what is worth looking at first, what to
+drop if unsure, what was skipped, in a few plain lines. Write it to a file outside the project (the scratchpad or a temp
+file; never a file in the repo), at the wrap-up (section 3) or any time before, and run
+`lane-improve pr <your project> --summary-file <path>`: the summary PR keeps it, and every `away-merge` after it keeps it
+too. You edit no file in the project for this. The summary is scanned like a diff; the body is generated and a refresh overwrites it, so owner notes belong in a PR comment; a body edited by hand anywhere (outside the generated parts or inside a region) is left as it is with a warning, and so is a `--summary-file` over it (the fix, `To go on:`, is in the warning).
 
 ## 3. Stopping and the owner's return
 Stop starting cycles at: the end time or `lane-improve off`; no-new-work on a metered budget (`budget-state --project`;
@@ -92,7 +95,7 @@ what the branch has and write the handover. When you stop because nothing within
 on a long lane need do nothing: its nudges back off by themselves (30, 60, 120 minutes, at most 8 h).
 
 **Caps (optional, off unless the owner gave them).** `--max-items N` stops new cycles after N merges through `away-merge`
-in this period (its own record, not the log); `--stop-at <weekly %>` stops them once `budget-state --project` gives weekly at
+in this period (its own record, not the PRs' text); `--stop-at <weekly %>` stops them once `budget-state --project` gives weekly at
 or above it. `lane-improve status` shows `items 4/10` and `weekly 66/70` for your project and says `cap reached` when one is hit. A cap
 works like the end time, for your project alone: the lane that is running finishes and merges through `away-merge` (with `--max-items`
 the Nth merge is the last: `away-merge` refuses a further one, so the lane you start must be the one that brings it to N), you start no
@@ -106,21 +109,22 @@ project, and the machine coordinator tells you when it ran `off`. No new cycle s
 and its PR still merges through `away-merge` (it accepts a draining project until you say you are done). The deny rules
 stay until then. Wrap up in this order:
 1. Wait for the running lane's report, review it, write the review comment, and `away-merge` the last PR (or leave an
-   unfinished item out and say so in the log).
-2. Update the log summary (a lane), push the branch, then run `lane-improve pr <project>`. The **draft PR** from
+   unfinished item out and say so in the summary).
+2. Write the summary (section 2), then run `lane-improve pr <project> --summary-file <path>`; it works after a cap is
+   reached too (it is the step that cap's refusal names). The **draft PR** from
    `away/<date>` into the project's integration branch is already open (it was opened when the mode started and every
    `away-merge` refreshed it; `branches`, `prs` and `integration` in `~/.config/lane-control/improve.json`, or the drain file
-   next to it, `improve-drain.json`, hold the branches and its number); this brings its body up to the final summary, opens it
+   next to it, `improve-drain.json`, hold the branches and its number); this rebuilds its body (your summary and the items) and opens it
    if it is somehow missing, and prints the link. It stays a draft: you never merge it.
-3. Make your first message to the owner the log summary and that PR's link (update it, point them at it; nothing more).
+3. Make your first message to the owner the summary and that PR's link (update it, point them at it; nothing more).
 4. Run `lane-improve drained <project>`: your deny rules come out and your project leaves the drain.
 The owner then adopts the whole branch, or names items to drop (you run a lane that reverts those merges on the
-branch, the merges titled `away: <item>`, mindful of the dependencies in the log), and merges as usual.
+branch, the merges titled `away: <item>`, mindful of the dependencies in the entries), and merges as usual.
 
 ## 4. What counts as failure, even when it works
 - A whole area **rewritten from scratch** (the frontend, say). With no size cap, a big change must show it is a
   real improvement and explain itself; "it is cleaner" is not enough.
-- The owner **cannot understand** what happened: the log must be enough to follow.
+- The owner **cannot understand** what happened: the entries and the summary must be enough to follow.
 - Work that **duplicates something that already exists** because nobody checked.
 
 ## 5. Never

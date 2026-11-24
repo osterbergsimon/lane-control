@@ -4,7 +4,8 @@ You run on the deep tier: idea quality is the point.
 
 Read, in this order: AGENTS.md and AGENTS.lane-control.md; the code and docs; the issue tracker (open and recently
 closed; `bd list` and `bd search`); open and recently merged PRs (`gh pr list`, read-only); specs and plans; and the
-away log so far (`AWAY-LOG.md` on <AWAY_BRANCH>). Owner-filed issues are candidates and come first when they fit
+away items so far (the merge commits on <AWAY_BRANCH>, `git log --first-parent --merges origin/<AWAY_BRANCH>`: each
+message holds the item's log entry; and the branch's draft summary PR, `gh pr list --head <AWAY_BRANCH>`). Owner-filed issues are candidates and come first when they fit
 the limits.
 
 The owner's limits, verbatim (binding; an item that may clash is not proposed, or is listed as a clash):
@@ -16,7 +17,7 @@ finding or a spike) as well as code. For each:
 1. what and why;
 2. the gain for the product;
 3. what already exists nearby, with references (files, issues, PRs); say plainly if you found nothing;
-4. what it builds on from the log, if anything;
+4. what it builds on from the merged away items, if anything;
 5. rough size (small, medium, large) and whether it is a rewrite of an existing area (if so, why it is a real
    improvement);
 6. any clash with the owner's limits, or "none".

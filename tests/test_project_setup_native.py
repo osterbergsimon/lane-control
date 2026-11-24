@@ -579,13 +579,24 @@ class NativeSkillTests(Case):
         skill = self.e.home / ".agents" / "skills" / "away-improve"
         src = ROOT / "orchestrators" / "native-orca" / "skills" / "away-improve" / "SKILL.md"
         self.assertEqual((skill / "SKILL.md").read_text(), src.read_text())
-        for name in ("away-innovation.md", "away-scout-brief.md", "away-build-brief.md", "AWAY-LOG.md"):
+        for name in ("away-innovation.md", "away-scout-brief.md", "away-build-brief.md", "away-entry.md"):
             self.assertEqual((skill / name).read_text(), (ROOT / "core" / "templates" / name).read_text(), name)
         for agent_dir in (self.e.home / ".claude" / "skills", Path(self.e.env["XDG_CONFIG_HOME"]) / "opencode" / "skills"):
             link = agent_dir / "away-improve"
             self.assertTrue(link.is_symlink(), link)
             self.assertEqual(link.resolve(), skill.resolve())
         self.assertIn("away-improve", r.stdout)
+
+    def test_a_file_an_older_install_left_in_the_skill_folder_is_removed(self):  # R1-09
+        self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)
+        stale = self.skill().parent / "away-improve" / "AWAY-LOG.md"
+        stale.write_text("an old template that says the log lives at the root of the branch\n")
+        (self.skill().parent / "away-improve" / "sub").mkdir()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse(stale.exists())
+        self.assertTrue((self.skill().parent / "away-improve" / "away-entry.md").exists())
+        self.assertTrue((self.skill().parent / "away-improve" / "sub").is_dir())  # only files go
 
     def test_refresh_puts_back_a_changed_or_missing_skill_file(self):
         self.assertEqual(self.e.run(str(self.repo), "--no-start").returncode, 0)

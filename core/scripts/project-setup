@@ -126,7 +126,7 @@ HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core
               "scripts/project-setup",
               *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
               "core/templates/frontend-brief.md", "core/templates/DESIGN.md", "core/templates/away-innovation.md",
-              "core/templates/away-scout-brief.md", "core/templates/away-build-brief.md", "core/templates/AWAY-LOG.md",
+              "core/templates/away-scout-brief.md", "core/templates/away-build-brief.md", "core/templates/away-entry.md",
               "core/scripts/project-setup", "core/harnesses", "orchestrators/native-orca",
               "orchestrators/orca-cotal/scripts/project-setup", "orchestrators/orca-cotal/personas",
               "orchestrators/orca-cotal/skills", "orchestrators/orca-cotal/templates",
@@ -828,7 +828,7 @@ def native_skills():
                               "away-innovation.md": (HERE / "core" / "templates" / "away-innovation.md").read_text(),
                               "away-scout-brief.md": (HERE / "core" / "templates" / "away-scout-brief.md").read_text(),
                               "away-build-brief.md": (HERE / "core" / "templates" / "away-build-brief.md").read_text(),
-                              "AWAY-LOG.md": (HERE / "core" / "templates" / "AWAY-LOG.md").read_text()})
+                              "away-entry.md": (HERE / "core" / "templates" / "away-entry.md").read_text()})
     state = "created" if fresh else ("updated" if changed else "exists")
     say("skills", state, f"native-orca-lanes, component-gallery, away-improve in {root}")
     design_skills(home)
@@ -972,6 +972,11 @@ def install_skill(home: Path, name: str, want: dict, also: tuple = ()) -> bool:
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(text)
             changed = True
+    if (root / name).is_dir() and not (root / name).is_symlink():
+        for old in (root / name).iterdir():  # a file an older version installed (the away log template, say) goes
+            if old.name not in want and old.is_file() and not old.is_symlink():
+                old.unlink()
+                changed = True
     for agent_dir in (home / ".claude" / "skills", home / ".config" / "opencode" / "skills"):
         for n in (name, *also):
             link = agent_dir / n

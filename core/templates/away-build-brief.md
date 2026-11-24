@@ -8,17 +8,21 @@ item (picked by <PARENT>, who says why): <ITEM>. Why it was picked: <WHY_PICKED>
 - The owner's limits, verbatim; they are binding, and an item that may clash is not built but reported as skipped:
   <LIMITS>
   Paths the PR must not touch: <DENY_PATHS>
-- Duplicate check, before you design: find what already exists for this (code, issues, PRs, docs, the log) and build
-  on it. If it already exists, stop and report that, instead of building a second one. Your log entry must name what
-  you checked.
+- Duplicate check, before you design: find what already exists for this (code, issues, PRs, docs, the merged away
+  items) and build on it. If it already exists, stop and report that, instead of building a second one. Your log entry
+  must name what you checked.
 - A big change (a whole area rewritten, a large new subsystem) must justify itself: what is better for the user, and
   why a smaller change would not do. "It is cleaner" is not enough. If you cannot show it is a real improvement,
   stop and report `NEEDS_DEEP` with your reasoning.
-- Write your entry in `AWAY-LOG.md` at the root of the branch (the branch's start commit made it; start the file from the template at
-  `<LANE_CONTROL>/core/templates/AWAY-LOG.md` only if it is missing), in the same PR, and update the summary lines
-  <PARENT> gives you here: <SUMMARY_UPDATE>. The entry has: what, why, what it builds on, existing work checked,
-  how to try it, how to drop it (the merge titled `away: <item>`; once it is merged the summary PR lists it with its revert command, so write no commit hash; say which later items depend on it), test results.
-  Plain, short words, for an owner who was not here.
+- Write your log entry in your PR's body, not in a file: open the PR with the headings of the template at
+  `<LANE_CONTROL>/core/templates/away-entry.md`, each filled in: What, Why, Builds on, Existing work checked, How to try
+  it, How to drop it (the merge titled `away: <item>`; once it is merged the summary PR lists it with its revert command,
+  so write no commit hash; say which later items depend on it), Tests. `away-merge` refuses a PR whose body lacks one
+  of them, and copies the entry into the merge commit's message; keep it up to date if you push again. Add no log file
+  to the branch, and leave the summary to <PARENT>. Plain, short words, for an owner who was not here.
+  The entry is scanned like the diff (no secrets, private names or home paths in it), an unfilled `<...>` template line
+  counts as empty, and a body edited after <PARENT>'s review needs a new review: push no late edits to it.
+  Open the PR as a draft if you like: `away-merge` marks it ready before it merges.
 - Tests green before you report (through `lane-heavy` for the full suite). Nothing private in anything you commit
   (hostnames, usernames, private paths, keys): the branch is public if the repository is.
 - The reviewer, on another model, checks correctness, the owner's limits, duplication and the big-change rule. The
