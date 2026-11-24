@@ -2508,5 +2508,95 @@ class PrivateNamesTests(unittest.TestCase):
         self.assertEqual(names.mask("docs/madeupshop.md"), "docs/***.md")
 
 
+# --- docs/getting-started.md and docs/README.md (lc-c8p) ----------------------------------------------------------
+
+LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")  # [text](target); the target has no space
+
+
+def linked_files(root, doc):
+    """(links, broken): the paths `doc` links to (resolved from its own folder, as repo-relative strings), and those
+    among them that are not a file or folder. A web link, a mail link and a bare #anchor are not files; a #fragment is cut."""
+    doc = Path(doc)
+    found, broken = set(), []
+    for target in LINK.findall(doc.read_text()):
+        if re.match(r"[a-z][a-z0-9+.-]*:", target, re.I) or target.startswith("#"):
+            continue
+        path = (doc.parent / target.split("#", 1)[0]).resolve()
+        rel = os.path.relpath(path, Path(root).resolve())
+        found.add(rel)
+        if not path.exists():
+            broken.append(target)
+    return found, broken
+
+
+def owner_docs(root):
+    """The owner-facing docs docs/README.md must index, as repo-relative strings: every top-level docs/*.md (except the
+    index itself), every orchestrators/*/setup.md and every core/*.md. Specs, plans and research under docs/ are
+    indexed as folders, not one by one; a record, notes or an orchestrator's own docs/ folder are not in this set."""
+    root = Path(root)
+    found = [p for p in (root / "docs").glob("*.md") if p.name != "README.md"]
+    found += (root / "orchestrators").glob("*/setup.md")
+    found += (root / "core").glob("*.md")
+    return sorted(os.path.relpath(p, root) for p in found)
+
+
+def unindexed(root):
+    """The owner-facing docs that docs/README.md does not link to."""
+    linked, _ = linked_files(root, Path(root) / "docs" / "README.md")
+    return [d for d in owner_docs(root) if d not in linked]
+
+
+class DocsIndexTests(unittest.TestCase):
+    def test_the_owner_docs_exist(self):
+        for name in ("getting-started.md", "README.md"):
+            self.assertTrue((ROOT / "docs" / name).is_file(), name)
+
+    def test_no_link_in_the_guide_or_the_index_is_broken(self):
+        for name in ("getting-started.md", "README.md"):
+            _, broken = linked_files(ROOT, ROOT / "docs" / name)
+            self.assertEqual(broken, [], f"docs/{name} links to files that do not exist")
+
+    def test_the_index_lists_every_owner_facing_doc(self):
+        self.assertEqual(unindexed(ROOT), [], "docs/README.md omits these owner-facing docs (top-level docs/*.md, "
+                                              "orchestrators/*/setup.md, core/*.md)")
+
+    def test_the_index_points_to_the_folders_of_specs_and_research(self):
+        linked, _ = linked_files(ROOT, ROOT / "docs" / "README.md")
+        for folder in ("docs/superpowers/specs", "docs/superpowers/plans", "docs/research"):
+            self.assertIn(folder, linked, folder)
+
+    def test_the_readme_leads_to_the_guide_and_the_index(self):
+        text = (ROOT / "README.md").read_text()
+        self.assertIn("(docs/getting-started.md)", text)
+        self.assertIn("(docs/README.md)", text)
+        self.assertLess(text.index("(docs/getting-started.md)"), text.index("## What it is"))
+
+    def test_the_guide_is_reachable_from_the_index(self):
+        linked, _ = linked_files(ROOT, ROOT / "docs" / "README.md")
+        self.assertIn("docs/getting-started.md", linked)
+
+    def test_the_checks_catch_a_broken_link_and_a_missing_doc(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for sub in ("docs", "core", "orchestrators/native-orca"):
+                (root / sub).mkdir(parents=True)
+            (root / "docs" / "guide.md").write_text("x")
+            (root / "core" / "roles.md").write_text("x")
+            (root / "core" / "README.md").write_text("x")
+            (root / "orchestrators" / "native-orca" / "setup.md").write_text("x")
+            (root / "orchestrators" / "native-orca" / "record.md").write_text("x")
+            index = root / "docs" / "README.md"
+            index.write_text("[g](guide.md) [r](../core/roles.md#top) [w](https://example.com/x) [a](#here) "
+                             "[gone](nope.md) [setup](../orchestrators/native-orca/setup.md)")
+            self.assertEqual(owner_docs(root), ["core/README.md", "core/roles.md", "docs/guide.md",
+                                                "orchestrators/native-orca/setup.md"])
+            found, broken = linked_files(root, index)
+            self.assertEqual(broken, ["nope.md"])
+            self.assertEqual(unindexed(root), ["core/README.md"])
+            self.assertNotIn("orchestrators/native-orca/record.md", unindexed(root))
+            (root / "docs" / "second.md").write_text("x")
+            self.assertEqual(unindexed(root), ["core/README.md", "docs/second.md"])
+
+
 if __name__ == "__main__":
     unittest.main()
