@@ -4,6 +4,9 @@
 # 127.0.0.1:4000; desktop also its own Orca server (orcad) on 127.0.0.1:6768, as the desktop app would listen.
 set -eu
 umask 022
+# The fake gateway's key (made up). Agents get it where they start: from Orca's server, so it is set before orcad starts
+# here and, for the box's orcad started over ssh, by sshd (SetEnv below), as setup.md says for a real gateway.
+export LITELLM_API_KEY=testbed-not-a-secret
 mkdir -p "$HOME/.ssh" "$HOME/.ssh-host" "$HOME/.local/state" "$HOME/tmp"
 chmod 700 "$HOME/.ssh" "$HOME/.ssh-host"
 [ -f "$HOME/.ssh-host/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -C "testbed-host-$TESTBED_ROLE" -f "$HOME/.ssh-host/ssh_host_ed25519_key"
@@ -21,7 +24,7 @@ PermitRootLogin no
 AllowTcpForwarding yes
 GatewayPorts no
 PermitUserEnvironment no
-SetEnv PATH=$HOME/.local/bin:$HOME/.agents/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin ORCA_ARTIFACTS=/opt/orca/artifacts TESTBED_FORGE=/forge TESTBED_ROLE=$TESTBED_ROLE
+SetEnv PATH=$HOME/.local/bin:$HOME/.agents/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin ORCA_ARTIFACTS=/opt/orca/artifacts TESTBED_FORGE=/forge TESTBED_ROLE=$TESTBED_ROLE LITELLM_API_KEY=$LITELLM_API_KEY
 CFG
 /usr/sbin/sshd -f "$HOME/.ssh-host/sshd_config" -E "$HOME/.ssh-host/sshd.log"
 git config --global user.name "Testbed Owner"; git config --global user.email owner@testbed.invalid
@@ -30,7 +33,7 @@ systemctl __boot
 case $TESTBED_ROLE in
   desktop|box)
     # The fake gateway's key is made up (testbed-not-a-secret): it only shows that the key reaches the gateway.
-    setsid python3 /usr/local/lib/testbed/gateway.py --port 4000 --key testbed-not-a-secret --log "$HOME/tmp/gateway.log" > /dev/null 2>&1 < /dev/null &
+    setsid python3 /usr/local/lib/testbed/gateway.py --port 4000 --key "$LITELLM_API_KEY" --log "$HOME/tmp/gateway.log" > /dev/null 2>&1 < /dev/null &
     ;;
 esac
 if [ "$TESTBED_ROLE" = desktop ]; then

@@ -131,15 +131,17 @@ def onboard(ctx):
         expect(f in files, f".lane-control/{f} was not rendered ({files})")
     terms = run(ctx, "desktop", "orca-ide terminal list --json").stdout
     expect("scratch coordinator" in terms, f"no terminal titled 'scratch coordinator': {terms[-600:]}")
+    called = '"path": "/v1/chat/completions", "auth": "ok"'
     for _ in range(60):
         log = run(ctx, "desktop", "cat ~/tmp/gateway.log").stdout
-        if "chat/completions" in log:
+        if called in log:
             break
         time.sleep(2)
-    expect("chat/completions" in log, "the coordinator's OpenCode never called the fake gateway")
+    expect(called in log, "the coordinator's OpenCode never called the fake gateway with its key (the key must be "
+                          f"in Orca's environment): {log[-300:]}")
     again = run(ctx, "desktop", tty(cmd), check=False, timeout=900)
     expect(again.returncode == 0 and "exists" in again.stdout, f"a re-run did not say exists: {again.stdout[-600:]}")
-    return "personas rendered, coordinator terminal up on OpenCode, gateway called; re-run says exists"
+    return "personas rendered, coordinator terminal up on OpenCode, gateway called with the key; re-run says exists"
 
 
 # --- 3. direction 1: the desktop drives the box ---------------------------------------------------------------------

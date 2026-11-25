@@ -33,9 +33,12 @@ or in CI. It is not `tests/test-orca-host-install.sh` (never run that one: it wi
 - **The fake gateway** (`fakes/gateway.py`, built on `tests/stubs/fake_llm.py`) is OpenAI- and LiteLLM-compatible:
   `/v1/models` lists the aliases `chat`, `code` and `embed`, `/model/info` names made-up models behind them
   (`testbed/fake-chat-small`, `testbed/fake-code-large`, and an embedding model), and chat completions answer `ok`
-  (streamed when asked). A message holding `RUN-TOOL: <command>` gets one bash tool call. It wants the key
-  `testbed-not-a-secret` (made up, set as `LITELLM_API_KEY`); OpenCode's config in a container points at it as
-  provider `litellm`, as `orchestrators/native-orca/setup.md` describes. OpenCode lanes run against it at no cost.
+  (streamed when asked). When the request offers tools, the last user message's steps come back as bash tool calls,
+  one per answer: each `RUN-TOOL: <command>` in order, then, for an Orca worker brief, the brief's own `worker_done`
+  command filled in, so an OpenCode worker on it can do a whole lane and report. It wants the key
+  `testbed-not-a-secret` (made up), which each container sets as `LITELLM_API_KEY` where agents start: before its
+  Orca server starts, and in sshd's environment for the box's server; OpenCode's config in a container points at it
+  as provider `litellm`, as `orchestrators/native-orca/setup.md` describes. OpenCode lanes run against it at no cost.
 - **The fake GitHub** (`fakes/gh`) is a stub `gh` over a folder shared by desktop and box (the docker volume mounted
   at `/forge`): bare repos at `/forge/repos/<owner>/<name>.git` are each clone's `origin` (`file://`), and pull
   requests, repo settings and check results are in `/forge/state.json`. It covers what lane-control calls: `auth
@@ -80,7 +83,7 @@ gateway or a plain shell command in an Orca terminal, never a real model.
 | Name | What runs | Passes when |
 |---|---|---|
 | `suggest-tiers` | `project-setup <scratch> --suggest-tiers litellm` on the desktop, without a terminal, then on one with yes | without a terminal it prints the aliases with the models behind them and exits 3; on yes `lanes.tsv` in the settings store has OpenCode rows; the embedding alias is left out; the gateway saw the key; the key is not printed |
-| `onboard` | `project-setup <scratch> --skip-adapt --coordinator opencode/litellm/chat --reviewer opencode/litellm/code` on a terminal (Enter to every question), then again | it exits 0; `.lane-control/coordinator.md` and `reviewer.md` are rendered; an Orca terminal titled `scratch coordinator` exists; its OpenCode called the gateway; the re-run says `exists` |
+| `onboard` | `project-setup <scratch> --skip-adapt --coordinator opencode/litellm/chat --reviewer opencode/litellm/code` on a terminal (Enter to every question), then again | it exits 0; `.lane-control/coordinator.md` and `reviewer.md` are rendered; an Orca terminal titled `scratch coordinator` exists; its OpenCode called the gateway with the key (so the key reached the agent through Orca's environment); the re-run says `exists` |
 | `d1-direct` | `orca-host-install box --pair --port 6769` from the desktop (the `-L` tunnel unit), then again | it says `installed`, `started`, `paired`; `orca-ide status --environment box` is reachable; a terminal made from the desktop through that environment runs on the box (its `hostname` lands there); the re-run says `exists`, `running`, `already-paired` |
 | `d1-jump` | the same after the box is reset, as `box-via-jump` (`ProxyJump jump`) | as `d1-direct`, and nothing of Orca is on the jump host |
 | `d2-tunnel` | on the desktop `lane-tunnel start <box> 6768` (`ssh -R`, through the jump after `d1-jump`); on the box `project-setup --box-pairing add desktop` with the desktop server's pairing link on stdin | the port is open on the box's loopback and not its network; pairing exits 0; the link is in no output and no file under the box's `~/.config` or lane-control copy; `status --environment desktop` from the box is reachable; a terminal the box makes through it runs on the desktop |

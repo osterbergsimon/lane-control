@@ -180,6 +180,26 @@ class FakeGateway(unittest.TestCase):
         r = self.call("/v1/chat/completions", {"model": "chat", "messages": msgs, "tools": [{"type": "function"}]})
         self.assertEqual(r["choices"][0]["message"]["content"], "ok")
 
+    def test_a_worker_brief_runs_its_steps_then_its_own_worker_done(self):
+        self.start()
+        brief = ("Your task ID is: task_1\nRUN-TOOL: git commit -qam x\nRUN-TOOL: git push -q\n  orca orchestration send "
+                 '--from term_ab --type worker_done --subject "<short status>" --body "<3-sentence summary>" '
+                 "--task-id task_1 --dispatch-id ctx_9 --outcome succeeded\n")
+        msgs, cmds = [{"role": "user", "content": brief}], []
+        for _ in range(5):
+            r = self.call("/v1/chat/completions", {"model": "chat", "messages": msgs, "tools": [{"type": "function"}]})
+            m = r["choices"][0]["message"]
+            if not m.get("tool_calls"):
+                break
+            cmds.append(json.loads(m["tool_calls"][0]["function"]["arguments"])["command"])
+            msgs += [{"role": "assistant", "tool_calls": m["tool_calls"]}, {"role": "tool", "content": "done"}]
+        self.assertEqual(cmds[:2], ["git commit -qam x", "git push -q"])
+        self.assertEqual(len(cmds), 3)
+        self.assertTrue(cmds[2].startswith("orca orchestration send --from term_ab --type worker_done --subject "), cmds[2])
+        self.assertTrue(cmds[2].endswith("--task-id task_1 --dispatch-id ctx_9 --outcome succeeded"), cmds[2])
+        self.assertNotIn("<short status>", cmds[2])
+        self.assertEqual(m["content"], "ok")
+
     def test_key_is_required_when_set_and_never_logged(self):
         self.start("--key", "sk-testbed-secret", "--alias", "chat=testbed/x")
         with self.assertRaises(urllib.error.HTTPError) as e:

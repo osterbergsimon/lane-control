@@ -8,8 +8,11 @@ Built on tests/stubs/fake_llm.py (same answers), plus what LiteLLM adds and lane
   GET  /model/info (and /v1/model/info) each alias with the made-up model behind it (litellm_params.model) and its
                                        model_info.mode (chat unless given, e.g. embedding)
   GET  /health/liveliness              "I'm alive!"
-  POST /v1/chat/completions (and /chat/completions)   "ok" (streamed when asked), or one shell tool call when the last
-                                       user message holds RUN-TOOL: <command> and the request offers tools
+  POST /v1/chat/completions (and /chat/completions)   "ok" (streamed when asked); when the request offers tools, the
+                                       last user message's steps as bash tool calls, one per answer, then "ok": each
+                                       `RUN-TOOL: <command>` in order, then, if the message is an Orca worker brief, its
+                                       own `worker_done` command filled in (so an OpenCode worker on this gateway does a
+                                       whole lane and reports, at no cost)
 Default aliases: chat -> testbed/fake-chat-small, code -> testbed/fake-code-large, embed -> testbed/fake-embed (mode
 embedding). With --key every request needs `Authorization: Bearer KEY` (401 otherwise); the key is never logged.
 --port 0 picks a free port; the first stdout line is the port. Each request is one JSON line in --log
@@ -20,6 +23,21 @@ import http.server
 import json
 import re
 import sys
+
+# The worker_done line of an Orca worker brief: `orca orchestration send --from <h> --type worker_done --subject "..."
+# --body "..." --task-id <t> --dispatch-id <d> --outcome succeeded`.
+WORKER_DONE = re.compile(r'(orca orchestration send --from \S+ --type worker_done) --subject "[^"]*" --body "[^"]*"'
+                         r'(.*?--task-id \S+ --dispatch-id \S+)')
+
+
+def steps(text):
+    """The commands a message asks the fake agent to run, in order."""
+    out = [m.group(1).strip() for m in re.finditer(r"RUN-TOOL: ([^\n\"\\]+)", text)]
+    m = WORKER_DONE.search(text.replace('\\"', '"'))
+    if m:
+        out.append(f'{m.group(1)} --subject "testbed lane done" --body "The fake agent ran the steps of its spec. '
+                   f'Nothing was found. Nothing is left."{m.group(2)} --outcome succeeded')
+    return out
 
 USAGE = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
 DEFAULT_ALIASES = ["chat=testbed/fake-chat-small", "code=testbed/fake-code-large", "embed=testbed/fake-embed:embedding"]
@@ -99,12 +117,12 @@ def make_handler(aliases, key, log):
                 if isinstance(m, dict) and m.get("role") == "user":
                     c = m.get("content")
                     last_user, idx = (c if isinstance(c, str) else json.dumps(c)), i
-            tool_done = any(isinstance(m, dict) and m.get("role") == "tool" for m in msgs[idx + 1:])
-            cmd = re.search(r"RUN-TOOL: ([^\n\"\\]+)", last_user)
+            done = sum(1 for m in msgs[idx + 1:] if isinstance(m, dict) and m.get("role") == "tool")
+            todo = steps(last_user) if req.get("tools") else []
             call = None
-            if cmd and req.get("tools") and not tool_done:
-                call = {"index": 0, "id": "call_1", "type": "function",
-                        "function": {"name": "bash", "arguments": json.dumps({"command": cmd.group(1).strip(),
+            if done < len(todo):
+                call = {"index": 0, "id": f"call_{done + 1}", "type": "function",
+                        "function": {"name": "bash", "arguments": json.dumps({"command": todo[done],
                                                                               "description": "testbed tool call"})}}
             if not req.get("stream"):
                 msg = {"role": "assistant", "content": None if call else "ok"}
