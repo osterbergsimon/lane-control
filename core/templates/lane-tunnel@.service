@@ -1,6 +1,7 @@
 # lane-control: the reverse tunnel that lets SSH host %i reach this machine's Orca (native-Orca setup, direction 2:
 # the host's coordinator runs lanes here). Written by core/scripts/lane-tunnel; its host and port are in the
-# instance's env file. Same port at both ends, on 127.0.0.1 only, so the desktop's share link works on the host as is.
+# instance's env file: PORT here (the share link's), REMOTE_PORT on the host (the port the host dials; PORT when the
+# file has none, as every file from before has), on 127.0.0.1 only at both ends.
 [Unit]
 Description=lane-control tunnel: %i reaches this machine's Orca
 After=network-online.target
@@ -12,7 +13,7 @@ StartLimitIntervalSec=0
 
 [Service]
 EnvironmentFile=@TUNNELS@/%i.env
-ExecStart=/bin/sh -c 'exec "$${LANE_TUNNEL_SSH:-ssh}" $${SSH_CONFIG:+-F "$$SSH_CONFIG"} -N -o BatchMode=yes -o ConnectTimeout=15 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R "127.0.0.1:$${PORT}:127.0.0.1:$${PORT}" "$$SSH_HOST"'
+ExecStart=/bin/sh -c 'exec "$${LANE_TUNNEL_SSH:-ssh}" $${SSH_CONFIG:+-F "$$SSH_CONFIG"} -N -o BatchMode=yes -o ConnectTimeout=15 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R "127.0.0.1:$${REMOTE_PORT:-$${PORT}}:127.0.0.1:$${PORT}" "$$SSH_HOST"'
 Restart=always
 RestartSec=10
 RestartSteps=6

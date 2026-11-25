@@ -91,6 +91,14 @@ if "--pairing-code" in args and args[args.index("--pairing-code") + 1] == "-":
         sys.exit(3)
     code = sys.stdin.read().strip()
     rec["stdin_sha256"] = hashlib.sha256(code.encode()).hexdigest()
+    try:  # what the box will dial, and a hash of the rest of the offer: no secret is logged
+        import base64, urllib.parse
+        c = (urllib.parse.parse_qs(urllib.parse.urlsplit(code).query).get("code") or [""])[0] if code.startswith("orca://") else code
+        offer = json.loads(base64.urlsafe_b64decode(c + "=" * (-len(c) % 4)))
+        rec["endpoint"] = offer.pop("endpoint")
+        rec["rest_sha256"] = hashlib.sha256(json.dumps(offer, sort_keys=True).encode()).hexdigest()
+    except Exception:
+        pass
     rec["user_data"] = os.environ.get("ORCA_USER_DATA_PATH")
     env["STUB_PAIRED_BY_STDIN"] = "1"
     if os.environ.get("STUB_ADD_ECHOES"):  # a CLI error that repeats what it was given, on stdout and stderr
@@ -158,7 +166,7 @@ def start(u):
     name = u[len("lane-tunnel@"):-len(".service")]
     env = dict(l.split("=", 1) for l in open(os.path.join(conf, "lane-control", "tunnels", name + ".env")).read().splitlines() if "=" in l)
     p = subprocess.Popen([sys.executable, "-c", "import socket,sys,time\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
-                          "s.bind((sys.argv[2],int(sys.argv[1])))\ns.listen()\ntime.sleep(120)", env["PORT"],
+                          "s.bind((sys.argv[2],int(sys.argv[1])))\ns.listen()\ntime.sleep(120)", env.get("REMOTE_PORT") or env["PORT"],
                           "0.0.0.0" if os.environ.get("STUB_TUNNEL_EXPOSED") else "127.0.0.1"],
                          start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
@@ -559,7 +567,8 @@ class DirectionTwoTests(Case):
         self.assertEqual(json.loads((box_store / "settings.json").read_text())["paired_environment"], "deskbox")
         rec = json.loads((self.e.home / ".config" / "lane-control" / "hosts" / "box.json").read_text())
         self.assertEqual(rec, {"host": "box", "environment": "box", "desktop_environment": "deskbox",
-                               "tunnel_port": self.port})
+                               "tunnel_port": self.port, "tunnel_remote_port": self.port})
+        self.assertEqual(node[0]["endpoint"], f"ws://127.0.0.1:{self.port}")  # one port: the link as it was made
 
     def test_the_prompt_is_hidden(self):
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link)
@@ -658,6 +667,7 @@ class DirectionTwoTests(Case):
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=self.link)
         self.assertNotEqual(rc, 0, out)
         self.assertIn(f"port {self.port}", out)
+        self.assertIn("--tunnel-remote-port", out)  # the way out that leaves the box's own server where it is
         self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
         self.assertNotIn("--user enable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
         self.assert_nowhere(out, self.link, self.token, self.code)
@@ -1005,6 +1015,148 @@ class RemoveHostTests(Case):
         self.assertIn("Settings > Servers", r.stdout)
 
 
+def offer_of(link):
+    code = link.split("code=", 1)[1] if link.startswith("orca://") else link
+    return json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
+
+
+def rest_sha(offer):
+    rest = {k: v for k, v in offer.items() if k != "endpoint"}
+    return hashlib.sha256(json.dumps(rest, sort_keys=True).encode()).hexdigest()
+
+
+class TwoPortTests(Case):
+    """TUN-1: the desktop's port (the share link's) and the box's port (what the box dials) can differ."""
+    def setUp(self):
+        super().setUp()
+        self.e.saved("box")
+        self.port, self.remote = free_port(), free_port()
+        self.link, self.token, self.code = make_link(self.port)
+
+    def records(self):
+        return (json.loads((self.e.home / ".config" / "lane-control" / "hosts" / "box.json").read_text()),
+                (self.e.home / ".config" / "lane-control" / "tunnels" / "box.env").read_text())
+
+    def test_the_box_dials_its_own_port_and_the_rest_of_the_link_is_unchanged(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", str(self.remote),
+                                   answer=self.link)
+        self.assertEqual(rc, 0, out)
+        rec, env = self.records()
+        self.assertEqual((rec["tunnel_port"], rec["tunnel_remote_port"]), (self.port, self.remote))
+        self.assertIn(f"PORT={self.port}\n", env)
+        self.assertIn(f"REMOTE_PORT={self.remote}\n", env)
+        node = [x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x]
+        self.assertEqual(len(node), 1, node)
+        self.assertEqual(node[0]["endpoint"], f"ws://127.0.0.1:{self.remote}")
+        self.assertEqual(node[0]["rest_sha256"], rest_sha(offer_of(self.link)))  # same token, key and the rest
+        self.assertIn(f"127.0.0.1:{self.remote} on box reaches 127.0.0.1:{self.port} here", out)
+        # neither the link nor the rewritten one is anywhere
+        rewritten = load().link_for_port(self.link, self.port, self.remote)
+        self.assertEqual(hashlib.sha256(rewritten.encode()).hexdigest(), node[0]["stdin_sha256"])
+        DirectionTwoTests.assert_nowhere(self, out, self.link, self.token, self.code)
+        DirectionTwoTests.assert_nowhere(self, out, rewritten, self.token, rewritten.split("code=", 1)[1])
+        self.assertNotIn("--tunnel-remote-port", " ".join(" ".join(c) for c in self.e.jlines(".ssh")))  # local only
+
+    def test_the_box_port_is_checked_not_the_desktops(self):
+        import socket
+        s = socket.socket()  # the box's own Orca server on the link's port: the box's end goes elsewhere
+        s.bind(("127.0.0.1", self.port))
+        s.listen()
+        self.addCleanup(s.close)
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", str(self.remote),
+                                   answer=self.link)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_busy_box_port_is_refused_naming_that_port(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", self.remote))
+        s.listen()
+        self.addCleanup(s.close)
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", str(self.remote),
+                                   answer=self.link)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn(f"port {self.remote} on box is in use", out)
+        self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
+
+    def test_a_bad_remote_port_is_refused_before_anything_runs(self):
+        for bad in ("0", "81", "1023", "70000", "x"):  # below 1024: a normal user's ssh -R cannot open it (review n1)
+            rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", bad,
+                                       answer=self.link)
+            self.assertEqual(rc, 2, (bad, out))
+            self.assertNotIn("share link for", out)
+            self.assertEqual(self.e.jlines(".install"), [], bad)
+
+    def test_an_already_paired_box_names_both_ports_from_its_record_and_an_old_record_reads_as_one(self):
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", str(self.remote),
+                                   answer=self.link)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", "6999")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("--tunnel-remote-port", out)
+        self.assertIn("not used", out)
+        self.assertIn(f"lane-tunnel start <options> --remote-port {self.remote} box {self.port}", out)
+        hosts = self.e.home / ".config" / "lane-control" / "hosts" / "box.json"
+        rec = json.loads(hosts.read_text())
+        rec.pop("tunnel_remote_port")  # a record from before TUN-1
+        hosts.write_text(json.dumps(rec))
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-no-enable")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"lane-tunnel start <options> --remote-port {self.port} box {self.port}", out)
+
+    def test_a_paired_box_whose_tunnel_is_down_gets_the_line_from_the_record_before_the_link_is_asked(self):
+        # review m1: after a reboot or a locked card the box still has this machine's environment but cannot reach it
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", str(self.remote),
+                                   answer=self.link)
+        self.assertEqual(rc, 0, out)
+        subprocess.run(["sh", str(TUNNEL), "stop", "box"], env=self.e.env, capture_output=True)
+        box = self.e.box_state()
+        for env in box["environments"]:
+            env["reachable"] = False
+        (self.e.box / "stub.json").write_text(json.dumps(box))
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-no-enable", answer="")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("tunnel: down", out)
+        line = f"lane-tunnel start <options> --remote-port {self.remote} box {self.port}"
+        self.assertIn(line, out)
+        self.assertLess(out.index(line), out.index("share link for box"))  # before the question
+        self.assertIn("desktop lanes: skipped", out)
+
+
+class LinkRewriteTests(unittest.TestCase):
+    def setUp(self):
+        self.m = load()
+
+    def test_only_the_endpoints_port_changes(self):
+        link, token, code = make_link(6768)
+        for given in (link, code):  # the link, or the bare code
+            new = self.m.link_for_port(given, 6768, 6790)
+            self.assertTrue(new.startswith("orca://pair?code="), "the link form Orca writes")
+            self.assertNotIn("=", new.split("code=", 1)[1])  # unpadded base64url, as Orca encodes it
+            before, after = offer_of(link), offer_of(new)
+            self.assertEqual(after["endpoint"], "ws://127.0.0.1:6790")
+            self.assertEqual(rest_sha(before), rest_sha(after))
+            self.assertEqual(list(before), list(after))  # same fields, same order
+            self.assertEqual(self.m.link_port(new), 6790)
+
+    def test_the_same_port_leaves_the_link_as_it_is(self):
+        link, _, _ = make_link(6768)
+        self.assertIs(self.m.link_for_port(link, 6768, 6768), link)
+
+    def test_an_endpoint_that_is_not_plainly_this_address_and_port_is_refused_without_showing_it(self):
+        for ep in ("ws://user@127.0.0.1:6768", "ws://127.0.0.1:6768/x?y=1#z"):
+            payload = {"v": 2, "endpoint": ep, "deviceToken": "dvtok-abc", "publicKeyB64": "k"}
+            code = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+            if ep.endswith("#z"):  # a path is kept: Orca dials the endpoint as written
+                new = self.m.link_for_port(code, 6768, 6790)
+                self.assertEqual(offer_of(new)["endpoint"], "ws://127.0.0.1:6790/x?y=1#z")
+                continue
+            with self.assertRaises(self.m.Fail) as cm:
+                self.m.link_for_port(code, 6768, 6790)
+            self.assertNotIn(code, str(cm.exception))
+            self.assertNotIn("dvtok-abc", str(cm.exception))
+
+
 class LaneTunnelTests(unittest.TestCase):
     def setUp(self):
         self.e = RemoteEnv()
@@ -1019,7 +1171,7 @@ class LaneTunnelTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         unit = (self.e.home / ".config" / "systemd" / "user" / "lane-tunnel@.service").read_text()
         self.assertIn("ExitOnForwardFailure=yes", unit)
-        self.assertIn("127.0.0.1:$${PORT}:127.0.0.1:$${PORT}", unit)
+        self.assertIn("127.0.0.1:$${REMOTE_PORT:-$${PORT}}:127.0.0.1:$${PORT}", unit)  # one port when no REMOTE_PORT
         self.assertIn("Restart=always", unit)
         env = (self.e.home / ".config" / "lane-control" / "tunnels" / "user-box.example.env").read_text()
         self.assertIn("SSH_HOST=user@box.example", env)
@@ -1030,6 +1182,66 @@ class LaneTunnelTests(unittest.TestCase):
         self.tunnel("start", "box", "6768")
         self.tunnel("start", "box", "6790")
         self.assertIn("--user restart lane-tunnel@box.service", self.e.lines(".systemctl"))
+
+    def test_the_boxs_port_can_differ_from_this_machines(self):
+        r = self.tunnel("start", "--remote-port", "6790", "box", "6768")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        env = self.start_env()
+        self.assertIn("PORT=6768\n", env)
+        self.assertIn("REMOTE_PORT=6790\n", env)
+        self.assertIn("127.0.0.1:6790 on box reaches 127.0.0.1:6768 here", r.stdout)
+        unit = (self.e.home / ".config" / "systemd" / "user" / "lane-tunnel@.service").read_text()
+        self.assertIn("127.0.0.1:$${REMOTE_PORT:-$${PORT}}:127.0.0.1:$${PORT}", unit)
+
+    def test_one_port_writes_the_env_file_as_before(self):
+        # a tunnel started before TUN-1 has no REMOTE_PORT: the same start must not change its file (or restart it)
+        for args in (("box", "6768"), ("--remote-port", "6768", "box", "6768"), ("--remote-port", "06768", "box", "6768")):
+            r = self.tunnel("start", *args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("REMOTE_PORT", self.start_env())
+            self.assertIn("127.0.0.1:6768 on box reaches 127.0.0.1:6768 here", r.stdout)
+        self.assertNotIn("--user restart lane-tunnel@box.service", self.e.lines(".systemctl"))
+
+    def test_a_changed_remote_port_restarts_a_running_tunnel(self):
+        self.tunnel("start", "box", "6768")
+        self.tunnel("start", "--remote-port", "6790", "box", "6768")
+        self.assertIn("--user restart lane-tunnel@box.service", self.e.lines(".systemctl"))
+
+    def test_a_bad_remote_port_is_refused(self):
+        for p in ("0", "70000", "x", ""):
+            r = self.tunnel("start", "--remote-port", p, "box", "6768")
+            self.assertEqual(r.returncode, 2, p)
+        self.assertEqual(self.tunnel("start", "box", "6768", "--remote-port").returncode, 2)
+        self.assertEqual(self.tunnel("stop", "--remote-port", "6790", "box").returncode, 2)
+        self.assertFalse((self.e.home / ".config" / "lane-control" / "tunnels").exists())
+
+    def test_the_unit_reads_an_old_env_files_one_port_as_both(self):
+        line = next(l for l in UNIT.read_text().splitlines() if l.startswith("ExecStart="))
+        body = line[len("ExecStart=/bin/sh -c '"):-1].replace("$$", "$")  # systemd turns $$ into $
+        log = self.e.home / "ran"
+        fake = self.e.home / "fakebin"
+        fake.mkdir()
+        (fake / "ssh").write_text(f'#!/bin/sh\necho "$*" >> {log}\n')
+        (fake / "ssh").chmod(0o755)
+        base = {"PATH": f"{fake}:/usr/bin:/bin", "SSH_HOST": "box", "PORT": "6768"}
+        for extra in ({}, {"REMOTE_PORT": "6790"}):
+            subprocess.run(["sh", "-c", body], env={**base, **extra}, check=True)
+        ran = log.read_text().splitlines()
+        self.assertIn("-R 127.0.0.1:6768:127.0.0.1:6768 box", ran[0])
+        self.assertIn("-R 127.0.0.1:6790:127.0.0.1:6768 box", ran[1])
+
+    def test_status_and_stop_work_on_a_tunnel_started_before(self):
+        tunnels = self.e.home / ".config" / "lane-control" / "tunnels"
+        tunnels.mkdir(parents=True)
+        (tunnels / "box.env").write_text(f"SSH_HOST=box\nPORT={free_port()}\nSSH_CONFIG=\nPATH=/usr/bin:/bin\n")
+        self.assertEqual(self.tunnel("status", "box").returncode, 3)  # not running yet: systemctl's inactive
+        subprocess.run(["systemctl", "--user", "start", "lane-tunnel@box.service"], env=self.e.env, check=True)
+        self.assertEqual(self.tunnel("status", "box").returncode, 0)  # running from the old file (review n2)
+        r = self.tunnel("stop", "box")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((tunnels / "box.env").exists())
+        self.assertIn("--user disable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
+        self.assertEqual(self.tunnel("status", "box").returncode, 3)
 
     def test_a_bad_port_is_refused(self):
         for p in ("0", "70000", "x", "22 -oProxyCommand=x"):
@@ -1288,6 +1500,14 @@ class DocTests(unittest.TestCase):
         self.assertIn("6769-6868", text)  # the range project-setup searches, so an estate knows where the edge is
         m = re.search(r"range\(6769, (\d+)\)", (ROOT / "core" / "scripts" / "project-setup").read_text())
         self.assertEqual(m.group(1), "6869")  # the doc's 6769-6868 and the code agree
+
+    def test_remote_doc_says_when_the_tunnel_is_not_needed(self):
+        text = " ".join(REMOTE_DOC.read_text().split())
+        self.assertIn("Do you need the tunnel?", text)
+        for s in ("Tailscale", "LAN", "NAT", "outbound ssh", "--tunnel-remote-port", "--remote-port",
+                  "tunnel_remote_port", "refuses", "every interface (0.0.0.0)", "firewall", "not run here"):
+            self.assertIn(s, text, s)  # review M1: a network link widens the desktop to every interface
+        self.assertNotIn("listening on that address", text)
 
     def test_the_coordinator_persona_names_the_stored_key(self):
         text = (ROOT / "orchestrators" / "native-orca" / "personas" / "coordinator.md").read_text()

@@ -94,12 +94,15 @@ is poll-only (Reports across hosts, below).
 2. `project-setup <repo> <host>` asks for the link on a hidden prompt, in a terminal only (Enter, no terminal or
    `--no-desktop-lanes` skips it; a box already paired is not asked again). A terminal that cannot hide what is
    typed is refused instead of asked.
-3. `core/scripts/lane-tunnel start <host> <port>` runs `lane-tunnel@<host>.service`, a systemd user service from
-   `core/templates/lane-tunnel@.service`: `ssh -N -R 127.0.0.1:<port>:127.0.0.1:<port> <host>` with the link's port,
-   restarted always. Its host and port are in `~/.config/lane-control/tunnels/<host>.env`. It needs a systemd user
-   manager here (`loginctl enable-linger $USER` keeps it without a login session); without one nothing is paired.
-   Before it starts, the port must be free on the box (`--box-pairing port`): anything else listening there, such as
-   the box's own Orca server on 6768, would get the code. The link is sent only once the box's end is open, the
+3. `core/scripts/lane-tunnel start --remote-port <box port> <host> <port>` runs `lane-tunnel@<host>.service`, a
+   systemd user service from `core/templates/lane-tunnel@.service`: `ssh -N -R 127.0.0.1:<box
+   port>:127.0.0.1:<port> <host>`, restarted always. `<port>` is the link's; `<box port>` is the same unless
+   `--tunnel-remote-port` names another (Two ports, below). Its host and ports are in
+   `~/.config/lane-control/tunnels/<host>.env` (`PORT`, and `REMOTE_PORT` only when it differs: a file from before
+   has `PORT` only, which the unit reads as both). It needs a systemd user manager here (`loginctl enable-linger
+   $USER` keeps it without a login session); without one nothing is paired.
+   Before it starts, the box's port must be free there (`--box-pairing port`): anything else listening there, such
+   as the box's own Orca server on 6768, would get the code. Setup then says to pass `--tunnel-remote-port`. The link is sent only once the box's end is open, the
    unit is active, and the port is open on the box's loopback only (sshd's `GatewayPorts yes` would open it on the
    box's network: setup refuses). By default the unit's ssh runs without your ssh agent, so it needs a key it can
    use alone, with no passphrase (`IdentityFile` in the ssh config it uses). See "A host that takes only a smartcard"
@@ -112,11 +115,37 @@ is poll-only (Reports across hosts, below).
    If that step fails, the tunnel is stopped again and the owner is told to revoke the link, since it may have
    reached the box.
 5. Only the name is kept: `paired_environment` in the box's project settings store (the coordinator persona reads
-   it), and `~/.config/lane-control/hosts/<host>.json` here (host, environment names, tunnel port).
+   it), and `~/.config/lane-control/hosts/<host>.json` here (host, environment names, `tunnel_port` here and
+   `tunnel_remote_port` on the box; a record from before has `tunnel_port` only, which is both).
 
 The link is never in an argument, a log, a file, the settings store or a test's output (`tests/test_remote_native.py`,
 `test_link_not_in_argv_or_files`). It lets the box run commands as the owner on this computer (no desktop control)
 until it is revoked.
+
+### Two ports
+The box's Orca dials what the link says: 127.0.0.1 and the link's port. When that port is taken on the box (its own
+Orca server on 6768, say), `project-setup <repo> <host> --tunnel-remote-port <box port>` opens the box's end there
+(`lane-tunnel start --remote-port`) and rewrites the port of the link's endpoint before the link goes to the box, in
+memory, changing nothing else in it. That is safe because the endpoint is only where the box dials: Orca pins this
+desktop by the public key in the link and seals the token to it, and this desktop's Orca server does not check which
+port the box dialled (read from Orca 1.4.250's and 1.4.268's source; not yet run against a real desktop). The box
+saves the port it dials, so moving the box's end later means pairing again (`--remove-host`, then a new link).
+Direction 1's `-L` tunnel has the same shape (one port at both ends, `--orca-port`) and is not changed.
+
+### Do you need the tunnel?
+The box's Orca dials the address the link names; the tunnel is one way to give it one.
+- Not needed when the box can reach this machine directly (the same LAN, or both on Tailscale) and you accept this
+  desktop's Orca listening on every network interface: a link made with that address ("Share this computer",
+  choosing the LAN or Tailscale address) should then work on the box with no tunnel (not run here). The address you
+  choose only sets what the link says. The first network pairing makes this desktop's Orca listen on every
+  interface (0.0.0.0), not only that address (`orca pair --help`: "The first network pairing makes a loopback-only
+  Orca listen on every interface"). So anything that can reach any of this machine's addresses can try the port
+  (the LAN, a café's Wi-Fi, a public address); only a firewall limits it to the LAN or the tailnet, and the link's
+  token is still needed. It stays that way across restarts while such a client remains paired.
+- Needed when the desktop must stay on 127.0.0.1, or the box cannot reach it (NAT, a company network: only outbound
+  ssh from here gets through). The box then dials its own 127.0.0.1, and `ssh -R` carries it here.
+- What setup does: it takes only a 127.0.0.1 link and refuses any other, so it always sets up the tunnel. Pairing a
+  box with a direct address is not something setup does; whether it should is the owner's decision.
 
 ## A host that takes only a smartcard
 The unit's ssh runs with `BatchMode`, so it can never ask for a PIN or a passphrase, and (by default) it does not see
@@ -133,8 +162,11 @@ the card unlocked. The owner unlocks it, then starts the tunnel:
 - `project-setup <repo> <host>` passes these on: `--tunnel-auth-sock <socket>`, `--tunnel-ssh <path>` and
   `--tunnel-no-enable`. They are read here only; the box's own run never sees them. They apply while the box is
   being paired. Bringing the tunnel up again later (after a reboot, or when the card was locked) is `lane-tunnel start`
-  with the same options and the port in `~/.config/lane-control/hosts/<host>.json` (`tunnel_port`); a new share link
-  is not needed while the box still has this machine's environment.
+  with the same options and the ports in `~/.config/lane-control/hosts/<host>.json` (`lane-tunnel start <options>
+  --remote-port <tunnel_remote_port> <host> <tunnel_port>`). A re-run of `project-setup <repo> <host>` prints that
+  line from the record: when the box cannot reach this machine (the tunnel is down), before it asks for a link, and
+  while it runs, when a `--tunnel-` option was given. A new share link is not needed while the box still has this
+  machine's environment: press Enter at the prompt and run that line instead.
 
 A key or card the unit cannot use is not a silent restart loop, and a short outage does not end the tunnel. The unit
 never gives up (`StartLimitIntervalSec=0`): it retries every 10 seconds at first and backs off to every 5 minutes
