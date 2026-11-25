@@ -2126,7 +2126,8 @@ class OnboardingTests(unittest.TestCase):
         (self.e.bin / "opencode2").symlink_to(FAKE_AGENT)
         conf = self.e.home / ".config" / "opencode" / "opencode.json"  # the owner's provider block, key by name
         conf.parent.mkdir(parents=True)
-        conf.write_text(json.dumps({"provider": {"x": {"options": {"apiKey": "{env:X_KEY}"}}}}))
+        conf.write_text(json.dumps({"provider": {"x": {"options": {"baseURL": "http://127.0.0.1:4000/v1",
+                                                                  "apiKey": "{env:X_KEY}"}}}}))
         r = self.e.run(str(self.repo), "--adapter", "opencode/x/y", adapt=True, env_extra={"X_KEY": "k"})
         self.assertEqual(r.returncode, 3, r.stderr)  # no terminal for the yes: stopped before the commit
         self.assertNotIn("claude/<model>", r.stderr)

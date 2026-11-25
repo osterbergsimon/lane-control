@@ -1995,49 +1995,124 @@ def opencode_rules(write: bool) -> list:
     return [{"action": a, "resource": r, "effect": e} for a, r, e in rules]
 
 
-def opencode_provider(model: str) -> tuple:
-    """(provider id, its block for the run's config, the NAME of its key variable) for `<provider>/<model>`, from the
-    owner's own OpenCode config (OPENCODE_CONFIG_CONTENT, else the file OPENCODE_CONFIG names, else
-    ~/.config/opencode/opencode.json[c]), never its auth store. Only what reaching the gateway needs is kept (npm,
-    name, models, options.baseURL, options.apiKey), and the key only as the reference `{env:NAME}`: a key written in
-    the config, or none at all (OpenCode would take it from its auth store, which is never read here), stops the run
-    with one line."""
+def opencode_sources() -> list:
+    """(name, text) of each OpenCode config source this user has, in the order OpenCode merges them (a later one wins):
+    the global folder's files, the file OPENCODE_CONFIG names, OPENCODE_CONFIG_DIR's files, OPENCODE_CONFIG_CONTENT.
+    Never OpenCode's auth or data files. The system folder (system_config) is refused before this is read."""
     TS = _tiersuggest()
-    provider = model.split("/", 1)[0]
-    entry, where = None, ""
-    content = os.environ.get("OPENCODE_CONFIG_CONTENT")
-    sources = ([("OPENCODE_CONFIG_CONTENT", content)] if content else []) + [
-        (str(f), f) for f in TS.opencode_config_paths(os.environ)]
-    for name, src in sources:
+    home = Path(os.environ.get("XDG_CONFIG_HOME") or Path(os.environ.get("HOME", str(Path.home()))) / ".config")
+    files = [home / "opencode" / n for n in ("config.json", "opencode.json", "opencode.jsonc")]
+    if os.environ.get("OPENCODE_CONFIG"):
+        files.append(Path(os.environ["OPENCODE_CONFIG"]).expanduser())
+    if os.environ.get("OPENCODE_CONFIG_DIR"):
+        files += [Path(os.environ["OPENCODE_CONFIG_DIR"]).expanduser() / n for n in ("opencode.json", "opencode.jsonc")]
+    out = []
+    for f in files:
         try:
-            conf = json.loads(TS.strip_jsonc(src if isinstance(src, str) else src.read_text()))
+            out.append((str(f), TS.strip_jsonc(f.read_text())))
         except FileNotFoundError:
             continue
-        except (OSError, ValueError, UnicodeDecodeError) as e:
+        except (OSError, UnicodeDecodeError) as e:
+            raise Fail(f"cannot read OpenCode's config {f}: {e}")
+    if os.environ.get("OPENCODE_CONFIG_CONTENT"):
+        out.append(("OPENCODE_CONFIG_CONTENT", TS.strip_jsonc(os.environ["OPENCODE_CONFIG_CONTENT"])))
+    return out
+
+
+def merged(a: dict, b: dict) -> dict:
+    """b over a, folders of settings merged, as OpenCode merges config documents."""
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = merged(out[k], v) if isinstance(out.get(k), dict) and isinstance(v, dict) else v
+    return out
+
+
+def opencode_provider(model: str) -> tuple:
+    """(provider id, its block for the run's config, the environment variables the block names) for
+    `<provider>/<model>`, from the provider as OpenCode resolves it: its entries in every config source this user
+    has (opencode_sources), merged in OpenCode's order. Kept: npm, name, models, options.headers and, written out, the
+    gateway's URL and the key as `{env:NAME}`. Checked before any key is put in an environment:
+    - the URL: options.baseURL or the provider's `api`, an http(s) URL written in the config or in a variable it
+      names (`{env:GW_URL}`, read now); none, or two that differ, stop the run, so an SDK never falls back to a
+      vendor's own default (api.openai.com, api.anthropic.com) with the prompt and the key;
+    - the key: only as `{env:NAME}`, set here; a key written in the config, or none (OpenCode would take it from its
+      auth store, which is never read here), stops the run."""
+    TS = _tiersuggest()
+    provider = model.split("/", 1)[0]
+    entry, where = {}, []
+    for name, text in opencode_sources():
+        try:
+            conf = json.loads(text)
+        except ValueError as e:
             raise Fail(f"cannot read OpenCode's config {name}: {e}")
         found = ((conf.get("provider") or {}) if isinstance(conf, dict) else {}).get(provider)
         if isinstance(found, dict):
-            entry, where = found, name
-            break
-    if entry is None:
+            entry, where = merged(entry, found), where + [name]
+    if not where:
         raise Fail(f"OpenCode's config has no provider {provider!r} for the onboarding agent {model}: an OpenCode "
-                   "onboarding run gets only that provider's block from your config, with its key as "
-                   '"apiKey": "{env:NAME}". Add the block, or pass another --adapter/--adapt-reviewer. Nothing was '
-                   "committed")
+                   "onboarding run gets only that provider's block from your config, with the gateway's URL "
+                   '("baseURL") and its key as "apiKey": "{env:NAME}". Add the block, or pass another '
+                   "--adapter/--adapt-reviewer. Nothing was committed")
+    at = " + ".join(where)
     opts = entry.get("options") if isinstance(entry.get("options"), dict) else {}
+    urls = []
+    for field, value in (("options.baseURL", opts.get("baseURL")), ("api", entry.get("api"))):
+        if value is None:
+            continue
+        ref = TS.ENV_REF.fullmatch(value) if isinstance(value, str) else None
+        url = os.environ.get(ref.group(1), "") if ref else value
+        if not isinstance(url, str) or not re.fullmatch(r"https?://[^\s/]+(/\S*)?", url):
+            raise Fail(f"{at}: provider {provider!r} has {field} {value!r}"
+                       + (f" and {ref.group(1)} is {'not set' if not url else 'not an http(s) URL'}" if ref else "")
+                       + ": an OpenCode onboarding run needs the gateway's http(s) URL. Nothing was committed")
+        urls.append(url)
+    if not urls:
+        raise Fail(f"{at}: provider {provider!r} names no URL (options.baseURL or api), and an OpenCode onboarding run "
+                   "never lets its SDK fall back to a vendor's own address with your prompt and key: write the "
+                   "gateway's URL as \"baseURL\" in its options. Nothing was committed")
+    if len(set(urls)) > 1:
+        raise Fail(f"{at}: provider {provider!r} names two different URLs ({' and '.join(urls)}): keep one. "
+                   "Nothing was committed")
     key = opts.get("apiKey")
     ref = TS.ENV_REF.fullmatch(key) if isinstance(key, str) else None
     if not ref:
-        raise Fail(f"{where}: provider {provider!r} has " + ("its apiKey written in the config" if key else "no apiKey")
+        raise Fail(f"{at}: provider {provider!r} has " + ("its apiKey written in the config" if key else "no apiKey")
                    + ", and an OpenCode onboarding run takes the key only from an environment variable it names "
                    '("apiKey": "{env:NAME}"); a key kept in OpenCode\'s auth store (opencode auth login) is never read '
                    "by lane-control. Nothing was committed")
-    if not os.environ.get(ref.group(1)):
-        raise Fail(f"the key's environment variable {ref.group(1)} (provider {provider!r} in {where}) is not set "
-                   "here. Nothing was committed")
+    names = [ref.group(1)]
+    headers = opts.get("headers") if isinstance(opts.get("headers"), dict) else {}
+    for v in headers.values():
+        hr = TS.ENV_REF.fullmatch(v) if isinstance(v, str) else None
+        if hr:
+            names.append(hr.group(1))
+    for n in names:
+        if not os.environ.get(n):
+            raise Fail(f"the environment variable {n} (provider {provider!r} in {at}) is not set here. Nothing was "
+                       "committed")
     block = {k: entry[k] for k in ("npm", "name", "models") if k in entry}
-    block["options"] = {"apiKey": key, **({"baseURL": opts["baseURL"]} if isinstance(opts.get("baseURL"), str) else {})}
-    return provider, block, ref.group(1)
+    block["options"] = {"baseURL": urls[0], "apiKey": key, **({"headers": headers} if headers else {})}
+    return provider, block, list(dict.fromkeys(names))
+
+
+SYSTEM_CONFIG = {"linux": "/etc/opencode", "darwin": "/Library/Application Support/opencode"}  # OpenCode 2.2.1's own
+
+
+def system_config() -> "Path | None":
+    """OpenCode's system config folder when there is one: it loads it as a whole (configs, plugins, agents, an MCP
+    server, instructions, a formatter) whatever HOME and the XDG folders are, and no switch turns it off."""
+    d = (Path(os.environ.get("ProgramData") or r"C:\ProgramData") / "opencode" if sys.platform == "win32"
+         else Path(SYSTEM_CONFIG.get(sys.platform, SYSTEM_CONFIG["linux"])))
+    return d if d.is_dir() else None
+
+
+def refuse_system_config() -> None:
+    where = system_config()
+    if where:
+        raise Fail(f"{where} exists: OpenCode loads that system config folder in every run whatever its HOME (its MCP "
+                   "servers, instructions, plugins and formatters too), with no switch to keep it out, so an OpenCode "
+                   "onboarding run cannot start from nothing here. Use a Claude --adapter and --adapt-reviewer, or "
+                   "move that folder away for the run. Nothing was committed")
 
 
 def scratch_dir(repo: Path, prefix: str) -> Path:
@@ -2064,12 +2139,15 @@ def opencode_agent(repo: Path, model: str, write: bool):
     config, plugin, agent, formatter, MCP server, auth or session of the owner's, nor the project's
     (OPENCODE_DISABLE_PROJECT_CONFIG) nor Claude Code's (OPENCODE_DISABLE_CLAUDE_CODE), is loaded, and the session is
     kept in that folder, not the owner's store. Its one config file holds only the adapter's provider block
-    (opencode_provider: the key by its variable's name, never the key), formatter, lsp and MCP off, and the run's
+    (opencode_provider: the gateway's URL written out, the key by its variable's name, never the key), formatter, lsp
+    and MCP off, and the run's
     agent, whose name is new each run (lane-onboard-<random>), with opencode_rules and steps MAX_TURNS plus OpenCode's
-    forced last answer. The environment is PATH, locale, TLS and proxy settings (KEEP_ENV) and the key's variable;
+    forced last answer. The environment is PATH, locale, TLS and proxy settings (KEEP_ENV) and the variables the
+    provider block names (its key, a header's);
     nothing else of this one (no LANE_ROLE, no OPENCODE_*). The prompt goes on stdin (an argument that starts with -
     would be read as a flag); --standalone runs a private server started in the run's folder."""
-    provider, block, key_env = opencode_provider(model)
+    refuse_system_config()
+    provider, block, key_envs = opencode_provider(model)
     name = f"lane-onboard-{secrets.token_hex(6)}"
     conf = {"provider": {provider: block}, "formatter": False, "lsp": False, "mcp": {}, "instructions": [],
             "autoupdate": False, "share": "disabled",
@@ -2078,7 +2156,7 @@ def opencode_agent(repo: Path, model: str, write: bool):
     home = scratch_dir(repo, "lane-onboard-home-")
     try:
         env = {k: v for k, v in os.environ.items() if KEEP_ENV.fullmatch(k)}
-        env[key_env] = os.environ[key_env]
+        env.update({n: os.environ[n] for n in key_envs})
         for var, sub in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
                          ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")):
             (home / sub).mkdir()
@@ -2086,7 +2164,7 @@ def opencode_agent(repo: Path, model: str, write: bool):
         (home / "config" / "opencode").mkdir()
         (home / "config" / "opencode" / "opencode.json").write_text(json.dumps(conf))
         env.update(OPENCODE_DISABLE_PROJECT_CONFIG="1", OPENCODE_DISABLE_CLAUDE_CODE="1",
-                   OPENCODE_DISABLE_AUTOUPDATE="1")
+                   OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_MODELS_FETCH="1")  # no model catalog fetched
         yield ([BINARIES["opencode"], "run", "--standalone", "--model", model, "--agent", name, "--format", "json"],
                env)
     finally:
@@ -2761,7 +2839,7 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
           "it is printed at the end):", flush=True)
     given = []
     for n, item in enumerate(items, 1):
-        print(f"\n{n}. {item}", flush=True)
+        print(f"\n{n}. {plain(item)}", flush=True)
         try:
             answer = input("   Your answer (Enter: ask me later): ").strip()
         except EOFError:
@@ -2875,6 +2953,10 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
                     "pass opencode/<provider>/<model> to onboard on OpenCode)") if fell else ""
             raise Fail(("claude not on PATH, but the onboarding agents use it" if h == "claude" else
                         f"{BINARIES[h]} not on PATH, but the onboarding agents run on {h}") + hint)
+    for h, m in (adapter, reviewer):  # before any agent: each OpenCode role's provider, and no system config
+        if h == "opencode":
+            refuse_system_config()
+            opencode_provider(m)
     for key in ("user.name", "user.email"):
         if not run(["git", "config", "--get", key], cwd=repo, check=False).stdout.strip():
             raise Fail(f"git has no {key} here, so the owner's commit can't be made; set it and run again")
@@ -3940,7 +4022,7 @@ def native_main(a, tiers: Path) -> int:
     finally:
         if LEFTOVER and not LEFTOVER_DELIVERED:
             print("\nLeft open at the commit and not given to a coordinator in this run (it was not started now). "
-                  "Bring it to the coordinator yourself:\n" + LEFTOVER, file=sys.stderr)
+                  "Bring it to the coordinator yourself:\n" + plain(LEFTOVER), file=sys.stderr)
         if agent_spent:
             print(f"agent time used: {minutes(agent_spent)} of {minutes(AGENT_LIMIT)}")
 
@@ -4820,7 +4902,7 @@ def main(argv=None) -> int:
     finally:
         if LEFTOVER and not LEFTOVER_DELIVERED:  # the file is gone: nothing the owner left open may vanish silently
             print("\nLeft open at the commit and not given to a coordinator in this run (it was not started now). "
-                  "Bring it to the coordinator yourself:\n" + LEFTOVER, file=sys.stderr)
+                  "Bring it to the coordinator yourself:\n" + plain(LEFTOVER), file=sys.stderr)
         if agent_spent:
             print(f"agent time used: {minutes(agent_spent)} of {minutes(AGENT_LIMIT)}")
 

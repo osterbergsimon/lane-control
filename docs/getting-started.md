@@ -273,13 +273,15 @@ attach by itself. In the copy the agent has `read` alone (no shell, grep, glob o
 only its template files under `.lane-control/`. Only those come back to the repo; anything else it changed (a `.git`, a
 dot-name, another file) stops the run, and nothing is copied. OpenCode starts from nothing for the run: none of your
 OpenCode config, plugins, formatters or MCP servers, nor the project's, only your provider's block (its URL and the key
-as `"apiKey": "{env:NAME}"`, as in step 2.3); a key kept only in OpenCode's auth store (`opencode auth login`) is not
-used, and the run stops and says so. The two flags are kept in the project's settings store once given, so a later run
-or `--readapt` without them uses the same models; a run that uses a default says so beside the model (`adapt: running
-claude/sonnet (the default: ...)`). An onboarded project (its `.lane-control/` files and `AGENTS.lane-control.md`
-committed on the default branch) says `adapt: exists .lane-control/ is committed` and runs no onboarding agent, so the
-flags make no difference there. The details, and how it differs from Claude's run, are in [the native Orca
-setup](../orchestrators/native-orca/setup.md), "OpenCode on a self-hosted LiteLLM gateway".
+as `"apiKey": "{env:NAME}"`, as in step 2.3; with no URL written out, the run stops rather than let OpenCode fall back
+to a vendor's address); a key kept only in OpenCode's auth store (`opencode auth login`) is not used, and the run stops
+and says so. An `/etc/opencode` folder (OpenCode loads it whatever its HOME) stops it too. The two flags are kept in the
+project's settings store once given, so a later run or `--readapt` without them uses the same models; a run that uses a
+default says so beside the model (`adapt: running claude/sonnet (the default: ...)`). An onboarded project (its
+`.lane-control/` files and `AGENTS.lane-control.md` committed on the default branch) says `adapt: exists .lane-control/
+is committed` and runs no onboarding agent, so the flags make no difference there. The details, and how it differs from
+Claude's run, are in [the native Orca setup](../orchestrators/native-orca/setup.md), "OpenCode on a self-hosted LiteLLM
+gateway".
 
 ### What the setup does, and what you should see
 
