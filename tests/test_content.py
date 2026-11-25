@@ -139,7 +139,8 @@ class TierTableTests(unittest.TestCase):
             for needle in ("Owner 2026-11-24: no refusals by model or harness",
                            "is the only place that says which models it uses",
                            "a self-hosted gateway (for example LiteLLM, with any models behind it) is first class",
-                           "`orca-ide orchestration worker-start --agent opencode2 --model <provider>/<model>`",
+                           "`orca-ide orchestration worker-start --worktree path:<that worktree> --agent opencode "
+                           "--model <provider>/<model>`",
                            "`scripts/lane-tier` refuses nothing",
                            "carry no China-region hosted models",
                            "The owner may restrict a project in its own conf"):
@@ -848,7 +849,7 @@ class NativePersonaTests(unittest.TestCase):
             for needle in ("orca-ide skills get orchestration", "orca-ide orchestration worker-start", "--agent",
                            "orca-ide orchestration send", "~/.agents/bin/lane-room", "~/.agents/bin/lane-tier",
                            "{{TIERS}}", "{{REVIEWER}}", "orchestrators/native-orca/templates/lane-brief.md",
-                           "`--agent opencode2 --model <provider>/<model>`", "`core/scripts/lane-tier`"):
+                           "--agent opencode --model <provider>/<model>", "`core/scripts/lane-tier`"):
                 self.assertIn(needle, t, (role, needle))
             self.assertNotIn("China-region", t, role)  # the rule is the project's own tier table's; a persona copy goes stale
             self.assertNotIn("exit 4", t, role)
@@ -867,7 +868,7 @@ class NativePersonaTests(unittest.TestCase):
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
             self.assertIn("`claude`", t, role)
-            self.assertIn("`opencode2`", t, role)
+            self.assertIn("`opencode`", t, role)
 
     def test_each_names_its_own_persona_path(self):
         for role in NATIVE_ROLES:
@@ -1067,12 +1068,18 @@ class OwnerDecisions20261119Tests(unittest.TestCase):
             for step in ("ceiling-15", "ceiling-7", "ceiling-4", "ceiling-2"):
                 self.assertIn(step, t, (f, step))
 
-    def test_we_target_opencode_v2(self):
-        # owner 2026-11-19: "We target opencode v2"; Orca's agent id for it is opencode2
-        for f in ("README.md", "core/model-routing.md", "orchestrators/orca-cotal/docs/orca.md"):
+    def test_no_file_gives_the_start_orca_refuses(self):
+        # lc-69b: Orca 1.4.268 and 1.4.274 take --model for OpenCode only on agent id opencode, never on opencode2
+        for f in ("README.md", "core/model-routing.md", "orchestrators/orca-cotal/docs/orca.md",
+                  "orchestrators/native-orca/personas/coordinator.md",
+                  "orchestrators/native-orca/skills/native-orca-lanes/SKILL.md",
+                  "orchestrators/native-orca/setup.md", "docs/getting-started.md"):
             t = flat(ROOT / f)
-            self.assertNotRegex(t, r"--agent opencode(?!2)", f)
-            self.assertIn("--agent opencode2", t, f)
+            self.assertNotRegex(t, r"--agent opencode2 --model", f)
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
+            self.assertIn("orca-ide worktree create", t, role)
+            self.assertIn("never `opencode2`", t, role)
 
 
 def reliability_entry(n):
@@ -1271,7 +1278,22 @@ class NativeLaneSkillTests(unittest.TestCase):
         self.assertLess(t.index("lane-room"), t.index("orca-ide orchestration worker-start"))
         self.assertLess(t.index("lane-tier"), t.index("orca-ide orchestration worker-start"))
         self.assertNotIn("Exit 4", t)
-        self.assertIn("`--agent opencode2 --model <provider>/<model>`", t)
+
+    def test_opencode_lane_starts_the_way_orca_accepts(self):
+        # lc-69b: worktree first, then agent id opencode with --model on its path, no --effort
+        create = ("orca-ide worktree create --repo <exact selector> --name <name> --base-branch origin/<BASE> "
+                  "--setup run --json")
+        start = ("orca-ide orchestration worker-start --spec-file <brief> --worktree path:<that worktree> "
+                 "--agent opencode --model <provider>/<model>")
+        raw = [line.strip() for line in self.text.replace("\\\n  ", "").splitlines()]  # join continued commands
+        self.assertIn(create, raw)
+        self.assertIn(start, raw)  # the whole line: nothing, --effort included, follows the model
+        self.assertLess(raw.index(create), raw.index(start))
+        for needle in ("never `opencode2`", "no `--effort`", "`new-child` and `new-top-level`",
+                       "`opencode models` lists `<provider>/<model>`", "Orca does not look the model up",
+                       "`opencode --version`", "2.0.14", "launch arguments", "SSH", "WSL",
+                       "Without `--model`", "1.4.268", "1.4.274", "hold the lane"):
+            self.assertIn(needle, self.flat, needle)
 
     def test_lane_mechanics(self):
         t = self.flat

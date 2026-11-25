@@ -28,7 +28,7 @@ Check each one. All are needed on the machine that runs the agents, as a normal 
 | GitHub CLI, signed in | `gh auth status` | `Logged in to github.com` |
 | jq, git, Python 3 | `jq --version && git --version && python3 --version` | three versions |
 | Git identity | `git config user.name && git config user.email` | your name and email; onboarding a project refuses without them |
-| Your agent engine, signed in once | Claude: `claude --version`. OpenCode: `command -v opencode2` | a version, or a path |
+| Your agent engine, signed in once | Claude: `claude --version`. OpenCode: `command -v opencode2`, and for lanes `opencode --version` (2.0.14 or newer) | a version, or a path |
 
 If not: on Linux, Orca's CLI is `orca-ide`; plain `orca` may be another program. If `orca-ide status` cannot
 connect, start the Orca app first. For bd, `machine-setup` (step 3) says how to fix it and never installs it. The
@@ -115,10 +115,10 @@ named here. Models are named by the gateway's aliases, such as `chat` and `code`
        "models": { "chat": {}, "code": {} } } } }
    ```
 
-   The alias `chat` is then `litellm/chat` in OpenCode. The `"model"` line matters: Orca passes no model to
-   OpenCode, so the three machine automations (night manager, lane sweep, machine check) run on whatever OpenCode's
-   default is. Without that line OpenCode picks a model itself, and on a machine that has only the gateway it may pick
-   one that does not exist.
+   The alias `chat` is then `litellm/chat` in OpenCode. The `"model"` line matters: Orca passes no model to an
+   OpenCode automation, so the three machine automations (night manager, lane sweep, machine check) run on whatever
+   OpenCode's default is. Without that line OpenCode picks a model itself, and on a machine that has only the gateway
+   it may pick one that does not exist.
 
 2. The agents get the key from the environment of the program that starts them, which is Orca. Quit Orca fully, set
    the variable in a shell, and start Orca from that shell (or set it where your login or desktop session starts
