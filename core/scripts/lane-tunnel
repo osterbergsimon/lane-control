@@ -2,8 +2,9 @@
 # lane-tunnel: the user service that keeps an SSH host's way back to this machine's Orca open (native-Orca setup,
 # direction 2; docs: orchestrators/native-orca/remote.md).
 #
-#   lane-tunnel start [--no-enable] [--auth-sock PATH] [--ssh PATH] <ssh-host> <port>
-#                                         write and start lane-tunnel@<name>.service: ssh -N -R 127.0.0.1:<port>:127.0.0.1:<port>
+#   lane-tunnel start [--no-enable] [--auth-sock PATH] [--ssh PATH] [--remote-port N] <ssh-host> <port>
+#                                         write and start lane-tunnel@<name>.service:
+#                                         ssh -N -R 127.0.0.1:<remote port>:127.0.0.1:<port>
 #   lane-tunnel stop <ssh-host>           stop and disable it, and forget its host and port
 #   lane-tunnel status <ssh-host>         exit 0 when it runs
 #   lane-tunnel check [--auth-sock PATH] [--ssh PATH]
@@ -14,6 +15,10 @@
 #   smartcard: unlock the card in an agent, then start with that agent's socket.
 # --ssh PATH (or LANE_TUNNEL_SSH): an executable run in place of `ssh` with the same arguments (a wrapper that sets
 #   up a card, a proxy, a socket); LANE_TUNNEL_SSH in the env file.
+# <port> is this machine's (the share link's); --remote-port N is the one the box dials, on its own 127.0.0.1 (default:
+#   <port>, as before). With another one, the box must be paired with a code whose endpoint names that port:
+#   project-setup --tunnel-remote-port rewrites the link for it (orchestrators/native-orca/remote.md, "Do you need the
+#   tunnel?"). An env file from before has PORT only, which the unit reads as both ports.
 # --no-enable: start the unit for now only (systemctl --user start). It is not enabled, so a login or reboot does not
 #   bring it back, and a start that left it enabled before is disabled (an error when that does not work). stop always
 #   leaves it stopped and disabled.
@@ -30,8 +35,8 @@
 # existed (a re-run during a blip must not turn an always-on tunnel off); lane-tunnel stop ends it.
 #
 # <name> is the host with every character but letters, digits, '.', '_' and '-' turned into '-' (as orca-host-install
-# names the host's environment). The instance's host, port, ssh config (LANE_SSH_CONFIG, passed as ssh -F), PATH,
-# agent socket and ssh wrapper are in ${XDG_CONFIG_HOME:-~/.config}/lane-control/tunnels/<name>.env (mode 0600; no
+# names the host's environment). The instance's host, ports (REMOTE_PORT only when it differs), ssh config
+# (LANE_SSH_CONFIG, passed as ssh -F), PATH, agent socket and ssh wrapper are in ${XDG_CONFIG_HOME:-~/.config}/lane-control/tunnels/<name>.env (mode 0600; no
 # secret is in it). Needs a systemd user manager; to keep it without a login session: loginctl enable-linger $USER.
 set -eu
 
@@ -73,13 +78,20 @@ check_values() {
   fi
 }
 
-usage="usage: lane-tunnel start [--no-enable] [--auth-sock PATH] [--ssh PATH] <ssh-host> <port> | stop <ssh-host> | status <ssh-host> | check [--auth-sock PATH] [--ssh PATH]"
+usage="usage: lane-tunnel start [--no-enable] [--auth-sock PATH] [--ssh PATH] [--remote-port N] <ssh-host> <port> | stop <ssh-host> | status <ssh-host> | check [--auth-sock PATH] [--ssh PATH]"
 [ $# -ge 1 ] || die "$usage" 2
 [ "$1" = check ] || [ $# -ge 2 ] || die "$usage" 2
 op=$1; shift
-enable=1; auth_sock=${LANE_TUNNEL_AUTH_SOCK:-}; ssh_bin=${LANE_TUNNEL_SSH:-}
+enable=1; auth_sock=${LANE_TUNNEL_AUTH_SOCK:-}; ssh_bin=${LANE_TUNNEL_SSH:-}; rport=""
 while [ $# -gt 0 ]; do
   case $1 in
+    --remote-port)
+      [ "$op" = start ] || die "$1 goes with start only: $usage" 2
+      [ $# -ge 2 ] || die "$1 needs a port" 2
+      rport=$2; shift 2
+      case $rport in ''|*[!0-9]*) die "bad remote port: $rport" 2 ;; esac
+      { [ "$rport" -ge 1 ] && [ "$rport" -le 65535 ]; } || die "bad remote port: $rport" 2
+      ;;
     --no-enable|--auth-sock|--ssh)
       [ "$op" = start ] || [ "$op" = check ] || die "$1 goes with start only: $usage" 2
       case $1 in
@@ -119,6 +131,7 @@ case $op in
     port=$1
     case $port in ''|*[!0-9]*) die "bad port: $port" 2 ;; esac
     { [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "bad port: $port" 2
+    { [ -n "$rport" ] && [ "$rport" -ne "$port" ]; } || rport=$port  # 06768 and 6768 are one port
     check_values
     if [ -n "$auth_sock" ] && [ ! -S "$auth_sock" ]; then
       echo "lane-tunnel: note: $auth_sock is not a socket (yet): the agent has to be running there for the unit to use it" >&2
@@ -128,6 +141,8 @@ case $op in
     chmod 700 "$tunnels"
     old=$(cat "$envfile" 2>/dev/null || true)
     new=$(printf 'SSH_HOST=%s\nPORT=%s\nSSH_CONFIG=%s\nPATH=%s' "$host" "$port" "$cfg" "$PATH")
+    # One port: the file as before, so a re-run for a tunnel started before does not restart it.
+    [ "$rport" = "$port" ] || new=$(printf '%s\nREMOTE_PORT=%s' "$new" "$rport")
     [ -z "$auth_sock" ] || new=$(printf '%s\nSSH_AUTH_SOCK=%s' "$new" "$auth_sock")
     [ -z "$ssh_bin" ] || new=$(printf '%s\nLANE_TUNNEL_SSH=%s' "$new" "$ssh_bin")
     (umask 077; printf '%s\n' "$new" > "$envfile.tmp")
@@ -153,7 +168,7 @@ case $op in
       fi
       sd start "$unit" >/dev/null 2>&1 || die "systemctl --user start $unit failed (journalctl --user -u $unit)"
     fi
-    # A changed host, port, agent or wrapper must replace a tunnel that already runs.
+    # A changed host, port (either end), agent or wrapper must replace a tunnel that already runs.
     if [ -n "$old" ] && [ "$old" != "$new" ]; then sd restart "$unit" || die "systemctl --user restart $unit failed"; fi
     # ssh runs with BatchMode, so a key or card it cannot use ends it at once: look again after a few seconds, while the
     # owner is here to read it.
@@ -174,7 +189,7 @@ case $op in
       i=$((i + 1)); sleep 1
     done
     if [ "$enable" = 1 ]; then how="enabled"; else how="not enabled: it does not come back at login or boot"; fi
-    echo "started $unit (127.0.0.1:$port on $host reaches 127.0.0.1:$port here; $how)"
+    echo "started $unit (127.0.0.1:$rport on $host reaches 127.0.0.1:$port here; $how)"
     ;;
   stop)
     # Without a user manager the unit cannot be stopped: keep its env file, so a running one is not left broken.
