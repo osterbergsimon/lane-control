@@ -56,13 +56,38 @@ Start the lane:
 orca-ide orchestration worker-start --spec-file <brief> --worktree new-child --agent <id> --model <model>
 ```
 
-- `<id>` is `claude` for Claude and `opencode2` for OpenCode (v2); `--effort` only for Claude. A tier whose harness
-  is `opencode` starts like any other: `--agent opencode2 --model <provider>/<model>`, the model as your table has it.
-- OpenCode needs its worktree first: `orca-ide worktree create`, then `--worktree path:<that worktree>`.
+- `<id>` is `claude` for Claude and `opencode` for OpenCode; `--effort` only for Claude.
 - Another host (`--on <environment>`): `--worktree new-top-level --repo <exact selector>` (Orca refuses `new-child`
-  and `current` there). Run `orca-ide orchestration check` right after, and on each wake: the wake may not reach you.
+  and `current` there; an OpenCode lane there: below). Run `orca-ide orchestration check` right after, and on each
+  wake: the wake may not reach you.
 - A paired box (`paired_environment` in the project's settings store): only for what this machine lacks (graphics,
   a browser, a GPU).
+
+**An OpenCode lane** (a tier whose harness is `opencode`, a model on a self-hosted gateway too) does not use the
+command above. Orca takes `--model` for OpenCode only on a worktree that already exists (`new-child` and
+`new-top-level` are refused), so make the worktree first, then start the lane on its path (the JSON prints it):
+
+```
+orca-ide worktree create --repo <exact selector> --name <name> --base-branch origin/<BASE> --setup run --json
+orca-ide orchestration worker-start --spec-file <brief> --worktree path:<that worktree> \
+  --agent opencode --model <provider>/<model>
+```
+
+- The id is `opencode`, never `opencode2` (Orca: "does not support launch-time model selection"), with the model as
+  your table has it and no `--effort`. Without `--model` the lane runs OpenCode's own default (`"model"` in its
+  config), not your tier's model: always pass it, a model that config defines too.
+- Check first, on the machine that runs the lane; if one fails, hold the lane and tell the owner:
+  - `opencode models` lists `<provider>/<model>`. Orca does not look the model up when it starts the lane.
+  - `opencode --version` says 2.0.14 or newer. Orca runs it too (its own command setting for OpenCode, if one is
+    set) and refuses an older 2.x; an `opencode2` command alone is not enough.
+  - Orca's settings give OpenCode no launch arguments: with any, 2.x is refused ("cannot apply this model choice to
+    this launch"). You never change them.
+  - The worktree is on that machine's own disk: not reached over SSH, and not in WSL.
+- A refused start: hold the lane and tell the owner. Never start it again without `--model` or on another id.
+- Another host: add `--environment <environment> --no-parent` to `worktree create`, and `--on <environment>` to
+  `worker-start`; that server runs Orca's check itself (read in Orca's source, not run).
+- Orca 1.4.268 and 1.4.274 have the same rules and the same help here (source of both). Started this way on 1.4.268
+  headless; on 1.4.274 read in the source, not run.
 
 Then mirror it on the lane's worktree card, so the owner sees it at a glance:
 `orca-ide worktree set --worktree <lane> --comment "<KEY> <tier> <harness>/<model>: <one line>"`.

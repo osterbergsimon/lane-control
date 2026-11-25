@@ -92,7 +92,10 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    ```
    Set the variable where the agents start (the session that starts Orca). The gateway's aliases are then
    `litellm/chat` in OpenCode, a tier row of harness `opencode` and model `litellm/chat`, and
-   `opencode/litellm/chat` for project-setup's `--coordinator` and `--reviewer`.
+   `opencode/litellm/chat` for project-setup's `--coordinator` and `--reviewer`. A lane on such a row starts on a
+   worktree made first, with `orca-ide orchestration worker-start --worktree path:<that worktree> --agent opencode
+   --model litellm/chat` (the `native-orca-lanes` skill has the commands and the checks); it needs the `opencode`
+   command, 2.0.14 or newer.
 2. `core/scripts/project-setup <repo> --suggest-tiers litellm` reads the gateway's `/v1/models` and, where it answers
    (LiteLLM), `/model/info`, which gives the model behind each alias; it shows each alias with that model and a
    suggested table (swift, standard, deep from name hints; top `none`; rows `opencode/<provider>/<alias>`). It leaves
@@ -108,8 +111,8 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
 3. A machine without Claude: `core/scripts/machine-setup --machine-coordinator opencode/litellm/chat` (the
    automations follow the machine coordinator's harness; `--automation-provider opencode` says it outright). The
    three automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
-   model to OpenCode. With no usage feed (every budget's feed empty in the playbook config) no budget is metered:
-   the caps are the limit, and night check-ins still go out.
+   model to an OpenCode automation. With no usage feed (every budget's feed empty in the playbook config) no budget
+   is metered: the caps are the limit, and night check-ins still go out.
 
 The URL, the key's variable and the model names stay in OpenCode's config and the project's settings store: no key,
 host or gateway URL in any repo.
