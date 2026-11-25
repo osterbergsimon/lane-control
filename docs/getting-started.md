@@ -56,9 +56,11 @@ lane-room
 You should see four lines (`memory`, `load`, `lanes`, `limits`) and last `room for another lane`, exit code 0.
 `lane-room` is the check a coordinator runs before it opens a lane.
 
-The lane tools (`lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh`, `design-shots`) are also copied to
-`~/.agents/bin`, where agents call them. `project-setup` does that copy on its first run (step 4) and says
-`lane-tools: created`; there is no separate installer.
+Then install it: `~/code/lane-control/scripts/lane-control install` prints `installed <sha>`. That puts the repo at its
+last commit in `~/.local/share/lane-control/<sha>/` with a `current` link, and links the lane tools (`lane-heavy`,
+`lane-room`, `lane-tier`, `lane-limits.sh`, `design-shots`) and `lane-control` into `~/.agents/bin`, where agents call
+them. Personas and hooks name `.../lane-control/current`, never this checkout. (`project-setup`, step 4, also installs
+when nothing is installed yet and says `lane-control: installed <sha>`.)
 
 If not: `lane-room: command not found` means the PATH line did not take effect in this shell. `lane-room` exiting
 non-zero says why: memory or load is too high, or the lane count is reached. That is a real answer, not a fault.
@@ -417,7 +419,7 @@ persona text it started with. Pick the case that fits.
 ```bash
 lane-control status                            # the installed sha, the checkout's, and whether they differ
 lane-control doctor                            # every project, link, skill and box against the install, with what to run
-project-setup ~/code/<project> --show          # says "lane-control <a> installed, project set up with <b>: run --refresh"
+project-setup ~/code/<project> --show          # says "lane-control <a> installed, project set up with <b>: run project-setup --refresh"
 ```
 
 ### A machine with its own lane-control checkout, project stays on its engine
@@ -433,14 +435,17 @@ project-pause start ~/code/<project>
 Why each step:
 - `git pull` updates the checkout; `lane-control install` lays its last commit as the machine's tree and switches
   `current` to it (no network; `--version <sha or tag>` installs another commit, `--from <checkout>` names the
-  checkout). After the first one, `~/.agents/bin/lane-control install` works from anywhere: it remembers the checkout.
-  `project-setup` run from a checkout installs that checkout's last commit itself too, so a forgotten install is not
-  a problem; uncommitted changes are never installed (it says so).
+  checkout). After the first one, `~/.agents/bin/lane-control install` works from anywhere: it remembers the main
+  checkout (never a lane worktree). `project-setup` run from the main checkout on its default branch installs that
+  checkout's last commit itself too, so a forgotten install is not a problem. Run from a lane worktree, another branch
+  or an older commit, it keeps the installed one (`lane-control: kept ...`) unless you answer yes in a terminal.
+  Uncommitted changes are never installed (it says so). A failed install exits 1 and changes nothing.
 - `--refresh` renders the skills and the personas again from the installed tree and records its sha. It keeps each
   persona's engine and model and the project's tier table, starts nothing and commits nothing, and says which running
   agents need a restart. It ignores `--coordinator` (project-setup says so).
-- A machine set up before the install moves to it on its first setup or `--refresh`: `lane-control: note: this machine
-  moves to the install ...` and, per project, `lane-control: moved ...`. Nothing else to do.
+- A machine set up before the install moves to it with the first install: `note: this machine moves to the install
+  ...` (from `lane-control install`, or `project-setup: note: ...` when setup installs first), and per project, at
+  its `--refresh`, `lane-control: moved ...`. Nothing else to do.
 - `project-pause stop` asks the coordinator for its handover, waits for it (up to 10 minutes) and closes its terminal. It
   refuses while a lane or reviewer runs, and it runs from an Orca terminal. `start` opens the coordinator again,
   resuming its session, with the new persona.

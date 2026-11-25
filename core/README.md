@@ -116,8 +116,15 @@ the links.
   `todo:` line saying what to run for each thing out of date.
 - `lane-control prune [--apply]`: the trees that are not current and that no running process of yours uses (its cwd,
   an open file or its command line); a dry run unless `--apply`.
-- `project-setup` and `machine-setup` run from a checkout install its HEAD first (or use the tree they run from), render
-  `{{LANE_CONTROL}}` as `.../lane-control/current`, link the lane tools, and record the sha in the project's settings
-  store (`lane_control`); `--show` says `lane-control <a> installed, project set up with <b>: run --refresh` when they
-  differ. A box (`project-setup <repo> <host>`, `machine-setup --host`) is sent the same tree at the same sha into its
-  own `.../lane-control/<sha>/` and `current`.
+- `project-setup` and `machine-setup` run from the main checkout on its default branch install its HEAD first (or use
+  the tree they run from). From a lane worktree, another branch or a commit older than the installed one they keep the
+  installed tree (`lane-control: kept ...`) unless the owner answers yes in a terminal or `LANE_CONTROL_SWITCH=1` is
+  set (the tests set it, in their scratch HOME); with nothing installed that is an error. A failed install exits 1 and
+  renders nothing. They render `{{LANE_CONTROL}}` and the persona hook as `.../lane-control/current`, link the lane
+  tools (a link is never turned back into a copy), and record the sha in the project's settings store (`lane_control`;
+  `lane_control_dirty` when the rendered text was not the installed tree's); `--show` says `lane-control <a>
+  installed, project set up with <b>: run project-setup --refresh` when they differ. A box (`project-setup <repo>
+  <host>`, `machine-setup --host`) is sent the same tree at the same sha into its own `.../lane-control/<sha>/`: every
+  box command goes as `sh -c '...'` (a fish login shell runs it too), the box counts the entries before it writes the
+  mark and switches `current` (a short stream lays nothing), and a box from before the install still runs its old
+  copy until then. `--show` sends and switches nothing.

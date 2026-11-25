@@ -2584,7 +2584,7 @@ class RunTests(unittest.TestCase):
         self.assertIn('tar -C "$t" -xf -', calls[0])
         self.assertIn('mv -fT "$d/.current.$$.tmp" "$d/current"', calls[0])
         self.assertIn("dev@box", calls[1])
-        self.assertIn('lane-control"/current/scripts/project-setup', calls[1])
+        self.assertIn('p="$d/current/scripts/project-setup"', calls[1])
         self.assertIn("https://example.com/acme/shop.git", calls[1])
         self.assertIn("bypassPermissions", calls[1])
         self.assertNotIn("--host", calls[1])
@@ -2882,7 +2882,9 @@ class RunTests(unittest.TestCase):
         r = self.e.run("~/My Repo;touch x", "--host", "dev@box")
         self.assertEqual(r.returncode, 0, r.stderr)
         remote = [c for c in self.e.calls() if c.startswith("ssh ")][1]
-        self.assertIn("~/'My Repo;touch x'", remote)
+        import shlex
+        inner = shlex.split(remote.split(" ", 2)[2])[2]  # ssh dev@box sh -c '<inner>' (INST-1 review M3)
+        self.assertIn("~/'My Repo;touch x'", inner)
 
     def test_bad_permission_mode(self):
         repo = self.e.repo()

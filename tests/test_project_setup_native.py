@@ -1405,7 +1405,7 @@ class HostTests(Case):
             self.assertEqual(r.returncode, 0, (args, r.stderr))
             calls = [c for c in self.e.calls() if c.startswith("ssh ")]
             self.assertEqual(len(calls), 2, calls)
-            self.assertIn('lane-control"/current/scripts/project-setup', calls[1])
+            self.assertIn('p="$d/current/scripts/project-setup"', calls[1])
             self.assertIn("--via-host", calls[1])
             self.assertNotIn("--host", calls[1].replace("--via-host", ""))
             self.assertNotIn(" user@host", calls[1].split(" ", 2)[2])  # the host is ssh's, not the host run's
@@ -2021,6 +2021,7 @@ class InstallTests(Case):
     def test_a_failed_install_exits_1_and_changes_nothing(self):
         self.e.run(str(self.repo), "--no-start")
         other = "e" * 40  # the machine is on another install; this run would switch, but tar fails
+        shutil.rmtree(self.lc() / self.head())
         (self.lc() / other).mkdir()
         (self.lc() / other / ".lane-control-sha").write_text(other + "\n")
         (self.lc() / "current").unlink()

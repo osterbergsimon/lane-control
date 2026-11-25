@@ -1786,7 +1786,8 @@ class BoxShellTests(Case):
         lc = self.e.home / ".local" / "share" / "lane-control"
         before = os.readlink(lc / "current")
         n = len(self.e.jlines(".ssh"))
-        r = self.e.setup(str(self.repo), "box", "--show")
+        r = subprocess.run([sys.executable, str(SETUP), str(self.repo), "box", "--show"], env=self.e.env,
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertFalse(any("tar -C" in c[-1] for c in self.e.jlines(".ssh")[n:]))
         self.assertEqual(os.readlink(lc / "current"), before)

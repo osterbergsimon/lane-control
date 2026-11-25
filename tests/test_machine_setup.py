@@ -1768,8 +1768,11 @@ class MachineSetupTests(BudgetTest):
                   "orchestrators/native-orca/personas/machine-coordinator.md"):
             self.assertIn(f, listing)
         self.assertIn("core/install.py", listing)
-        self.assertEqual(calls[1][-1], '"${XDG_DATA_HOME:-$HOME/.local/share}/lane-control"/current/core/scripts/'
-                                       'machine-setup --folder ~/machine --no-start')
+        self.assertTrue(calls[1][-1].startswith("sh -c '"), calls[1][-1])  # INST-1 review M3: any login shell
+        import shlex
+        inner = shlex.split(calls[1][-1])[2]
+        self.assertIn('p="$d/current/core/scripts/machine-setup"', inner)
+        self.assertTrue(inner.endswith('exec "$p" --folder ~/machine --no-start'), inner)
         self.assertEqual(self.orca_calls(), [])  # nothing ran here
 
 
