@@ -416,14 +416,20 @@ class NativeOnboardingTests(Case):
 
 FAKE_AGENT = ROOT / "tests" / "stubs" / "fake_agent.py"
 OC_ADAPTER, OC_REVIEWER = "litellm/code", "litellm/deep"
+GATEWAY_URL = "http://127.0.0.1:4000/v1"
+GATEWAY_FLAGS = ("--gateway-url", GATEWAY_URL, "--gateway-key-env", "LITELLM_API_KEY")
 ALL_OPENCODE = ("--adapter", f"opencode/{OC_ADAPTER}", "--adapt-reviewer", f"opencode/{OC_REVIEWER}",
-                "--coordinator", "opencode/litellm/chat", "--reviewer", "opencode/litellm/deep", "--no-start")
+                "--coordinator", "opencode/litellm/chat", "--reviewer", "opencode/litellm/deep", "--no-start",
+                *GATEWAY_FLAGS)
 GATEWAY_KEY = "sk-example-gateway-key-0000"
-GATEWAY_BLOCK = {"npm": "@ai-sdk/openai-compatible", "name": "LiteLLM", "models": {"code": {}, "deep": {}},
-                 "options": {"baseURL": "http://127.0.0.1:4000/v1", "apiKey": "{env:LITELLM_API_KEY}",
-                             "headers": {"X-Owner": "kept", "X-Team": "{env:GW_TEAM}"}}}
-# the owner's config holds more than the provider: none of it may reach an onboarding run (B10)
-OWNER_OPENCODE = {"provider": {"litellm": GATEWAY_BLOCK, "other": {"options": {"apiKey": "{env:OTHER}"}}},
+# the owner's OpenCode config is never read for onboarding (round 6): a provider of the same id pointing elsewhere,
+# headers, literal secrets, and everything else in it must stay out of the run (B10-B14, M7, M8)
+OWNER_BLOCK = {"npm": "@ai-sdk/openai", "api": "https://api.openai.com/v1", "name": "Owner's",
+               "models": {"code": {"options": {"apiKey": "sk-model-literal"}}},
+               "options": {"baseURL": "http://{env:GW_HOST}/v1", "apiKey": "{env:LITELLM_API_KEY}",
+                           "headers": {"Authorization": "Bearer sk-header-literal"}}}
+OWNER_OPENCODE = {"provider": {"litellm": OWNER_BLOCK, "other": {"options": {"apiKey": "{env:OTHER}"}}},
+                  "providers": {"litellm": {"options": {"baseURL": "https://elsewhere.example/v1"}}},
                   "formatter": True, "lsp": True, "mcp": {"x": {"type": "local", "command": ["touch", "/nonexistent"]}},
                   "plugin": ["some-plugin"], "permission": {"*": "allow"}, "default_agent": "plan",
                   "instructions": ["~/notes.md"]}
@@ -443,7 +449,7 @@ class OpenCodeOnboardingTests(Case):
         self.e.set_state(agent_steps=steps)
         self.owner_config(OWNER_OPENCODE)
         self.e.env["LITELLM_API_KEY"] = GATEWAY_KEY
-        self.e.env["GW_TEAM"] = "team-a"
+        self.e.env["GW_HOST"] = "elsewhere.example"
 
     def owner_config(self, conf):
         """The owner's own OpenCode config (~/.config/opencode/opencode.json under the test HOME)."""
@@ -516,15 +522,17 @@ class OpenCodeOnboardingTests(Case):
                 self.assertEqual(sorted(conf), ["agents", "autoupdate", "formatter", "instructions", "lsp", "mcp",
                                                 "provider", "share"])
                 self.assertEqual((conf["formatter"], conf["lsp"], conf["mcp"], conf["instructions"]), (False, False, {}, []))
+                # written fresh from --gateway-url and --gateway-key-env: nothing of the owner's OpenCode config
                 self.assertEqual(conf["provider"], {"litellm": {
-                    "npm": "@ai-sdk/openai-compatible", "name": "LiteLLM", "models": {"code": {}, "deep": {}},
-                    "options": {"baseURL": "http://127.0.0.1:4000/v1", "apiKey": "{env:LITELLM_API_KEY}",
-                                "headers": {"X-Owner": "kept", "X-Team": "{env:GW_TEAM}"}}}})
+                    "npm": "@ai-sdk/openai-compatible", "name": "litellm", "models": {r["model"].split("/", 1)[1]: {}},
+                    "options": {"baseURL": GATEWAY_URL, "apiKey": "{env:LITELLM_API_KEY}"}}})
+                for owner in ("sk-model-literal", "sk-header-literal", "api.openai.com", "elsewhere", "GW_HOST"):
+                    self.assertNotIn(owner, r["config"])
                 self.assertIsNone(r["env"]["OPENCODE_CONFIG"])
                 self.assertIsNone(r["env"]["OPENCODE_CONFIG_CONTENT"])
                 # nothing else of this environment: no marker, no owner OPENCODE_*, no other secret
                 allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
-                           "LITELLM_API_KEY", "GW_TEAM", "OPENCODE_DISABLE_PROJECT_CONFIG",
+                           "LITELLM_API_KEY", "OPENCODE_DISABLE_PROJECT_CONFIG",
                            "OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_AUTOUPDATE", "OPENCODE_DISABLE_MODELS_FETCH",
                            "PWD", "SHLVL", "_"}
                 extra = [k for k in r["env_keys"] if k not in allowed and not re.fullmatch(r"LANG|LC_\w+|TZ", k)]
@@ -677,7 +685,7 @@ class OpenCodeOnboardingTests(Case):
                 self.opencode_agents({"sonnet": [{"write": {ADDITION: "x\n", **write}}], OC_REVIEWER: [PASS]},
                                      claude=True)
                 status = self.setup("--adapter", "claude/sonnet", "--adapt-reviewer", f"opencode/{OC_REVIEWER}",
-                                    "--no-start")
+                                    "--no-start", *GATEWAY_FLAGS)
                 self.assertEqual(status, 1)
                 self.assertIn("which an onboarding agent must never write: a git command in there could run a "
                               "command its config names", self.err)
@@ -856,71 +864,59 @@ class OpenCodeOnboardingTests(Case):
         self.assertIn(f"the OpenCode reviewer changed {ADDITION} in its copy", self.err)
         self.assertEqual((self.repo / ADDITION).read_text(), WRITE_NATIVE["write"][ADDITION])
 
-    def test_the_provider_block_must_name_its_key_by_variable(self):
-        # B10: the run gets only the adapter's provider block; a key only in OpenCode's auth store is never read
-        cases = (
-            ({"provider": {}}, "OpenCode's config has no provider 'litellm' for the onboarding agent"),
-            ({"provider": {"litellm": {**GATEWAY_BLOCK, "options": {"baseURL": "http://127.0.0.1:4000/v1"}}}},
-             "provider 'litellm' has no apiKey, and an OpenCode onboarding run takes the key only from an environment "
-             "variable it names"),
-            ({"provider": {"litellm": {**GATEWAY_BLOCK, "options": {"baseURL": "http://127.0.0.1:4000/v1",
-                                                                     "apiKey": "sk-literal"}}}},
-             "provider 'litellm' has its apiKey written in the config"),
-        )
-        for conf, said in cases:
-            with self.subTest(said=said[:40]):
-                self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
-                self.owner_config(conf)
-                self.assertEqual(self.setup(*ALL_OPENCODE), 1)
-                self.assertIn(said, self.err)
-                self.assertNotIn("sk-literal", self.err)
-                self.assertEqual(self.e.agent_runs(), [])
+    def test_an_opencode_onboarding_agent_needs_the_gateway_given_explicitly(self):
+        # round 6: no OpenCode config is read; the gateway comes from --gateway-url alone, refused before any agent
         self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+        no_gateway = [x for x in ALL_OPENCODE if x not in GATEWAY_FLAGS]
+        self.assertEqual(self.setup(*no_gateway), 1)
+        self.assertIn("no --gateway-url: an OpenCode onboarding agent (litellm/code) reaches its gateway only by the URL "
+                      "given to project-setup", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
+        for url, said in (("http://{env:GW_HOST}/v1", "must be a complete http(s) URL written out"),
+                          ("https:///v1", "must be a complete http(s) URL written out"),
+                          ("ftp://gw.example/v1", "must be a complete http(s) URL written out"),
+                          ("http://user:pw@gw.example/v1", "must not carry a user or password"),
+                          ("https://api.openai.com/v1", "is a vendor's public API"),
+                          ("https://x.openai.azure.com/openai", "is a vendor's public API"),
+                          ("https://api.anthropic.com", "is a vendor's public API")):
+            with self.subTest(url=url):
+                r = self.e.run(str(self.repo), *no_gateway, "--gateway-url", url, adapt=True)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn(said, r.stderr)
+        r = self.e.run(str(self.repo), *no_gateway, "--gateway-url", GATEWAY_URL, "--gateway-key-env", "A-B", adapt=True)
+        self.assertIn("takes the NAME of an environment variable", r.stderr)
         self.e.env.pop("LITELLM_API_KEY")
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
-        self.assertIn("the environment variable LITELLM_API_KEY (provider 'litellm' in", self.err)
+        self.assertIn("the gateway key's environment variable LITELLM_API_KEY (--gateway-key-env) is not set", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
 
-    def test_the_run_never_goes_without_the_gateways_url(self):
-        # B11: with no URL written out, an SDK would send the prompt and the key to its vendor's own address
-        npm = {"npm": "@ai-sdk/openai", "models": {"code": {}, "deep": {}}}
-        key = {"apiKey": "{env:LITELLM_API_KEY}"}
-        refused = (
-            ({"provider": {"litellm": {**npm, "options": key}}}, None, "names no URL (options.baseURL or api)"),
-            ({"provider": {"litellm": {**npm, "options": {**key, "baseURL": "{env:GW_URL}"}}}}, None,
-             "has options.baseURL '{env:GW_URL}' and GW_URL is not set"),
-            ({"provider": {"litellm": {**npm, "options": {**key, "baseURL": "api.example"}}}}, None,
-             "needs the gateway's http(s) URL"),
-            ({"provider": {"litellm": {**npm, "api": "http://127.0.0.1:4000/v1",
-                                       "options": {**key, "baseURL": "http://127.0.0.1:5000/v1"}}}}, None,
-             "names two different URLs"),
-        )
-        for conf, content, said in refused:
-            with self.subTest(said=said):
-                self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
-                self.owner_config(conf)
-                self.assertEqual(self.setup(*ALL_OPENCODE), 1)
-                self.assertIn(said, self.err)
-                self.assertEqual(self.e.agent_runs(), [])  # before any run, so before any key is in an environment
-        taken = (  # m20 and B11's shapes, each with its URL written out in the run's block
-            ({"provider": {"litellm": {**npm, "api": "http://127.0.0.1:4000/v1", "options": key}}}, None, {}),
-            ({"provider": {"litellm": {**npm, "options": {**key, "baseURL": "{env:GW_URL}"}}}}, None,
-             {"GW_URL": "http://127.0.0.1:4000/v1"}),
-            # split across sources: the URL in the file, the rest repeated in OPENCODE_CONFIG_CONTENT
-            ({"provider": {"litellm": {"options": {"baseURL": "http://127.0.0.1:4000/v1"}}}},
-             {"provider": {"litellm": {**npm, "options": key}}}, {}),
-        )
-        for conf, content, extra in taken:
-            with self.subTest(conf=json.dumps(conf)[:60]):
-                self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
-                self.owner_config(conf)
-                shutil.rmtree(self.repo / ".lane-control", ignore_errors=True)
-                env = {**extra, **({"OPENCODE_CONFIG_CONTENT": json.dumps(content)} if content else {})}
-                self.assertEqual(self.setup(*ALL_OPENCODE, "--readapt", answer="n", env_extra=env), 3,
-                                 self.err + self.out)
-                block = json.loads(self.e.agent_runs()[-1]["config"])["provider"]["litellm"]
-                self.assertEqual(block["options"]["baseURL"], "http://127.0.0.1:4000/v1")
-                self.assertNotIn("api", block)
-                self.e.log.with_name(self.e.log.name + ".agents").unlink()
+    def test_the_gateway_is_kept_per_project_and_never_its_key(self):
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE, answer="n"), 3, self.err + self.out)
+        self.assertEqual(self.e.settings(self.repo)["gateway"], {"url": GATEWAY_URL, "key_env": "LITELLM_API_KEY"})
+        self.assertNotIn(GATEWAY_KEY, (self.e.store(self.repo) / "settings.json").read_text())
+        self.e.set_state(agent_steps={OC_REVIEWER: [PASS]})
+        self.assertEqual(self.setup("--no-start"), 0, self.err + self.out)  # no flags: the stored gateway and pins
+        conf = json.loads(self.e.agent_runs()[-1]["config"])
+        self.assertEqual(conf["provider"]["litellm"]["options"]["baseURL"], GATEWAY_URL)
+
+    def test_a_vendor_named_provider_id_still_gets_only_the_given_url(self):
+        self.opencode_agents({"openai/gpt": [WRITE_NATIVE], "anthropic/claude": [PASS]})
+        self.assertEqual(self.setup("--adapter", "opencode/openai/gpt", "--adapt-reviewer", "opencode/anthropic/claude",
+                                    "--no-start", *GATEWAY_FLAGS), 0, self.err + self.out)
+        for r, pid in zip(self.e.agent_runs(), ("openai", "anthropic")):
+            block = json.loads(r["config"])["provider"]
+            self.assertEqual(list(block), [pid])
+            self.assertEqual((block[pid]["npm"], block[pid]["options"]["baseURL"]),
+                             ("@ai-sdk/openai-compatible", GATEWAY_URL))
+
+    def test_a_bad_opencode_reviewer_stops_before_the_claude_adapter_runs(self):
+        # m22: each OpenCode role is checked before any agent starts
+        self.opencode_agents({"sonnet": [WRITE_NATIVE]}, claude=True)
+        self.assertEqual(self.setup("--adapter", "claude/sonnet", "--adapt-reviewer", f"opencode/{OC_REVIEWER}",
+                                    "--no-start"), 1)
+        self.assertIn("no --gateway-url", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
 
     def test_a_system_config_folder_stops_an_opencode_run(self):
         # M6: OpenCode loads its system folder whatever HOME is, with no switch to keep it out
@@ -933,26 +929,24 @@ class OpenCodeOnboardingTests(Case):
         self.assertEqual(self.e.agent_runs(), [])
 
     def test_the_owners_questions_are_printed_without_control_characters(self):
-        # m18: the adapter's open questions (and any text left for the coordinator) go to the screen plain
-        q = "## Open questions\n- Which branch\x1b[8m hides the list\x1b]52;c;eA==\x07?\n"
+        # m18, m21: the adapter's open questions go to the screen plain, and so does the text left for the
+        # coordinator at the end (LEFTOVER, printed when no coordinator starts in this run)
+        q = ("## AGENTS.md edits you would make\n\n## Questions for the owner\n"
+             "- Which branch\x1b[8m hides the list\x1b]52;c;eA==\x07?\n")
         self.opencode_agents({OC_ADAPTER: [{**WRITE_NATIVE, "write": {**WRITE_NATIVE["write"],
                                                                       ".lane-control/SUGGESTIONS.md": q}}],
                               OC_REVIEWER: [PASS]})
-        self.setup(*ALL_OPENCODE, answer="")
-        self.assertIn("Which branch", self.out)
-        self.assertNotIn("\x1b", self.out + self.err)
-
-    def test_a_provider_in_the_owners_config_content_is_found_and_the_rest_left_out(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
-        self.owner_config({})
-        owner = {"provider": {"litellm": GATEWAY_BLOCK}, "formatter": True,
-                 "agents": {"lane-onboard": {"permission": {"*": "allow"}}}}
-        self.assertEqual(self.setup(*ALL_OPENCODE, env_extra={"OPENCODE_CONFIG_CONTENT": json.dumps(owner)}), 0,
-                         self.err + self.out)
-        conf = json.loads(self.e.agent_runs()[0]["config"])
-        self.assertEqual(conf["formatter"], False)
-        self.assertEqual(list(conf["provider"]), ["litellm"])
-        self.assertNotIn("lane-onboard", conf["agents"])
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
+                mock.patch("builtins.input", side_effect=["", "y", "n", "n"]), \
+                contextlib.redirect_stdout(Tty()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            m.main([str(self.repo), *ALL_OPENCODE])
+        out, err = out.getvalue(), err.getvalue()
+        self.assertIn("Questions the adapting agent could not settle", out)  # the question was asked
+        self.assertIn("1. - Which branch[8m hides the list]52;c;eA==?", out)  # its ESC and BEL bytes gone
+        self.assertIn("Left open at the commit", err)  # LEFTOVER: printed, since no coordinator started
+        self.assertIn("Which branch", err)
+        self.assertNotIn("\x1b", out + err)
 
     def test_an_empty_opencode_run_is_a_failure_with_what_it_said(self):
         # m2: exit 0 with no answer and no tool call (a help print, an empty answer) is no result
@@ -1016,7 +1010,7 @@ class OpenCodeOnboardingTests(Case):
 
     def test_mixed_harnesses_each_run_their_own(self):
         self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], "opus": [PASS]}, claude=True)
-        self.assertEqual(self.setup("--adapter", f"opencode/{OC_ADAPTER}", "--no-start"), 0, self.err + self.out)
+        self.assertEqual(self.setup("--adapter", f"opencode/{OC_ADAPTER}", "--no-start", *GATEWAY_FLAGS), 0, self.err + self.out)
         self.assertEqual([(r["tool"], r["model"]) for r in self.e.agent_runs()],
                          [("opencode2", OC_ADAPTER), ("claude", "opus")])
 
@@ -1152,9 +1146,11 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
             "permission": {"*": "allow"}, "default_agent": "plan", "formatter": True, "lsp": True,  # B10
             "mcp": {"y": {"type": "local", "command": ["touch", str(self.t / "owner-mcp-ran")]}},
             "instructions": [str(self.t / "owner-instr.md")],
-            "provider": {"lanetest": {"npm": "@ai-sdk/openai-compatible", "name": "lanetest", "models": {"m": {}},
-                                      "options": {"baseURL": f"http://127.0.0.1:{port}/v1",
-                                                  "apiKey": "{env:LANETEST_KEY}"}}}}))
+            # the owner's own block for the same provider id points elsewhere: never read for onboarding
+            "provider": {"lanetest": {"npm": "@ai-sdk/openai", "api": "https://api.openai.com/v1",
+                                      "options": {"baseURL": "https://elsewhere.example/v1", "apiKey": "sk-literal"}}}}))
+        self.m.GATEWAY.clear()
+        self.m.GATEWAY.update(url=f"http://127.0.0.1:{port}/v1", key_env="LANETEST_KEY")
         (self.t / "config" / "opencode" / "plugins").mkdir(exist_ok=True)  # an owner plugin, never loaded
         (self.t / "config" / "opencode" / "plugins" / "o.js").write_text(
             f'import fs from "fs"\nfs.writeFileSync({json.dumps(str(self.t / "owner-plugin-ran"))}, "x")\n'
@@ -1186,10 +1182,9 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
             self.assertFalse((self.t / ran).exists(), ran)
         return (str(results[-1]) if results else ""), text
 
-    def gateway_run(self, block: dict, content: "dict | None" = None):
-        """One adapter run with the owner's provider given as `block` (and `content` as OPENCODE_CONFIG_CONTENT), the
-        local fake model as the gateway; returns (requests the gateway got, what the proxy saw). The run may fail (the
-        fake speaks chat completions only); what matters is where it went."""
+    def gateway_run(self, model: str):
+        """One reviewer run for `model` (opencode/<provider>/<model> without the opencode/) against the local fake as
+        the given gateway; returns (requests the gateway got, what the proxy saw)."""
         log = self.t / "gateway.jsonl"
         log.write_text("")
         fake = subprocess.Popen([sys.executable, str(ROOT / "tests" / "stubs" / "fake_tool_llm.py"), str(log)],
@@ -1197,36 +1192,27 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         self.addCleanup(fake.stdout.close)
         self.addCleanup(fake.wait, 15)
         self.addCleanup(fake.terminate)
-        url = f"http://127.0.0.1:{int(fake.stdout.readline())}/v1"
-        fill = lambda x: json.loads(json.dumps(x).replace("GATEWAY", url))
-        (self.t / "config" / "opencode" / "opencode.json").write_text(json.dumps({"provider": {"gw": fill(block)}}))
+        port = int(fake.stdout.readline())
+        self.m.GATEWAY.clear()
+        self.m.GATEWAY.update(url=f"http://127.0.0.1:{port}/v1", key_env="GW_KEY")
         env = {"PATH": os.environ["PATH"], "HOME": str(self.t / "home"), "XDG_CONFIG_HOME": str(self.t / "config"),
-               "GW_KEY": "dummy-gateway-key", "TMPDIR": str(self.t), **self.proxy_env,
-               **({"OPENCODE_CONFIG_CONTENT": json.dumps({"provider": {"gw": fill(content)}})} if content else {})}
+               "GW_KEY": "dummy-gateway-key", "TMPDIR": str(self.t), **self.proxy_env}
         self.proxy_log.write_text("")
         with mock.patch.dict(os.environ, env, clear=True):
-            self.m.run_opencode(self.repo, "gw/m", "RUN-TOOL check", False)
+            self.m.run_opencode(self.repo, model, "RUN-TOOL check", False)
         return log.read_text().count("\n"), self.proxy_log.read_text()
 
-    def test_the_gateway_gets_every_request_whatever_the_provider_shape(self):
-        # B11: the URL in `api`, or split from the rest across config sources, with SDKs whose default is a vendor
-        key = {"apiKey": "{env:GW_KEY}"}
-        for name, block, content in (
-                ("openai, api field", {"npm": "@ai-sdk/openai", "api": "GATEWAY", "models": {"m": {}},
-                                       "options": key}, None),
-                ("anthropic, api field", {"npm": "@ai-sdk/anthropic", "api": "GATEWAY", "models": {"m": {}},
-                                          "options": key}, None),
-                ("openai, split", {"options": {"baseURL": "GATEWAY"}},
-                 {"npm": "@ai-sdk/openai", "models": {"m": {}}, "options": key}),
-                ("openai-compatible, plain", {"npm": "@ai-sdk/openai-compatible", "models": {"m": {}},
-                                              "options": {**key, "baseURL": "GATEWAY"}}, None)):
-            with self.subTest(name):
-                got, past = self.gateway_run(block, content)
-                self.assertEqual(past, "", f"{name}: a request went past the gateway")
-                self.assertGreater(got, 0, f"{name}: the gateway got nothing")
-        with self.assertRaisesRegex(self.m.Fail, "names no URL"):  # no URL: refused, nothing sent anywhere
-            self.gateway_run({"npm": "@ai-sdk/openai", "models": {"m": {}}, "options": key})
-        self.assertEqual(self.proxy_log.read_text(), "")
+    def test_only_the_given_gateway_is_contacted_whatever_the_provider_id(self):
+        # round 6: the run's config is written from --gateway-url alone; a vendor-named provider id (whose built-in
+        # SDK default is the vendor's API) and the owner's own block for it (pointing elsewhere) change nothing
+        (self.t / "config" / "opencode" / "opencode.json").write_text(json.dumps({"provider": {
+            "openai": {"npm": "@ai-sdk/openai", "options": {"baseURL": "https://api.openai.com/v1"}},
+            "anthropic": {"npm": "@ai-sdk/anthropic", "api": "https://api.anthropic.com/v1"}}}))
+        for model in ("openai/gpt-x", "anthropic/claude-x", "litellm/code"):
+            with self.subTest(model=model):
+                got, past = self.gateway_run(model)
+                self.assertEqual(past, "", f"{model}: a request went past the given gateway")
+                self.assertGreater(got, 0, f"{model}: the gateway got nothing")
 
     def test_reads_the_repo(self):
         got, text = self.call("read", {"path": "AGENTS.md"}, write=False)
