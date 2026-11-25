@@ -153,8 +153,8 @@ def proof_on(ctx, env, role, tag):
                    "(git init -q && git commit -q --allow-empty -m proof)); rm -f ~/tmp/proof-" + tag)
     src = "desktop" if role != "desktop" else "box"
     cli = "orca-ide" if src == "desktop" else "~/.orca/cli/bin/orca"
-    run(ctx, src, f"{cli} repo add --environment {env} --path /home/lc/code/proof-{tag} --json >/dev/null")
-    run(ctx, src, f"{cli} terminal create --environment {env} --worktree path:/home/lc/code/proof-{tag} "
+    run(ctx, src, f"{cli} repo add --environment {env} --path /home/u/code/proof-{tag} --json >/dev/null")
+    run(ctx, src, f"{cli} terminal create --environment {env} --worktree path:/home/u/code/proof-{tag} "
                   f"--title proof-{tag} --command 'hostname > ~/tmp/proof-{tag}' --json >/dev/null")
     for _ in range(30):
         seen = run(ctx, role, f"cat ~/tmp/proof-{tag} 2>/dev/null", check=False).stdout.strip()

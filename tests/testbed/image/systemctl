@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-HOME = Path(os.environ.get("HOME", "/home/lc"))
+HOME = Path(os.environ.get("HOME") or Path.home())
 UNITS = HOME / ".config" / "systemd" / "user"
 STATE = HOME / ".local" / "state" / "testbed-systemd"
 MAX_RESTART = float(os.environ.get("TESTBED_MAX_RESTART_SEC", "5"))

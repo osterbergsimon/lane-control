@@ -2,15 +2,18 @@
 """lane-control's testbed: three throwaway, unprivileged containers on a private network, to test lane-control end to
 end (tests/testbed/README.md). Opt-in only: never part of the unit suite or CI.
 
-  tests/testbed/run up                  build the image (through lane-heavy) and start desktop, jump and box
+  tests/testbed/run doctor              check what the testbed needs here, and say what is missing
+  tests/testbed/run up [--orca-from DIR|local]  build the image (through lane-heavy) and start desktop, jump and box
   tests/testbed/run scenario <name>|all run scenarios and print a pass/fail table (exit 1 when one fails)
   tests/testbed/run status              what runs, and the last result of each scenario
   tests/testbed/run down                remove every container, network, volume and image tag it made, nothing else
   tests/testbed/run list                the scenarios, in order
 
-Env: TESTBED_WORK (its state and build context; default $TMPDIR/lane-control-testbed-<uid>), TESTBED_ORCA (the Orca
-app's resources folder to copy; default the one `orca-ide` on PATH resolves to), TESTBED_ORCA_VERSION (the pinned Orca
-version, default 1.4.268: up refuses another), TESTBED_BD and TESTBED_OPENCODE (binaries copied into the image;
+Orca: by default the pinned official server release (orca-pin.json: version, URL, sha256 checked before use);
+--orca-from DIR an Orca app's resources folder, its orcad-template or an unpacked server release; --orca-from local the
+build `orca-ide` on PATH resolves to. Env: TESTBED_ENGINE (docker or podman; default docker if installed, else
+podman), TESTBED_WORK (its state, downloads and build context; default $TMPDIR/lane-control-testbed-<uid>),
+TESTBED_ORCA (the same as --orca-from), TESTBED_ORCA_VERSION (to test another Orca than the pin on purpose), TESTBED_BD and TESTBED_OPENCODE (binaries copied into the image;
 default the ones on PATH), TESTBED_REAL_MODEL=1 (opt-in, off by default and reserved: no scenario uses a real model
 yet; one would need the owner's sign-in in the container, and CI never sets it). Nothing of the owner's (HOME, ~/.config,
 ~/.ssh, ~/.orca, the docker socket) is mounted into a container; every container runs as a normal user with every
@@ -32,7 +35,8 @@ PREFIX = "lc-testbed"
 NET = f"{PREFIX}-net"
 VOLUME = f"{PREFIX}-forge"
 ROLES = ("desktop", "jump", "box")
-PIN = os.environ.get("TESTBED_ORCA_VERSION", "1.4.268")
+PIN = os.environ.get("TESTBED_ORCA_VERSION") or json.loads((HERE / "orca-pin.json").read_text())["version"]
+ENGINE = os.environ.get("TESTBED_ENGINE") or ("docker" if shutil.which("docker") or not shutil.which("podman") else "podman")
 IMAGE = f"{PREFIX}:orca-{PIN}"
 BASE_IMAGE = f"{PREFIX}:base-orca-{PIN}"
 WORK = Path(os.environ.get("TESTBED_WORK") or Path(tempfile.gettempdir()) / f"lane-control-testbed-{os.getuid()}")
@@ -52,12 +56,13 @@ def sh(*cmd, check=True, capture=True, input=None, timeout=None):
 
 
 def docker(*args, **kw):
-    return sh("docker", *args, **kw)
+    """The container engine (TESTBED_ENGINE: docker, or rootless podman, which takes the same commands here)."""
+    return sh(ENGINE, *args, **kw)
 
 
-def ex(role, script, check=True, timeout=600, input=None, user="lc"):
+def ex(role, script, check=True, timeout=600, input=None, user="u"):
     """Run a bash script in a container as its normal user, in a login-like environment."""
-    return docker("exec", "-i", "-u", user, "-w", "/home/lc", "-e", "HOME=/home/lc", name(role), "bash", "-c",
+    return docker("exec", "-i", "-u", user, "-w", "/home/u/", name(role), "bash", "-c",
                   "set -o pipefail; " + script, check=check, timeout=timeout, input=input)
 
 
@@ -75,68 +80,128 @@ def save(st):
 
 # --- up ----------------------------------------------------------------------------------------------------------------
 
-def orca_resources():
-    if os.environ.get("TESTBED_ORCA"):
-        return Path(os.environ["TESTBED_ORCA"])
-    cli = shutil.which("orca-ide")
-    if not cli:
-        raise SystemExit("testbed: orca-ide is not on PATH; set TESTBED_ORCA to an Orca app's resources folder")
-    return Path(os.path.realpath(cli)).parents[1]
+PINFILE = HERE / "orca-pin.json"
 
 
-def stage_orca(res: Path, ctx: Path):
-    """Copy (never mount) the Orca build: its node runtime and an orcad slot assembled from its orcad-template (the
-    common files, the linux-x64-glibc target, the packaged ripgrep), as the canary did (docs/research/2026-11-21)."""
-    app = json.loads((res / "app.asar.unpacked" / "out" / "package.json").read_text()).get("version")
-    if app != PIN:
-        raise SystemExit(f"testbed: the Orca at {res} is {app}, the testbed is pinned to {PIN}; set "
-                         f"TESTBED_ORCA_VERSION={app} to test that one on purpose")
-    tpl = res / "orcad-template"
-    meta = json.loads((tpl / "orcad-template.json").read_text())
-    target = meta["targets"]["linux-x64-glibc"]
-    node = res / "node-runtime" / "bin" / "node"
-    nodesha = sh("sha256sum", str(node)).stdout.split()[0]
-    # A provisional name: the image build renames the slot to the content digest orcad computes for it (Dockerfile).
-    ver = "0.1.0+000000000000"
+def pin():
+    return json.loads(PINFILE.read_text())
+
+
+def fetch_pinned():
+    """The pinned official Orca server release (orca-pin.json), downloaded once into TESTBED_WORK/downloads and
+    checked against the pinned sha256 before it is unpacked or used; a mismatch is deleted and refused."""
+    p = pin()
+    dl = WORK / "downloads"
+    dl.mkdir(parents=True, exist_ok=True)
+    tar = dl / p["url"].rsplit("/", 1)[-1]
+    if not tar.exists():
+        import urllib.request
+        print(f"testbed: downloading Orca {p['version']} ({p['url']})", file=sys.stderr)
+        tmp = tar.with_suffix(".part")
+        with urllib.request.urlopen(p["url"], timeout=300) as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f)
+        tmp.replace(tar)
+    import hashlib
+    h = hashlib.sha256()
+    with open(tar, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest() != p["sha256"]:
+        tar.unlink()
+        raise SystemExit(f"testbed: {tar.name} does not have the pinned sha256 ({h.hexdigest()} != {p['sha256']}): "
+                         "deleted, nothing used")
+    out = dl / f"orca-server-{p['version']}"
+    if not (out / ".unpacked").exists():
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir()
+        sh("tar", "-xzf", str(tar), "-C", str(out), "--strip-components=1", "--no-same-owner")
+        (out / ".unpacked").write_text(p["sha256"] + "\n")
+    return out
+
+
+def orca_source(arg):
+    """Where the Orca build comes from: `--orca-from DIR` (an Orca app's resources folder, its orcad-template, or an
+    unpacked official server release), `--orca-from local` (the build `orca-ide` on PATH resolves to), TESTBED_ORCA
+    (the same as --orca-from), else the pinned official release (orca-pin.json)."""
+    arg = arg or os.environ.get("TESTBED_ORCA")
+    if not arg:
+        return fetch_pinned()
+    if arg == "local":
+        cli = shutil.which("orca-ide")
+        if not cli:
+            raise SystemExit("testbed: --orca-from local: orca-ide is not on PATH")
+        return Path(os.path.realpath(cli)).parents[1]
+    d = Path(arg).expanduser().resolve()
+    if not d.is_dir():
+        raise SystemExit(f"testbed: --orca-from {arg} is not a folder")
+    return d
+
+
+def copy_tree(src: Path, dst: Path):
+    shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+    sh("chmod", "-R", "u+w", str(dst))  # a store's or a tar's copies may be read-only
+
+
+def stage_orca(src: Path, ctx: Path):
+    """Copy (never mount) an Orca build into the build context: an orcad slot and its node. From an unpacked server
+    release the slot is its orcad/ folder; from an app (its resources folder, or orcad-template itself) the slot is
+    assembled from orcad-template (the common files, the linux-x64-glibc target, the packaged ripgrep), as the canary
+    did (docs/research/2026-11-21-orca-newer.md). Either way `up` then names it by the digest the slot reports."""
+    want = os.environ.get("TESTBED_ORCA_VERSION") or pin()["version"]
     o = ctx / "orca"
+    ver = "0.1.0+000000000000"  # provisional: up renames the slot to its own content digest
     slot = o / "artifacts" / "linux-x64-glibc" / ver
-    slot.mkdir(parents=True)
-    for item in tpl.iterdir():
-        if item.name in ("targets", "orcad-template.json"):
-            continue
-        dst = slot / item.name
-        (shutil.copytree(item, dst, symlinks=True) if item.is_dir() else shutil.copy2(item, dst))
-    sh("chmod", "-R", "u+w", str(slot))  # the store's copies are read-only
-    shutil.copytree(tpl / "targets" / "linux-x64-glibc", slot, dirs_exist_ok=True, symlinks=True)
-    sh("chmod", "-R", "u+w", str(slot))
-    (slot / "ripgrep" / "linux-x64").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(res / "ripgrep" / "linux-x64" / "rg", slot / "ripgrep" / "linux-x64" / "rg")
+    slot.parent.mkdir(parents=True)
+    if (src / "orcad" / "orcad.js").exists():  # an unpacked official server release
+        app = json.loads((src / "orcad" / "out" / "package.json").read_text()).get("version")  # the Orca app version
+        copy_tree(src / "orcad", slot)
+        nodesha = (slot / ".runtime-node").read_text().strip()
+        node = src / "runtimes" / f"node-{nodesha}" / "bin" / "node"
+        kind = "official server release"
+    else:
+        res = src.parent if src.name == "orcad-template" else src
+        tpl = res / "orcad-template"
+        if not (tpl / "orcad-template.json").exists():
+            raise SystemExit(f"testbed: {src} is not an Orca app's resources folder, its orcad-template or an unpacked "
+                             "server release (orca-server-<version>-linux-x64)")
+        pkg = res / "app.asar.unpacked" / "out" / "package.json"
+        app = json.loads((pkg if pkg.exists() else tpl / "out" / "package.json").read_text()).get("version")
+        node = res / "node-runtime" / "bin" / "node"
+        nodesha = sh("sha256sum", str(node)).stdout.split()[0]
+        slot.mkdir()
+        for item in tpl.iterdir():
+            if item.name not in ("targets", "orcad-template.json"):
+                (copy_tree(item, slot / item.name) if item.is_dir() else shutil.copy2(item, slot / item.name))
+        copy_tree(tpl / "targets" / "linux-x64-glibc", slot)
+        (slot / "ripgrep" / "linux-x64").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(res / "ripgrep" / "linux-x64" / "rg", slot / "ripgrep" / "linux-x64" / "rg")
+        (slot / ".runtime-node").write_text(nodesha + "\n")
+        (slot / ".server-target").write_text("linux-x64-glibc\n")
+        kind = "Orca app"
+    if app != want:
+        raise SystemExit(f"testbed: the Orca at {src} is {app}, the testbed is pinned to {want} (orca-pin.json); set "
+                         f"TESTBED_ORCA_VERSION={app} to test that one on purpose")
+    if not node.exists() or sh("sha256sum", str(node)).stdout.split()[0] != nodesha:
+        raise SystemExit(f"testbed: no node with the slot's sha {nodesha[:12]} at {node}")
     (slot / ".version").write_text(ver + "\n")
-    (slot / ".runtime-node").write_text(nodesha + "\n")
-    (slot / ".server-target").write_text("linux-x64-glibc\n")
-    missing = [f for f in target["files"] if not (slot / f).exists() and not f.startswith(".")]
-    if missing:
-        print(f"testbed: note: the slot lacks {', '.join(missing)} (not in this build's orcad-template)", file=sys.stderr)
     (o / "resources" / "node-runtime" / "bin").mkdir(parents=True)
     shutil.copy2(node, o / "resources" / "node-runtime" / "bin" / "node")
-    sh("chmod", "-R", "u+w", str(o))
     (o / "resources" / "bin").mkdir(parents=True)
     # orca-ide in a container is the CLI launcher the local orcad writes (~/.orca/cli/bin/orca), as on a box.
     (o / "resources" / "bin" / "orca-ide").write_text(
         '#!/bin/sh\n# testbed: the Orca CLI of the Orca server this container runs (written by orcad when it starts)\n'
         'cli="$HOME/.orca/cli/bin/orca"\n[ -x "$cli" ] || { echo "orca-ide (testbed): no Orca server has run here '
         'yet ($cli missing)" >&2; exit 127; }\nexec "$cli" "$@"\n')
+    sh("chmod", "-R", "u+w,a+rX", str(o))
     (o / "resources" / "bin" / "orca-ide").chmod(0o755)
-    for p in o.rglob("*"):
-        if p.is_file() and not p.is_symlink():
-            p.chmod(p.stat().st_mode | 0o644)
     (o / "VERSION").write_text(ver + "\n")
-    (o / "APP_VERSION").write_text(app + "\n")
-    (o / "SOURCE").write_text(f"orca app {app}, node {nodesha[:12]}, slot {ver}\n")
-    return ver, app
+    (o / "APP_VERSION").write_text(f"{app}\n")
+    (o / "SOURCE").write_text(f"{kind} {app}, node {nodesha[:12]}\n")
+    return kind, app
 
 
-def stage(ctx: Path):
+def stage(ctx: Path, orca_from=None):
     if ctx.exists():
         shutil.rmtree(ctx)
     ctx.mkdir(parents=True)
@@ -152,7 +217,8 @@ def stage(ctx: Path):
             raise SystemExit(f"testbed: {tool} not found on PATH; set {var} to a linux-x64 glibc binary")
         shutil.copy2(os.path.realpath(src), ctx / "bin" / dest)
     os.symlink("opencode2", ctx / "bin" / "opencode")
-    return stage_orca(orca_resources(), ctx)
+    src = orca_source(orca_from)
+    return src, stage_orca(src, ctx)
 
 
 def heavy(*cmd):
@@ -166,11 +232,17 @@ def exists(kind, n):
     return docker(kind, "inspect", n, check=False).returncode == 0
 
 
-def up(_args):
+def up(args):
+    orca_from = None
+    if args[:1] == ["--orca-from"] and len(args) > 1:
+        orca_from = args[1]
+    elif args:
+        raise SystemExit("testbed: up [--orca-from DIR|local]")
     WORK.mkdir(parents=True, exist_ok=True)
     ctx = WORK / "context"
-    _, app = stage(ctx)
-    heavy("docker", "build", "-q", "--label", LABEL, "--build-arg", f"UID={UID}", "-t", BASE_IMAGE, str(ctx))
+    src, (kind, app) = stage(ctx, orca_from)
+    heavy(ENGINE, "build", "-q", "--label", LABEL, "--build-arg", f"UID={UID}", "--build-arg",
+          f"BASE={pin()['base_image']}", "-t", BASE_IMAGE, str(ctx))
     # orcad takes only a slot named by its content digest; the slot's own profile preflight (it needs a PTY, so in a
     # container, not in a build step) says what that is.
     pre = docker("run", "--rm", "-t", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
@@ -182,10 +254,10 @@ def up(_args):
     if not line:
         raise SystemExit(f"testbed: the orcad slot's preflight did not answer: {pre[-600:]}")
     ver = json.loads(line)["artifactVersion"]
-    heavy("docker", "build", "-q", "--label", LABEL, "--build-arg", f"BASE={BASE_IMAGE}", "--build-arg", f"VER={ver}",
+    heavy(ENGINE, "build", "-q", "--label", LABEL, "--build-arg", f"BASE={BASE_IMAGE}", "--build-arg", f"VER={ver}",
           "-t", IMAGE, "-f", str(ctx / "rename.Dockerfile"), str(ctx / "empty"))
     shutil.rmtree(ctx)
-    print(f"testbed: Orca {app} (orcad slot {ver}) from {orca_resources()}, copied into the image")
+    print(f"testbed: Orca {app} ({kind}, orcad slot {ver}) from {src}, copied into the image")
     if not exists("network", NET):
         docker("network", "create", "--internal", "--label", LABEL, NET)
     if not exists("volume", VOLUME):
@@ -206,7 +278,8 @@ def up(_args):
             raise SystemExit(f"testbed: {role} did not start: {docker('logs', name(role), check=False).stderr[-800:]}")
     wire_ssh()
     copy_lane_control("desktop")
-    st = {"up": time.time(), "orca": app, "slot": ver, "results": state().get("results", {})}
+    st = {"up": time.time(), "orca": app, "slot": ver, "orca_source": f"{kind} {src}", "engine": ENGINE,
+          "results": state().get("results", {})}
     save(st)
     print("testbed: up (desktop, jump, box on network " + NET + ")")
     return 0
@@ -222,9 +295,9 @@ def wire_ssh():
     for role in ROLES:
         hk = ex(role, "cut -d' ' -f1,2 ~/.ssh-host/ssh_host_ed25519_key.pub").stdout.strip()
         known += f"[{role}]:2222 {hk}\n"
-    cfg = ("Host jump box desktop\n  Port 2222\n  User lc\n  IdentityFile ~/.ssh/id_ed25519\n  IdentitiesOnly yes\n"
+    cfg = ("Host jump box desktop\n  Port 2222\n  User u\n  IdentityFile ~/.ssh/id_ed25519\n  IdentitiesOnly yes\n"
            "  StrictHostKeyChecking yes\n  UserKnownHostsFile ~/.ssh/known_hosts\n"
-           "Host box-via-jump\n  HostName box\n  HostKeyAlias [box]:2222\n  Port 2222\n  User lc\n  ProxyJump jump\n"
+           "Host box-via-jump\n  HostName box\n  HostKeyAlias [box]:2222\n  Port 2222\n  User u\n  ProxyJump jump\n"
            "  IdentityFile ~/.ssh/id_ed25519\n  IdentitiesOnly yes\n  StrictHostKeyChecking yes\n")
     for role in ROLES:
         ex(role, "cat > ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts", input=known)
@@ -242,7 +315,7 @@ def copy_lane_control(role, ref=None, dest="lane-control"):
         files = b"\0".join(f for f in files.split(b"\0") if f and (REPO / f.decode()).exists())
         tar = subprocess.run(["tar", "-C", str(REPO), "--null", "-T", "-", "-cf", "-"], input=files,
                              capture_output=True, check=True).stdout
-    subprocess.run(["docker", "exec", "-i", "-u", "lc", name(role), "sh", "-c",
+    subprocess.run([ENGINE, "exec", "-i", "-u", "u", name(role), "sh", "-c",
                     f"rm -rf ~/{dest} && mkdir -p ~/{dest} && tar -C ~/{dest} -xf -"], input=tar, check=True, capture_output=True)
 
 
@@ -252,8 +325,8 @@ def labelled(kind):
     if kind == "container":
         return docker("ps", "-aq", "--filter", f"label={LABEL}").stdout.split()
     if kind == "image":
-        return [l for l in docker("images", "--filter", f"label={LABEL}", "--format", "{{.Repository}}:{{.Tag}}").stdout.split()
-                if l.startswith(PREFIX + ":")]
+        rows = docker("images", "--filter", f"label={LABEL}", "--format", "{{.Repository}}:{{.Tag}}").stdout.split()
+        return [l for l in rows if l.removeprefix("localhost/").startswith(PREFIX + ":")]  # podman says localhost/
     return docker(kind, "ls", "-q", "--filter", f"label={LABEL}").stdout.split()
 
 
@@ -334,16 +407,74 @@ def listing(_args):
     return 0
 
 
+def version_of(cmd, rx):
+    import re
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(rx, out.stdout + out.stderr)
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def doctor(_args):
+    """What the testbed needs, each line ok or missing with how to fix it. Exit 1 when something is missing."""
+    rows = []
+
+    def row(ok, what, fix=""):
+        rows.append(ok)
+        print(f"{'ok     ' if ok else 'missing'}  {what}{'' if ok else '  -> ' + fix}")
+
+    eng = ENGINE
+    if eng == "docker":
+        v = version_of(["docker", "version", "--format", "{{.Server.Version}}"], r"(\d+)\.(\d+)")
+        row(bool(v and v >= (20, 10)), f"docker 20.10 or newer, its daemon reachable as you (found {v and '.'.join(map(str, v))})",
+            "install docker and let your user reach it, or set TESTBED_ENGINE=podman")
+    else:
+        v = version_of(["podman", "version", "--format", "{{.Client.Version}}"], r"(\d+)\.(\d+)")
+        row(bool(v and v >= (4, 4)), f"podman 4.4 or newer, rootless (found {v and '.'.join(map(str, v))})",
+            "install podman (rootless: subuid/subgid for your user), or set TESTBED_ENGINE=docker")
+    row(sys.version_info >= (3, 9), f"python 3.9 or newer (found {sys.version.split()[0]})", "install python3")
+    for tool in ("git", "tar"):
+        row(shutil.which(tool) is not None, tool, f"install {tool}")
+    for var, tool, why in (("TESTBED_BD", "bd", "beads, bd 1.0.4 or newer (github.com/steveyegge/beads releases)"),
+                           ("TESTBED_OPENCODE", "opencode2", "OpenCode v2 (npm @opencode/cli; opencode2 or opencode)")):
+        src = os.environ.get(var) or shutil.which(tool) or shutil.which(tool.rstrip("2"))
+        ok = bool(src) and "ELF 64-bit" in sh("file", "-L", src, check=False).stdout if src and shutil.which("file") else bool(src)
+        row(ok, f"{why}: a linux-x64 glibc binary ({src or 'none'})", f"install it on PATH, or set {var} to one")
+    p = pin()
+    src = os.environ.get("TESTBED_ORCA")
+    if src:
+        row(Path(src).is_dir(), f"Orca from TESTBED_ORCA={src}", "point it at an Orca app's resources folder, its "
+            "orcad-template or an unpacked server release")
+    else:
+        cached = (WORK / "downloads" / p["url"].rsplit("/", 1)[-1]).exists()
+        row(True, f"Orca {p['version']}: the pinned release ({'downloaded' if cached else 'downloaded by up'}, sha256 "
+                  f"{p['sha256'][:12]}... checked)")
+    free = shutil.disk_usage(WORK if WORK.exists() else WORK.parent).free / 2**30
+    row(free >= 6, f"6 GB free for TESTBED_WORK and the image (found {free:.0f} GB at {WORK.parent})", "free some disk")
+    try:
+        mem = int(next(l for l in open("/proc/meminfo") if l.startswith("MemAvailable")).split()[1]) / 2**20
+        row(mem >= 4, f"4 GB of memory available (found {mem:.1f} GB)", "close something, or expect a slow run")
+    except (OSError, StopIteration, ValueError):
+        row(False, "memory (cannot read /proc/meminfo)", "the testbed runs on Linux")
+    if shutil.which(eng):
+        left = labelled("container")
+        row(True, f"{len(left)} testbed container(s) exist now" + (" (run down for a fresh start)" if left else ""))
+    return 0 if all(rows) else 1
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0 if argv else 2
-    cmds = {"up": up, "down": down, "status": status, "scenario": scenario, "list": listing}
+    cmds = {"up": up, "down": down, "status": status, "scenario": scenario, "list": listing, "doctor": doctor}
     if argv[0] not in cmds:
-        print(f"testbed: unknown command {argv[0]} (up, scenario, status, down, list)", file=sys.stderr)
+        print(f"testbed: unknown command {argv[0]} (doctor, up, scenario, status, down, list)", file=sys.stderr)
         return 2
-    if shutil.which("docker") is None:
-        print("testbed: docker is not installed; nothing was done", file=sys.stderr)
+    if argv[0] != "doctor" and shutil.which(ENGINE) is None:
+        print(f"testbed: {ENGINE} is not installed (TESTBED_ENGINE picks docker or podman); nothing was done. "
+              "tests/testbed/run doctor says what else is missing", file=sys.stderr)
         return 2
     return cmds[argv[0]](argv[1:])
 

@@ -13,20 +13,27 @@ or in CI. It is not `tests/test-orca-host-install.sh` (never run that one: it wi
 | `jump` | sshd only |
 | `box` | sshd, the fake gateway, OpenCode; Orca's server and lane-control arrive the way they do on a real box (`orca-host-install`, the copy in `~/.local/share/lane-control`) |
 
-- Each container runs as a normal user (`lc`) with every capability dropped (`--cap-drop ALL`), `no-new-privileges`,
+- Each container runs as a normal user (`u`) with every capability dropped (`--cap-drop ALL`), `no-new-privileges`,
   on its own `--internal` docker network (no way out, no published ports). Never privileged, never the host network,
   and nothing of yours is mounted: not your HOME, `~/.config`, `~/.ssh`, `~/.orca` or the docker socket.
 - sshd runs as that user on port 2222. Every key is made inside its container when it starts (a host key and a user
   key each); `up` lets the desktop's key into `jump` and `box` and writes their host keys into the desktop's
   `known_hosts`. Your own keys are never used, and the generated ones go with the containers. The desktop's
   `~/.ssh/config` has `box` (direct), `jump` and `box-via-jump` (`ProxyJump jump`).
-- **Orca** is the build you have: `up` copies it, read-only, from the folder `orca-ide` on your PATH resolves to (on
-  NixOS a store path), into the image at build time; nothing is mounted. It assembles an orcad slot from the app's
-  `orcad-template` (the common files, the `linux-x64-glibc` target, the packaged ripgrep) with the app's own Node,
-  asks that slot for its content digest (its profile preflight) and names it by it, since orcad takes no other name.
-  The testbed is **pinned to Orca 1.4.268**; `up` refuses another unless you set `TESTBED_ORCA_VERSION` to it. The
+- **Orca** is pinned to **1.4.268** in `orca-pin.json` (version, download URL, sha256). By default `up` downloads that
+  official server release (`orca-server-linux-x64.tar.gz` from Orca's GitHub releases) once into `TESTBED_WORK`,
+  checks its sha256 against the pin before it unpacks or uses anything (a mismatch is deleted and refused), and copies
+  its `orcad/` slot and Node into the image. `up --orca-from DIR` takes an Orca you have instead: an Orca app's
+  `resources` folder, its `orcad-template`, or an unpacked server release; `--orca-from local` is the app `orca-ide` on
+  your PATH resolves to (on NixOS a store path, read-only). From an app the slot is assembled from `orcad-template`
+  (the common files, the `linux-x64-glibc` target, the packaged ripgrep) with the app's own Node. Either way the slot
+  is asked for its content digest (its profile preflight) and named by it, since orcad takes no other name, and
+  nothing is mounted. `up` refuses an Orca whose version is not the pin unless `TESTBED_ORCA_VERSION` names it.
+  Tested: both the pinned download and `--orca-from local` (the nix-packaged 1.4.268 app) pass `scenario all`. The
   desktop runs that slot as its server; the same slot is in `ORCA_ARTIFACTS` there, so `orca-host-install` puts it on
   the box exactly as it does from a real desktop.
+- **The base image** is pinned by digest (`base_image` in `orca-pin.json`, Python 3.12 on Debian bookworm); its
+  packages (sshd, git, jq, tini) come from Debian at build time.
 - **No systemd** in a container, so a small `systemctl --user` stand-in (`image/systemctl`) runs the user units
   lane-control writes (`orca-tunnel-<host>`, `orcad`, `lane-tunnel@<host>`), with `EnvironmentFile`, `%i` and
   restarts. It exists only in the image.
@@ -55,10 +62,37 @@ or in CI. It is not `tests/test-orca-host-install.sh` (never run that one: it wi
 
 ## Requirements
 
-docker (the testbed was built on 29.8), Orca 1.4.268 installed (`orca-ide` on PATH), `bd` and OpenCode (`opencode2`
-or `opencode`) on PATH as linux-x64 glibc binaries, or `TESTBED_BD` / `TESTBED_OPENCODE` pointing at them; about 2
-GB of disk for the image. The image build runs through `~/.agents/bin/lane-heavy` when it is there. The first build
-fetches Debian packages; after that the containers have no network beyond each other.
+`tests/testbed/run doctor` checks each of these and says what is missing:
+
+- Linux on x86-64 (the image and Orca's slot are linux-x64 glibc); no NixOS assumption.
+- A container engine, picked by `TESTBED_ENGINE` (default docker when installed, else podman): docker 20.10 or newer
+  that your user can reach, or rootless podman 4.4 or newer (with subuid and subgid for your user). Tested with docker
+  29.8; the podman path uses only commands both share, but has not been run yet.
+- Python 3.9 or newer, git and tar on the host.
+- `bd` (beads 1.0.4 or newer) and OpenCode v2 (`opencode2` or `opencode`) as linux-x64 glibc binaries, on PATH or
+  named by `TESTBED_BD` and `TESTBED_OPENCODE`; they are copied into the image.
+- Network once: the Orca download (about 100 MB, unless `--orca-from`), the base image and Debian's packages. After
+  that the containers have no network beyond each other.
+- About 6 GB of disk (the image is about 2 GB, plus the download and the build context) and 4 GB of free memory.
+  A cold `up` takes a few minutes (most of it Debian's packages); `scenario all` takes about a minute and a half.
+- The image build runs through `~/.agents/bin/lane-heavy` when it is there (lane-control's machine-wide gate), and
+  without it otherwise.
+
+## Replicate it elsewhere
+
+From a fresh clone, on a machine with the requirements above:
+
+```sh
+git clone https://github.com/osterbergsimon/lane-control && cd lane-control
+tests/testbed/run doctor && tests/testbed/run up && tests/testbed/run scenario all
+```
+
+That needs no account of yours: the gateway and GitHub are fakes, every ssh key is made inside the containers, and the
+pinned Orca is a public download. Reset with `tests/testbed/run down` (then `up` again); `down` also takes the image,
+so the next `up` rebuilds it (Docker's build cache makes that quick). The downloads stay in `TESTBED_WORK` until you
+delete it. What would need your own accounts, both off by default and not built yet: the real cheap model
+(`TESTBED_REAL_MODEL=1`; your Claude sign-in inside the container) and a real throwaway GitHub repo (a repo you make
+and a `gh` signed in to an account that may write to it).
 
 ## Run
 
@@ -90,9 +124,12 @@ gateway or a plain shell command in an Orca terminal, never a real model.
 | `refresh` | on the box: a second scratch project set up by lane-control `48a38ab` (main before LIT-1, whose lane-tier refuses OpenCode tiers), then `project-setup --refresh` from this checkout | the old setup left an older `~/.agents/bin/lane-tier`; after `--refresh` it and the `native-orca-lanes` skill are this checkout's |
 
 Not built yet (the next slices, in this order): a `worker-start` lane on one host through its report, a stub review,
-the merge on the fake GitHub, release and cleanup (the worker is OpenCode on the fake gateway: its brief carries the
-exact `worker_done` command, so a gateway mode that answers with that command as a tool call makes a full lane at no
-cost); a lane with `--on` across hosts; away-improve (`lane-improve on`, the cap, the summary PR, drained).
+the merge on the fake GitHub, release and cleanup; a lane with `--on` across hosts; away-improve (`lane-improve on`,
+the cap, the summary PR, drained). For the first, the gateway's worker mode is in (a worker brief's steps, then its own
+`worker_done` command, as tool calls) and a probe got this far: on Orca 1.4.268 an OpenCode worker starts only as
+`worker-start --agent opencode --model litellm/chat --worktree path:<a worktree made first>` (`--agent opencode2 --model`
+and `new-child` with `--model` are refused, lc-69b); it started and called the gateway with its key, but did not run
+its tool steps yet, which is where that slice starts.
 
 ## Not covered
 
@@ -107,7 +144,7 @@ Claude, so a Claude-free onboarding runs with `--skip-adapt`).
 
 Add a function to `scenarios.py` with `@scenario("<one line>")`; its name (underscores as dashes) is the scenario's
 name and its place in the file is its place in `all`. It gets a `ctx`: `run(ctx, role, script)` runs bash in a
-container as `lc` (raises `Fail` on a non-zero exit unless `check=False`), `tty(cmd, "REGEX=>reply", ...)` runs a
+container as `u` (raises `Fail` on a non-zero exit unless `check=False`), `tty(cmd, "REGEX=>reply", ...)` runs a
 command on a terminal and answers its questions, `scratch_project(ctx, role, name)` makes a project on the fake GitHub
 and its clone, `ctx.copy_lane_control(role, ref=..., dest=...)` puts lane-control (the worktree, or a commit) into a
 container. Raise `Fail("what went wrong")` for a failed check, `Skip("why")` when what it needs is not there (say

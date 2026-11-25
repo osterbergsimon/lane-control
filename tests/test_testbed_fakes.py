@@ -213,6 +213,20 @@ class FakeGateway(unittest.TestCase):
         self.assertEqual([json.loads(l)["auth"] for l in log.splitlines()][:2], ["missing", "ok"])
 
 
+class TestbedPin(unittest.TestCase):
+    def test_orca_and_the_base_image_are_pinned_in_one_file(self):
+        """Replicable elsewhere (owner 2026-11-25): one pinned Orca release with its sha256, the base image by digest."""
+        import re
+        pin = json.loads((ROOT / "tests" / "testbed" / "orca-pin.json").read_text())
+        self.assertRegex(pin["version"], r"^\d+\.\d+\.\d+$")
+        self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(pin["url"].startswith("https://github.com/") and f"v{pin['version']}/" in pin["url"], pin["url"])
+        self.assertRegex(pin["base_image"], r"@sha256:[0-9a-f]{64}$")
+        docker = (ROOT / "tests" / "testbed" / "image" / "Dockerfile").read_text()
+        self.assertFalse(re.search(r"^FROM (?!\$\{BASE\})", docker, re.M), "a FROM that is not the pinned base")
+        self.assertIn(pin["version"], (ROOT / "tests" / "testbed" / "README.md").read_text())
+
+
 class TestbedIsOptIn(unittest.TestCase):
     def test_the_suite_never_runs_the_testbed(self):
         """The testbed needs docker and is opt-in: no unit test may call tests/testbed/run (owner 2026-11-25)."""
