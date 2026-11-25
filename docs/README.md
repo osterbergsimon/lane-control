@@ -6,6 +6,7 @@ with the first one.
 ## Start here
 
 - [Getting started](getting-started.md): from an empty machine to a first merged lane, step by step. Read it first, and again when you set up a new machine.
+- [How the parts fit](how-it-fits.md): one page on every moving part: who does what, a box and its two tunnels, the automations and budgets. Read it when you are unsure which piece does what.
 - [The README](../README.md): what lane-control is, the layers, the doctrines and the map of files. Read it for the picture.
 
 ## Running projects
@@ -38,7 +39,7 @@ with the first one.
 
 ## Reference and doctrine
 
-- [Core](../core/README.md): what every orchestrator shares, each script and file in `core/`, and the paths kept for live machines. Read it to find a script.
+- [Core](../core/README.md): what every orchestrator shares, the files in `core/`, one line on every script in the repo, and the paths kept for live machines. Read it to find a script.
 - [Reliability log](../core/reliability.md): each failure of a coordinator, its durable fix and how to reuse it. Read it when something goes wrong twice.
 - [Agent rules](../AGENTS.md): the checks and rules for agents that change this repo. Read it before you change anything here.
 

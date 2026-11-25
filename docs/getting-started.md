@@ -15,6 +15,8 @@ gateway. Replace them with yours.
 - A **lane** is a worker agent with one issue, one branch, one PR and its own worktree, on a **tier**.
 - Tiers are roles (swift, standard, deep, top). Each project's tier table says which engine and model fills each one.
 
+Every part and how they connect, on one page: [How the parts fit](how-it-fits.md).
+
 More in the [README](../README.md) and in [core/roles.md](../core/roles.md).
 
 ## 1. Requirements
@@ -471,6 +473,11 @@ project-pause start ~/code/<project>
   second command.
 
 ### A box driven from a desktop
+
+A box has two connections, both tunnels started on the desktop ([how the parts fit](how-it-fits.md#a-box-two-directions)):
+`orca-tunnel-<host>` (`ssh -L`, direction 1: the desktop controls the box, made by `orca-host-install --pair`) and
+`lane-tunnel@<host>` (`ssh -R`, direction 2: the box's coordinator starts lanes on the desktop, made by
+`project-setup` after the share link).
 
 A box set up with `project-setup <repo> <host>` has no lane-control checkout of its own. It gets the desktop's installed
 tree, whole and at the same sha, in its own `~/.local/share/lane-control/<sha>/` with its own `current` link, on every
