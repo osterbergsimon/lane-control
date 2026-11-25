@@ -72,6 +72,10 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 - **One issue, one key, one lane**; claim at launch, close at merge, park resumably (`core/issues.md`).
 - **Decisions surface to you** with a recommendation, the way the orchestrator offers; messages are few, terse and event-driven.
 - **Scripts enforce only limits the owner decided**; no silent machine-wide caps.
+- **Use Orca where we can** (owner 2026-11-25: "lets use orca where we can"): when Orca has its own feature that does
+  the job, use it instead of lane-control code; lane-control keeps only what Orca lacks. Before adding plumbing, read
+  Orca's help and its release notes since the pinned version. What overlaps today, with a replace, wrap or keep each:
+  `docs/research/2026-11-25-orca-overlap.md`.
 - **Every failure with a durable fix** goes into `core/reliability.md`.
 
 ## Sandbox

@@ -2,6 +2,8 @@
 
 Orca's own orchestration (runs, tasks, workers, messages), with no Cotal. Status and trial results: `record.md`.
 Pin the Orca version you tested: Orca ships often and its orchestration commands change (`record.md`).
+Where Orca has a feature that does the job, use it rather than adding lane-control code (README, Doctrines, "Use Orca
+where we can"; what overlaps today: `docs/research/2026-11-25-orca-overlap.md`).
 
 ## Install
 - The Orca desktop app on the workstation (on Linux its CLI is `orca-ide`; plain `orca` may be another program).
