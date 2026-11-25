@@ -390,8 +390,13 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
 
 - **Let it work while you are away:** [docs/away-improve.md](away-improve.md). It is off until you run `lane-improve on`.
   Presence alone is `lane-away on` (night hours check in on idle coordinators); it never starts improve mode.
-- **Put a project on an SSH host:** `project-setup ~/code/<project> example-host`, driven from this machine's Orca
-  ([orchestrators/native-orca/remote.md](../orchestrators/native-orca/remote.md)). Run `ssh example-host` once by hand first.
+- **Put a project on an SSH host:** run `ssh example-host` once by hand, then
+  `project-setup --check ~/code/<project> example-host`: it lists every prerequisite (ssh, Orca on both sides and their
+  versions, pairing both ways, the tunnel, the agent and the gateway key on the host) and changes nothing. Then
+  `project-setup ~/code/<project> example-host`, driven from this machine's Orca
+  ([orchestrators/native-orca/remote.md](../orchestrators/native-orca/remote.md)). For the host's coordinator to run
+  lanes here it asks for this desktop's link, which you make by hand in Orca: Settings > Servers > "Share this
+  computer", choosing 127.0.0.1 (setup says so before it starts, so you can make it while it runs).
 - **Cleanup and branches:** [docs/orca-cleanup.md](orca-cleanup.md).
 - **More projects and models:** repeat step 4 per repo; tiers and routing are in [core/model-routing.md](../core/model-routing.md).
 - **Switch orchestrators:** `scripts/orch status ~/code/<project>`, then follow [the switch guide](../orchestrators/switching.md).
@@ -457,8 +462,11 @@ A box set up with `project-setup <repo> <host>` has no lane-control checkout of 
 
 ```bash
 cd ~/code/lane-control && git pull
+project-setup --check <repo on the host> example-host     # what is missing; changes nothing
 project-setup <repo on the host> example-host --refresh
 ```
+
+`--check` also says when the box's Orca and this desktop's differ (`check versions: warn`): keep them on one version.
 
 The box's copy is refreshed and the box's own `--refresh` runs there (lane tools, skills, personas). The copy holds only
 what `project-setup` needs, so on the box there is no `project-pause` and no `--suggest-tiers`. To restart the box's
