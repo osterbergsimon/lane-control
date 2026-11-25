@@ -59,7 +59,8 @@ def orca():
     if args[:1] == ["status"]:
         if not state["orca_up"]:
             out({"ok": False, "error": {"message": "runtime not reachable"}}, 1)
-        out({"ok": True, "result": {"runtime": {"state": "ready", "reachable": True}}})
+        out({"ok": True, "result": {"runtime": {"state": "ready", "reachable": True,
+                                                **({"appVersion": state["app_version"]} if "app_version" in state else {})}}})
     if cmd == "host list":
         out({"ok": True, "result": {"hosts": [{"kind": "local", "name": "this machine", "id": "local",
                                                "machineName": state.get("machine_name", "deskbox")}]}})
