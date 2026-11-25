@@ -276,6 +276,14 @@ def up(args):
             time.sleep(1)
         else:
             raise SystemExit(f"testbed: {role} did not start: {docker('logs', name(role), check=False).stderr[-800:]}")
+    for _ in range(180):  # the desktop's Orca server answers (a busy machine can take a while)
+        if ex("desktop", "orca-ide status --json 2>/dev/null | jq -e '.result.runtime.state == \"ready\"' >/dev/null",
+              check=False).returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit("testbed: the desktop's Orca server did not get ready in 3 minutes (see ~/.orca-desktop.log "
+                         "in lc-testbed-desktop)")
     wire_ssh()
     copy_lane_control("desktop")
     st = {"up": time.time(), "orca": app, "slot": ver, "orca_source": f"{kind} {src}", "engine": ENGINE,
