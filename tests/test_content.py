@@ -2700,20 +2700,26 @@ def script_rows(root):
     return rows[2:]
 
 
+def listed_scripts(root):
+    """The scripts with a row of their own in the Scripts table: the paths in the first cell of a row that has a
+    purpose. A mention anywhere else does not count."""
+    return {path for row in script_rows(root) if len(row) == 4 and row[1] for path in re.findall(r"`([^`]+)`", row[0])}
+
+
 def undocumented(root, excluded=UNDOCUMENTED):
-    """Scripts (by their path) and skills (by their name), in backticks, that neither the Scripts table nor
-    docs/how-it-fits.md names."""
+    """Scripts without a row in the Scripts table, and skills that docs/how-it-fits.md does not name in backticks."""
     page = Path(root) / "docs" / "how-it-fits.md"
-    table = "\n".join("|".join(r) for r in script_rows(root))
-    text = table + "\n" + (page.read_text() if page.is_file() else "")
-    wanted = [(s, s) for s in repo_scripts(root)] + [(s, s.rsplit("/", 1)[1]) for s in repo_skills(root)]
-    return [path for path, name in wanted if path not in excluded and f"`{name}`" not in text]
+    text = page.read_text() if page.is_file() else ""
+    listed = listed_scripts(root)
+    missing = [s for s in repo_scripts(root) if s not in listed]
+    missing += [s for s in repo_skills(root) if f"`{s.rsplit('/', 1)[1]}`" not in text]
+    return [path for path in missing if path not in excluded]
 
 
 class HowItFitsTests(unittest.TestCase):
     def test_every_script_and_skill_is_named(self):
-        self.assertEqual(undocumented(ROOT), [], "name these in core/README.md's Scripts table (a script, by its "
-                                                 "path) or docs/how-it-fits.md (a skill, by its name)")
+        self.assertEqual(undocumented(ROOT), [], "give each script a row with its purpose in core/README.md's "
+                                                 "Scripts table, and name each skill in docs/how-it-fits.md")
 
     def test_every_exclusion_exists_and_says_why(self):
         for path, why in UNDOCUMENTED.items():
@@ -2771,17 +2777,19 @@ class HowItFitsTests(unittest.TestCase):
             for sub in ("docs", "core/scripts", "scripts", "orchestrators/x/scripts", "orchestrators/x/skills/new-skill",
                         "core/skills/told", "core/scripts/__pycache__"):
                 (root / sub).mkdir(parents=True)
-            for script in ("core/scripts/listed", "core/scripts/on-the-page", "core/scripts/new",
-                           "scripts/listed-too", "orchestrators/x/scripts/new"):
+            for script in ("core/scripts/listed", "core/scripts/on-the-page", "core/scripts/no-purpose",
+                           "core/scripts/in-a-purpose", "scripts/listed-too", "orchestrators/x/scripts/new"):
                 (root / script).write_text("x")
             (root / "core" / "README.md").write_text(
                 "## Scripts\n\n| Script | What | Who | Doc |\n|---|---|---|---|\n"
-                "| `core/scripts/listed`, `scripts/listed-too` | a \\| b | owner | [d](x.md) |\n\n"
-                "## Later\n`core/scripts/new`\n")  # a mention outside the table does not count
+                "| `core/scripts/listed`, `scripts/listed-too` | a \\| b, calls `core/scripts/in-a-purpose` | owner "
+                "| [d](x.md) |\n| `core/scripts/no-purpose` |  | owner | [d](x.md) |\n\n"
+                "## Later\n`core/scripts/on-the-page`\n")
             (root / "docs" / "how-it-fits.md").write_text("`core/scripts/on-the-page` and `told`; new-skill unquoted")
-            missing = ["core/scripts/new", "orchestrators/x/scripts/new", "orchestrators/x/skills/new-skill"]
+            missing = ["core/scripts/in-a-purpose", "core/scripts/no-purpose", "core/scripts/on-the-page",
+                       "orchestrators/x/scripts/new", "orchestrators/x/skills/new-skill"]
             self.assertEqual(undocumented(root, {}), missing)
-            self.assertEqual(undocumented(root, {"core/scripts/new": "why"}), missing[1:])
+            self.assertEqual(undocumented(root, {"core/scripts/in-a-purpose": "why"}), missing[1:])
             self.assertEqual(len(script_rows(root)[0]), 4)
 
 

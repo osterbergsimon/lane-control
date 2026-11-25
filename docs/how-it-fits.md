@@ -81,6 +81,10 @@ More: [roles](../core/roles.md), [model routing](../core/model-routing.md), [nat
 The copies in `~/.agents/bin` and `~/.agents/skills` do **not** follow a `git pull`: run `project-setup <project>
 --refresh` after it.
 
+**Pending, INST-1 (lc-7gk, PR #73, in progress):** this changes the table above and the update step. As that PR
+describes it today, each machine and box gets one versioned install, the lane tools in `~/.agents/bin` become links
+into it instead of copies, and a new `lane-control` command installs it and reports what is out of date.
+
 More: [core and its scripts](../core/README.md), [where beads lives](../core/issues.md#where-beads-lives-backup-and-restore-lc-5c1),
 [updating an existing host](getting-started.md#updating-an-existing-host).
 
@@ -105,10 +109,12 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
   cleanup rules and installs the `ci-presence` timer.
 - **`project-setup <project>`** (once per project): onboards the repo (an adapting agent and a reviewer write the lane
   files; committed only on your yes), installs the lane tools and skills, renders the personas, writes the tier table
-  and starts the coordinator. Today onboarding a new project needs Claude (pending: onboarding on OpenCode, PR #66).
+  and starts the coordinator. Today onboarding a new project needs Claude. Onboarding on OpenCode is parked, so do not
+  expect it soon: PR #66 was parked after review round 7, with findings still open.
 - **`project-setup <project> --refresh`**: after lane-control changed. Updates the tools, skills and personas, keeps
-  the tier table and engines, starts and commits nothing. Restart the coordinator (`project-pause stop`, then
-  `start`) so it reads the new persona.
+  the tier table and engines and starts nothing. It commits nothing, with one exception, only on your yes: moving a
+  retired design lead's additions into `DESIGN.md`. Restart the coordinator (`project-pause stop`, then `start`) so it
+  reads the new persona.
 - Both say `exists` for what is already done, so running them again is safe.
 - **`project-setup --check <repo> <host>`**: run it before a box setup. It lists every prerequisite, says what is
   missing or could not be checked, and changes nothing.
@@ -177,10 +183,8 @@ fallback, but must make sure to make it as painless as possible for user". So di
 link step cannot be done. **It is not a drop-in:** it needs direction 1 in place and the desktop connected, it mails a
 bot on the desktop, and a person approves it once. It reaches a bot, not a lane, so it can ask the desktop for work
 but cannot start a supervised lane there ([pairing research](research/2026-11-25-orca-pairing.md), section 6; not run
-there). lane-control has not built it, and setup does not fall back to it by itself. **Pending, PR #68:** the testbed
-tried it without the desktop app and reports a gap (there was no bot to send to). Its verdict is "fallback only": it
-needs the desktop app open, a bot you made and an approval, and it gives the box mail rather than the lane. Also
-pending (PAIN-1, lc-bmk): making the share-link step as painless as possible.
+there). lane-control has not built it, and setup does not fall back to it by itself. Also pending (PAIN-1, lc-bmk):
+making the share-link step as painless as possible.
 
 **The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; run `project-setup
 --check <repo> <host>`; make sure ssh can log in without asking anything (for a smartcard or agent key, `lane-tunnel`
@@ -199,9 +203,8 @@ Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you
 - On main, the native Orca trial ran both with containers: a container as the box, and a second Orca server standing in
   for the desktop. The desktop app's own share link and a lane started from a box's coordinator were not run
   ([record](../orchestrators/native-orca/record.md), NO-6). The docs on main say the no-tunnel route is not run.
-- Pending, PR #68: a container testbed, `tests/testbed/README.md`. Its own coverage table reports both directions
-  passing on headless Orca, and the no-tunnel route passing with `orca serve`, which then listens on every interface.
-  It does not cover the desktop app or its share link.
+- A container testbed exists in PR #68 (`tests/testbed/`, not on main). It was stood down on 2026-11-25. Its results
+  are not verified yet, so this page does not rely on them.
 - Why the share link stays your step: `orca pair` would make the desktop listen on every interface
   ([pairing research](research/2026-11-25-orca-pairing.md), read from Orca's source).
 - A lane's report across the two machines is poll-only: nothing proves it wakes the coordinator that started it.
