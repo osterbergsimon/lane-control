@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""lane-control: the one versioned lane-control tree on this machine (core/install.py).
+
+  lane-control install [--version <sha|tag|branch>] [--from <checkout>]
+        lay the whole tree of that commit (default: the checkout's HEAD) at
+        ${XDG_DATA_HOME:-~/.local/share}/lane-control/<sha>/, switch `current` to it by rename and link the lane tools
+        (and lane-control itself) into ~/.agents/bin. Prints "installed <sha>" or "exists <sha>". Old trees are kept:
+        running lanes may use them. No network: the commit must be in the checkout (git fetch there first).
+        The checkout is --from, else the one this script is in, else the one the last install came from.
+  lane-control status
+        the current sha, the checkout's sha, and whether they differ.
+
+After an install, run `project-setup --refresh <project>` for each project: its personas and skills are rendered
+from the tree, and the project records the sha it was set up with."""
+import argparse
+import importlib.util
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parents[2]  # core/scripts/ -> root: a checkout, or an installed tree
+
+
+def _install():
+    spec = importlib.util.spec_from_file_location("lc_install", HERE / "core" / "install.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+I = _install()
+
+
+def checkout(given):
+    if given:
+        return Path(given).expanduser().resolve()
+    if I.is_checkout(HERE):
+        return HERE
+    return I.source()
+
+
+def cmd_install(a) -> int:
+    src = checkout(a.from_)
+    if src is None:
+        print("lane-control: no checkout to install from: give --from <checkout of lane-control>", file=sys.stderr)
+        return 2
+    try:
+        state, sha, before = I.install(src, a.version or "HEAD")
+    except I.InstallError as e:
+        print(f"lane-control: {e}", file=sys.stderr)
+        return 1
+    print(f"{state} {sha}")
+    if before and before != sha:
+        print(f"current: was {I.short(before)}, now {I.short(sha)}")
+    if (a.version or "HEAD") == "HEAD" and I.dirty(src):
+        print(f"note: {src} has uncommitted changes; the install is its last commit, without them")
+    links = I.link_tools(I.data_root() / "current")
+    changed = [n for n, s in links.items() if s != "exists"]
+    print(f"links: {'updated ' + ', '.join(changed) if changed else 'exist'} in {I.bin_dir()}")
+    print("next: project-setup --refresh <project> for each project set up on this machine")
+    return 0
+
+
+def cmd_status(a) -> int:
+    cur = I.installed()
+    src = checkout(a.from_)
+    head = I.resolve(src) if src else None
+    print(f"current: {cur or 'none'} ({I.data_root() / 'current'})")
+    print(f"checkout: {head or 'unknown'}" + (f" ({src})" if src else ""))
+    if cur is None:
+        print("state: not installed: run lane-control install")
+        return 1
+    if head and head != cur:
+        print("state: differ: run lane-control install, then project-setup --refresh <project>")
+        return 1
+    print("state: same" if head else "state: no checkout to compare")
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="lane-control", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("install", help="lay a commit's tree and switch current to it")
+    p.add_argument("--version", help="a sha, tag or branch in the checkout (default HEAD)")
+    p.add_argument("--from", dest="from_", metavar="CHECKOUT")
+    p = sub.add_parser("status", help="the current sha against the checkout's")
+    p.add_argument("--from", dest="from_", metavar="CHECKOUT")
+    a = ap.parse_args(argv)
+    return {"install": cmd_install, "status": cmd_status}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

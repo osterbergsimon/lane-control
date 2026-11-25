@@ -41,7 +41,7 @@ uses it has been updated.
 | Old path | Now | Who uses it |
 |---|---|---|
 | `scripts/window-guard.sh` | `core/scripts/window-guard.sh` | the installed `lane-control-window-guard.service` runs it (written by `window-guard-install`) |
-| `scripts/lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh` | `core/scripts/` | docs and briefs; `project-setup` copies them to `~/.agents/bin` (from `core/scripts/` now), which project build scripts call |
+| `scripts/lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh` | `core/scripts/` | docs and briefs; `project-setup` and `lane-control install` link them into `~/.agents/bin` (from the installed tree's `core/scripts/`), which project build scripts call |
 | `scripts/lib.sh` | `core/scripts/lib.sh` | sourced by every watch script, wherever it is started from |
 | `scripts/stale-claims.sh`, `park-check.sh` | `core/scripts/` | Rove routines (`bash <repo>/scripts/...`) |
 | `scripts/window-guard-install` | `core/scripts/window-guard-install` | the install steps in the docs |
@@ -52,5 +52,22 @@ uses it has been updated.
 | `roles.md`, `model-routing.md` | `core/` | a machine coordinator whose persona was rendered before the move reads them there |
 | `model-routing.md`, `reliability.md`, `lane-ledger.tsv` | `core/` | the Rove quickstart linked them into `~/.config/rove/` |
 
-`~/.agents/bin/lane-heavy` and `~/.agents/bin/lane-limits.sh` are copies, not links: they keep working as they are
-and are refreshed from `core/scripts/` by the next `project-setup` run.
+`~/.agents/bin/lane-heavy`, `lane-limits.sh` and the other lane tools are links into the installed tree
+(`~/.local/share/lane-control/current/core/scripts/`, `core/install.py`), not into a checkout: `lane-control install`
+switches `current` by rename, and a running script keeps the file it opened because old trees are kept. A machine
+set up before the install had copies there; its next `project-setup` run (or `lane-control install`) replaces them with
+the links.
+
+## The install: one versioned tree per machine and per box
+
+`core/scripts/lane-control` (a link at `scripts/lane-control`, and at `~/.agents/bin/lane-control` once installed):
+
+- `lane-control install [--version <sha|tag>] [--from <checkout>]`: `git archive` of that commit (default the
+  checkout's HEAD; no network) laid at `${XDG_DATA_HOME:-~/.local/share}/lane-control/<sha>/`, then `current` switched
+  to it by renaming a new link over it. Prints `installed <sha>` or `exists <sha>`. Old trees are kept.
+- `lane-control status`: the current sha, the checkout's sha, and whether they differ.
+- `project-setup` and `machine-setup` run from a checkout install its HEAD first (or use the tree they run from), render
+  `{{LANE_CONTROL}}` as `.../lane-control/current`, link the lane tools, and record the sha in the project's settings
+  store (`lane_control`); `--show` says `lane-control <a> installed, project set up with <b>: run --refresh` when they
+  differ. A box (`project-setup <repo> <host>`, `machine-setup --host`) is sent the same tree at the same sha into its
+  own `.../lane-control/<sha>/` and `current`.

@@ -129,6 +129,19 @@ def _tiersuggest():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+def _install():
+    """core/install.py: the one versioned lane-control tree per machine and box (lane-control install)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lc_install", HERE / "core" / "install.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+INSTALL = _install()
+LC = HERE  # the path personas and ~/.agents/bin name: .../lane-control/current once use_install() ran
+TREE = HERE  # the installed tree it points at (what a box is sent)
+LC_SHA = None  # its sha; None for a plain copy that is neither a checkout nor an install
 GENERATED = DOC.GENERATED  # the generated coordination's own file, at the repo root; AGENTS.md only points to it
 OC = HERE / "orchestrators" / "orca-cotal"  # this orchestrator's personas, skill and templates
 HARNESSES = ("claude", "opencode")
@@ -141,17 +154,7 @@ PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_prox
 ORCA = "orca"  # resolved in main(): ORCA_CLI, the Orca host CLI, the desktop shim, then PATH (may be OrcaSlicer)
 PORTS = range(14200, 15000)
 LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-shots")  # the library first: a new tool never sees an old one
-OLD_PATH_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier")  # kept as links in scripts/ for machines
-HOST_FILES = (".lane-control-root", "core/lcroot.py", "core/agentsdoc.py", "core/beads.py", "core/cleanup.py", "core/improve.py", "core/protection.py",
-              "scripts/project-setup",
-              *(f"scripts/{t}" for t in OLD_PATH_TOOLS), "core/skills", "core/design-skills.tsv",
-              "core/templates/frontend-brief.md", "core/templates/DESIGN.md", "core/templates/away-innovation.md",
-              "core/templates/away-scout-brief.md", "core/templates/away-build-brief.md", "core/templates/away-entry.md",
-              "core/scripts/project-setup", "core/harnesses", "orchestrators/native-orca",
-              "orchestrators/orca-cotal/scripts/project-setup", "orchestrators/orca-cotal/personas",
-              "orchestrators/orca-cotal/skills", "orchestrators/orca-cotal/templates",
-              *(f"core/scripts/{t}" for t in LANE_TOOLS), "core/model-routing.md",
-              "core/scripts/pairing-code-stdin.cjs")  # what --host copies (scripts/<name> are links to their real files, copied too)
+# A host gets the whole installed tree at the same sha (copy_to_host), never a list of files.
 
 
 class Fail(Exception):
@@ -195,7 +198,7 @@ def render_persona(text: str, harness: str, model: str, mode: str, project: str,
     rule = ATTACHED_RULE.format(paths=", ".join(f"`{a}`" for a in attached)) if attached else ""
     return (text.replace("{{ATTACHED}}\n", rule).replace("{{HARNESS}}", harness).replace("{{MODEL}}", model).replace("{{LAUNCH}}", launch)
             .replace("{{PROJECT}}", project).replace("{{MODE}}", mode).replace("{{TIERS}}", tiers)
-            .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(HERE)))
+            .replace("{{REVIEWER}}", reviewer).replace("{{LANE_CONTROL}}", str(LC)))
 
 
 def orca_cli() -> str:
@@ -225,7 +228,7 @@ def free_port(start: int) -> int:
 
 SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
-                "paired_environment", "beads_repo")  # all that is ever written: names and choices, never a secret
+                "paired_environment", "beads_repo", "lane_control")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -435,7 +438,7 @@ def ssh_base() -> list:
     return ["ssh", "-F", os.path.expanduser(cfg)] if cfg else ["ssh"]
 
 
-REMOTE = "~/.local/share/lane-control"  # where --host puts lane-control on the host
+REMOTE = INSTALL.BOX_ROOT + "/current"  # the host's installed tree, for its shell (copy_to_host puts it there)
 # setup's own ssh calls never wait for a password or a dead link; only the host's own run keeps a terminal
 SSH_BATCH = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15")
 HOST_RE = re.compile(r"[A-Za-z0-9._@:\[\]%-]+")
@@ -460,14 +463,54 @@ def remote_cmd(script: str, args: list) -> str:
     return f"{REMOTE}/{script} " + " ".join(q(x) for x in args)
 
 
-def copy_to_host(place: "Place") -> None:
-    """Put what project-setup needs in ~/.local/share/lane-control on the host (every run: a newer lane-control
-    replaces an older copy)."""
-    pack = subprocess.Popen(["tar", "-C", str(HERE), "--exclude=__pycache__", "-cf", "-", *HOST_FILES],
-                            stdout=subprocess.PIPE)
+def use_install() -> None:
+    """Install (or use) this lane-control's tree (core/install.py): from a checkout its HEAD goes to
+    .../lane-control/<sha> and `current` is switched to it; personas and ~/.agents/bin then name .../current, never a
+    checkout or a lane worktree. A plain copy (neither) is used as it is, as before."""
+    global LC, TREE, LC_SHA
     try:
-        copy = subprocess.run(place.ssh_argv(f"mkdir -p {REMOTE} && tar -C {REMOTE} -xf -"), stdin=pack.stdout,
-                              stderr=subprocess.PIPE, text=True, timeout=900)
+        u = INSTALL.use(HERE)
+    except INSTALL.InstallError as e:
+        say("lane-control", "warning", f"not installed ({e}); this run uses {HERE} as before")
+        return
+    LC, TREE, LC_SHA = u.stable, u.tree, u.sha
+    say("lane-control", u.state, f"{u.sha or ''} at {u.stable}".strip())
+    for n in u.notes:  # on stderr, like the other warnings: a re-run's stdout stays all `exists`
+        print(f"project-setup: note: {n}", file=sys.stderr)
+
+
+def record_version(repo: Path, set_up_before: bool) -> None:
+    """The sha the project's personas and skills were rendered from, in its settings store; set_up_before: its
+    coordinator persona was there before this run rendered it."""
+    if not LC_SHA:
+        return
+    was = settings(repo).get("lane_control")
+    if was and was != LC_SHA:
+        say("lane-control", "updated", f"project was set up with {INSTALL.short(was)}, now {INSTALL.short(LC_SHA)}")
+    elif not was and set_up_before:
+        say("lane-control", "moved", f"this project's personas now name {LC} (it was set up before the install)")
+    settings(repo, lane_control=LC_SHA)
+
+
+def drift_line(repo: Path) -> "str | None":
+    """"lane-control <a> installed, project set up with <b>: run --refresh" when they differ, else None."""
+    cur, was = INSTALL.installed(), settings(repo).get("lane_control")
+    if cur and cur != was:
+        return (f"lane-control {INSTALL.short(cur)} installed, project set up with {INSTALL.short(was)}: "
+                "run project-setup --refresh")
+    return None
+
+
+def copy_to_host(place: "Place") -> None:
+    """The whole installed tree, at the same sha, to the host's own .../lane-control/<sha> with its `current` switched
+    (a tar over ssh's stdin; core/install.py box_script). Sent every run: the host keeps it when it has that sha."""
+    if not LC_SHA:
+        raise Fail(f"{HERE} is neither a git checkout nor an install, so there is no versioned tree to send: "
+                   "run project-setup from a checkout of lane-control")
+    pack = subprocess.Popen(INSTALL.tar_tree(TREE), stdout=subprocess.PIPE)
+    try:
+        copy = subprocess.run(place.ssh_argv(INSTALL.box_script(LC_SHA)), stdin=pack.stdout,
+                              capture_output=True, text=True, timeout=900)
     except subprocess.TimeoutExpired:
         pack.kill()
         raise Fail(f"copying lane-control to {place.host} took more than 15 minutes; stopped") from None
@@ -476,7 +519,8 @@ def copy_to_host(place: "Place") -> None:
     if pack.wait() != 0 or copy.returncode != 0:
         said = [l for l in (copy.stderr or "").splitlines() if l.strip()]
         raise Fail(f"copying lane-control to {place.host} failed" + (f": {said[-1].strip()}" if said else ""))
-    say("lane-control", "copied", f"to {REMOTE} on {place.host}")
+    state = "exists" if copy.stdout.strip().startswith("exists") else "copied"
+    say("lane-control", state, f"{LC_SHA} on {place.host} (its .../lane-control/current)")
 
 
 LOCAL_ONLY_FLAGS = {"--no-desktop-lanes": False, "--no-machine-setup": False, "--orca-port": True, "--host": True,
@@ -791,16 +835,24 @@ def orca_repo(repo: Path, place: Place = LOCAL) -> str:
 
 
 def lane_tools(home: Path):
-    """The machine-wide limits (lane-heavy, lane-room), once per machine in ~/.agents/bin. Copies, because the checkout
-    they come from may be a worktree that goes away. Replaced by rename: bash reads a running script as it goes, and
-    lanes may be running these right now."""
+    """The machine-wide limits (lane-heavy, lane-room...), once per machine in ~/.agents/bin: links into the installed
+    tree's stable path (.../lane-control/current), so they never point at a worktree that goes away and a new install
+    moves them all at once. A link is replaced by rename, and a running bash script keeps the file it opened (old
+    trees are kept). Without an install (a plain copy): copies, replaced by rename, as before."""
     bin_dir = home / ".agents" / "bin"
     fresh = not (bin_dir / "lane-heavy").exists()
+    names = ", ".join(t for t in LANE_TOOLS if t != "lane-limits.sh")
+    if LC_SHA:
+        states = INSTALL.link_tools(LC)
+        changed = any(v != "exists" for v in states.values())
+        say("lane-tools", "created" if fresh else ("updated" if changed else "exists"),
+            f"{names}{', lane-control' if 'lane-control' in states else ''} in {bin_dir}: links into {LC}")
+        return
     changed = False
     for name in LANE_TOOLS:
         src, dst = HERE / "core" / "scripts" / name, bin_dir / name
         mode = src.stat().st_mode & 0o777
-        if dst.exists() and dst.read_bytes() == src.read_bytes() and dst.stat().st_mode & 0o777 == mode:
+        if dst.exists() and not dst.is_symlink() and dst.read_bytes() == src.read_bytes() and dst.stat().st_mode & 0o777 == mode:
             continue
         bin_dir.mkdir(parents=True, exist_ok=True)
         tmp = bin_dir / f".{name}.{os.getpid()}.tmp"
@@ -808,8 +860,7 @@ def lane_tools(home: Path):
         tmp.chmod(mode)
         os.replace(tmp, dst)
         changed = True
-    say("lane-tools", "created" if fresh else ("updated" if changed else "exists"),
-        f"lane-heavy, lane-room, lane-tier, design-shots in {bin_dir}")
+    say("lane-tools", "created" if fresh else ("updated" if changed else "exists"), f"{names} in {bin_dir}")
 
 
 def skills():
@@ -1112,6 +1163,7 @@ def personas_and_tiers(repo: Path, project: str, coord, reviewer, mode: str, tie
     """tier_text: the project's table, from choose_tiers."""
     table = str(store_table(repo))
     review_persona = str(repo / ".cotal" / "agents" / "reviewer.md")
+    before = (repo / ".cotal" / "agents" / "coordinator.md").exists()
     roles = [("coordinator", coord), ("reviewer", reviewer)]
     changed = []  # personas that existed and now read differently: a running agent keeps the old text
     for name, (h, m) in roles:
@@ -1124,6 +1176,7 @@ def personas_and_tiers(repo: Path, project: str, coord, reviewer, mode: str, tie
             changed.append(name)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
     say("gitignore", ignore_cotal(repo), ".cotal/")
+    record_version(repo, before)
     return changed
 
 
@@ -2838,6 +2891,9 @@ def show(repo: Path) -> int:
         old.append(str(keyed_by_name_only(repo)))
     if old:
         print(f"not moved yet: {', '.join(old)} (project-setup moves them on its next run, also with --refresh)")
+    drift = drift_line(repo)
+    if drift:
+        print(drift)
     if ORCHESTRATOR == "native-orca":
         print(f"rendered personas: {repo / ADAPTED} (<role>.md; additions in {repo / ADDITIONS})")
     else:
@@ -2940,6 +2996,7 @@ def native_personas(repo: Path, project: str, pins: dict, mode: str, tier_text: 
     roles = {"coordinator": pins["coordinator"],
              "reviewer": pins["reviewer"], "design-reviewer": pins["reviewer"], "debugger": pins["reviewer"]}
     refuse_tracked(repo, NATIVE_ROLES)
+    before = (repo / ADAPTED / "coordinator.md").exists()
     say("git-exclude", exclude_local(repo), "rendered personas, .claude/settings.local.json and a project-level "
                                             "OpenCode plugin (.git/info/exclude)")
     changed = []
@@ -2950,6 +3007,7 @@ def native_personas(repo: Path, project: str, pins: dict, mode: str, tier_text: 
         if state == "updated":
             changed.append(role)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
+    record_version(repo, before)
     return changed
 
 
@@ -4245,6 +4303,8 @@ def main(argv=None) -> int:
             print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
                   "has (only --reviewer is used, for a reviewer persona that is missing)", file=sys.stderr)
             return 2
+    if not a.show:
+        use_install()  # before the host copy and before anything is rendered
     if host:
         if a.orchestrator == "orca-cotal":
             return on_host(host, argv, a.target, value_flags)

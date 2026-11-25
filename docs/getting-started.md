@@ -399,25 +399,40 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
 
 ## Updating an existing host
 
-A host set up before a change keeps old copies: the lane tools in `~/.agents/bin`, the skills, and the personas
-rendered into each project. A running coordinator also keeps the persona text it started with. So an old host can
-refuse what a new checkout allows, for example an OpenCode tier (`lane-tier` there refuses it until it is refreshed).
-Pick the case that fits.
+Each machine and each box has one installed lane-control: the whole repo at one commit, in
+`~/.local/share/lane-control/<sha>/` (`$XDG_DATA_HOME` when set), with a `current` link to the one in use. Personas
+name `~/.local/share/lane-control/current`, and the lane tools in `~/.agents/bin` (with `lane-control` itself) are
+links into it, so nothing points at a checkout or a lane worktree that may go away. Old trees are kept: a running lane
+may still read one. A project records the sha it was set up with. Installing a new commit moves the tools at once;
+the skills and each project's personas follow at that project's `--refresh`. A running coordinator also keeps the
+persona text it started with. Pick the case that fits.
+
+```bash
+lane-control status                            # the installed sha, the checkout's, and whether they differ
+project-setup ~/code/<project> --show          # says "lane-control <a> installed, project set up with <b>: run --refresh"
+```
 
 ### A machine with its own lane-control checkout, project stays on its engine
 
 ```bash
 cd ~/code/lane-control && git pull
+scripts/lane-control install                   # prints "installed <sha>" (or "exists <sha>")
 project-setup ~/code/<project> --refresh      # once per project
 project-pause stop ~/code/<project>
 project-pause start ~/code/<project>
 ```
 
 Why each step:
-- `git pull` updates the checkout the scripts run from.
-- `--refresh` copies the current lane tools and skills over the old ones and renders the personas again. It keeps each
+- `git pull` updates the checkout; `lane-control install` lays its last commit as the machine's tree and switches
+  `current` to it (no network; `--version <sha or tag>` installs another commit, `--from <checkout>` names the
+  checkout). After the first one, `~/.agents/bin/lane-control install` works from anywhere: it remembers the checkout.
+  `project-setup` run from a checkout installs that checkout's last commit itself too, so a forgotten install is not
+  a problem; uncommitted changes are never installed (it says so).
+- `--refresh` renders the skills and the personas again from the installed tree and records its sha. It keeps each
   persona's engine and model and the project's tier table, starts nothing and commits nothing, and says which running
   agents need a restart. It ignores `--coordinator` (project-setup says so).
+- A machine set up before the install moves to it on its first setup or `--refresh`: `lane-control: note: this machine
+  moves to the install ...` and, per project, `lane-control: moved ...`. Nothing else to do.
 - `project-pause stop` asks the coordinator for its handover, waits for it (up to 10 minutes) and closes its terminal. It
   refuses while a lane or reviewer runs, and it runs from an Orca terminal. `start` opens the coordinator again,
   resuming its session, with the new persona.
@@ -451,17 +466,20 @@ project-pause start ~/code/<project>
 
 ### A box driven from a desktop
 
-A box set up with `project-setup <repo> <host>` has no lane-control checkout of its own. Its copy is
-`~/.local/share/lane-control`, not a git repo, and every `project-setup <repo> <host>` run replaces it
-([the remote doc](../orchestrators/native-orca/remote.md)). So update it from the desktop:
+A box set up with `project-setup <repo> <host>` has no lane-control checkout of its own. It gets the desktop's installed
+tree, whole and at the same sha, in its own `~/.local/share/lane-control/<sha>/` with its own `current` link, on every
+`project-setup <repo> <host>` run (sent over ssh; kept when the box has that sha already;
+[the remote doc](../orchestrators/native-orca/remote.md)). So update it from the desktop:
 
 ```bash
-cd ~/code/lane-control && git pull
+cd ~/code/lane-control && git pull && scripts/lane-control install
 project-setup <repo on the host> example-host --refresh
 ```
 
-The box's copy is refreshed and the box's own `--refresh` runs there (lane tools, skills, personas). The copy holds only
-what `project-setup` needs, so on the box there is no `project-pause` and no `--suggest-tiers`. To restart the box's
+The box gets the tree (`lane-control: copied <sha> on example-host`) and the box's own `--refresh` runs there (lane
+tools as links, skills, personas naming the box's own `current`). A box set up before has its old copy in the same
+folder; it stays and is no longer used. The box has the whole tree, so `project-pause` and `--suggest-tiers` are there
+too, under `~/.local/share/lane-control/current/scripts/`. To restart the box's
 coordinator, tell it in its terminal to write its handover, close its terminal in Orca (it shows in your window), then
 run `project-setup <repo on the host> example-host` again: it starts the missing coordinator, which reads
 `handover-latest`. (From the source; not run.) Without a restart the coordinator reads the new persona at its next

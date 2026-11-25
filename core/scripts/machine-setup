@@ -63,14 +63,13 @@ import harnesses  # noqa: E402
 import machineconf  # noqa: E402
 import beads  # noqa: E402
 import cleanup  # noqa: E402
+import install  # noqa: E402
 
 ROLE = "machine-coordinator"
 TITLE = "machine coordinator"
 PERSONA = ROOT / "orchestrators" / "native-orca" / "personas" / f"{ROLE}.md"
-NIGHT_DOC = ROOT / "orchestrators" / "native-orca" / "night-manager.md"
-REMOTE = "~/.local/share/lane-control"
-HOST_FILES = [".lane-control-root", "core", "orchestrators/native-orca",
-              "orchestrators/orca-cotal/scripts/project-setup"]
+LC = ROOT  # the path the persona, automations and timer name: .../lane-control/current once main() installed it
+REMOTE = install.BOX_ROOT + "/current"  # a host's installed tree, for its shell (project-setup's copy_to_host too)
 NOTES_STUB = ("# Machine coordinator notes\n\n"
               "Private: owner decisions, caps, priorities. Never push this folder to a public remote.\n")
 FEED_MAX_AGE_MIN = 60
@@ -193,7 +192,7 @@ def folder_step(folder: Path):
 
 def render(harness: str, model: str, folder: Path) -> str:
     text = (PERSONA.read_text().replace("{{HARNESS}}", harness).replace("{{MODEL}}", model)
-            .replace("{{NOTES}}", str(folder / "notes.md")).replace("{{LANE_CONTROL}}", str(ROOT)))
+            .replace("{{NOTES}}", str(folder / "notes.md")).replace("{{LANE_CONTROL}}", str(LC)))
     left = sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", text)))
     if left:
         raise Fail(f"{PERSONA}: placeholders machine-setup does not fill: {', '.join(left)}")
@@ -241,9 +240,10 @@ def start_step(harness: str, model: str, mode: str, folder: Path, persona: Path,
 
 
 def automation_specs() -> list:
-    s = HERE
+    s = LC / "core" / "scripts"
     q = shlex.quote
-    night = (f"You are this machine's night manager. Follow {NIGHT_DOC} exactly; lane-control is {ROOT}. "
+    NIGHT_DOC = LC / "orchestrators" / "native-orca" / "night-manager.md"
+    night = (f"You are this machine's night manager. Follow {NIGHT_DOC} exactly; lane-control is {LC}. "
              "Be brief: you spend budget nobody is watching.")
     sweep = (f"Run {q(str(s / 'lane-sweep'))} --changes: the lane findings that are new since the last sweep "
              f"(it removes nothing). Send each line to the coordinator its owner= names, the way the Messages "
@@ -289,7 +289,7 @@ def automations_step(folder: Path, from_lane: bool = False, provider: str = "cla
                 continue
             orca("automations", "edit", a["id"], "--precheck", precheck, "--precheck-timeout", str(timeout),
                  "--prompt", prompt)
-            say(name, "repaired", f"(automation {a['id']}: precheck and prompt now point at {ROOT}; was "
+            say(name, "repaired", f"(automation {a['id']}: precheck and prompt now point at {LC}; was "
                                   f"{pc.get('command') or 'no precheck'})")
             continue
         older = [have[o] for o in OLDER_AUTOMATIONS[name] if o in have]
@@ -347,7 +347,7 @@ def timer_step():
         return re.sub(r'(?m)^Environment="PATH=.*"$', "", text)
     for name in ("ci-presence.service", "ci-presence.timer"):
         text = (ROOT / "core" / "templates" / name).read_text()
-        text = text.replace("@REPO@", str(ROOT)).replace("@PATH@", os.environ.get("PATH", "").replace("%", "%%"))
+        text = text.replace("@REPO@", str(LC)).replace("@PATH@", os.environ.get("PATH", "").replace("%", "%%"))
         dest = units / name
         if not (dest.is_file() and no_path(dest.read_text()) == no_path(text)):
             dest.write_text(text)
@@ -363,7 +363,7 @@ def timer_step():
                          "enable-linger $USER)")
 
 
-def lane_worktree_warning(root: Path) -> "str | None":
+def lane_worktree_warning(root: Path, installed: bool = False) -> "str | None":
     """A warning when lane-control runs from a linked worktree (a lane): the automations and the timer call scripts by
     this path, and a lane is removed when its PR merges. None for a main checkout or a copy that is not git."""
     def rev(*a):
@@ -374,6 +374,9 @@ def lane_worktree_warning(root: Path) -> "str | None":
     if not git_dir or os.path.realpath(git_dir) == os.path.realpath(common):
         return None
     main = os.path.dirname(os.path.realpath(common))
+    if installed:  # the paths are .../lane-control/current, but its commit is now the lane's
+        return (f"{root} is a lane worktree: its commit is now this machine's installed lane-control, and existing "
+                f"automations are left as they are. Run machine-setup from the main checkout ({main}) to go back")
     return (f"{root} is a lane worktree; the automations and the timer will call scripts there, and it goes when the "
             f"lane does. Run machine-setup from the main checkout ({main}) instead")
 
@@ -387,13 +390,23 @@ def ssh_base() -> list:
 
 def on_host(host: str, argv: list) -> int:
     """Copy what machine-setup needs to the host and run it there with the same arguments minus --host."""
-    pack = subprocess.Popen(["tar", "-C", str(ROOT), "--exclude=__pycache__", "-cf", "-", *HOST_FILES],
-                            stdout=subprocess.PIPE)
-    copy = subprocess.run([*ssh_base(), host, f"mkdir -p {REMOTE} && tar -C {REMOTE} -xf -"], stdin=pack.stdout)
+    try:
+        u = install.use(ROOT)
+    except install.InstallError as e:
+        print(f"machine-setup: {e}", file=sys.stderr)
+        return 1
+    if not u.sha:
+        print(f"machine-setup: {ROOT} is neither a git checkout nor an install: no versioned tree to send to {host}",
+              file=sys.stderr)
+        return 1
+    pack = subprocess.Popen(install.tar_tree(u.tree), stdout=subprocess.PIPE)
+    copy = subprocess.run([*ssh_base(), host, install.box_script(u.sha)], stdin=pack.stdout, stdout=subprocess.PIPE,
+                          text=True)
     pack.stdout.close()
     if pack.wait() != 0 or copy.returncode != 0:
         print(f"machine-setup: copying lane-control to {host} failed", file=sys.stderr)
         return 1
+    say("lane-control", "exists" if (copy.stdout or "").startswith("exists") else "copied", f"{u.sha} on {host}")
     args, skip = [], False
     for x in argv:
         if skip:
@@ -435,7 +448,17 @@ def main(argv) -> int:
     if a.host:
         return on_host(a.host, argv)
     folder = Path(os.path.expanduser(a.folder)).resolve()
-    warning = lane_worktree_warning(ROOT)
+    global LC
+    try:
+        u = install.use(ROOT)
+    except install.InstallError as e:
+        print(f"machine-setup: {e}", file=sys.stderr)
+        return 1
+    LC = u.stable
+    say("lane-control", u.state, f"{u.sha or ''} at {u.stable}".strip())
+    for n in u.notes:
+        print(f"machine-setup: note: {n}", file=sys.stderr)
+    warning = lane_worktree_warning(ROOT, installed=bool(u.sha))
     if warning:
         say("lane-control", "warning", warning)
     try:

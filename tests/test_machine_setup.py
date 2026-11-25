@@ -1475,7 +1475,8 @@ class MachineSetupTests(BudgetTest):
         text = persona.read_text()
         self.assertNotIn("{{", text)
         self.assertIn(str(self.folder / "notes.md"), text)
-        self.assertIn(str(ROOT), text)
+        self.assertIn(str(self.home / ".local" / "share" / "lane-control" / "current"), text)  # INST-1
+        self.assertNotIn(str(ROOT), text)
         self.assertTrue((self.folder / "notes.md").is_file())
         settings = json.loads((self.folder / ".claude" / "settings.local.json").read_text())
         self.assertIn("persona-hook.sh", json.dumps(settings["hooks"]["SessionStart"]))
@@ -1537,9 +1538,10 @@ class MachineSetupTests(BudgetTest):
         self.assertEqual(set(a), {"night manager", "lane sweep", "machine check"})
         triggers = {"night manager": "37 * * * *", "lane sweep": "17 */3 * * *", "machine check": "*/30 * * * *"}
         import shlex
-        prechecks = {"night manager": shlex.quote(f"{SCRIPTS}/night-precheck"),
-                     "lane sweep": shlex.quote(f"{SCRIPTS}/lane-sweep") + " --precheck",
-                     "machine check": shlex.quote(f"{SCRIPTS}/machine-check")}
+        s = self.home / ".local" / "share" / "lane-control" / "current" / "core" / "scripts"  # INST-1: the install
+        prechecks = {"night manager": shlex.quote(f"{s}/night-precheck"),
+                     "lane sweep": shlex.quote(f"{s}/lane-sweep") + " --precheck",
+                     "machine check": shlex.quote(f"{s}/machine-check")}
         for name, c in a.items():
             with self.subTest(name=name):
                 def opt(k):
@@ -1620,7 +1622,8 @@ class MachineSetupTests(BudgetTest):
         r = self.setup_machine("--no-start")
         units = self.home / ".config" / "systemd" / "user"
         svc = (units / "ci-presence.service").read_text()
-        self.assertIn(f'ExecStart=/usr/bin/env bash "{ROOT}/core/scripts/ci-presence"', svc)
+        lc = self.home / ".local" / "share" / "lane-control" / "current"  # INST-1: the install, not the checkout
+        self.assertIn(f'ExecStart=/usr/bin/env bash "{lc}/core/scripts/ci-presence"', svc)
         self.assertNotIn("@REPO@", svc)
         self.assertNotIn("@PATH@", svc)
         self.assertTrue((units / "ci-presence.timer").is_file())
@@ -1758,13 +1761,14 @@ class MachineSetupTests(BudgetTest):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         calls = [json.loads(x) for x in (self.tmp / "ssh.log").read_text().splitlines()]
         self.assertEqual(calls[0][0], "user@host")
-        self.assertIn("tar -C ~/.local/share/lane-control -xf -", calls[0][1])
+        self.assertIn('tar -C "$t" -xf -', calls[0][1])  # INST-1: the whole installed tree, at one sha
         listing = subprocess.run(["tar", "-tf", str(self.tmp / "ssh-in0")], capture_output=True, text=True).stdout
         for f in ("core/scripts/machine-setup", "core/harnesses/persona-hook.sh", ".lane-control-root",
                   "orchestrators/native-orca/personas/machine-coordinator.md"):
             self.assertIn(f, listing)
-        self.assertNotIn("tests/", listing)
-        self.assertEqual(calls[1][-1], "~/.local/share/lane-control/core/scripts/machine-setup --folder ~/machine --no-start")
+        self.assertIn("core/install.py", listing)
+        self.assertEqual(calls[1][-1], '"${XDG_DATA_HOME:-$HOME/.local/share}/lane-control"/current/core/scripts/'
+                                       'machine-setup --folder ~/machine --no-start')
         self.assertEqual(self.orca_calls(), [])  # nothing ran here
 
 

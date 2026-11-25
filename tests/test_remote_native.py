@@ -1519,3 +1519,25 @@ class DocTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallOnBoxTests(Case):
+    """INST-1 (lc-7gk): the box gets the desktop's installed tree, whole and at the same sha, and renders its own
+    current path."""
+
+    def test_the_box_gets_the_whole_tree_at_the_same_sha(self):
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--no-machine-setup")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        sha = git("rev-parse", "HEAD", cwd=ROOT)
+        self.assertIn(f"lane-control: copied {sha} on box", r.stdout)
+        broot = self.e.box / ".local" / "share" / "lane-control"
+        self.assertEqual(os.readlink(broot / "current"), sha)
+        listed = set(git("ls-tree", "-r", "--name-only", sha, cwd=ROOT).split())
+        laid = {str(p.relative_to(broot / sha)) for p in (broot / sha).rglob("*")
+                if (p.is_file() or p.is_symlink()) and "__pycache__" not in p.parts}
+        self.assertEqual(laid, listed | {".lane-control-sha"})
+        text = (self.repo / ".lane-control" / "coordinator.md").read_text()
+        self.assertIn(str(broot / "current"), text)
+        self.assertNotIn(str(ROOT), text)
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--no-machine-setup")
+        self.assertIn(f"lane-control: exists {sha} on box", r.stdout)
