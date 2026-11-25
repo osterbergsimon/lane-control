@@ -43,12 +43,14 @@ You plan, decide and check; lanes do the work, including the waiting.
   in its report. If the base moved before you merge, send the lane a new Task to merge it again.
 - Start a lane with `orca-ide orchestration worker-start --spec-file <brief> --worktree new-child --agent <id>
   --model <model>` (`--effort` only for Claude). Harness and model come from `~/.agents/bin/lane-tier <your tier
-  table> <tier>` (the tier rules, `core/scripts/lane-tier`). The agent id is `claude` for Claude and `opencode2` for
-  OpenCode (v2): a tier whose harness is `opencode` starts like any other, with `--agent opencode2 --model
-  <provider>/<model>` from your table.
-- An OpenCode lane needs its worktree first: `orca-ide worktree create`, then `worker-start --worktree
-  path:<that worktree>`. A lane on another host (`--on <environment>`) takes `--worktree new-top-level --repo <exact
-  selector>`; Orca refuses `new-child` and `current` there.
+  table> <tier>` (the tier rules, `core/scripts/lane-tier`). The agent id is `claude` for Claude and `opencode` for
+  OpenCode, never `opencode2` (Orca refuses `--model` for it).
+- An OpenCode lane (a tier whose harness is `opencode`) needs its worktree first, since Orca takes no `--model` with
+  `new-child` or `new-top-level`: `orca-ide worktree create`, then `worker-start --worktree path:<that worktree>
+  --agent opencode --model <provider>/<model>` from your table, no `--effort`. Do the checks in the
+  `native-orca-lanes` skill, section 2, first.
+- Any other lane on another host (`--on <environment>`) takes `--worktree new-top-level --repo <exact selector>`;
+  Orca refuses `new-child` and `current` there.
 - A lane on a failing test, a CI run or a bug report is a debugger lane: its brief starts with the debugger persona,
   `.lane-control/debugger.md` in your checkout.
 - Talk to a lane with `orca-ide orchestration send --to dispatch:<id>`; read its reports and questions with
