@@ -2119,7 +2119,8 @@ class OnboardingTests(unittest.TestCase):
 
     def test_onboarding_agents_run_on_opencode_too(self):
         # Owner 2026-11-24 (LIT-2): nothing is refused by harness; an OpenCode role runs `opencode2 run`.
-        self.e.script_agents(**{"x/y": [WRITE], "opus": [PASS]})
+        # an OpenCode adapter's files come back from its copy only at its template paths (copy_back)
+        self.e.script_agents(**{"x/y": [{"write": {".lane-control/project.md": "facts\n"}}], "opus": [PASS]})
         (self.e.bin / "opencode2").symlink_to(FAKE_AGENT)
         r = self.e.run(str(self.repo), "--adapter", "opencode/x/y", adapt=True)
         self.assertEqual(r.returncode, 3, r.stderr)  # no terminal for the yes: stopped before the commit

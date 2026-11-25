@@ -262,7 +262,7 @@ is refused. The list exists only in the agents' command line, never in a file. A
 that is not `.env*` needs `--private` or an ignore line. A name with `( ) * ? [ ] { } \` or a newline cannot be put in a
 rule: setup stops and names it. An OpenCode adapter or reviewer (`--adapter opencode/<provider>/<model>`) does not get
 these rules: it runs in a scratch copy that holds only the tracked files minus `.env*` and everything a `--private` glob
-covers, with no `.git`, ignored file or symlink, and only its new files under `.lane-control/` come back
+covers, with no `.git`, ignored file or symlink, and only its template files under `.lane-control/` come back
 (`orchestrators/native-orca/setup.md`, "OpenCode on a self-hosted LiteLLM gateway").
 
 ### The settings store: per-project choices, outside the repo

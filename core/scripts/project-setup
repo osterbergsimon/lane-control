@@ -86,6 +86,7 @@ import contextlib
 import difflib
 import fnmatch
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -1677,6 +1678,7 @@ def snapshot(repo: Path) -> dict:
 
 
 def check_scope(repo: Path, before: dict):
+    refuse_git_metadata(repo)  # before any other git call
     if current_head(repo) != before[HEAD_KEY]:
         raise Fail("HEAD moved while an agent ran; onboarding's agents never commit. Nothing further was committed")
     # before's paths too: a file put back to its committed state no longer shows in git status
@@ -1765,9 +1767,16 @@ def private_glob(rel: str, g: str) -> bool:
     """True when the --private glob `g` covers the path `rel` (from the repo root), matched here with fnmatch, never by
     git, so no .gitignore line (a `!` negation) or comment (`#`) and no working folder can change it. As in an ignore
     line, a glob covers what is below a folder it names (`secrets`, `private/`), one with no slash matches a name at any
-    depth, and `**/` may match no folder at all. It errs towards covering more."""
-    g = g.strip("/")
-    shapes = {g, g.replace("**/", ""), g.replace("/**/", "/")}
+    depth, each `**/` may match no folder at all (each on its own), and `[^...]` is git's `[!...]`. POSIX classes
+    (`[[:digit:]]`) are refused by bad_glob. It errs towards covering more."""
+    g = re.sub(r"\[\^", "[!", g.strip("/"))
+    pieces = g.split("**/")
+    shapes = set()
+    for keep in itertools.product((True, False), repeat=min(len(pieces) - 1, 8)):  # each **/ there or not
+        x = pieces[0]
+        for i, piece in enumerate(pieces[1:]):
+            x += ("**/" if i >= len(keep) or keep[i] else "") + piece
+        shapes |= {x, x.replace("/**/", "/")}
     parts = rel.split("/")
     for i in range(1, len(parts) + 1):  # the path and each folder it is in
         here = "/".join(parts[:i])
@@ -1858,28 +1867,59 @@ def opencode_export(repo: Path):
         shutil.rmtree(top, ignore_errors=True)
 
 
+def adapter_names() -> set:
+    """The paths an onboarding adapter writes, as its prompts name them: each template as `.lane-control/<its name>`
+    and `.lane-control/additions/<its name>` (native Orca's placement), and the suggestions file. Plain names only:
+    no dot-name, no folder of its own, so nothing git (or anything else) would take for a repo or a config."""
+    templates = [t.name for t in TEMPLATES.glob("*.md") if t.name not in PROMPTS]
+    return ({f"{ADAPTED}/{t}" for t in templates} | {f"{ADDITIONS}/{t}" for t in templates} | {SUGGESTIONS})
+
+
 def copy_back(repo: Path, top: Path, before: dict, write: bool) -> None:
-    """Bring back what an OpenCode onboarding agent wrote in its copy: only new or changed plain files under
-    .lane-control/, and only from the adapting agent (the reviewer writes nothing). Anything else that changed (a file
-    elsewhere, a deletion, a link) stops the run and nothing is copied."""
+    """Bring back what an OpenCode onboarding agent wrote in its copy: only new or changed plain files, only from the
+    adapting agent (the reviewer writes nothing), and only at the paths adapter_names lists. Everything is checked
+    before anything is written: a file anywhere else (a .git, a dot-name, a folder of its own), a deletion, a link, or
+    a link in the repo on the way to one stops the run, and nothing is copied or made."""
     after = tree_state(top)
     changed = sorted(n for n in set(before) | set(after) if before.get(n) != after.get(n))
-    bad = [n for n in changed if not write or not n.startswith(ADAPTED + "/") or after.get(n) in (None, "link", "other")]
+    allowed = adapter_names()
+    bad = [n for n in changed if not write or n not in allowed or after.get(n) in (None, "link", "other")]
     if bad:
         who = "adapting agent" if write else "reviewer"
         raise Fail(f"the OpenCode {who} changed {', '.join(bad[:5])}{' ...' if len(bad) > 5 else ''} in its copy of the "
-                   f"project, outside what it may write ({ADAPTED}/, adapter only): nothing it wrote was copied back. "
-                   "Nothing was committed")
-    root = repo.resolve()
+                   f"project, where it may not write (the adapter writes only its template files in {ADAPTED}/): "
+                   "nothing it wrote was copied back. Nothing was committed")
+    for n in changed:  # every folder on the way must be a real folder, or not there yet; nothing is made before this
+        here = repo
+        for part in Path(n).parts:
+            here = here / part
+            if here.is_symlink() or (here.exists() and here != repo / n and not here.is_dir()):
+                raise Fail(f"{n}: {here.relative_to(repo)} in the repo is a link or not a folder, so the OpenCode "
+                           "adapter's files were not copied back. Nothing was committed")
     for n in changed:
         dest = repo / n
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.is_symlink() or Path(os.path.realpath(dest.parent)) != root / Path(n).parent:
-            raise Fail(f"{n}: a link in the repo is in the way, so the OpenCode adapter's file was not copied back. "
-                       "Nothing was committed")
+        dest.parent.mkdir(parents=True, exist_ok=True)  # .lane-control/ or its additions/ only (adapter_names)
         tmp = dest.with_name(f".{dest.name}.lane-control-{os.getpid()}")
         shutil.copyfile(top / n, tmp)
         tmp.replace(dest)
+
+
+def refuse_git_metadata(repo: Path) -> None:
+    """Stop when anything under .lane-control/ could pass for a repo: a .git (folder or file, any case, any depth) or a
+    folder laid out as a bare one (HEAD with objects/ or refs/). A git command run in there would read its config,
+    and so run whatever command it names (core.fsmonitor, hooks). Checked before and after every onboarding agent, on
+    both harnesses, before any git command can go in."""
+    top = repo / ADAPTED
+    if not top.is_dir() or top.is_symlink():
+        return
+    for here, dirs, files in os.walk(top):
+        names = {n.lower() for n in dirs + files}
+        bare = "head" in names and ({"objects", "refs"} & names)
+        if ".git" in names or bare:
+            where = Path(here).relative_to(repo).as_posix()
+            raise Fail(f"{where} holds {'a .git' if '.git' in names else 'what git takes for a bare repo'}, which an "
+                       "onboarding agent must never write: a git command in there could run a command it names. "
+                       f"Nothing was committed; remove it by hand (rm -rf {where}/.git, or the folder) and run again")
 
 
 def git_z(repo: Path, *args) -> list:
@@ -1926,8 +1966,9 @@ def opencode_rules(write: bool) -> list:
     Shell, web, grep, glob, sub-agents and anything outside the copy stay off (grep and glob have rules that match
     the pattern searched for, never a folder, so they could not be kept in it)."""
     rules = [("*", "*", "deny"), ("read", "*", "allow")]
-    if write:
-        rules.append(("edit", f"{ADAPTED}/**", "allow"))
+    if write:  # then no .git and no dot-name in it (copy_back refuses them too)
+        rules += [("edit", f"{ADAPTED}/**", "allow")] + [("edit", f"{ADAPTED}/{x}", "deny") for x in (
+            ".git", ".git/**", "**/.git", "**/.git/**", ".*", "**/.*")]
     return [{"action": a, "resource": r, "effect": e} for a, r, e in rules]
 
 
@@ -1978,7 +2019,8 @@ def run_opencode(repo: Path, model: str, prompt: str, write: bool):
         for memfd in (True, False):
             with opencode_agent(model, write, memfd) as (cmd, env, route):
                 p = run(cmd, cwd=top, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
-            lost = route == "memfd" and p.returncode != 0 and "Agent not found" in (p.stdout + p.stderr)
+            said = opencode_result(p.stdout)[2] + "\n" + ANSI.sub("", p.stderr)  # never the transcript's tool text
+            lost = route == "memfd" and p.returncode != 0 and "Agent not found" in said
             if not lost:
                 break
             if "OPENCODE_CONFIG_CONTENT" in os.environ:
@@ -2015,6 +2057,7 @@ def opencode_result(stdout: str) -> tuple:
 def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
     global agent_spent
     check_limit()
+    refuse_git_metadata(repo)  # before private_rules or the copy run git in the repo's folders
     started = time.monotonic()
     opencode = who[0] == "opencode"
     try:
@@ -2025,6 +2068,7 @@ def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
                     stdin=subprocess.DEVNULL, check=False)
     finally:
         agent_spent += time.monotonic() - started
+        refuse_git_metadata(repo)  # also after a failed run: what it wrote is in the repo (Claude) or came back
     stderr = ANSI.sub("", p.stderr).strip()
     empty = False
     if opencode:
@@ -2890,8 +2934,13 @@ def onboard_attached(d: Path, project: str, adapter: tuple, reviewer: tuple, aga
 
 
 def bad_glob(g) -> bool:
+    """A --private glob project-setup will not take; POSIX classes too, which an OpenCode run's matcher (private_glob)
+    cannot carry: write the range ([0-9])."""
     return not isinstance(g, str) or not g or g.startswith(("/", "~", "!")) or ".." in Path(g).parts \
-        or bool(RULE_UNSAFE & set(g) - set("*?[]"))
+        or bool(RULE_UNSAFE & set(g) - set("*?[]")) or "[[:" in g
+
+
+GLOB_RULE = "a glob relative to the repo root, with no POSIX class like [[:digit:]] (write [0-9])"
 
 
 def validate_settings(repo: Path, st: dict) -> None:
@@ -2953,7 +3002,7 @@ def resolve_settings(repo: Path, a) -> dict:
     private = list(dict.fromkeys([*(st.get("private") or []), *a.private]))
     for g in private:
         if bad_glob(g):
-            raise Fail(f"{store_dir(repo) / 'settings.json'}: private glob {g!r} is not a glob relative to the repo root")
+            raise Fail(f"{store_dir(repo) / 'settings.json'}: private glob {g!r} is not {GLOB_RULE}")
     onboarding, kept = {}, {}
     for role, flag in (("adapter", a.adapter), ("adapt-reviewer", a.adapt_reviewer)):
         spec = flag or stored.get(role) or ONBOARD_PINS[role]
@@ -4428,7 +4477,7 @@ def main(argv=None) -> int:
             harness_model(v)
     for g in a.private:
         if bad_glob(g):
-            print(f"project-setup: --private takes a glob relative to the repo root, got {g!r}", file=sys.stderr)
+            print(f"project-setup: --private takes {GLOB_RULE}, got {g!r}", file=sys.stderr)
             return 2
     if not a.skip_adapt and not a.refresh and a.adapter and a.adapt_reviewer \
             and harness_model(a.adapter)[1] == harness_model(a.adapt_reviewer)[1]:

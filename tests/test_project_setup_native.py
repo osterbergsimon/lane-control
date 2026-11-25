@@ -427,13 +427,11 @@ class OpenCodeOnboardingTests(Case):
 
     def opencode_agents(self, steps: dict, claude=False):
         """opencode2 becomes the agent stub (tests/stubs/fake_agent.py); claude is taken off PATH unless asked for."""
-        (self.e.bin / "opencode2").unlink()
+        (self.e.bin / "opencode2").unlink(missing_ok=True)
         (self.e.bin / "opencode2").symlink_to(FAKE_AGENT)
+        (self.e.bin / "claude").unlink(missing_ok=True)
         if claude:
-            (self.e.bin / "claude").unlink()
             (self.e.bin / "claude").symlink_to(FAKE_AGENT)
-        else:
-            (self.e.bin / "claude").unlink()
         self.e.set_state(agent_steps=steps)
 
     def setup(self, *args, answer="y", env_extra=None):
@@ -541,7 +539,8 @@ class OpenCodeOnboardingTests(Case):
                     self.assertIn(readable, files)
                 rules = self.rules(r)
                 self.assertEqual(rules[:2], [("*", "*", "deny"), ("read", "*", "allow")])  # second layer
-        self.assertEqual(self.rules(adapter)[2:], [("edit", ".lane-control/**", "allow")])
+        self.assertEqual(self.rules(adapter)[2:], [("edit", ".lane-control/**", "allow")] + [
+            ("edit", f".lane-control/{x}", "deny") for x in (".git", ".git/**", "**/.git", "**/.git/**", ".*", "**/.*")])
         self.assertEqual(self.rules(reviewer)[2:], [])
         for ours in (".lane-control/project.md", "AGENTS.md", GENERATED):  # the reviewer sees onboarding's work
             self.assertIn(ours, reviewer["files"])
@@ -596,12 +595,90 @@ class OpenCodeOnboardingTests(Case):
         self.opencode_agents({OC_ADAPTER: [{"write": {ADDITION: "x\n", "AGENTS.md": "rewritten\n"}}]})
         before = (self.repo / "AGENTS.md").read_text() if (self.repo / "AGENTS.md").exists() else None
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
-        self.assertIn("the OpenCode adapting agent changed AGENTS.md in its copy of the project, outside what it may "
-                      "write (.lane-control/, adapter only): nothing it wrote was copied back", self.err)
+        self.assertIn("the OpenCode adapting agent changed AGENTS.md in its copy of the project, where it may not "
+                      "write (the adapter writes only its template files in .lane-control/): nothing it wrote was "
+                      "copied back", self.err)
         self.assertFalse((self.repo / ADDITION).exists())
         after = (self.repo / "AGENTS.md").read_text() if (self.repo / "AGENTS.md").exists() else None
         self.assertNotEqual(after, "rewritten\n")
         self.assertEqual(before, None if after is None else before)
+
+    def test_a_git_folder_or_dot_name_from_the_adapter_never_reaches_the_repo(self):
+        # B7: a .git the model writes under .lane-control/ would let a later git command there run its config
+        for write in ({".lane-control/.git/config": "[core]\n\tfsmonitor = touch PWNED\n",
+                       ".lane-control/.git/HEAD": "ref: refs/heads/main\n"},
+                      {".lane-control/.GIT": "gitdir: ../elsewhere\n"}, {".lane-control/.hidden.md": "x\n"},
+                      {".lane-control/additions/.git/config": "x\n"}, {".lane-control/notes/x.md": "x\n"},
+                      {".lane-control/x/HEAD": "ref: x\n", ".lane-control/x/objects/a": "x", ".lane-control/x/refs/b": "x"},
+                      {".lane-control/other.md": "not a template\n"}):
+            with self.subTest(write=sorted(write)):
+                shutil.rmtree(self.repo / ".lane-control", ignore_errors=True)
+                self.opencode_agents({OC_ADAPTER: [{"write": {ADDITION: "x\n", **write}}]})
+                self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+                self.assertIn("where it may not write (the adapter writes only its template files in .lane-control/)",
+                              self.err)
+                self.assertFalse((self.repo / ".lane-control").exists())  # nothing came back, nothing was made
+
+    def test_a_git_folder_from_a_claude_adapter_stops_before_any_git_command_enters_it(self):
+        # B7 on the other harness: a mixed setup, Claude adapter and OpenCode reviewer, and a bare-repo layout too
+        for write in ({".lane-control/.git/config": "[core]\n\tfsmonitor = touch PWNED\n"},
+                      {".lane-control/x/HEAD": "ref: x\n", ".lane-control/x/objects/a": "x"}):
+            with self.subTest(write=sorted(write)):
+                shutil.rmtree(self.repo / ".lane-control", ignore_errors=True)
+                self.opencode_agents({"sonnet": [{"write": {ADDITION: "x\n", **write}}], OC_REVIEWER: [PASS]},
+                                     claude=True)
+                status = self.setup("--adapter", "claude/sonnet", "--adapt-reviewer", f"opencode/{OC_REVIEWER}",
+                                    "--no-start")
+                self.assertEqual(status, 1)
+                self.assertIn("which an onboarding agent must never write: a git command in there could run a "
+                              "command it names", self.err)
+                self.assertEqual([r["tool"] for r in self.e.agent_runs()][-1], "claude")  # the reviewer never ran
+                self.e.log.with_name(self.e.log.name + ".agents").unlink()
+
+    def test_no_folder_is_made_through_a_link_in_the_repo(self):
+        # m8: a link on the way stops the copy back before anything is made, outside the repo too
+        outside = self.e.home / "outside"
+        outside.mkdir()
+        (self.repo / ".lane-control").mkdir()
+        (self.repo / ".lane-control" / "additions").symlink_to(outside)
+        self.opencode_agents({OC_ADAPTER: [{"write": {ADDITION: "x\n", ".lane-control/project.md": "p\n"}}]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+        self.assertIn(".lane-control/additions in the repo is a link or not a folder", self.err)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse((self.repo / ".lane-control" / "project.md").exists())  # checked all before copying one
+
+    def test_private_globs_cover_at_least_what_git_matches(self):
+        # M1: each form bad_glob takes, against git's own matching of the same line
+        m = load()
+        paths = ["shot1.md", "shotx.md", "shot.md", "a/x/b/c.md", "a/b/y/c.md", "a/b/c.md", "a/x/b/y/c.md", "a/c.md",
+                 "secrets/a", "x/secrets/b", "private/b", "root.pem", "d/e.pem", "docs/private/p", "#notes/a",
+                 "config/k", "app/(g)/p", "app/[id]/q", "data1/y", "dataX/y", "q/w/e", "b/c", "z/a/b/c.md"]
+        globs = ["shot[^0-9].md", "shot[!0-9].md", "shot[0-9].md", "a/**/b/**/c.md", "a/**/c.md", "**/b/**",
+                 "q/**/e", "**/w/**/e", "secrets", "private/", "**/*.pem", "docs/private/**", "#notes/**", "config/**",
+                 "app/**", "data?/**", "*.pem"]
+        work = self.e.home / "globs"
+        git("init", "-q", str(work), cwd=self.e.home)
+        for p in paths:
+            (work / p).parent.mkdir(parents=True, exist_ok=True)
+            (work / p).write_text("x")
+        for g in globs:
+            with self.subTest(glob=g):
+                self.assertFalse(m.bad_glob(g))
+                by_git = set(git("ls-files", "-o", "-i", f"--exclude={g}", cwd=work).splitlines())
+                self.assertTrue(by_git)
+                self.assertEqual(by_git - {p for p in paths if m.private_glob(p, g)}, set())
+        for g in ("shot[[:digit:]].md", "data[[:alpha:]]/**"):  # POSIX classes: refused, with the way out
+            self.assertTrue(m.bad_glob(g))
+            r = self.e.run(str(self.repo), "--private", g, adapt=True)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("with no POSIX class like [[:digit:]] (write [0-9])", r.stderr)
+
+    def test_the_memfd_retry_reads_the_error_not_the_transcript(self):
+        # n1: a failed run whose text holds "Agent not found" (it read this script, say) is not run again
+        self.opencode_agents({OC_ADAPTER: [{"say": 'it says Agent not found: "x"', "err": "boom", "exit": 1}]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+        self.assertEqual(len(self.e.agent_runs()), 1)
+        self.assertIn("opencode2 run --model failed: boom", self.err)
 
     def test_the_reviewer_writes_nothing_back(self):
         self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [{"write": {ADDITION: "changed\n"}, **PASS}]})
@@ -712,7 +789,7 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
     test_project_setup_native.py -k OpenCodeOnboardingLiveTests"""
 
     GLOBS = ["secrets", "private/", "**/*.pem", "shot[0-9].md", "shots/**", "docs/private/**", "#notes/**",
-             "config/**", "app/**", "lib/AGENTS.md"]
+             "config/**", "app/**", "lib/AGENTS.md", "shot[^0-9].md", "a/**/b/**/c.md"]
 
     def setUp(self):
         import tempfile
@@ -747,7 +824,7 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
             (self.repo / n).write_text(text)
         for n in (".env", "data/x.csv", "sub/secret.key", "sub/AGENTS.md", "secrets/a.md", "private/b.md", "root.pem",
                   "shot1.md", "shots/f.png", "docs/private/plan.md", "#notes/a.md", "config/keys.md",
-                  "app/(group)/p.tsx", "app/[id]/q.tsx", "lib/AGENTS.md"):
+                  "app/(group)/p.tsx", "app/[id]/q.tsx", "lib/AGENTS.md", "shotx.md", "a/x/b/c.md", "a/b/y/c.md"):
             secret(n)
         secret("config.yaml", self.t / "beads")
         secret("outside.md", self.t)
@@ -831,7 +908,8 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
                      "docs/private/plan.md", "#notes/a.md",  # B4: whitelist .gitignore, a leading #
                      "config/keys.md",  # B5 below runs it from a subfolder too
                      "sub/AGENTS.md", "lib/AGENTS.md", "lib/link/AGENTS.md",  # B6
-                     "app/(group)/p.tsx", "app/[id]/q.tsx"):  # m5
+                     "app/(group)/p.tsx", "app/[id]/q.tsx",  # m5
+                     "shotx.md", "a/x/b/c.md", "a/b/y/c.md"):  # M1: [^...] and two **/ in one glob
             with self.subTest(path=path):
                 got, _ = self.call("read", {"path": path}, write=False)
                 self.assertNotIn("LIVE-SECRET", got)
@@ -857,6 +935,19 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
                 got, _ = self.call(tool, args, write=True)
                 self.assertIn("No tool named", got)
         self.assertFalse((self.t / "ran").exists())
+
+    def test_the_adapter_cannot_put_a_git_or_a_dot_name_in_the_repo(self):
+        # B7: a .lane-control/.git with core.fsmonitor would run a command at the next git call in there
+        for path in (".lane-control/.git/config", ".lane-control/.git/HEAD", ".lane-control/.GIT",
+                     ".lane-control/additions/.git/config", ".lane-control/.hidden.md"):
+            with self.subTest(path=path):
+                got, _ = self.call("write", {"path": path, "content": "[core]\n\tfsmonitor = touch PWNED\n"},
+                                   write=True)
+                self.assertIn("Permission denied", got)  # the second layer; copy_back refuses it too
+                self.assertFalse((self.repo / ".lane-control").exists())
+        with self.assertRaisesRegex(self.m.Fail, "where it may not write"):  # a file that is not a template
+            self.call("write", {"path": ".lane-control/notes.md", "content": "x"}, write=True)
+        self.assertFalse((self.repo / ".lane-control").exists())
 
     def test_the_adapter_writes_only_lane_control_and_it_comes_back(self):
         got, _ = self.call("write", {"path": "AGENTS.md", "content": "changed"}, write=True)
