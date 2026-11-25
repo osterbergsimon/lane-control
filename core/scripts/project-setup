@@ -9,7 +9,7 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
                 [--no-desktop-lanes] [--no-machine-setup] [--orca-port N]
                 [--orca-from DIR | --orca-bundle TAR] [--orca-version V]
-                [--tunnel-auth-sock PATH] [--tunnel-ssh PATH] [--tunnel-no-enable]
+                [--tunnel-auth-sock PATH] [--tunnel-ssh PATH] [--tunnel-no-enable] [--tunnel-remote-port N]
   project-setup --remove-host <host>
   project-setup <dir> --suggest-tiers <provider> [--gateway URL] [--gateway-key-env NAME]
 
@@ -486,6 +486,7 @@ def copy_to_host(place: "Place") -> None:
 
 LOCAL_ONLY_FLAGS = {"--no-desktop-lanes": False, "--no-machine-setup": False, "--orca-port": True, "--host": True,
                     "--tunnel-auth-sock": True, "--tunnel-ssh": True, "--tunnel-no-enable": False,
+                    "--tunnel-remote-port": True,
                     "--orca-from": True, "--orca-bundle": True, "--orca-version": True}
 
 
@@ -4018,6 +4019,37 @@ def link_port(link: str) -> int:
     return port
 
 
+def link_for_port(link: str, port: int, remote: int) -> str:
+    """The link with its endpoint's port changed from `port` (this machine's, behind the tunnel) to `remote` (the one
+    the box dials), everything else as it was; the link itself when they are the same. The endpoint is only where the
+    box dials: Orca pins this machine by the offer's public key and seals the token to it (Orca 1.4.250 and 1.4.268,
+    read from its source), so the rest of the offer stays valid. Every message is free of the link."""
+    if remote == port:
+        return link
+    import base64
+    import urllib.parse
+    bad = Fail("the link's endpoint is not plainly 127.0.0.1 and its port, so it cannot be pointed at another port "
+               "on the box; nothing was sent or started. Leave out --tunnel-remote-port, or make the link again")
+    try:
+        text = link.strip()
+        if text.lower().startswith("orca://"):
+            u = urllib.parse.urlsplit(text)
+            code = (urllib.parse.parse_qs(u.query).get("code") or [""])[0] or u.fragment
+        else:
+            code = text
+        code = code.replace("+", "-").replace("/", "_")
+        payload = json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
+        ep = urllib.parse.urlsplit(payload["endpoint"])
+        if ep.netloc != f"127.0.0.1:{port}":  # no user part, no other spelling of the address or the port
+            raise ValueError
+        payload["endpoint"] = urllib.parse.urlunsplit(ep._replace(netloc=f"127.0.0.1:{remote}"))
+        # Orca's own encoding: JSON.stringify, then unpadded base64url, as orca://pair?code=
+        data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+        return "orca://pair?code=" + base64.urlsafe_b64encode(data).decode().rstrip("=")
+    except Exception:  # noqa: BLE001 (one message, without the link)
+        raise bad from None
+
+
 def box_pairing_remote(place: Place, op: str, name: str, link: "str | None" = None) -> str:
     """The box-side pairing step (project-setup --box-pairing on the host's copy): its one-word answer."""
     r = place.ssh(remote_cmd("scripts/project-setup", ["--box-pairing", op, name]), input=link)
@@ -4029,18 +4061,40 @@ def box_pairing_remote(place: Place, op: str, name: str, link: "str | None" = No
     return said[-1]
 
 
-def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | None":
+def recorded_ports(host: str) -> "tuple | None":
+    """(this machine's port, the box's port) of the host's tunnel from its record; a record from before the two
+    could differ has tunnel_port only, which is both."""
+    try:
+        rec = json.loads(host_record(host).read_text())
+        port = rec["tunnel_port"]
+        remote = rec.get("tunnel_remote_port", port)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    ok = all(isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65535 for p in (port, remote))
+    return (port, remote) if ok else None
+
+
+def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: "int | None" = None) -> "str | None":
     """Direction 2: the box pairs with this desktop's Orca, through a reverse tunnel. The environment's name on the
-    box, or None when skipped. tunnel_opts are lane-tunnel start's own options (--auth-sock, --ssh, --no-enable)."""
+    box, or None when skipped. tunnel_opts are lane-tunnel start's own options (--auth-sock, --ssh, --no-enable);
+    remote_port is the port the box dials (default: the link's)."""
     host, me = place.host, this_machine()
     state = box_pairing_remote(place, "status", me)
+    ports = recorded_ports(host)
+    again = (f"core/scripts/lane-tunnel start <options> --remote-port {ports[1]} {host} {ports[0]}" if ports else
+             f"core/scripts/lane-tunnel start <options> --remote-port <box port> {host} <port> (the ports are "
+             "tunnel_port and tunnel_remote_port in the host's record under ~/.config/lane-control/hosts/)")
+    if state == "saved" and ports:  # paired before, the tunnel is down (a reboot, a locked card): no new link needed
+        say("tunnel", "down", f"{host} has this machine's Orca as environment {me} but cannot reach it. To bring the "
+            f"tunnel back without a new link run {again} (and skip the link below with Enter)")
     if state == "reachable":
         given = [f for f, v in (("--tunnel-auth-sock", tunnel_opts and "--auth-sock" in tunnel_opts),
                                 ("--tunnel-ssh", tunnel_opts and "--ssh" in tunnel_opts),
-                                ("--tunnel-no-enable", tunnel_opts and "--no-enable" in tunnel_opts)) if v]
-        unused = (f"; {' '.join(given)} not used: the tunnel is already paired and running. To change it run "
-                  f"core/scripts/lane-tunnel start <options> {host} <port> (the port is tunnel_port in the host's "
-                  "record under ~/.config/lane-control/hosts/)") if given else ""
+                                ("--tunnel-no-enable", tunnel_opts and "--no-enable" in tunnel_opts),
+                                ("--tunnel-remote-port", remote_port is not None)) if v]
+        unused = (f"; {' '.join(given)} not used: the tunnel is already paired and running. To change its options "
+                  f"run {again}; another port on the box needs pairing again (project-setup --remove-host {host}, "
+                  "then a new link)") if given else ""
         say("desktop lanes", "exists", f"{host} has this machine's Orca as environment {me}{unused}")
         return me
     if not has_terminal():
@@ -4064,6 +4118,8 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | Non
         say("desktop lanes", "skipped", f"(no link; run again to add it, or --no-desktop-lanes)")
         return None
     port = link_port(link)
+    remote = remote_port or port
+    link = link_for_port(link, port, remote)  # the box dials its own end of the tunnel
     if state == "saved":  # saved there earlier but not reachable: this machine's identity or port changed
         box_pairing_remote(place, "rm", me)
     tunnel = tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel")
@@ -4071,11 +4127,14 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | Non
     subprocess.run([tunnel, "stop", host], capture_output=True)  # an earlier tunnel of ours would hold the port
     # The box's end must be ours: whatever else listens there (the box's own Orca server, another user's program)
     # would get the code instead of this machine.
-    if not wait_box_port(place, port, "free"):
-        raise Fail(f"port {port} on {host} is in use (its own Orca server, or another program), so the tunnel back "
-                   f"here cannot open there; nothing was sent. Move what listens there (Orca's server: "
-                   f"orca-host-install {host} --pair --port <another>), then run again")
-    t = subprocess.run([tunnel, "start", *(tunnel_opts or []), host, str(port)], capture_output=True, text=True)
+    if not wait_box_port(place, remote, "free"):
+        raise Fail(f"port {remote} on {host} is in use (its own Orca server, or another program) or not open to your "
+                   "user there, so the tunnel back "
+                   f"here cannot open there; nothing was sent. Run again with --tunnel-remote-port <a free port on "
+                   f"{host}> for the box's end, or move what listens there (Orca's server: orca-host-install {host} "
+                   "--pair --port <another>)")
+    t = subprocess.run([tunnel, "start", *(tunnel_opts or []), "--remote-port", str(remote), host, str(port)],
+                       capture_output=True, text=True)
     if t.returncode != 0:
         # lane-tunnel leaves an always-on unit enabled and retrying after a failed start. Pairing failed here, so stop
         # it and forget its env file; a retry of this command starts it afresh.
@@ -4085,7 +4144,7 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | Non
                    "(and --tunnel-ssh <wrapper>)")
     sent = False
     try:
-        up = wait_box_port(place, port, "busy")
+        up = wait_box_port(place, remote, "busy")
         for _ in range(2):  # and it is our unit that holds it, not another program after the unit died
             up = up and subprocess.run([tunnel, "status", host], capture_output=True).returncode == 0
             time.sleep(1)
@@ -4093,8 +4152,8 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | Non
             raise Fail(f"the tunnel {unit} did not come up on {host}, so nothing was sent (journalctl --user -u {unit}). "
                        "The unit's ssh runs without your ssh agent unless --tunnel-auth-sock names one: it needs a key "
                        "it can use alone, with no passphrase (IdentityFile in the ssh config it uses), or that agent")
-        if box_pairing_remote(place, "exposed", str(port)) != "no":
-            raise Fail(f"on {host} the tunnel's port {port} is open on more than 127.0.0.1 (sshd's GatewayPorts is on "
+        if box_pairing_remote(place, "exposed", str(remote)) != "no":
+            raise Fail(f"on {host} the tunnel's port {remote} is open on more than 127.0.0.1 (sshd's GatewayPorts is on "
                        "there), which would put this desktop's Orca on that network; nothing was sent. Set "
                        "GatewayPorts no (or clientspecified) in the box's sshd_config, then run again")
         say("tunnel", "created", t.stdout.strip())
@@ -4116,7 +4175,8 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None) -> "str | Non
         time.sleep(2)
     hosts_dir().mkdir(parents=True, exist_ok=True)
     write_atomic(host_record(host), json.dumps({"host": host, "environment": place.env, "desktop_environment": me,
-                                                "tunnel_port": port}, indent=2).encode(), 0o600)
+                                                "tunnel_port": port, "tunnel_remote_port": remote}, indent=2).encode(),
+                 0o600)
     if state == "reachable":
         say("desktop lanes", "created", f"{host} reaches this machine's Orca as environment {me} "
             f"(tunnel lane-tunnel@{env_name(host)}.service)")
@@ -4227,7 +4287,7 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
         if a.no_desktop_lanes:
             say("desktop lanes", "skipped", "(--no-desktop-lanes)")
         else:
-            paired = desktop_lanes(place, tunnel_options(a))
+            paired = desktop_lanes(place, tunnel_options(a), a.tunnel_remote_port)
         rc = reexec(place, [*rest, *(["--desktop-environment", paired] if paired else [])])
         if rc != 0:
             return rc
@@ -4435,6 +4495,10 @@ def main(argv=None) -> int:
     ap.add_argument("--tunnel-no-enable", action="store_true",
                     help="with a host: start the tunnel without enabling it, so it does not come back at login "
                          "(lane-tunnel start --no-enable)")
+    ap.add_argument("--tunnel-remote-port", type=int, metavar="N",
+                    help="with a host: the port on the host its end of the tunnel opens and its Orca dials (default: "
+                         "the share link's port); the link is rewritten for it before it is sent "
+                         "(lane-tunnel start --remote-port)")
     ap.add_argument("--orca-port", type=int, metavar="N",
                     help="with a host: the port of Orca's server there and its tunnel here (default: the first free "
                          "one from 6769)")
@@ -4534,6 +4598,11 @@ def main(argv=None) -> int:
         return suggest_tiers(a)
     if a.orca_from and a.orca_bundle:
         print("project-setup: --orca-from and --orca-bundle exclude each other: give one source", file=sys.stderr)
+        return 2
+    if a.tunnel_remote_port is not None and not 1024 <= a.tunnel_remote_port <= 65535:
+        # ssh -R as a normal user (setup never runs as root there) cannot open a port below 1024 on the box
+        print(f"project-setup: --tunnel-remote-port takes a port from 1024 to 65535 (a normal user's ssh -R cannot "
+              f"open a lower one on the box), got {a.tunnel_remote_port}", file=sys.stderr)
         return 2
     if a.tunnel_auth_sock or a.tunnel_ssh:  # lane-tunnel's own rules, before anything runs on the host
         c = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "check", *tunnel_options(a)],
