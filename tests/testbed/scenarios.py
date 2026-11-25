@@ -745,6 +745,88 @@ def restart_retry(ctx):
     raise Fail(f"neither the worker ({after}) nor its --retry-of ({r2['dispatchId']}) reported after the restart")
 
 
+# --- 10. away-improve on the fake GitHub ----------------------------------------------------------------------------------
+
+ENTRY = """## What
+A testbed item.
+## Why
+To try away-merge end to end.
+## Builds on
+Nothing.
+## Existing work checked
+None found.
+## How to try it
+Read item-{n}.txt.
+## How to drop it
+Revert the merge.
+## Tests
+The fake CI check passed.
+"""
+
+
+def away_pr(ctx, away, n):
+    """A lane's PR into the away branch, with its log entry and the coordinator's review marker; its number."""
+    run(ctx, "desktop", f"cd ~/code/scratch && git fetch -q origin && git checkout -q -B tb-item-{n} origin/{away} && "
+                        f"echo item {n} > item-{n}.txt && git add item-{n}.txt && git commit -qm 'testbed item {n}' && "
+                        f"git push -q -f origin tb-item-{n} && git checkout -q main")
+    run(ctx, "desktop", f"cat > ~/tmp/entry-{n}.md", input=ENTRY.format(n=n))
+    url = gh_in(ctx, "desktop", f"pr create --head tb-item-{n} --base {away} --title 'testbed item {n}' --body-file "
+                                f"~/tmp/entry-{n}.md").stdout.strip()
+    num = url.rsplit("/", 1)[-1]
+    head = json.loads(gh_in(ctx, "desktop", f"pr view {num} --json headRefOid").stdout)["headRefOid"]
+    gh_in(ctx, "desktop", f"pr comment {num} --body 'Review: passed {head}'")
+    return num
+
+
+@scenario("away-improve with no agent: lane-improve on (a cap of 1 item) cuts away/<date> and its draft summary PR; a "
+          "reviewed lane PR goes in by away-merge; the next is refused at the cap; drained; off")
+def away_improve(ctx):
+    scratch_project(ctx, "desktop")
+    run(ctx, "desktop", "mkdir -p ~/.config/lane-control && printf 'COORDINATORS=\"\nscratch /home/u/code/scratch\n\"\n"
+                        "RUNNER_REPOS=\"\"\n' > ~/.config/lane-control/machine.conf && "
+                        "printf 'tb-private-name\n' > ~/.config/lane-control/private-names.txt")
+    lc = f"{LC}/core/scripts"
+    run(ctx, "desktop", f"{lc}/lane-improve off < /dev/null >/dev/null 2>&1; {lc}/lane-improve drained --all "
+                        "< /dev/null >/dev/null 2>&1; true", check=False)  # an earlier run's period, wrapped up
+    # A project has one away branch, ever: an earlier run's is dropped first, as the owner would (delete it, close its PR).
+    run(ctx, "desktop", "cd ~/code/scratch && git fetch -q --prune origin && for b in $(git branch -r --format "
+                        "'%(refname:short)' | grep -o 'away/[0-9-]*'); do for n in $(gh pr list --head $b --state open --json number -q '.[].number') $(gh pr list --base $b --state open "
+                        "--json number -q '.[].number'); do gh pr close $n; done; git push -q origin --delete $b; done; "
+                        "git branch --format '%(refname:short)' | grep '^away/' | xargs -r git branch -q -D; true",
+        check=False)
+    on = run(ctx, "desktop", f"{lc}/lane-improve on --project scratch --max-items 1 --unmetered --yes", check=False)
+    expect(on.returncode == 0, f"lane-improve on exited {on.returncode}: {(on.stdout + on.stderr)[-600:]}")
+    run(ctx, "desktop", "cd ~/code/scratch && git fetch -q origin")
+    away = run(ctx, "desktop", "cd ~/code/scratch && git branch -r --format '%(refname:short)' | grep -o 'away/[0-9-]*' "
+                               "| head -1").stdout.strip()
+    expect(away, f"no away branch on the fake GitHub after lane-improve on: {on.stdout[-400:]}")
+    summary = json.loads(gh_in(ctx, "desktop", f"pr list --head {away} --state open --json number,isDraft,baseRefName")
+                         .stdout)
+    expect(summary and summary[0]["isDraft"] and summary[0]["baseRefName"] == "main",
+           f"no draft summary PR {away} -> main: {summary}")
+    n1 = away_pr(ctx, away, 1)
+    m = run(ctx, "desktop", f"cd ~/code/scratch && {lc}/away-merge --project scratch --pr {n1} --item 'testbed item 1'",
+            check=False)
+    expect(m.returncode == 0, f"away-merge refused the reviewed PR: {(m.stdout + m.stderr)[-700:]}")
+    merged = json.loads(gh_in(ctx, "desktop", f"pr view {n1} --json state").stdout)["state"]
+    body = json.loads(gh_in(ctx, "desktop", f"pr view {summary[0]['number']} --json body").stdout)["body"]
+    expect(merged == "MERGED" and "testbed item 1" in body, f"PR {n1} is {merged}; summary body lacks the item")
+    n2 = away_pr(ctx, away, 2)
+    m2 = run(ctx, "desktop", f"cd ~/code/scratch && {lc}/away-merge --project scratch --pr {n2} --item 'testbed item 2'",
+             check=False)
+    expect(m2.returncode != 0, "away-merge merged a second item past --max-items 1")
+    st = run(ctx, "desktop", f"{lc}/lane-improve status", check=False).stdout
+    dr = run(ctx, "desktop", f"{lc}/lane-improve drained scratch", check=False)
+    off = run(ctx, "desktop", f"{lc}/lane-improve off < /dev/null", check=False)
+    after = run(ctx, "desktop", f"{lc}/lane-improve status", check=False).stdout
+    expect(off.returncode == 0, f"lane-improve off exited {off.returncode}: {(off.stdout + off.stderr)[-300:]}")
+    capline = next((l.strip() for l in st.splitlines() if "items" in l), st.strip()[-80:])
+    why = next((l.strip() for l in (m2.stdout + m2.stderr).splitlines() if l.strip()), "")
+    return (f"{away} cut with draft summary PR #{summary[0]['number']}; PR #{n1} merged by away-merge and listed in "
+            f"the summary; PR #{n2} refused ({why[:120]}); status: {capline}; drained exit {dr.returncode}; off: "
+            f"{after.strip().splitlines()[0][:80] if after.strip() else 'ok'}")
+
+
 # --- 7. a lane through PR, review and merge on the fake GitHub; Orca's cleanup after it ---------------------------------
 
 def gh_in(ctx, role, args, check=True):
@@ -819,5 +901,5 @@ def builtin_cleanup(ctx):
 # The order `all` runs them in: each lane right after the pairing it uses (d1-jump resets the box's server).
 ORDER = ["suggest-tiers", "onboard", "d1-direct", "lane-a-direct", "d1-jump", "lane-a-jump", "d2-tunnel", "lane-b-jump",
          "d2-ports", "lane-b-direct", "d2-no-tunnel", "d2-on-client", "builtin-ssh-target", "builtin-worker-notice",
-         "builtin-worker-count", "lane-pr-merge", "builtin-cleanup", "restart-retry", "refresh", "mixed-pair"]
+         "builtin-worker-count", "lane-pr-merge", "builtin-cleanup", "restart-retry", "away-improve", "refresh", "mixed-pair"]
 ALL.sort(key=lambda s: ORDER.index(s.name) if s.name in ORDER else len(ORDER))

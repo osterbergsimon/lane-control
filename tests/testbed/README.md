@@ -139,6 +139,7 @@ gateway or a plain shell command in an Orca terminal, never a real model.
 | `builtin-worker-count` | overlap row 14: two local workers waiting for a message; `worker-list` with and without `--terminal-state active`; `lane-room` | `worker-list` shows both as `liveness: live`, `outcome: in_progress`; the result names their `terminalState` and what lane-room counts |
 | `lane-pr-merge` | a local OpenCode worker commits, pushes its branch and opens a PR on the fake GitHub, then reports; a stub review (`gh pr comment`); the PR's check set to failure, then success | the PR is the lane's (its branch, its file); the failing check blocks `gh pr merge`, the passing one merges it into main; with "delete head branches" on, the branch is gone; the worker releases |
 | `builtin-cleanup` | overlap row 11: `workspace cleanup preview` and `run` on the merged lane's worktree | passes when Orca's cleanup removes it; today reports a **gap**: the row says `keep`, cause `rules-off` (rules are set in Orca's settings only), the run removes nothing; the worktree is then removed by hand (lane-control's fallback) |
+| `away-improve` | no agent: machine.conf naming the scratch coordinator and a private-names file; `lane-improve on --project scratch --max-items 1 --unmetered --yes`; a lane PR into the away branch with its log entry and the coordinator's `Review: passed <head>` comment, merged by `away-merge`; a second one; `lane-improve status`, `drained`, `off` (an earlier run's away branch and period are dropped first, as the owner would) | `away/<date>` is cut with its draft summary PR into main; the first PR merges and is listed in the summary's body; the second is refused at the cap; status shows the cap; drained and off succeed |
 | `restart-retry` | a local worker waiting for a message; the desktop's server killed and back; then a message | the worker keeps its dispatch and reports (resumed); else `worker-start --retry-of` on the same task and worktree must start one that reports |
 | `mixed-pair` | after `refresh`: the box's server on the other pinned Orca (`orca-host-install --version`), then lane A, `d2`, lane B | every lane check passes across the version gap, both ways (run once with each version as the desktop's) |
 | `refresh` | on the box: a second scratch project set up by lane-control `48a38ab` (main before LIT-1, whose lane-tier refuses OpenCode tiers), then `project-setup --refresh` from this checkout | the old setup left an older `~/.agents/bin/lane-tier`; after `--refresh` it and the `native-orca-lanes` skill are this checkout's |
@@ -148,8 +149,7 @@ Lanes start the way the lane skill says for OpenCode, as far as Orca 1.4.268 let
 `new-child` or `new-top-level` are refused (lc-69b). A scripted stand-in agent under another agent id (Aider's) was
 tried and dropped: Orca's launch readiness did not accept it.
 
-Not built yet (the next slices): away-improve (`lane-improve on`, the cap, the summary PR, drained) and the items marked
-not verified below.
+Not built yet: the items marked not verified below (the real-model wake check, the rest of 1.4.272's mail features).
 
 ## Direction 2, and its fallback
 
@@ -201,9 +201,11 @@ in the scenarios that compare them (`d1-*`, `d2-*`, the lanes over them) next to
 | One environment per server: a box that paired with the desktop through the tunnel must forget it before pairing with the desktop's network address ("This server is already paired as \"desktop\"") | | verified | `d2-no-tunnel` |
 | Direction 2 by `--on-client` hand-off after direction 1 only | | **gap** headless: no bot without a bot chat; "desktop is offline" (only the desktop app is a connected computer) | `d2-on-client` |
 | Mixed versions: a 1.4.274 desktop with a 1.4.268 box, and a 1.4.268 desktop with a 1.4.274 box: lane A and lane B, every lane check | verified (both ways) | verified (both ways) | `mixed-pair` |
-| A runtime restart with a lane waiting: the worker keeps its dispatch, takes a message and reports (resume work on restart) | | verified (one machine; `--retry-of` not needed, so not run) | `restart-retry` |
+| A runtime restart with a lane waiting: the worker keeps its dispatch, takes a message and reports (resume work on restart) | | verified (one machine; `--retry-of` not needed, so not run) | `away-improve` | no agent: machine.conf naming the scratch coordinator and a private-names file; `lane-improve on --project scratch --max-items 1 --unmetered --yes`; a lane PR into the away branch with its log entry and the coordinator's `Review: passed <head>` comment, merged by `away-merge`; a second one; `lane-improve status`, `drained`, `off` (an earlier run's away branch and period are dropped first, as the owner would) | `away/<date>` is cut with its draft summary PR into main; the first PR merges and is listed in the summary's body; the second is refused at the cap; status shows the cap; drained and off succeed |
+| `restart-retry` |
+| Away-improve: on, the cap, the summary PR, away-merge as the only merge route, drained, off | | verified (no agent: the coordinator's steps done by the scenario) | `away-improve` |
 | A cross-host `worker_done` wakes an idle agent coordinator | not verified: needs a real agent coordinator (the opt-in `TESTBED_REAL_MODEL`, not built); the testbed's coordinators are shells | | none |
-| 1.4.272+: `send --on-client <installation> --to bot:<name>`, `recipient_delivery_held` receipts, resume work on restart, a paired server's follow-up report no longer refused | | not verified (not built) | none |
+| 1.4.272+: `recipient_delivery_held` receipts on `send --on`, a paired server's follow-up worker report no longer refused | | not verified (not built); `--on-client` and resume work on restart are rows above | none |
 | Onboarding with no Claude (`--skip-adapt`), `--suggest-tiers` against a LiteLLM-like gateway, `--refresh` from an older checkout | verified | verified | `suggest-tiers`, `onboard`, `refresh` |
 
 ## Not covered
