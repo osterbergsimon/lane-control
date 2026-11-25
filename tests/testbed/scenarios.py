@@ -827,6 +827,18 @@ def away_improve(ctx):
             f"{after.strip().splitlines()[0][:80] if after.strip() else 'ok'}")
 
 
+# --- 11. the real-model check (opt-in, last) -------------------------------------------------------------------------
+
+@scenario("opt-in, real model: does a cross-host worker_done wake an idle agent coordinator (TESTBED_REAL_MODEL=1)")
+def real_model_wake(ctx):
+    import os
+    if os.environ.get("TESTBED_REAL_MODEL") != "1":
+        raise Skip("off by default: it needs a real agent coordinator (Claude haiku) signed in by the owner inside the "
+                   "box container, and costs usage; set TESTBED_REAL_MODEL=1 to ask for it")
+    raise Skip("TESTBED_REAL_MODEL=1, but this check is not built yet: it needs the owner's sign-in in the container "
+               "first (remote.md, Reports across hosts, stays poll-only until it runs)")
+
+
 # --- 7. a lane through PR, review and merge on the fake GitHub; Orca's cleanup after it ---------------------------------
 
 def gh_in(ctx, role, args, check=True):
@@ -901,5 +913,5 @@ def builtin_cleanup(ctx):
 # The order `all` runs them in: each lane right after the pairing it uses (d1-jump resets the box's server).
 ORDER = ["suggest-tiers", "onboard", "d1-direct", "lane-a-direct", "d1-jump", "lane-a-jump", "d2-tunnel", "lane-b-jump",
          "d2-ports", "lane-b-direct", "d2-no-tunnel", "d2-on-client", "builtin-ssh-target", "builtin-worker-notice",
-         "builtin-worker-count", "lane-pr-merge", "builtin-cleanup", "restart-retry", "away-improve", "refresh", "mixed-pair"]
+         "builtin-worker-count", "lane-pr-merge", "builtin-cleanup", "restart-retry", "away-improve", "refresh", "mixed-pair", "real-model-wake"]
 ALL.sort(key=lambda s: ORDER.index(s.name) if s.name in ORDER else len(ORDER))
