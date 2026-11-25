@@ -2667,5 +2667,131 @@ class DocsIndexTests(unittest.TestCase):
             self.assertEqual(linked_files(root, index)[1], ["guide.md#no-such-anchor", "#nowhere"])
 
 
+# --- docs/how-it-fits.md and the Scripts table (lc-rpy) -----------------------------------------------------------
+
+SCRIPT_DIRS = ("core/scripts", "scripts", "orchestrators/*/scripts")
+SKILL_DIRS = ("orchestrators/*/skills/*", "core/skills/*")
+# Repo path -> why it needs no mention. Keep it short; nothing needs it today.
+UNDOCUMENTED = {}
+RUNNERS = {"owner", "coordinator", "lane", "automation", "setup", "library"}
+
+
+def repo_scripts(root):
+    """Every file (links too) directly in the script folders, as repo-relative strings."""
+    return sorted(f.relative_to(root).as_posix() for pattern in SCRIPT_DIRS for d in Path(root).glob(pattern)
+                  for f in d.iterdir() if not f.name.startswith(".") and not f.is_dir())
+
+
+def repo_skills(root):
+    return sorted(d.relative_to(root).as_posix() for pattern in SKILL_DIRS for d in Path(root).glob(pattern)
+                  if d.is_dir() and not d.name.startswith((".", "__")))
+
+
+def scripts_section(root):
+    """core/README.md's "## Scripts" section, up to the next heading of that level."""
+    m = re.search(r"^## Scripts\n(.*?)(?=^## |\Z)", (Path(root) / "core" / "README.md").read_text(), re.M | re.S)
+    return m.group(1) if m else ""
+
+
+def script_rows(root):
+    """The Scripts table's rows, header and rule left out, each as its list of cells (\\| is not a cell border)."""
+    rows = [[c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+            for line in scripts_section(root).splitlines() if line.startswith("|")]
+    return rows[2:]
+
+
+def listed_scripts(root):
+    """The scripts with a row of their own in the Scripts table: the paths in the first cell of a row that has a
+    purpose. A mention anywhere else does not count."""
+    return {path for row in script_rows(root) if len(row) == 4 and row[1] for path in re.findall(r"`([^`]+)`", row[0])}
+
+
+def undocumented(root, excluded=UNDOCUMENTED):
+    """Scripts without a row in the Scripts table, and skills that docs/how-it-fits.md does not name in backticks."""
+    page = Path(root) / "docs" / "how-it-fits.md"
+    text = page.read_text() if page.is_file() else ""
+    listed = listed_scripts(root)
+    missing = [s for s in repo_scripts(root) if s not in listed]
+    missing += [s for s in repo_skills(root) if f"`{s.rsplit('/', 1)[1]}`" not in text]
+    return [path for path in missing if path not in excluded]
+
+
+class HowItFitsTests(unittest.TestCase):
+    def test_every_script_and_skill_is_named(self):
+        self.assertEqual(undocumented(ROOT), [], "give each script a row with its purpose in core/README.md's "
+                                                 "Scripts table, and name each skill in docs/how-it-fits.md")
+
+    def test_every_exclusion_exists_and_says_why(self):
+        for path, why in UNDOCUMENTED.items():
+            self.assertTrue((ROOT / path).exists(), f"{path} is gone: drop its exclusion")
+            self.assertTrue(why.strip(), f"{path} is excluded without a reason")
+
+    def test_the_folders_are_read(self):
+        self.assertIn("core/scripts/lane-room", repo_scripts(ROOT))
+        self.assertIn("scripts/orch", repo_scripts(ROOT))
+        self.assertIn("orchestrators/wsp/scripts/wsp-owner-code.mjs", repo_scripts(ROOT))
+        self.assertIn("core/skills/component-gallery", repo_skills(ROOT))
+        self.assertIn("orchestrators/native-orca/skills/away-improve", repo_skills(ROOT))
+
+    def test_every_row_has_a_purpose_a_runner_and_a_doc(self):
+        rows = script_rows(ROOT)
+        self.assertTrue(rows, "core/README.md has no Scripts table")
+        for row in rows:
+            self.assertEqual(len(row), 4, row)
+            script, purpose, who, doc = row
+            self.assertTrue(purpose, script)
+            for part in re.sub(r"\([^)]*\)", "", who).split(","):
+                self.assertIn(part.strip(), RUNNERS, f"{script}: run by {who!r}")
+            self.assertRegex(doc, LINK, script)
+
+    def test_every_path_in_a_row_is_the_same_script(self):
+        for row in script_rows(ROOT):
+            paths = re.findall(r"`([^`]+)`", row[0])
+            self.assertTrue(paths, row[0])
+            for path in paths:
+                self.assertTrue((ROOT / path).is_file(), f"the Scripts table names {path}, which is not there")
+            self.assertEqual(len({(ROOT / p).resolve() for p in paths}), 1, f"these are different files: {paths}")
+
+    def test_no_link_in_the_page_or_the_table_is_broken(self):
+        for doc in ("docs/how-it-fits.md", "core/README.md"):
+            _, broken = linked_files(ROOT, ROOT / doc)
+            self.assertEqual(broken, [], f"{doc} links to files or headings that do not exist")
+
+    def test_the_index_and_the_table_lead_to_the_page(self):
+        index = (ROOT / "docs" / "README.md").read_text()
+        start = index[index.index("## Start here"):index.index("## Running projects")]
+        self.assertIn("(how-it-fits.md)", start)
+        self.assertIn("docs/how-it-fits.md", linked_files(ROOT, ROOT / "core" / "README.md")[0])
+        self.assertIn("core/README.md", linked_files(ROOT, ROOT / "docs" / "how-it-fits.md")[0])
+
+    def test_both_tunnels_are_worded_the_same_way(self):
+        for doc in ("docs/how-it-fits.md", "docs/getting-started.md", "orchestrators/native-orca/setup.md",
+                    "orchestrators/native-orca/remote.md"):
+            text = " ".join((ROOT / doc).read_text().split())
+            for tunnel in ("`orca-tunnel-<host>` (`ssh -L`", "`lane-tunnel@<host>` (`ssh -R`"):
+                self.assertIn(tunnel, text, doc)
+
+    def test_the_check_catches_a_new_script_and_a_new_skill(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for sub in ("docs", "core/scripts", "scripts", "orchestrators/x/scripts", "orchestrators/x/skills/new-skill",
+                        "core/skills/told", "core/scripts/__pycache__"):
+                (root / sub).mkdir(parents=True)
+            for script in ("core/scripts/listed", "core/scripts/on-the-page", "core/scripts/no-purpose",
+                           "core/scripts/in-a-purpose", "scripts/listed-too", "orchestrators/x/scripts/new"):
+                (root / script).write_text("x")
+            (root / "core" / "README.md").write_text(
+                "## Scripts\n\n| Script | What | Who | Doc |\n|---|---|---|---|\n"
+                "| `core/scripts/listed`, `scripts/listed-too` | a \\| b, calls `core/scripts/in-a-purpose` | owner "
+                "| [d](x.md) |\n| `core/scripts/no-purpose` |  | owner | [d](x.md) |\n\n"
+                "## Later\n`core/scripts/on-the-page`\n")
+            (root / "docs" / "how-it-fits.md").write_text("`core/scripts/on-the-page` and `told`; new-skill unquoted")
+            missing = ["core/scripts/in-a-purpose", "core/scripts/no-purpose", "core/scripts/on-the-page",
+                       "orchestrators/x/scripts/new", "orchestrators/x/skills/new-skill"]
+            self.assertEqual(undocumented(root, {}), missing)
+            self.assertEqual(undocumented(root, {"core/scripts/in-a-purpose": "why"}), missing[1:])
+            self.assertEqual(len(script_rows(root)[0]), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,8 @@
 # Core: what every orchestrator shares
 
 These files do not depend on which orchestrator runs the agents. A project keeps them when it switches from one
-orchestrator to another; everything that does depend on one is in `orchestrators/<name>/`.
+orchestrator to another; everything that does depend on one is in `orchestrators/<name>/`. New here? Read
+[how the parts fit](../docs/how-it-fits.md); for one line on each script, [Scripts](#scripts) below.
 
 | File | What |
 |---|---|
@@ -31,6 +32,48 @@ orchestrator to another; everything that does depend on one is in `orchestrators
 
 Why shared: roles, routing, budgets, the heavy-work gate, beads and the reliability log are how we work, whatever
 starts the agents. A switch carries them over unchanged (`orchestrators/switching.md`).
+
+## Scripts
+
+Every script in `core/scripts/`, `scripts/` and `orchestrators/*/scripts/`, one row each. How they work together:
+[docs/how-it-fits.md](../docs/how-it-fits.md). Other paths in a row are links to the first one. "Run by" is who starts
+it: you (owner), a coordinator, a lane (reviewers too), an automation (an Orca automation, a timer or a routine) or
+setup; "library" is only read by other scripts. A **parked** script belongs to an orchestrator that is not in use.
+
+| Script | What it does | Run by | Doc |
+|---|---|---|---|
+| `core/scripts/away-merge` | the only merge into a project's `away/<date>` branch, after its checks | coordinator | [away-improve](../docs/away-improve.md) |
+| `core/scripts/budget-state` | prints each metered budget's step now | coordinator, owner, automation | [budget steps](model-routing.md#budget-thresholds-per-metered-budget-ceiling--the-owners-weekly-percent) |
+| `core/scripts/ci-presence` | sets CI's CPU and memory limits by whether you are there | automation | [machine caps](machine.md#machine-caps) |
+| `core/scripts/design-shots` | screenshots of a UI at two widths in both themes, and a before/after page | lane | [design kit](../docs/superpowers/specs/2026-11-21-design-kit-design.md) |
+| `core/scripts/lane-away` | tells the machine you are away or back | owner, coordinator (the machine one, on your word) | [a machine](../orchestrators/native-orca/setup.md#a-machine) |
+| `core/scripts/lane-heavy`, `scripts/lane-heavy` | runs a build or full test suite under the machine-wide limit | lane, coordinator | [machine caps](machine.md#machine-caps) |
+| `core/scripts/lane-idle` | says how long a marked session has been idle, or waits for it | owner, coordinator | [session record](harnesses/session-record.md) |
+| `core/scripts/lane-improve` | switches away-improve mode on or off and keeps its state and summary PR | owner, coordinator | [away-improve](../docs/away-improve.md) |
+| `core/scripts/lane-limits.sh`, `scripts/lane-limits.sh` | works out this machine's limits for the lane tools | library | [limits example](limits.example.sh) |
+| `core/scripts/lane-room`, `scripts/lane-room` | says whether there is room to open another lane | coordinator | [machine caps](machine.md#machine-caps) |
+| `core/scripts/lane-sweep` | reports merged, parked, stuck and broken lanes; removes some only with `--apply` | automation, owner | [lane cleanup](../docs/orca-cleanup.md) |
+| `core/scripts/lane-tier`, `scripts/lane-tier` | looks a tier up in a project's tier table | coordinator, setup | [model routing](model-routing.md#tiers) |
+| `core/scripts/lane-tunnel` | `lane-tunnel@<host>` (`ssh -R`, direction 2): starts, stops and checks the box's way back to the desktop | setup, owner | [direction 2](../orchestrators/native-orca/remote.md#direction-2-the-boxs-coordinator-runs-lanes-here) |
+| `core/scripts/lib.sh`, `scripts/lib.sh` | the config and budget helpers `budget-state` and the watch scripts share | library | [config example](config.example.sh) |
+| `core/scripts/machine-check` | finds changes in budget step, memory, runners and coordinators | automation | [a machine](../orchestrators/native-orca/setup.md#a-machine) |
+| `core/scripts/machine-setup` | sets a machine up once, here or on a box | owner, setup | [a machine](../orchestrators/native-orca/setup.md#a-machine) |
+| `core/scripts/night-precheck` | says which coordinators are due a night or away-improve check-in | automation | [night manager](../orchestrators/native-orca/night-manager.md) |
+| `core/scripts/pairing-code-stdin.cjs` | on a box, feeds the share link to Orca's CLI from stdin, so it is in no command line | setup | [direction 2](../orchestrators/native-orca/remote.md#direction-2-the-boxs-coordinator-runs-lanes-here) |
+| `core/scripts/park-check.sh`, `scripts/park-check.sh` | **parked** (needs Rove): daily check that parked lanes can be resumed | automation | [Rove notes](../orchestrators/rove/notes.md#issues) |
+| `core/scripts/project-pause`, `scripts/project-pause`, `orchestrators/orca-cotal/scripts/project-pause` | rests, wakes, stops or starts a project's coordinator | owner, coordinator | [stopping](../docs/getting-started.md#stopping) |
+| `core/scripts/project-setup`, `scripts/project-setup`, `orchestrators/orca-cotal/scripts/project-setup` | sets a project up, here or on a box; with `--check` lists what a box setup still needs; refreshes or removes it | owner | [native Orca setup](../orchestrators/native-orca/setup.md), [a box](../orchestrators/native-orca/remote.md) |
+| `core/scripts/stale-claims.sh`, `scripts/stale-claims.sh` | **parked** (needs Rove): daily check for claimed issues with no live task | automation | [Rove notes](../orchestrators/rove/notes.md#issues) |
+| `core/scripts/window-guard.sh`, `scripts/window-guard.sh` | **parked** (sends through Cotal): sends budget-window and low-memory orders | automation | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
+| `core/scripts/window-guard-install`, `scripts/window-guard-install` | **parked** (with the window guard): installs it as a systemd user service | owner | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
+| `core/orch.py`, `scripts/orch` | the `orch` command: a project's orchestrator status, setup, strip and switch | owner | [switching](../orchestrators/switching.md) |
+| `orchestrators/orca-cotal/scripts/orca-host-install`, `scripts/orca-host-install` | puts Orca's server on a box; with `--pair` makes `orca-tunnel-<host>` (`ssh -L`, direction 1) and pairs it. **In use** by native Orca, though it sits in a parked folder | setup, owner | [direction 1](../orchestrators/native-orca/remote.md#direction-1-this-machine-drives-the-box) |
+| `orchestrators/orca-cotal/scripts/cotal-agent`, `scripts/cotal-agent` | **parked** (Orca + Cotal): runs OpenCode as a Cotal agent in this terminal | setup, coordinator | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
+| `orchestrators/orca-cotal/scripts/machine-coordinator-setup`, `scripts/machine-coordinator-setup` | **parked** (Orca + Cotal): creates its machine coordinator | owner | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
+| `orchestrators/orca-cotal/scripts/orca-cotal-task`, `scripts/orca-cotal-task` | **parked** (Orca + Cotal): makes an Orca task for a Cotal agent | coordinator | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
+| `orchestrators/rove/scripts/docs-review-launch.sh`, `scripts/docs-review-launch.sh` | **parked** (Rove): launches the weekly docs review lane | automation, owner | [Rove setup](../orchestrators/rove/setup.md) |
+| `orchestrators/rove/scripts/machine-night-watch.sh`, `scripts/machine-night-watch.sh` | **parked** (Rove): hourly night watch over its coordinators | automation | [Rove notes](../orchestrators/rove/notes.md#night-mode) |
+| `orchestrators/wsp/scripts/wsp-owner-code.mjs`, `scripts/wsp-owner-code.mjs` | **parked** (wsp): makes a browser pairing code with owner rights | owner | [wsp notes](../orchestrators/wsp/docs/wsp.md) |
 
 ## Paths kept for live machines
 

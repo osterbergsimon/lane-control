@@ -71,9 +71,14 @@ project and lane (`core/machine.md`); open a lane only when `~/.agents/bin/lane-
 its own heavy targets (a CI script, a make target) through `lane-heavy` so every caller gets the gate.
 
 ## An SSH host
-`core/scripts/project-setup <repo> <host>` sets a project up on an SSH box, driven from this machine's Orca, and lets
-the box's coordinator run lanes here with the desktop's share link (`remote.md`); `project-setup --remove-host
-<host>` undoes the second part.
+`core/scripts/project-setup <repo> <host>` sets a project up on an SSH box in two directions, each with its own
+tunnel, both started on this machine (`remote.md`; the picture:
+[how the parts fit](../../docs/how-it-fits.md#a-box-two-directions)):
+- direction 1, this machine controls the box: `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair`,
+  with no click and no pairing code from the owner;
+- direction 2, the box's coordinator starts lanes here: `lane-tunnel@<host>` (`ssh -R`), made by `project-setup`
+  after the share link, which the owner makes in this machine's Orca. `project-setup --remove-host <host>` undoes
+  this direction only.
 
 ## OpenCode on a self-hosted LiteLLM gateway
 A self-hosted gateway with any models behind it is first class, and nothing is refused by model or harness (owner
