@@ -37,8 +37,18 @@ if opencode:
     row["config"] = (Path(os.environ["OPENCODE_CONFIG"]).read_text() if os.environ.get("OPENCODE_CONFIG")
                      else os.environ.get("OPENCODE_CONFIG_CONTENT"))
     # what the run can see: every path in its folder (project-setup's scratch copy), links marked
-    row["files"] = sorted(str(Path(h, n).relative_to(".")) + ("@" if Path(h, n).is_symlink() else "")
-                          for h, ds, fs in os.walk(".") for n in fs + [d for d in ds if Path(h, d).is_symlink()])
+    files = []
+    for h, ds, fs in os.walk("."):
+        if h == ".":
+            ds[:] = [d for d in ds if d != ".git"]  # the copy's own empty repo, recorded below
+        files += [str(Path(h, n).relative_to(".")) + ("@" if Path(h, n).is_symlink() else "")
+                  for n in fs + [d for d in ds if Path(h, d).is_symlink()]]
+    row["files"] = sorted(files)
+    git = subprocess.run(["git", "rev-list", "--all", "--count"], capture_output=True, text=True)
+    row["copy_git"] = {"toplevel": subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
+                                                  text=True).stdout.strip(),
+                       "commits": git.stdout.strip(), "hooks": sorted(os.listdir(".git/hooks"))
+                       if os.path.isdir(".git/hooks") else []}
 with open(os.environ["STUB_LOG"] + ".agents", "a") as log:
     log.write(json.dumps(row) + "\n")
 for path, text in step.get("write", {}).items():

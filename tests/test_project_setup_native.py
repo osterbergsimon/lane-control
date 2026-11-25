@@ -475,6 +475,9 @@ class OpenCodeOnboardingTests(Case):
                 cwd = Path(r["cwd"]).resolve()
                 self.assertFalse(cwd.is_relative_to(self.repo.resolve()), cwd)
                 self.assertFalse(cwd.exists())
+                # B8: the copy is its own empty repo, so OpenCode never takes an enclosing one for the project
+                self.assertEqual(Path(r["copy_git"]["toplevel"]).resolve(), cwd)
+                self.assertEqual((r["copy_git"]["commits"], r["copy_git"]["hooks"]), ("0", []))
                 self.assertIn("lane-control", r["prompt"])
                 self.assertEqual(r["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")  # no project plugin or config
                 self.assertIsNone(r["env"]["LANE_ROLE"])  # never a coordinator's persona or guard
@@ -652,10 +655,11 @@ class OpenCodeOnboardingTests(Case):
         m = load()
         paths = ["shot1.md", "shotx.md", "shot.md", "a/x/b/c.md", "a/b/y/c.md", "a/b/c.md", "a/x/b/y/c.md", "a/c.md",
                  "secrets/a", "x/secrets/b", "private/b", "root.pem", "d/e.pem", "docs/private/p", "#notes/a",
-                 "config/k", "app/(g)/p", "app/[id]/q", "data1/y", "dataX/y", "q/w/e", "b/c", "z/a/b/c.md"]
+                 "config/k", "app/(g)/p", "app/[id]/q", "data1/y", "dataX/y", "q/w/e", "b/c", "z/a/b/c.md",
+                 "shots/2024/raw/f", "shots/raw/g", "docs/a/private/x", "docs/private/b/x"]
         globs = ["shot[^0-9].md", "shot[!0-9].md", "shot[0-9].md", "a/**/b/**/c.md", "a/**/c.md", "**/b/**",
                  "q/**/e", "**/w/**/e", "secrets", "private/", "**/*.pem", "docs/private/**", "#notes/**", "config/**",
-                 "app/**", "data?/**", "*.pem"]
+                 "app/**", "data?/**", "*.pem", "**/shots/**/raw", "docs/**/private/**/x"]
         work = self.e.home / "globs"
         git("init", "-q", str(work), cwd=self.e.home)
         for p in paths:
@@ -667,11 +671,72 @@ class OpenCodeOnboardingTests(Case):
                 by_git = set(git("ls-files", "-o", "-i", f"--exclude={g}", cwd=work).splitlines())
                 self.assertTrue(by_git)
                 self.assertEqual(by_git - {p for p in paths if m.private_glob(p, g)}, set())
-        for g in ("shot[[:digit:]].md", "data[[:alpha:]]/**"):  # POSIX classes: refused, with the way out
-            self.assertTrue(m.bad_glob(g))
-            r = self.e.run(str(self.repo), "--private", g, adapt=True)
-            self.assertEqual(r.returncode, 2)
-            self.assertIn("with no POSIX class like [[:digit:]] (write [0-9])", r.stderr)
+        # POSIX classes, ./ and empty or . segments (M2): refused, with the way out, on both harnesses
+        for g in ("shot[[:digit:]].md", "data[[:alpha:]]/**", "./secrets", "./config/**", "./notes.txt",
+                  "config//keys.txt", "config/./keys.txt"):
+            with self.subTest(refused=g):
+                self.assertTrue(m.bad_glob(g))
+                r = self.e.run(str(self.repo), "--private", g, adapt=True)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn("with no POSIX class like [[:digit:]] (write [0-9]) and no ./ or //", r.stderr)
+        self.assertFalse(m.bad_glob("private/"))  # a trailing / is a folder, as in an ignore line
+
+    def test_a_tmpdir_inside_the_repo_is_refused(self):
+        # B8: the copy must never sit in the project's own work tree
+        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+        (self.repo / ".tmp").mkdir()
+        self.assertEqual(self.setup(*ALL_OPENCODE, env_extra={"TMPDIR": str(self.repo / ".tmp")}), 1)
+        self.assertIn("is inside the repo, where an OpenCode onboarding agent's copy of the project must not be", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_copy_back_checks_every_destination_before_writing_any(self):
+        # m9: a link or a folder in the repo where a file goes stops it all, with the other files untouched
+        for shape in ("link", "folder"):
+            with self.subTest(shape=shape):
+                shutil.rmtree(self.repo / ".lane-control", ignore_errors=True)
+                (self.repo / ".lane-control").mkdir()
+                (self.repo / ".lane-control" / "project.md").write_text("earlier run's\n")  # in the copy too
+                target = self.repo / ".lane-control" / "routing.md"
+                if shape == "link":
+                    target.symlink_to(self.e.home / "elsewhere.md")
+                else:
+                    target.mkdir()
+                self.opencode_agents({OC_ADAPTER: [{"write": {".lane-control/project.md": "model's\n",
+                                                              ".lane-control/routing.md": "r\n"}}]})
+                self.assertEqual(self.setup(*ALL_OPENCODE, "--readapt"), 1)
+                self.assertIn(".lane-control/routing.md in the repo is a link or not a file", self.err)
+                self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "earlier run's\n")
+                self.assertFalse((self.e.home / "elsewhere.md").exists())
+
+    def test_a_repo_file_left_out_of_the_copy_is_never_overwritten(self):
+        # m10: an ignored .lane-control/ file the agent never saw stays the owner's
+        (self.repo / ".gitignore").write_text(".lane-control/routing.md\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-qm", "ignore", cwd=self.repo)
+        (self.repo / ".lane-control").mkdir()
+        (self.repo / ".lane-control" / "routing.md").write_text("owner's local notes\n")
+        self.opencode_agents({OC_ADAPTER: [{"write": {".lane-control/routing.md": "model's\n", ADDITION: "x\n"}}]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
+        self.assertIn(".lane-control/routing.md is in the repo but was left out of the OpenCode adapter's copy", self.err)
+        self.assertEqual((self.repo / ".lane-control" / "routing.md").read_text(), "owner's local notes\n")
+        self.assertFalse((self.repo / ADDITION).exists())
+
+    def test_a_glob_over_onboardings_own_files_or_agents_md_is_refused(self):
+        # m11, m12: a review that cannot see the adapter's files proves nothing; AGENTS.md's diff is in its prompt
+        for g in ("**/*.md", "*.md", ".lane-control/**", "AGENTS.md", "CLAUDE.md"):
+            with self.subTest(glob=g):
+                if g == "CLAUDE.md":  # AGENTS.md -> CLAUDE.md: the file it links to counts as AGENTS.md
+                    (self.repo / "CLAUDE.md").write_text("# rules\n")
+                    (self.repo / "AGENTS.md").symlink_to("CLAUDE.md")
+                    git("add", "CLAUDE.md", "AGENTS.md", cwd=self.repo)
+                    git("commit", "-qm", "rules", cwd=self.repo)
+                self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+                self.assertEqual(self.setup(*ALL_OPENCODE, "--private", g), 1)
+                self.assertIn(f"--private {g!r} covers", self.err)
+                self.assertIn("which onboarding writes or its reviewer must read: narrow the glob", self.err)
+                self.assertEqual(self.e.agent_runs(), [])
+                st = self.e.store(self.repo) / "settings.json"
+                st.write_text(json.dumps({**json.loads(st.read_text()), "private": []}))
 
     def test_the_memfd_retry_reads_the_error_not_the_transcript(self):
         # n1: a failed run whose text holds "Agent not found" (it read this script, say) is not run again
@@ -816,7 +881,7 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
                  "keep.txt": "readable-keep\n", "docs/a.md": "readable-docs\n", "lib/ok.md": "readable-lib\n",
                  # B4: a whitelist .gitignore (its negations must not switch a --private glob off), then the
                  # ignored files, after it, so no negation takes them back
-                 ".gitignore": "*\n!*/\n!*.md\n!.gitignore\n!keep.txt\n!*.png\n!*.pem\n!*.tsx\n"
+                 ".gitignore": "*\n!*/\n!*.md\n!.gitignore\n!keep.txt\n!*.png\n!*.pem\n!*.tsx\n!*.js\n!opencode.json\n"
                                "data/\n.beads\nsub/secret.key\nsub/AGENTS.md\n",
                  "docs/.gitignore": "!*.md\n"}
         for n, text in files.items():
@@ -835,12 +900,23 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         (self.repo / "lib" / "link").mkdir()
         (self.repo / "lib" / "link" / "AGENTS.md").symlink_to(self.t / "outside.md")  # B6: an AGENTS.md link out
         (self.repo / "rules.md").symlink_to("CLAUDE.md")
+        # M3: the project's own OpenCode config, tracked so it is in the copy: a plugin, an MCP command and an
+        # instructions file; OPENCODE_DISABLE_PROJECT_CONFIG must keep all three out
         (self.repo / ".opencode" / "plugins").mkdir(parents=True)
         (self.repo / ".opencode" / "plugins" / "p.js").write_text(
             f'import fs from "fs"\nfs.writeFileSync({json.dumps(str(self.t / "plugin-ran"))}, "x")\n'
             'export default { id: "p", setup() {} }\n')
+        (self.repo / "opencode.json").write_text(json.dumps({
+            "instructions": ["instr.md"],
+            "mcp": {"x": {"type": "local", "command": ["touch", str(self.t / "mcp-ran")]}}}))
+        secret("instr.md")  # in the copy, but only an instructions entry would send it unasked
+        self.dotrepo = self.t / "dotfiles"  # B8: a HOME kept in git, and a TMPDIR inside it
+        (self.dotrepo / "tmp").mkdir(parents=True)
+        git("init", "-q", cwd=self.dotrepo)
+        secret("private-in-home.md", self.dotrepo)
         git("add", "-A", cwd=self.repo)
-        git("add", "-f", "keep.txt", "lib/link/AGENTS.md", "self", "keys", "out.md", "rules.md", cwd=self.repo)
+        git("add", "-f", "keep.txt", "lib/link/AGENTS.md", "self", "keys", "out.md", "rules.md", ".opencode/plugins/p.js",
+            "opencode.json", "instr.md", cwd=self.repo)
         git("commit", "-qm", "init", cwd=self.repo)
         tracked = git("ls-files", cwd=self.repo).splitlines()
         for n in ("sub/AGENTS.md", "sub/secret.key", "data/x.csv", ".beads"):  # really ignored, so never tracked
@@ -850,8 +926,11 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
             self.assertIn(n, tracked)  # tracked: private only by --private, or a link
         self.m = load()
         self.m.PRIVATE_GLOBS[:] = self.GLOBS
+        copied = self.m.export_files(self.repo)
+        for n in (".opencode/plugins/p.js", "opencode.json", "instr.md"):  # M3: so the guard is what keeps them out
+            self.assertIn(n, copied)
 
-    def call(self, tool: str, args: dict, write: bool, cwd: "Path | None" = None):
+    def call(self, tool: str, args: dict, write: bool, cwd: "Path | None" = None, tmpdir: "Path | None" = None):
         """One onboarding run whose model asks for `tool` with `args`; returns (tool result, run text). Fails when any
         marker reached the model."""
         log = self.t / "requests.jsonl"
@@ -872,7 +951,7 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
                "XDG_DATA_HOME": str(self.t / "data"), "XDG_STATE_HOME": str(self.t / "state"),
                "XDG_CACHE_HOME": str(self.t / "cache"), "OPENCODE_DISABLE_MODELS_FETCH": "1",
                "OPENCODE_DISABLE_AUTOUPDATE": "1", "LANE_ROLE": "coordinator",
-               "OPENCODE_CONFIG_CONTENT": json.dumps(owner)}
+               "OPENCODE_CONFIG_CONTENT": json.dumps(owner), "TMPDIR": str(tmpdir or self.t)}
         here = os.getcwd()
         try:
             os.chdir(cwd or self.t)
@@ -888,6 +967,7 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         results = [m["content"] for line in body.splitlines()
                    for m in json.loads(json.loads(line)["body"]).get("messages", []) if m.get("role") == "tool"]
         self.assertFalse((self.t / "plugin-ran").exists())  # the project's own plugin never ran
+        self.assertFalse((self.t / "mcp-ran").exists())  # nor its MCP server
         return (str(results[-1]) if results else ""), text
 
     def test_reads_the_repo(self):
@@ -920,6 +1000,21 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         for path in (".", "sub", "lib", "lib/link", "sub/ok.md", "lib/ok.md", "docs/a.md"):
             with self.subTest(path=path):
                 self.call("read", {"path": path}, write=False)
+
+    def test_a_tmpdir_inside_another_repo_gives_none_of_it(self):
+        # B8: the copy is its own empty repo, so an enclosing work tree is never the project
+        home = self.dotrepo / "private-in-home.md"
+        for path in ("../../private-in-home.md", str(home), "../../.git/config"):
+            with self.subTest(path=path):
+                got, _ = self.call("read", {"path": path}, write=False, tmpdir=self.dotrepo / "tmp")
+                self.assertIn("external_directory", got)
+        self.assertIn("root rules readable",
+                      self.call("read", {"path": "AGENTS.md"}, write=False, tmpdir=self.dotrepo / "tmp")[0])
+
+    def test_a_tmpdir_inside_the_repo_is_refused(self):
+        (self.repo / ".tmp").mkdir()
+        with self.assertRaisesRegex(self.m.Fail, "is inside the repo"):
+            self.call("read", {"path": ".env"}, write=False, tmpdir=self.repo / ".tmp")
 
     def test_anchored_globs_hold_from_a_subfolder(self):
         # B5: project-setup started in <repo>/docs

@@ -1839,9 +1839,12 @@ def export_files(repo: Path) -> dict:
 
 
 def tree_state(top: Path) -> dict:
-    """{path: sha1, or "link"/"other"} of everything below `top`, links never followed."""
+    """{path: sha1, or "link"/"other"} of everything below `top`, links never followed; the copy's own empty .git
+    (opencode_export) is left out: nothing in it is ever copied back."""
     out = {}
     for here, dirs, files in os.walk(top):
+        if Path(here) == top and ".git" in dirs:
+            dirs.remove(".git")
         for name in files + [d for d in dirs if (Path(here) / d).is_symlink()]:
             f = Path(here) / name
             rel = f.relative_to(top).as_posix()
@@ -1853,10 +1856,23 @@ def tree_state(top: Path) -> dict:
 @contextlib.contextmanager
 def opencode_export(repo: Path):
     """A scratch folder (mode 700, outside the repo) holding only what an OpenCode onboarding agent may see
-    (export_files): no .git, no ignored file, no private path, no link. Yields (folder, its state); removed after."""
+    (export_files): no ignored file, no private path, no link. It is made its own empty git repo (no history, no
+    remote, no hooks) first: OpenCode takes the nearest git work tree as the project, so a copy under a TMPDIR inside
+    some other repo (a HOME kept in git) would otherwise give the agent all of that repo. A TMPDIR inside this repo is
+    refused. Yields (folder, its state); removed after."""
     import tempfile
-    top = Path(tempfile.mkdtemp(prefix="lane-onboard-"))
+    saved, tempfile.tempdir = tempfile.tempdir, None  # TMPDIR as it is now, not as this process first saw it
     try:
+        base = tempfile.gettempdir()
+    finally:
+        tempfile.tempdir = saved
+    top = Path(tempfile.mkdtemp(prefix="lane-onboard-", dir=base))
+    if top.resolve().is_relative_to(repo.resolve()):
+        top.rmdir()
+        raise Fail(f"the temporary folder ({top.parent}, TMPDIR) is inside the repo, where an OpenCode onboarding "
+                   "agent's copy of the project must not be: set TMPDIR to a folder outside it and run again")
+    try:
+        run(["git", "init", "-q", "--template=", str(top)], cwd=top)
         for n, src in export_files(repo).items():
             dest = top / n
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1889,13 +1905,17 @@ def copy_back(repo: Path, top: Path, before: dict, write: bool) -> None:
         raise Fail(f"the OpenCode {who} changed {', '.join(bad[:5])}{' ...' if len(bad) > 5 else ''} in its copy of the "
                    f"project, where it may not write (the adapter writes only its template files in {ADAPTED}/): "
                    "nothing it wrote was copied back. Nothing was committed")
-    for n in changed:  # every folder on the way must be a real folder, or not there yet; nothing is made before this
+    for n in changed:  # all checked before anything is made or written
         here = repo
-        for part in Path(n).parts:
+        for part in Path(n).parts:  # each folder on the way a real folder or not there yet; the file a plain one
             here = here / part
-            if here.is_symlink() or (here.exists() and here != repo / n and not here.is_dir()):
-                raise Fail(f"{n}: {here.relative_to(repo)} in the repo is a link or not a folder, so the OpenCode "
-                           "adapter's files were not copied back. Nothing was committed")
+            if here.is_symlink() or (here.exists() and not (here.is_file() if here == repo / n else here.is_dir())):
+                raise Fail(f"{n}: {here.relative_to(repo)} in the repo is a link or not a "
+                           f"{'file' if here == repo / n else 'folder'}, so the OpenCode adapter's files were not copied "
+                           "back. Nothing was committed")
+        if n not in before and (repo / n).exists():  # in the repo but not in the copy: ignored or private
+            raise Fail(f"{n} is in the repo but was left out of the OpenCode adapter's copy (ignored or private), so "
+                       "its file was not copied over it, nor any other. Nothing was committed")
     for n in changed:
         dest = repo / n
         dest.parent.mkdir(parents=True, exist_ok=True)  # .lane-control/ or its additions/ only (adapter_names)
@@ -2756,6 +2776,18 @@ def stale_checkout(repo: Path, quick: bool = False):
     return None
 
 
+def refuse_private_onboarding(repo: Path) -> None:
+    """A --private glob may not cover what onboarding writes and its reviewer must see (the adapter's files, the
+    generated file) nor AGENTS.md or the file it links to: a review that cannot see them proves nothing, and the
+    reviewer's prompt holds AGENTS.md's diff. Both harnesses; checked before any agent starts."""
+    names = sorted(adapter_names() | {GENERATED, "AGENTS.md", agents_md(repo)})
+    for g in PRIVATE_GLOBS:
+        hit = [n for n in names if private_glob(n, g)]
+        if hit:
+            raise Fail(f"--private {g!r} covers {hit[0]}, which onboarding writes or its reviewer must read: narrow the "
+                       f"glob (the settings store keeps it: {store_dir(repo) / 'settings.json'}). Nothing was changed")
+
+
 def onboard_from(role: str) -> str:
     """Said beside a run's model: where it came from, so a run that falls back to the default says so."""
     src = ONBOARD_FROM.get(role)
@@ -2784,6 +2816,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
             raise Fail(f"git has no {key} here, so the owner's commit can't be made; set it and run again")
     check_agents_md(repo)
     check_gitignore(repo)
+    refuse_private_onboarding(repo)
     # Before the agent starts, so nothing in .cotal/ can pass for its work; committed with its files.
     if ORCHESTRATOR == "orca-cotal":
         say("gitignore", ignore_cotal(repo), ".cotal/")
@@ -2937,10 +2970,12 @@ def bad_glob(g) -> bool:
     """A --private glob project-setup will not take; POSIX classes too, which an OpenCode run's matcher (private_glob)
     cannot carry: write the range ([0-9])."""
     return not isinstance(g, str) or not g or g.startswith(("/", "~", "!")) or ".." in Path(g).parts \
-        or bool(RULE_UNSAFE & set(g) - set("*?[]")) or "[[:" in g
+        or bool(RULE_UNSAFE & set(g) - set("*?[]")) or "[[:" in g \
+        or bool({"", "."} & set(g.rstrip("/").split("/")))  # ./x, a//b, a/./b: no matcher reads them alike
 
 
-GLOB_RULE = "a glob relative to the repo root, with no POSIX class like [[:digit:]] (write [0-9])"
+GLOB_RULE = ("a glob relative to the repo root, with no POSIX class like [[:digit:]] (write [0-9]) and no ./ or // "
+             "(write config/** for ./config/**)")
 
 
 def validate_settings(repo: Path, st: dict) -> None:
