@@ -1,7 +1,8 @@
 #!/bin/sh
 # The testbed container's start: its own ssh keys (made here, never the owner's), sshd as the normal user on port
 # 2222, the user units it had enabled, then by role (TESTBED_ROLE): desktop and box get the fake gateway on
-# 127.0.0.1:4000; desktop also its own Orca server (orcad) on 127.0.0.1:6768, as the desktop app would listen.
+# 127.0.0.1:4000; desktop also its own Orca server (orcad) on 127.0.0.1:6768, as the desktop app listens. Started
+# without --bind; headless orcad still counts that as pinned to loopback and will not widen for `orca pair`.
 set -eu
 umask 022
 # The fake gateway's key (made up). Agents get it where they start: from Orca's server, so it is set before orcad starts
@@ -50,7 +51,7 @@ if [ "$TESTBED_ROLE" = desktop ]; then
   # The desktop's server: kept running, its first stdout line (the readiness line with the pairing link) per start.
   ( cd "$slot"; while :; do
       ORCA_VERSION=$ver ORCA_USER_DATA=$HOME/.orca TMPDIR=$HOME/tmp "$node" --max-semi-space-size=8 "$slot/orcad.js" \
-        --json --bind 127.0.0.1 --port 6768 > "$HOME/.orca-desktop-readiness" 2>> "$HOME/.orca-desktop.log" < /dev/null || true
+        --json --port 6768 > "$HOME/.orca-desktop-readiness" 2>> "$HOME/.orca-desktop.log" < /dev/null || true
       sleep 2
     done ) &
 fi

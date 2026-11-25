@@ -304,26 +304,33 @@ def lane_across(ctx, coord, env, target, tag):
     t0 = json.loads(run(ctx, coord, f"{cli} terminal create --worktree path:/home/u/code/coord --title 'tb {tag} "
                                     "coordinator' --command bash --json").stdout)["result"]["terminal"]["handle"]
     run(ctx, coord, f"{cli} orchestration run-create --objective 'testbed {tag}' --from {t0} --json >/dev/null")
-    name = f"tb-{tag}-{int(time.time()) % 100000}"
-    spec = (f"Testbed lane {tag}.\nRUN-TOOL: git rev-parse --abbrev-ref HEAD > ~/tmp/{name}-branch; pwd > "
-            f"~/tmp/{name}-pwd; hostname > ~/tmp/{name}-host\nWAIT-FOR-MESSAGE\n")
-    run(ctx, coord, f"cat > ~/tmp/{name}.md", input=spec)
-    p = run(ctx, coord, f"{cli} orchestration worker-start --on {env} --worktree new-top-level --repo "
-                        f"path:/home/u/code/scratch --name {name} --agent opencode --spec-file ~/tmp/{name}.md "
-                        f"--from {t0} --json", check=False, timeout=300)
-    try:
-        ws = json.loads(p.stdout)
-    except ValueError:
-        ws = {}
-    res = ws.get("result") or {}
-    expect(ws.get("ok") and res.get("dispatchId"), f"worker-start --on {env} failed: {(p.stdout + p.stderr)[-700:]}")
-    disp, term = res["dispatchId"], res.get("terminal")
-    for _ in range(90):
-        seen = run(ctx, target, f"cat ~/tmp/{name}-host ~/tmp/{name}-branch ~/tmp/{name}-pwd 2>/dev/null",
-                   check=False).stdout.split()
+    retried = ""
+    for attempt in (1, 2):
+        name = f"tb-{tag}-{int(time.time()) % 100000}"
+        spec = (f"Testbed lane {tag}.\nRUN-TOOL: git rev-parse --abbrev-ref HEAD > ~/tmp/{name}-branch; pwd > "
+                f"~/tmp/{name}-pwd; hostname > ~/tmp/{name}-host\nWAIT-FOR-MESSAGE\n")
+        run(ctx, coord, f"cat > ~/tmp/{name}.md", input=spec)
+        p = run(ctx, coord, f"{cli} orchestration worker-start --on {env} --worktree new-top-level --repo "
+                            f"path:/home/u/code/scratch --name {name} --agent opencode --spec-file ~/tmp/{name}.md "
+                            f"--from {t0} --json", check=False, timeout=300)
+        try:
+            ws = json.loads(p.stdout)
+        except ValueError:
+            ws = {}
+        res = ws.get("result") or {}
+        expect(ws.get("ok") and res.get("dispatchId"), f"worker-start --on {env} failed: {(p.stdout + p.stderr)[-700:]}")
+        disp, term = res["dispatchId"], res.get("terminal")
+        for _ in range(45 if attempt == 1 else 90):
+            seen = run(ctx, target, f"cat ~/tmp/{name}-host ~/tmp/{name}-branch ~/tmp/{name}-pwd 2>/dev/null",
+                       check=False).stdout.split()
+            if len(seen) == 3:
+                break
+            time.sleep(2)
         if len(seen) == 3:
             break
-        time.sleep(2)
+        # Seen once: OpenCode up with an empty composer, the brief never delivered (lc-7dd). Say so, start once more.
+        retried = f" (first start's brief never arrived, lc-7dd; retried)"
+        run(ctx, coord, f"{cli} orchestration worker-release --dispatch {disp} --json >/dev/null 2>&1", check=False)
     expect(len(seen) == 3, f"the lane never ran its first step on {target}")
     expect(seen[0] == target, f"the lane ran on {seen[0]}, not {target}")
     expect(name in seen[1] and seen[2].startswith("/home/u/orca/workspaces/"),
@@ -363,7 +370,7 @@ def lane_across(ctx, coord, env, target, tag):
         check=False)
     expect(run(ctx, target, f"test ! -e {seen[2]}", check=False).returncode == 0, f"{seen[2]} is still on {target}")
     return (f"worker-start --on {env}: worktree and branch {seen[1]} on {target}; a message made it act; worker_done "
-            f"reached {coord}'s check; released (terminal closed); worktree removed")
+            f"reached {coord}'s check; released (terminal closed); worktree removed{retried}")
 
 
 @scenario("lane A, direct: the desktop's coordinator runs and controls a lane on the box (--on box)")
@@ -421,7 +428,73 @@ def refresh(ctx):
     return f"set up with {OLD_REF}, refreshed with this checkout: lane-tier and the lane skill replaced"
 
 
+# --- 4b. direction 2 without lane-tunnel --------------------------------------------------------------------------------
+
+def listeners(ctx, role, port):
+    return sorted(set(run(ctx, role, f"ss -ltnH 'sport = :{port}' | awk '{{print $4}}'", check=False).stdout.split()))
+
+
+@scenario("direction 2 without lane-tunnel: the box pairs with the desktop's network address (orca pair --address), "
+          "then a lane from the box on the desktop; records what the desktop's Orca then listens on")
+def d2_no_tunnel(ctx):
+    """Is lane-tunnel still needed? (owner 2026-11-25). Driven with the Orca CLI directly: project-setup refuses a link
+    that is not 127.0.0.1. Afterwards the desktop's server is restarted, back on loopback, and the box forgets it."""
+    if not box_cli_ready(ctx):
+        raise Skip("the box has no Orca server yet (run d1-direct or d1-jump first)")
+    ip = run(ctx, "desktop", "hostname -i | awk '{print $1}'").stdout.strip()
+    before = listeners(ctx, "desktop", 6768)
+    p = run(ctx, "desktop", f"orca-ide pair --address {ip} --json", check=False)
+    try:
+        link = json.loads(p.stdout).get("result", {}).get("url") or ""
+    except ValueError:
+        link = ""
+    if not link.startswith("orca://"):
+        link = next((w for w in (p.stdout + p.stderr).split() if w.startswith("orca://")), "")
+    if not link and "network_exposure_failed" in p.stdout:
+        why = run(ctx, "desktop", "grep -o 'Runtime bind address is pinned to [0-9.]*; refusing to widen to all interfaces' "
+                  "~/.orca-desktop.log | tail -1",
+                  check=False).stdout.strip()
+        raise Skip(f"orca pair --address {ip}: network_exposure_failed; headless orcad will not widen ({why or 'see '
+                   '~/.orca-desktop.log'}), even started without --bind; only the desktop app widens itself. The "
+                   f"desktop kept listening on {', '.join(before)}. Not verified here: needs the desktop app, or orcad "
+                   "started with --bind 0.0.0.0 (next slice)")
+    expect(link, f"orca pair --address {ip} gave no link ({p.returncode}): {(p.stdout + p.stderr)[-500:]}")
+    time.sleep(2)
+    after = listeners(ctx, "desktop", 6768)
+    try:
+        run(ctx, "box", "~/.orca/cli/bin/orca environment rm --environment desktop-net --json >/dev/null 2>&1; true",
+            check=False)
+        # The link reaches the box on stdin, through the same preload project-setup uses (pairing-code-stdin.cjs).
+        ctx.copy_lane_control("box", dest=".local/share/lane-control")
+        add = run(ctx, "box", "cli=$(readlink -f ~/.orca/cli/bin/orca); "
+                              "node=$(grep -o '/[^ \"]*/bin/node' \"$cli\" | head -1); "
+                              "idx=$(grep -o '/[^ \"]*/out/cli/index.js' \"$cli\" | head -1); "
+                              "$node --require ~/.local/share/lane-control/core/scripts/pairing-code-stdin.cjs $idx "
+                              "environment add --name desktop-net --pairing-code - --json", check=False, input=link + "\n")
+        if add.returncode:  # the launcher's shape differs: the CLI's own argument (a throwaway container's link)
+            add = run(ctx, "box", "~/.orca/cli/bin/orca environment add --name desktop-net --pairing-code "
+                                  f"{shlex.quote(link)} --json", check=False)
+        expect(add.returncode == 0, f"environment add on the box failed: {(add.stdout + add.stderr)[-400:]}")
+        st = json.loads(run(ctx, "box", "~/.orca/cli/bin/orca status --environment desktop-net --json").stdout)
+        expect(st.get("result", {}).get("runtime", {}).get("reachable") is True,
+               f"the desktop at {ip} is not reachable from the box without a tunnel: {st}")
+        lane = lane_across(ctx, "box", "desktop-net", "desktop", "no-tunnel")
+    finally:
+        run(ctx, "box", "~/.orca/cli/bin/orca environment rm --environment desktop-net --json >/dev/null 2>&1; true",
+            check=False)
+        run(ctx, "desktop", "for p in $(pgrep -f 'orcad[.]js .*--port 6768'); do kill $p; done", check=False)
+        for _ in range(90):
+            if run(ctx, "desktop", "orca-ide status --json | jq -e '.result.runtime.state == \"ready\"' >/dev/null",
+                   check=False).returncode == 0:
+                break
+            time.sleep(1)
+    restored = listeners(ctx, "desktop", 6768)
+    return (f"without a tunnel: {lane}. The desktop's Orca listened on {', '.join(before) or 'nothing'} before, on "
+            f"{', '.join(after)} after orca pair (exposure: every interface of the desktop); after a restart on "
+            f"{', '.join(restored)}")
+
+
 # The order `all` runs them in: each lane right after the pairing it uses (d1-jump resets the box's server).
 ORDER = ["suggest-tiers", "onboard", "d1-direct", "lane-a-direct", "d1-jump", "lane-a-jump", "d2-tunnel", "lane-b-jump",
-         "d2-ports", "lane-b-direct", "refresh"]
+         "d2-ports", "lane-b-direct", "d2-no-tunnel", "refresh"]
 ALL.sort(key=lambda s: ORDER.index(s.name) if s.name in ORDER else len(ORDER))

@@ -131,6 +131,7 @@ gateway or a plain shell command in an Orca terminal, never a real model.
 | `lane-b-jump` | after `d2-tunnel` (through the jump): the same with the coordinator on the box and `--on desktop` | as `lane-a-direct`, from the box's side, the lane on the desktop |
 | `d2-ports` | `d2-tunnel` direct to `box` with other ports (TUN-1): `lane-tunnel start --remote-port 6870 box 6768`, the link pointed at 6870 by project-setup's own `link_for_port`, after a restart of the desktop's server (a link pairs once) | as `d2-tunnel`, on port 6870 on the box |
 | `lane-b-direct` | `lane-b-jump` again over that tunnel | as `lane-b-jump` |
+| `d2-no-tunnel` | after `lane-b-direct`: on the desktop `orca pair --address <its network address>`, the link to the box on stdin (the same preload project-setup uses), then the lane checks from the box over it; project-setup is not used (it refuses a link that is not 127.0.0.1); the desktop's listeners are recorded before and after, and its server is restarted afterwards | skips plainly today: headless orcad answers `network_exposure_failed` ("Runtime bind address is pinned to 127.0.0.1; refusing to widen") even started without `--bind`, and keeps listening on 127.0.0.1 only |
 | `refresh` | on the box: a second scratch project set up by lane-control `48a38ab` (main before LIT-1, whose lane-tier refuses OpenCode tiers), then `project-setup --refresh` from this checkout | the old setup left an older `~/.agents/bin/lane-tier`; after `--refresh` it and the `native-orca-lanes` skill are this checkout's |
 
 Lanes start the way the lane skill says for OpenCode, as far as Orca 1.4.268 lets them: `--agent opencode` without
@@ -143,22 +144,24 @@ branch; away-improve (`lane-improve on`, the cap, the summary PR, drained); and 
 
 ## Coverage
 
-What remote.md and the owner's questions claim, and what the testbed checks. Verified means a scenario above passes on
-that Orca version (`scenario all` from a fresh `up`).
+What remote.md and the owner's questions claim, and what the testbed checks. Verified means the scenario passed in a
+`scenario all` from a fresh `up` on that Orca version (2026-11-25, docker 29.8, the pinned official server releases).
 
 | Claim | 1.4.268 | 1.4.274 | Scenario |
 |---|---|---|---|
-| Direction 1: `orca-host-install --pair` installs and pairs a box over `-L`, direct and via ProxyJump; a re-run is idempotent | verified | see below | `d1-direct`, `d1-jump` |
-| Direction 2: `lane-tunnel -R` opens the port on the box's loopback only; `--box-pairing add` with the link on stdin pairs the box; the link is in no argv output or file | verified | see below | `d2-tunnel`, `d2-ports` |
-| TUN-1: different local and remote tunnel ports, the link pointed at the box's port | verified | see below | `d2-ports` |
-| A desktop coordinator controls a lane on the box (`--on`, `new-top-level --repo`): worktree and branch there, `send --to dispatch:<id>` reaches it and it acts, its `worker_done` reaches the desktop's `check`, release closes its terminal, cleanup | verified | see below | `lane-a-direct`, `lane-a-jump` |
-| A box coordinator runs a lane on the desktop through `-R`, the same checks | verified | see below | `lane-b-jump`, `lane-b-direct` |
-| Reports across hosts arrive in the coordinator's `check` (poll) | verified | see below | the lane scenarios |
+| Direction 1: `orca-host-install --pair` installs and pairs a box over `-L`, direct and via ProxyJump; a re-run is idempotent | verified | verified | `d1-direct`, `d1-jump` |
+| Direction 2 with lane-tunnel: `-R` opens the port on the box's loopback only; `--box-pairing add` with the link on stdin pairs the box; the link is in no output or file | verified | verified | `d2-tunnel`, `d2-ports` |
+| TUN-1: different local and remote tunnel ports, the link pointed at the box's port | verified | verified | `d2-ports` |
+| A desktop coordinator controls a lane on the box (`--on`, `new-top-level --repo`): worktree and branch there, `send --to dispatch:<id>` reaches it and it acts, its `worker_done` reaches the desktop's `check`, release closes its terminal, cleanup | verified | verified | `lane-a-direct`, `lane-a-jump` |
+| A box coordinator runs a lane on the desktop through `-R`, the same checks | verified | verified | `lane-b-jump`, `lane-b-direct` |
+| Reports across hosts arrive in the coordinator's `check` (polled) | verified | verified | the lane scenarios |
+| The first OpenCode lane started on the desktop from the box gets its brief | not always: OpenCode came up with an empty composer, the start was retried (lc-7dd) | the same | `lane-b-jump` |
+| Is lane-tunnel still needed? Direction 2 without it, the box pairing with the desktop's network address | not verified: headless orcad will not widen to the network (`network_exposure_failed`, "pinned to 127.0.0.1") even without `--bind`; the desktop app widens itself on a network pairing (`orca pair --help`: "makes a loopback-only Orca listen on every interface"), so without the tunnel the desktop's Orca listens on every interface: that is the exposure lane-tunnel avoids. Needs the desktop app, or orcad with `--bind 0.0.0.0` (next slice) | the same | `d2-no-tunnel` (skips) |
 | A cross-host `worker_done` wakes an idle agent coordinator | not verified: needs a real agent coordinator (the opt-in `TESTBED_REAL_MODEL`, not built); the testbed's coordinators are shells | | none |
-| A newer client against an older server (and back) | not verified: needs two Orca versions in one run (the pin file holds both; a mixed-pair scenario is not built) | | none |
-| A runtime restart: workers keep or lose their dispatch (`worker_identity_changed`), `worker-start --retry-of` | not verified (`d2-ports` restarts the desktop's server with no lane running, and only checks that it comes back) | | none |
-| 1.4.272: `send --on-client <installation> --to bot:<name>`, `recipient_delivery_held` receipts, resume work on restart, a paired server's follow-up report no longer refused | not verified (not built) | | none |
-| Onboarding with no Claude (`--skip-adapt`), `--suggest-tiers` against a LiteLLM-like gateway, `--refresh` from an older checkout | verified | see below | `suggest-tiers`, `onboard`, `refresh` |
+| A newer client against an older server (and back) | not verified: the pin file holds both versions; a mixed-pair scenario is not built | | none |
+| A runtime restart: workers keep or lose their dispatch (`worker_identity_changed`), `worker-start --retry-of` | not verified (`d2-ports` restarts the desktop's server with no lane running and checks only that it comes back) | | none |
+| 1.4.272+: `send --on-client <installation> --to bot:<name>`, `recipient_delivery_held` receipts, resume work on restart, a paired server's follow-up report no longer refused | | not verified (not built) | none |
+| Onboarding with no Claude (`--skip-adapt`), `--suggest-tiers` against a LiteLLM-like gateway, `--refresh` from an older checkout | verified | verified | `suggest-tiers`, `onboard`, `refresh` |
 
 ## Not covered
 
