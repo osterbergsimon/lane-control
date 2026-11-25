@@ -1405,7 +1405,7 @@ class HostTests(Case):
             self.assertEqual(r.returncode, 0, (args, r.stderr))
             calls = [c for c in self.e.calls() if c.startswith("ssh ")]
             self.assertEqual(len(calls), 2, calls)
-            self.assertIn("lane-control/current/scripts/project-setup", calls[1])
+            self.assertIn('lane-control"/current/scripts/project-setup', calls[1])
             self.assertIn("--via-host", calls[1])
             self.assertNotIn("--host", calls[1].replace("--via-host", ""))
             self.assertNotIn(" user@host", calls[1].split(" ", 2)[2])  # the host is ssh's, not the host run's
@@ -1963,6 +1963,9 @@ class InstallTests(Case):
     def lc(self):
         return self.e.home / ".local" / "share" / "lane-control"
 
+    def lane(self, role):
+        return self.repo / ".lane-control" / f"{role}.md"
+
     def head(self):
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
 
@@ -1984,14 +1987,14 @@ class InstallTests(Case):
         self.e.run(str(self.repo), "--no-start")
         st = json.loads((self.e.store(self.repo) / "settings.json").read_text())
         self.assertEqual(st["lane_control"], self.head())
-        r = self.e.run(str(self.repo), "--show")
+        r = self.e.run(str(self.repo), "--show", adapt=True)
         self.assertNotIn("run project-setup --refresh", r.stdout)
         other = "f" * 40  # a later install: its tree and the switched link
         (self.lc() / other).mkdir()
         (self.lc() / other / ".lane-control-sha").write_text(other + "\n")
         (self.lc() / "current").unlink()
         (self.lc() / "current").symlink_to(other)
-        r = self.e.run(str(self.repo), "--show")
+        r = self.e.run(str(self.repo), "--show", adapt=True)
         self.assertIn(f"lane-control {other[:12]} installed, project set up with {self.head()[:12]}: "
                       "run project-setup --refresh", r.stdout)
 
@@ -2005,7 +2008,7 @@ class InstallTests(Case):
         st = json.loads(f.read_text())
         st.pop("lane_control")
         f.write_text(json.dumps(st))
-        r = self.e.run(str(self.repo), "--refresh")
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("this machine moves to the install", r.stderr)
         self.assertIn("lane-control: moved", r.stdout)

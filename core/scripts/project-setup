@@ -521,6 +521,8 @@ def copy_to_host(place: "Place") -> None:
         raise Fail(f"copying lane-control to {place.host} failed" + (f": {said[-1].strip()}" if said else ""))
     state = "exists" if copy.stdout.strip().startswith("exists") else "copied"
     say("lane-control", state, f"{LC_SHA} on {place.host} (its .../lane-control/current)")
+    write_atomic(config_home() / "lane-control" / "boxes" / f"{env_name(place.host)}.json",  # for lane-control doctor
+                 json.dumps({"host": place.host, "lane_control": LC_SHA}, indent=2).encode())
 
 
 LOCAL_ONLY_FLAGS = {"--no-desktop-lanes": False, "--no-machine-setup": False, "--orca-port": True, "--host": True,
@@ -4303,8 +4305,8 @@ def main(argv=None) -> int:
             print(f"project-setup: {' '.join(ignored)} has no effect with --refresh: each persona keeps what it "
                   "has (only --reviewer is used, for a reviewer persona that is missing)", file=sys.stderr)
             return 2
-    if not a.show:
-        use_install()  # before the host copy and before anything is rendered
+    if host or not a.show:
+        use_install()  # before the host copy and before anything is rendered; a local --show writes nothing
     if host:
         if a.orchestrator == "orca-cotal":
             return on_host(host, argv, a.target, value_flags)

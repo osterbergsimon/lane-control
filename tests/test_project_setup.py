@@ -2580,7 +2580,7 @@ class RunTests(unittest.TestCase):
         self.assertIn('tar -C "$t" -xf -', calls[0])
         self.assertIn('mv -fT "$d/.current.$$.tmp" "$d/current"', calls[0])
         self.assertIn("dev@box", calls[1])
-        self.assertIn("lane-control/current/scripts/project-setup", calls[1])
+        self.assertIn('lane-control"/current/scripts/project-setup', calls[1])
         self.assertIn("https://example.com/acme/shop.git", calls[1])
         self.assertIn("bypassPermissions", calls[1])
         self.assertNotIn("--host", calls[1])
