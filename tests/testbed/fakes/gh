@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""A fake `gh` for the testbed: GitHub played by a folder (the forge) that every host of the testbed shares.
+
+  $TESTBED_FORGE/repos/<owner>/<name>.git   bare repos; a clone's origin is file://<that path>
+  $TESTBED_FORGE/state.json                 pull requests, repo settings, check results (one lock, flock)
+
+Covers what lane-control calls (tests/testbed/README.md, "The fake GitHub"):
+  auth status | auth setup-git
+  repo view [owner/name] [--json f,..] [-q expr] | repo edit --delete-branch-on-merge | repo create <o/n> --private
+  repo clone <o/n> [dir]
+  pr create --head B [--base B] --title T (--body T | --body-file F) [--draft]
+  pr view [N|branch] [--json f,..] [-q expr] | pr list [--head B] [--state open|closed|merged|all] [--json] [--limit N]
+  pr ready N | pr edit N (--body-file F | --body T) | pr diff N | pr checks N | pr merge N [--merge|--squash|--rebase]
+      [--match-head-commit SHA] [--subject S] [--body-file F|--body T] [--delete-branch] [--auto] | pr close N
+  api user [-q ..] | api repos/<o>/<n> [-X PATCH -f|-F delete_branch_on_merge=true] | api graphql (lastEditedAt)
+Testbed only (no real gh has these): `gh testbed checks <N|branch> success|failure|pending` sets what a PR's checks
+report, `gh testbed state` prints the whole state. TESTBED_CHECKS (default success) is what a new PR's checks say.
+Every call is appended to $TESTBED_FORGE/calls.log. Exit codes and messages follow gh closely enough for callers that
+read only the exit code and the last stderr line. Nothing here talks to a network.
+"""
+import contextlib
+import datetime as dt
+import fcntl
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+FORGE = Path(os.environ.get("TESTBED_FORGE", "/forge"))
+STATE = FORGE / "state.json"
+LOGIN = os.environ.get("TESTBED_GH_LOGIN", "testbed-owner")
+
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+@contextlib.contextmanager
+def locked():
+    FORGE.mkdir(parents=True, exist_ok=True)
+    with open(FORGE / ".lock", "a+") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        st = json.loads(STATE.read_text()) if STATE.exists() and STATE.stat().st_size else {}
+        st.setdefault("repos", {})
+        st.setdefault("prs", {})
+        yield st
+        tmp = STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(st, indent=1, sort_keys=True))
+        tmp.replace(STATE)
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def git(*args, cwd=None, check=True):
+    p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and p.returncode:
+        die(f"gh (testbed): git {' '.join(args[:2])} failed: {(p.stderr or p.stdout).strip()[-300:]}")
+    return p.stdout.strip()
+
+
+def bare(full):
+    return FORGE / "repos" / f"{full}.git"
+
+
+def repo_of_cwd():
+    """owner/name of the cwd's origin when it is a forge repo."""
+    p = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
+    url = p.stdout.strip()
+    if p.returncode or not url:
+        die("failed to determine base repo: no git remote origin\nnone of the git remotes configured for this "
+            "repository point to a known GitHub host")
+    path = url[len("file://"):] if url.startswith("file://") else url
+    try:
+        rel = Path(path).resolve().relative_to((FORGE / "repos").resolve())
+    except ValueError:
+        die(f"none of the git remotes configured for this repository point to a known GitHub host ({url})")
+    return str(rel)[:-len(".git")] if str(rel).endswith(".git") else str(rel)
+
+
+def take(args, name, has_value=True, default=None):
+    """Remove `name` (and its value) from args; return the value (True for a flag) or default."""
+    for i, a in enumerate(args):
+        if a == name:
+            if not has_value:
+                del args[i]
+                return True
+            v = args[i + 1] if i + 1 < len(args) else die(f"flag needs an argument: {name}")
+            del args[i:i + 2]
+            return v
+        if has_value and a.startswith(name + "="):
+            del args[i]
+            return a.split("=", 1)[1]
+    return default
+
+
+def emit(obj, fields, query):
+    if fields is not None:
+        keep = [f for f in fields.split(",") if f]
+        if isinstance(obj, list):
+            obj = [{k: o.get(k) for k in keep} for o in obj]
+        else:
+            obj = {k: obj.get(k) for k in keep}
+    text = json.dumps(obj)
+    if query:
+        p = subprocess.run(["jq", "-r", query], input=text, capture_output=True, text=True)
+        if p.returncode:
+            die(f"gh (testbed): jq failed: {p.stderr.strip()}")
+        sys.stdout.write(p.stdout)
+    else:
+        print(text)
+
+
+def repo_record(st, full):
+    if not bare(full).is_dir():
+        die(f"GraphQL: Could not resolve to a Repository with the name '{full}'. (repository)")
+    r = st["repos"].setdefault(full, {"deleteBranchOnMerge": False, "visibility": "PUBLIC"})
+    head = git("symbolic-ref", "--short", "HEAD", cwd=bare(full), check=False) or "main"
+    owner, name = full.split("/", 1)
+    return {**r, "name": name, "owner": {"login": owner}, "nameWithOwner": full,
+            "defaultBranchRef": {"name": head}, "url": f"https://github.test/{full}",
+            "isPrivate": r.get("visibility") == "PRIVATE", "viewerPermission": "ADMIN"}
+
+
+def sha(full, ref):
+    return git("rev-parse", "--verify", "-q", f"refs/heads/{ref}", cwd=bare(full), check=False)
+
+
+def pr_view_obj(st, full, pr):
+    p = dict(pr)
+    head = sha(full, pr["headRefName"]) if pr["state"] == "OPEN" else pr.get("headRefOid")
+    p["headRefOid"] = head or pr.get("headRefOid")
+    p["url"] = f"https://github.test/{full}/pull/{pr['number']}"
+    p["isCrossRepository"] = False
+    p["author"] = {"login": LOGIN}
+    p["statusCheckRollup"] = [] if pr["checks"] == "none" else [{
+        "__typename": "CheckRun", "name": "testbed-ci", "status": "COMPLETED" if pr["checks"] != "pending" else "IN_PROGRESS",
+        "conclusion": {"success": "SUCCESS", "failure": "FAILURE"}.get(pr["checks"], ""), "workflowName": "ci"}]
+    p["mergeable"] = "MERGEABLE"
+    if p["state"] == "OPEN" and p["headRefOid"]:
+        base = sha(full, pr["baseRefName"])
+        files = git("diff", "--name-only", f"{base}...{p['headRefOid']}", cwd=bare(full), check=False).split()
+        p["files"] = [{"path": f, "additions": 0, "deletions": 0} for f in files]
+    p["mergeCommit"] = {"oid": pr["mergeCommit"]} if pr.get("mergeCommit") else None
+    return p
+
+
+def find_pr(st, full, sel):
+    prs = st["prs"].get(full, {})
+    if sel is None:
+        sel = git("branch", "--show-current", check=False)
+    if str(sel).lstrip("#").isdigit():
+        pr = prs.get(str(sel).lstrip("#"))
+    else:
+        pr = next((p for p in sorted(prs.values(), key=lambda p: -p["number"]) if p["headRefName"] == sel), None)
+    if pr is None:
+        die(f"no pull requests found for {sel!r}" if sel else "could not determine current branch")
+    return pr
+
+
+def body_of(args):
+    f = take(args, "--body-file")
+    if f is not None:
+        return sys.stdin.read() if f == "-" else Path(f).read_text()
+    return take(args, "--body") or take(args, "-b") or ""
+
+
+def merge(full, pr, method, subject, body):
+    with tempfile.TemporaryDirectory() as d:
+        git("clone", "-q", "--no-local", str(bare(full)), d)
+        git("checkout", "-q", pr["baseRefName"], cwd=d)
+        git("fetch", "-q", "origin", pr["headRefName"], cwd=d)
+        ident = ["-c", "user.name=Testbed Forge", "-c", "user.email=forge@testbed.invalid"]
+        if method == "squash":
+            git(*ident, "merge", "-q", "--squash", "FETCH_HEAD", cwd=d)
+            git(*ident, "commit", "-q", "-m", subject or f"{pr['title']} (#{pr['number']})", "-m", body, cwd=d)
+        elif method == "rebase":
+            git(*ident, "rebase", "-q", "FETCH_HEAD", cwd=d)
+            die("gh (testbed): --rebase is not modelled")
+        else:
+            msg = subject or f"Merge pull request #{pr['number']} from {pr['headRefName']}"
+            p = subprocess.run(["git", *ident, "merge", "-q", "--no-ff", "-m", msg, "-m", body, "FETCH_HEAD"], cwd=d,
+                               capture_output=True, text=True)
+            if p.returncode:
+                die(f"Pull request #{pr['number']} is not mergeable: the merge commit cannot be cleanly created.")
+        git("push", "-q", "origin", pr["baseRefName"], cwd=d)
+        return git("rev-parse", "HEAD", cwd=d)
+
+
+def cmd_pr(args, full):
+    sub = args.pop(0) if args else ""
+    with locked() as st:
+        repo_record(st, full)
+        prs = st["prs"].setdefault(full, {})
+        if sub == "create":
+            draft = take(args, "--draft", False) or take(args, "-d", False)
+            head = take(args, "--head") or take(args, "-H") or git("branch", "--show-current")
+            base = take(args, "--base") or take(args, "-B") or repo_record(st, full)["defaultBranchRef"]["name"]
+            title = take(args, "--title") or take(args, "-t") or head
+            body = body_of(args)
+            if not sha(full, head):
+                die(f"pull request create failed: GraphQL: Head sha can't be blank, Base sha can't be blank, No commits "
+                    f"between {base} and {head}, Head ref must be a branch (createPullRequest)")
+            if any(p["headRefName"] == head and p["baseRefName"] == base and p["state"] == "OPEN" for p in prs.values()):
+                die(f'a pull request for branch "{head}" into branch "{base}" already exists')
+            n = max([int(k) for k in prs] + [0]) + 1
+            prs[str(n)] = {"number": n, "title": title, "body": body, "headRefName": head, "baseRefName": base,
+                           "state": "OPEN", "isDraft": bool(draft), "createdAt": now(), "lastEditedAt": None,
+                           "checks": os.environ.get("TESTBED_CHECKS", "success"), "comments": [], "mergeCommit": None,
+                           "headRefOid": sha(full, head)}
+            print(f"https://github.test/{full}/pull/{n}")
+            return
+        if sub == "list":
+            head = take(args, "--head") or take(args, "-H")
+            state = (take(args, "--state") or take(args, "-s") or "open").upper()
+            base = take(args, "--base") or take(args, "-B")
+            limit = int(take(args, "--limit") or take(args, "-L") or 30)
+            fields, q = take(args, "--json"), take(args, "-q") or take(args, "--jq")
+            rows = [p for p in sorted(prs.values(), key=lambda p: -p["number"])
+                    if (head is None or p["headRefName"] == head) and (base is None or p["baseRefName"] == base)
+                    and (state == "ALL" or p["state"] == state)]
+            out = [pr_view_obj(st, full, p) for p in rows[:limit]]
+            if fields is None and not q:
+                for p in out:
+                    print(f"{p['number']}\t{p['title']}\t{p['headRefName']}\t{p['state']}")
+                return
+            return emit(out, fields, q)
+        sel = args.pop(0) if args and not args[0].startswith("-") else None
+        pr = find_pr(st, full, sel)
+        if sub == "view":
+            fields, q = take(args, "--json"), take(args, "-q") or take(args, "--jq")
+            return emit(pr_view_obj(st, full, pr), fields, q)
+        if sub == "diff":
+            v = pr_view_obj(st, full, pr)
+            sys.stdout.write(git("diff", f"{sha(full, pr['baseRefName'])}...{v['headRefOid']}", cwd=bare(full)) + "\n")
+            return
+        if sub == "checks":
+            c = pr["checks"]
+            print(f"testbed-ci\t{ {'success': 'pass', 'failure': 'fail'}.get(c, c) }")
+            sys.exit({"success": 0, "failure": 1, "pending": 8, "none": 1}.get(c, 1))
+        if sub == "ready":
+            if pr["state"] != "OPEN":
+                die(f"Pull request #{pr['number']} is closed")
+            pr["isDraft"] = False
+            print(f"✓ Pull request #{pr['number']} is marked as \"ready for review\"")
+            return
+        if sub == "edit":
+            pr["body"] = body_of(args)
+            pr["lastEditedAt"] = now()
+            print(f"https://github.test/{full}/pull/{pr['number']}")
+            return
+        if sub == "close":
+            pr["state"] = "CLOSED"
+            return
+        if sub == "comment":
+            pr["comments"].append({"author": {"login": LOGIN}, "body": body_of(args), "createdAt": now()})
+            return
+        if sub == "merge":
+            method = "squash" if take(args, "--squash", False) or take(args, "-s", False) else \
+                "rebase" if take(args, "--rebase", False) or take(args, "-r", False) else "merge"
+            take(args, "--merge", False), take(args, "-m", False), take(args, "--auto", False)
+            delete = take(args, "--delete-branch", False) or take(args, "-d", False)
+            match = take(args, "--match-head-commit")
+            subject = take(args, "--subject") or take(args, "-t")
+            body = body_of(args)
+            if pr["state"] != "OPEN":
+                die(f"Pull request #{pr['number']} was already merged or closed")
+            if pr["isDraft"]:
+                die(f"Pull request #{pr['number']} is still a draft")
+            head = sha(full, pr["headRefName"])
+            if match and match != head:
+                die(f"Head branch was modified. Review and try the merge again. (head is {head[:7]})")
+            if pr["checks"] == "failure":
+                die(f"Pull request #{pr['number']} is not mergeable: the base branch policy prohibits the merge "
+                    "(required status check \"testbed-ci\" is failing).")
+            pr["mergeCommit"] = merge(full, pr, method, subject, body)
+            pr["headRefOid"], pr["state"], pr["mergedAt"] = head, "MERGED", now()
+            if delete or st["repos"][full].get("deleteBranchOnMerge"):
+                git("update-ref", "-d", f"refs/heads/{pr['headRefName']}", cwd=bare(full), check=False)
+            print(f"✓ Merged pull request #{pr['number']} ({pr['title']})")
+            return
+    die(f"gh (testbed): pr {sub} is not modelled")
+
+
+def cmd_repo(args):
+    sub = args.pop(0) if args else ""
+    if sub == "create":
+        full = args.pop(0)
+        if bare(full).exists():
+            die(f"GraphQL: Name already exists on this account (createRepository)")
+        bare(full).parent.mkdir(parents=True, exist_ok=True)
+        git("init", "-q", "--bare", "-b", "main", str(bare(full)))
+        with locked() as st:
+            st["repos"][full] = {"deleteBranchOnMerge": False,
+                                 "visibility": "PRIVATE" if "--private" in args else "PUBLIC"}
+        print(f"https://github.test/{full}")
+        return
+    if sub == "clone":
+        full = args.pop(0)
+        if not bare(full).is_dir():
+            die(f"GraphQL: Could not resolve to a Repository with the name '{full}'. (repository)")
+        dest = args[0] if args and not args[0].startswith("-") else full.split("/")[-1]
+        p = subprocess.run(["git", "clone", "-q", f"file://{bare(full)}", dest])
+        sys.exit(p.returncode)
+    full = args.pop(0) if args and not args[0].startswith("-") else repo_of_cwd()
+    with locked() as st:
+        rec = repo_record(st, full)
+        if sub == "view":
+            return emit(rec, take(args, "--json"), take(args, "-q") or take(args, "--jq"))
+        if sub == "edit":
+            if take(args, "--delete-branch-on-merge", False):
+                st["repos"][full]["deleteBranchOnMerge"] = True
+            v = take(args, "--visibility")
+            if v:
+                st["repos"][full]["visibility"] = v.upper()
+            print(f"✓ Edited repository {full}")
+            return
+    die(f"gh (testbed): repo {sub} is not modelled")
+
+
+def cmd_api(args):
+    method = (take(args, "-X") or take(args, "--method") or "").upper()
+    q = take(args, "-q") or take(args, "--jq")
+    fields = {}
+    while True:
+        f = take(args, "-f") or take(args, "-F") or take(args, "--raw-field") or take(args, "--field")
+        if f is None:
+            break
+        k, _, v = f.partition("=")
+        fields[k] = v
+    path = args[0] if args else ""
+    if path == "user":
+        return emit({"login": LOGIN}, None, q)
+    if path == "graphql":
+        full = f"{fields.get('owner')}/{fields.get('name')}"
+        if "{owner}" in full:
+            full = repo_of_cwd()
+        with locked() as st:
+            pr = st["prs"].get(full, {}).get(str(fields.get("number")))
+        return emit({"data": {"repository": {"pullRequest": {"lastEditedAt": pr and pr.get("lastEditedAt")}}}}, None, q)
+    parts = path.strip("/").split("/")
+    if parts[:1] == ["repos"] and len(parts) >= 3:
+        full = "/".join(parts[1:3])
+        if full == "{owner}/{repo}":
+            full = repo_of_cwd()
+        with locked() as st:
+            rec = repo_record(st, full)
+            if len(parts) == 3:
+                if method == "PATCH" or (fields and method != "GET"):
+                    if "delete_branch_on_merge" in fields:
+                        st["repos"][full]["deleteBranchOnMerge"] = fields["delete_branch_on_merge"] in ("true", "1")
+                    rec = repo_record(st, full)
+                return emit({"full_name": full, "default_branch": rec["defaultBranchRef"]["name"],
+                             "delete_branch_on_merge": rec["deleteBranchOnMerge"],
+                             "visibility": rec["visibility"].lower(), "private": rec["isPrivate"]}, None, q)
+            if parts[3:4] == ["actions"]:
+                return emit({"total_count": 0, "runners": []}, None, q)
+            if parts[3:4] == ["branches"] and parts[5:6] == ["protection"]:
+                die("gh: Branch not protected (HTTP 404)")
+    die(f"gh: Not Found (HTTP 404) [testbed: api {path} is not modelled]")
+
+
+def cmd_testbed(args):
+    sub = args.pop(0) if args else ""
+    if sub == "state":
+        with locked() as st:
+            print(json.dumps(st, indent=1, sort_keys=True))
+        return
+    if sub == "checks":
+        sel, val = args[0], args[1]
+        if val not in ("success", "failure", "pending", "none"):
+            die("gh testbed checks <N|branch> success|failure|pending|none", 2)
+        full = take(args, "-R") or repo_of_cwd()
+        with locked() as st:
+            find_pr(st, full, sel)["checks"] = val
+        return
+    die("gh testbed state | checks <N|branch> success|failure|pending|none", 2)
+
+
+def main(argv):
+    args = list(argv)
+    FORGE.mkdir(parents=True, exist_ok=True)
+    with open(FORGE / "calls.log", "a") as f:
+        f.write(json.dumps({"cwd": os.getcwd(), "argv": args}) + "\n")
+    if not args:
+        die("gh (testbed): a fake gh; see its header", 2)
+    full = take(args, "-R") or take(args, "--repo")
+    top = args.pop(0)
+    if top == "auth":
+        sub = args[0] if args else ""
+        if sub in ("status", "setup-git", "token") or sub == "login":
+            print(f"github.test\n  ✓ Logged in to github.test account {LOGIN} (testbed)", file=sys.stderr)
+            return
+    if top == "pr":
+        return cmd_pr(args, full or repo_of_cwd())
+    if top == "repo":
+        if full:
+            args.insert(1, full)
+        return cmd_repo(args)
+    if top == "api":
+        return cmd_api(args)
+    if top == "testbed":
+        if full:
+            args += ["-R", full]
+        return cmd_testbed(args)
+    die(f"gh (testbed): {top} is not modelled", 1)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

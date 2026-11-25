@@ -40,6 +40,7 @@ with the first one.
 
 - [Core](../core/README.md): what every orchestrator shares, each script and file in `core/`, and the paths kept for live machines. Read it to find a script.
 - [Reliability log](../core/reliability.md): each failure of a coordinator, its durable fix and how to reuse it. Read it when something goes wrong twice.
+- [The testbed](../tests/testbed/README.md): throwaway containers (desktop, jump, box) with a fake gateway and a fake GitHub, to test onboarding, refresh and both SSH directions end to end. Read it before you change setup, pairing or tunnels.
 - [Agent rules](../AGENTS.md): the checks and rules for agents that change this repo. Read it before you change anything here.
 
 ## Design specs, plans and research

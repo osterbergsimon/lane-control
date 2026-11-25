@@ -1,0 +1,66 @@
+#!/bin/sh
+# The testbed container's start: its own ssh keys (made here, never the owner's), sshd as the normal user on port
+# 2222, the user units it had enabled, then by role (TESTBED_ROLE): desktop and box get the fake gateway on
+# 127.0.0.1:4000; desktop also its own Orca server (orcad) on 127.0.0.1:6768, as the desktop app listens. Started
+# without --bind; headless orcad still counts that as pinned to loopback and will not widen for `orca pair`.
+set -eu
+umask 022
+# The fake gateway's key (made up). Agents get it where they start: from Orca's server, so it is set before orcad starts
+# here and, for the box's orcad started over ssh, by sshd (SetEnv below), as setup.md says for a real gateway.
+export LITELLM_API_KEY=testbed-not-a-secret
+mkdir -p "$HOME/.ssh" "$HOME/.ssh-host" "$HOME/.local/state" "$HOME/tmp"
+chmod 700 "$HOME/.ssh" "$HOME/.ssh-host"
+[ -f "$HOME/.ssh-host/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -C "testbed-host-$TESTBED_ROLE" -f "$HOME/.ssh-host/ssh_host_ed25519_key"
+[ -f "$HOME/.ssh/id_ed25519" ] || ssh-keygen -q -t ed25519 -N '' -C "testbed-user-$TESTBED_ROLE" -f "$HOME/.ssh/id_ed25519"
+touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"
+cat > "$HOME/.ssh-host/sshd_config" <<CFG
+Port 2222
+HostKey $HOME/.ssh-host/ssh_host_ed25519_key
+PidFile $HOME/.ssh-host/sshd.pid
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+PermitRootLogin no
+AllowTcpForwarding yes
+GatewayPorts no
+PermitUserEnvironment no
+SetEnv PATH=$HOME/.local/bin:$HOME/.agents/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin ORCA_ARTIFACTS=/opt/orca/artifacts TESTBED_FORGE=/forge TESTBED_ROLE=$TESTBED_ROLE LITELLM_API_KEY=$LITELLM_API_KEY
+CFG
+/usr/sbin/sshd -f "$HOME/.ssh-host/sshd_config" -E "$HOME/.ssh-host/sshd.log"
+git config --global user.name "Testbed Owner"; git config --global user.email owner@testbed.invalid
+git config --global init.defaultBranch main
+systemctl __boot
+case $TESTBED_ROLE in
+  desktop|box)
+    # The fake gateway's key is made up (testbed-not-a-secret): it only shows that the key reaches the gateway.
+    setsid python3 /usr/local/lib/testbed/gateway.py --port 4000 --key "$LITELLM_API_KEY" --log "$HOME/tmp/gateway.log" > /dev/null 2>&1 < /dev/null &
+    ;;
+esac
+if [ "$TESTBED_ROLE" = desktop ]; then
+  ver=$(cat /opt/orca/VERSION)
+  slot=$HOME/.orca-remote/orcad-$ver
+  nodesha=$(cat "/opt/orca/artifacts/linux-x64-glibc/$ver/.runtime-node")
+  node=$HOME/.orca-remote/runtimes/node-$nodesha/bin/node
+  if [ ! -x "$node" ]; then  # where orcad looks for it: ../runtimes/node-<sha> beside its slot, as on a box
+    mkdir -p "$(dirname "$node")"; ln -sf /opt/orca/resources/node-runtime/bin/node "$node"
+  fi
+  if [ ! -f "$slot/.install-complete" ]; then
+    mkdir -p "$HOME/.orca-remote"; rm -rf "$slot"; cp -r "/opt/orca/artifacts/linux-x64-glibc/$ver" "$slot"; touch "$slot/.install-complete"
+  fi
+  # The desktop's server: kept running, its first stdout line (the readiness line with the pairing link) per start.
+  # ~/.testbed-desktop-server picks how: orcad (the default, as orca-host-install runs a box's) or serve (`orca serve`
+  # from the official release, with no --bind: it listens on every interface; d2-no-tunnel uses it).
+  ( cd "$slot"; while :; do
+      if [ "$(cat "$HOME/.testbed-desktop-server" 2>/dev/null)" = serve ] && [ -x /opt/orca/server/bin/orca-ide ]; then
+        ORCA_USER_DATA_PATH=$HOME/.orca TMPDIR=$HOME/tmp /opt/orca/server/bin/orca-ide serve --port 6768 --json \
+          > "$HOME/.orca-desktop-readiness" 2>> "$HOME/.orca-desktop.log" < /dev/null || true
+      else
+        ORCA_VERSION=$ver ORCA_USER_DATA=$HOME/.orca TMPDIR=$HOME/tmp "$node" --max-semi-space-size=8 "$slot/orcad.js" \
+          --json --port 6768 > "$HOME/.orca-desktop-readiness" 2>> "$HOME/.orca-desktop.log" < /dev/null || true
+      fi
+      sleep 2
+    done ) &
+fi
+echo "testbed $TESTBED_ROLE up" > "$HOME/tmp/entrypoint.done"
+exec sleep infinity
