@@ -1,5 +1,13 @@
 # Native Orca on an SSH host
 
+Two separate connections, each with its own tunnel. Both tunnels are systemd user units **on this machine** (the
+desktop), so only outbound ssh from here is needed. The picture, and what the owner does by hand:
+[how the parts fit](../../docs/how-it-fits.md#a-box-two-directions).
+- **Direction 1**, the desktop controls the box (the box's Orca is the server): `orca-tunnel-<host>` (`ssh -L`), made
+  by `orca-host-install --pair`. The box's server makes the pairing code and the script uses it: nothing for the owner.
+- **Direction 2**, the box's coordinator starts lanes on the desktop (the desktop's Orca is the server):
+  `lane-tunnel@<host>` (`ssh -R`), made by `project-setup` after the share link, which the owner makes.
+
 `project-setup <repo> <host>` sets a project up on an SSH host (a box) and keeps it driven from this machine's Orca
 window (design: `docs/superpowers/specs/2026-11-19-native-orca-setup-design.md`, section 7). `<repo>` is a git URL or
 an absolute (or `~/`) path on the host; `<host>` is what ssh calls it (`LANE_SSH_CONFIG` names a separate ssh config,
@@ -15,7 +23,11 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    nothing below is done for it.
 2. Orca's server on the box: when the environment `<host>` (every character but letters, digits, `.`, `_`, `-` made
    `-`) does not answer here, `orchestrators/orca-cotal/scripts/orca-host-install <host> --pair --port <p>` puts it
-   there from this machine's Orca install and pairs it here through a `-L` tunnel (`orca-tunnel-<host>.service`).
+   there from this machine's Orca install (the server and its node runtime, node checked against its sha, so the box
+   downloads neither), starts it on the box's 127.0.0.1 (a systemd user unit when the box has a user manager, else a
+   detached process), opens `orca-tunnel-<host>` (`ssh -L`, direction 1, a user unit here), reads the box server's
+   pairing code itself and runs `orca environment add` here: no click and no code from the owner. Without `--pair` the
+   script only puts the files there, for Orca's own Settings > SSH connect to reuse (a box with no internet).
    `<p>` is the first free port from 6769 (`--orca-port` to choose): the desktop listens on 6768, and the tunnel uses
    one port at both ends. **Ports 6769 and up are reserved for Orca tunnels** (the range project-setup searches is
    6769-6868): do not put your own services there, on this machine or on a box, or setup takes the next free one and a
@@ -81,6 +93,14 @@ Agents on the box sign in there once, by the owner; setup never copies a credent
 there as here.
 
 ## Direction 2: the box's coordinator runs lanes here
+Direction 2 is a supported, first-class path, not a fallback (owner 2026-11-25: "coordinator lives on box for just that
+reason. direction 2 must stay."). Orca's own model, a coordinator on the client that starts workers on paired servers
+with `--on`, is covered by direction 1. lane-control also lets a project's coordinator live on its box, so that it keeps
+working while the desktop is off or unreachable; to run lanes on the desktop it needs the box paired the other way.
+The way is the share link and `lane-tunnel` (below). The documented fallback, for when the link step cannot be done, is
+the `send --on-client` hand-off (Orca 1.4.272+; owner 2026-11-25): pending, not built or tried
+([how the parts fit](../../docs/how-it-fits.md#a-box-two-directions)).
+
 For what the box lacks (graphics, a browser, a GPU), its coordinator starts a lane in this desktop's Orca with
 `--on <this machine>`; the lane works in its own clone here, pushes to GitHub, and it reports by Orca; across hosts that
 is poll-only (Reports across hosts, below).
@@ -94,8 +114,8 @@ is poll-only (Reports across hosts, below).
 2. `project-setup <repo> <host>` asks for the link on a hidden prompt, in a terminal only (Enter, no terminal or
    `--no-desktop-lanes` skips it; a box already paired is not asked again). A terminal that cannot hide what is
    typed is refused instead of asked.
-3. `core/scripts/lane-tunnel start --remote-port <box port> <host> <port>` runs `lane-tunnel@<host>.service`, a
-   systemd user service from `core/templates/lane-tunnel@.service`: `ssh -N -R 127.0.0.1:<box
+3. `core/scripts/lane-tunnel start --remote-port <box port> <host> <port>` runs `lane-tunnel@<host>.service`
+   (direction 2's tunnel), a systemd user service from `core/templates/lane-tunnel@.service`: `ssh -N -R 127.0.0.1:<box
    port>:127.0.0.1:<port> <host>`, restarted always. `<port>` is the link's; `<box port>` is the same unless
    `--tunnel-remote-port` names another (Two ports, below). Its host and ports are in
    `~/.config/lane-control/tunnels/<host>.env` (`PORT`, and `REMOTE_PORT` only when it differs: a file from before
@@ -133,6 +153,7 @@ saves the port it dials, so moving the box's end later means pairing again (`--r
 Direction 1's `-L` tunnel has the same shape (one port at both ends, `--orca-port`) and is not changed.
 
 ### Do you need the tunnel?
+This is about direction 2's tunnel, `lane-tunnel@<host>`, only; direction 1 and `orca-tunnel-<host>` are not affected.
 The box's Orca dials the address the link names; the tunnel is one way to give it one.
 - Not needed when the box can reach this machine directly (the same LAN, or both on Tailscale) and you accept this
   desktop's Orca listening on every network interface: a link made with that address ("Share this computer",
@@ -148,9 +169,10 @@ The box's Orca dials the address the link names; the tunnel is one way to give i
   box with a direct address is not something setup does; whether it should is the owner's decision.
 
 ## A host that takes only a smartcard
-The unit's ssh runs with `BatchMode`, so it can never ask for a PIN or a passphrase, and (by default) it does not see
-your ssh agent. A jump host that accepts only a key on a smartcard therefore needs the unit to use an agent that has
-the card unlocked. The owner unlocks it, then starts the tunnel:
+This section and the `--tunnel-` options are about direction 2's unit, `lane-tunnel@<host>`; they change nothing in
+direction 1's `orca-tunnel-<host>`, which has no such options. That unit's ssh runs with `BatchMode`, so it can never
+ask for a PIN or a passphrase, and (by default) it does not see your ssh agent. A jump host that accepts only a key on a
+smartcard therefore needs the unit to use an agent that has the card unlocked. The owner unlocks it, then starts the tunnel:
 - `lane-tunnel start --auth-sock <agent socket> <host> <port>` puts `SSH_AUTH_SOCK=<socket>` in the instance's env file
   (`LANE_TUNNEL_AUTH_SOCK` does the same). `--ssh <path>` (or `LANE_TUNNEL_SSH`) runs an executable of yours in place
   of `ssh`, with ssh's arguments, for a card that needs a wrapper. Both paths are absolute, with no line break, and
@@ -191,8 +213,8 @@ line break, a backslash, a leading quote or leading or trailing spaces (systemd 
 `project-setup --remove-host <host>`: the box forgets this machine's environment (`environment rm`, and
 `paired_environment` leaves its stores), `lane-tunnel@<host>` stops and its env file goes, and the owner is told to
 revoke the link in Orca here: Settings > Servers, the link shared with that box. An unreachable box still has its
-tunnel stopped, and the command to run there later is printed. Direction 1 stays; the output names the two commands
-that drop it too.
+tunnel stopped, and the command to run there later is printed. Direction 1 (`orca-tunnel-<host>`) stays; the output
+names the two commands that drop it too.
 
 ## Reports across hosts
 What a worker's report (`worker_done`) does, as far as it is known. "Known" below is Orca 1.4.250, where "tested"

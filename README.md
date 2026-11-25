@@ -4,7 +4,7 @@ How we run software projects with coding agents, whichever orchestrator starts t
 
 Orchestrators change fast, so the repo keeps what does not depend on one (`core/`) apart from what does (`orchestrators/<name>/`). A project can be set up on any supported orchestrator, moved from one to another without losing its rules, work or history, and a parked orchestrator can be retested later from what we learned last time.
 
-New here? Follow [Getting started](docs/getting-started.md): an empty machine to a first merged lane. Every doc is listed in the [docs index](docs/README.md).
+New here? Follow [Getting started](docs/getting-started.md): an empty machine to a first merged lane. To see what each part does and how they connect, read [How the parts fit](docs/how-it-fits.md). Every doc is listed in the [docs index](docs/README.md).
 
 ## What it is
 Three layers of agents, each run by the orchestrator you use:

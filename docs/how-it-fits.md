@@ -1,0 +1,274 @@
+# How the parts fit
+
+Every moving part of lane-control on native Orca (the orchestrator in use), in plain words, for an owner who has not
+read the code. "Desktop" is your workstation with the Orca app. A "box" is a machine you reach over SSH. Every script
+has one line in [the Scripts table](../core/README.md#scripts). **Pending** means an open pull request or an open
+issue: not on main yet.
+
+## Who does what
+
+```
+YOU      talk to a coordinator in its Orca terminal; say "merge"; sign agents in; make the share link (box only)
+
+AGENTS   machine coordinator   one per machine, optional   splits the budget, watches memory and load
+         project coordinator   one per project             queues, briefs, opens lanes, reviews, merges on your word
+         lane                  one per issue               own worktree and branch, ends in a pull request
+
+SETUP    machine-setup   once per machine   machine coordinator, 3 automations, CI limits timer
+         project-setup   once per project   lane tools, skills, personas, tier table, coordinator (--refresh updates)
+
+LANE     lane-room   may another lane open?        lane-tier     which model does this tier use?
+TOOLS    lane-heavy  one gate for heavy builds     design-shots  screenshots of a UI
+         lane-limits.sh   the limits behind lane-room and lane-heavy (a file the tools read, not a command)
+
+BOX      optional. A coordinator that lives on the box can keep working while the desktop is off.
+         BOTH TUNNELS START ON THE DESKTOP (it only needs to ssh out to the box).
+  direction 1: the desktop controls the box
+      tunnel   orca-tunnel-<host> (ssh -L), made by orca-host-install --pair
+      you      no click in Orca, no pairing code
+  direction 2: the box's coordinator starts lanes on the desktop
+      tunnel   lane-tunnel@<host> (ssh -R), made by project-setup after the share link
+      you      make the share link in Orca once per box and paste it at project-setup's hidden prompt
+
+RUNNING  night manager       Orca automation    checks in on idle coordinators when you are away or it is night
+         lane sweep          Orca automation    reports merged, parked, stuck and broken lanes
+         machine check       Orca automation    tells the machine coordinator when budget, memory or runners change
+         ci-presence         systemd timer      sets CI's CPU and memory limits by whether you are there
+         orca-tunnel-<host>  systemd (desktop)  carries direction 1
+         lane-tunnel@<host>  systemd (desktop)  carries direction 2
+         orcad               on the box         Orca's server there (unit orcad.service when systemd allows)
+         "Delete merged workspaces"             Orca's own rule that removes a merged lane's worktree; you turn it on
+```
+
+More: the sections below; [Getting started](getting-started.md).
+
+## The three layers
+
+- **Machine coordinator** (optional, one per machine). Judgment only: splits the budget across projects, decides which
+  lane yields when memory is short, passes your orders on. It runs no project work. It is an agent in its own private
+  folder, in an Orca terminal titled `machine coordinator`.
+- **Project coordinator** (one per project). You talk to it in the terminal titled `<project> coordinator`. It turns
+  your asks into issues, picks a tier, opens lanes, checks what comes back and merges only on your word. The one
+  exception is away-improve mode, which you switch on yourself.
+- **Lane**: one worker for one issue, with its own worktree and branch. It opens a pull request and reports once.
+  Reviewers (code, and design for anything a user sees) are workers too. A lane for a failing test or a bug gets the
+  debugger persona.
+
+A **tier** (swift, standard, deep, top) is a role. Each project's tier table says which engine and model fill it; a
+tier set to `none` is skipped.
+
+What each agent reads: a **persona** (its standing instructions, in `orchestrators/native-orca/personas/`, copied into
+the project by setup) and **skills** (how-to pages it loads when needed). The lane skills are `native-orca-lanes`
+(the coordinator's gate, lane, report, review and close), `away-improve` (the away-improve cycle) and
+`component-gallery` (a UI lane's gallery and screenshots). `orca-cotal-lanes` belongs to the parked Orca + Cotal setup.
+
+More: [roles](../core/roles.md), [model routing](../core/model-routing.md), [native Orca setup](../orchestrators/native-orca/setup.md).
+
+## Where lane-control lives on a machine
+
+| What | Where | Who puts it there |
+|---|---|---|
+| The checkout: scripts, templates, docs | `~/code/lane-control` (any folder works) | you, `git clone`; update with `git pull` |
+| Copies of the lane tools, which agents call | `~/.agents/bin/` | `project-setup`, and again with `--refresh` |
+| Skills (the three lane skills and the design skills) | `~/.agents/skills/`, linked for Claude and OpenCode | `project-setup`, `--refresh` |
+| One project's settings and tier table, **outside its repo** | `~/.config/lane-control/projects/<folder>-<hash>/` (`settings.json`, `lanes.tsv`) | `project-setup`; `--show` prints them |
+| This machine's settings and state | `~/.config/lane-control/`: `machine.conf`, `limits.sh` (optional, yours), the away file, away-improve's files, `hosts/<host>.json`, `tunnels/<host>.env` | `machine-setup`, you, `lane-away`, `lane-improve`, `project-setup`, `lane-tunnel` |
+| Budget config and weekly ceiling | `~/.config/rove/playbook.conf.sh` (an old folder name, still the default) and the ceiling file it names | you ([getting started](getting-started.md), step 2.2) |
+| In a project's repo | `AGENTS.lane-control.md` plus one pointer line in `AGENTS.md`, and the lane files in `.lane-control/`; the rendered personas there are not committed | `project-setup`, committing only on your yes |
+| Beads: issues and memories | a private repo `<project>-beads` in `~/code/`; the project's `.beads` is a git-ignored link to it | you, or `project-setup` on your yes |
+| On a box | a copy in `~/.local/share/lane-control` (not a git checkout) | `project-setup <repo> <host>`, on every run |
+
+The copies in `~/.agents/bin` and `~/.agents/skills` do **not** follow a `git pull`: run `project-setup <project>
+--refresh` after it.
+
+More: [core and its scripts](../core/README.md), [where beads lives](../core/issues.md#where-beads-lives-backup-and-restore-lc-5c1),
+[updating an existing host](getting-started.md#updating-an-existing-host).
+
+## The lane tools
+
+- **`lane-room`**: "is there room for another lane?" It looks at free memory, CPU contention and a count of running
+  lane agents. A coordinator runs it before every lane; if it says no, the lane waits and you are told. The agent count
+  only sees Orca + Cotal agents today, so on native Orca memory and CPU are what hold a lane (pending: lc-sq0).
+- **`lane-heavy <command>`**: every build and full test suite goes through it. Only a few run at once on the whole
+  machine; the rest wait. CI jobs have their own slots.
+- **`lane-tier <table> <tier>`**: looks a tier up in a project's tier table and prints the engine and model.
+- **`lane-limits.sh`**: works out the limits `lane-room` and `lane-heavy` use, from the machine's size, whether you are
+  there, and your optional `limits.sh`.
+- **`design-shots`**: headless screenshots at phone and desktop width, light and dark, and a before/after page.
+
+More: [machine caps](../core/machine.md#machine-caps), [the limits example](../core/limits.example.sh).
+
+## Setup
+
+- **`machine-setup`** (once per machine; `--host <host>` runs it on a box): writes `machine.conf` (you fill in the
+  projects), checks the usage feed, starts the machine coordinator, creates the three automations, reports Orca's
+  cleanup rules and installs the `ci-presence` timer.
+- **`project-setup <project>`** (once per project): onboards the repo (an adapting agent and a reviewer write the lane
+  files; committed only on your yes), installs the lane tools and skills, renders the personas, writes the tier table
+  and starts the coordinator. Today onboarding a new project needs Claude (pending: onboarding on OpenCode, PR #66).
+- **`project-setup <project> --refresh`**: after lane-control changed. Updates the tools, skills and personas, keeps
+  the tier table and engines, starts and commits nothing. Restart the coordinator (`project-pause stop`, then
+  `start`) so it reads the new persona.
+- Both say `exists` for what is already done, so running them again is safe.
+- **Pending (PR #71):** `project-setup --check <repo> <host>` lists everything a box setup needs and changes nothing.
+
+More: [getting started](getting-started.md), [native Orca setup](../orchestrators/native-orca/setup.md).
+
+## A box: two directions
+
+`project-setup <repo> <host>` sets up both. They are separate connections with opposite roles. Both tunnels are
+`ssh` processes **on the desktop**, so the box never has to reach the desktop's network.
+
+**Why there are two.** In Orca's own model the coordinator runs on your computer (the client) and starts workers on
+paired servers with `--on`. Direction 1 covers that. lane-control also lets a project's coordinator **live on its
+box**, so that it keeps working while the desktop is off or unreachable. Such a coordinator still needs the desktop
+for some lanes, and to start them the box must be a client of the desktop: that is direction 2. The owner decided
+(2026-11-25) that direction 2 stays, as a supported, first-class path and not a fallback: "coordinator lives on box
+for just that reason. direction 2 must stay."
+
+While the desktop is off, the box's coordinator and the lanes on the box can go on; lanes on the desktop need it on
+and the tunnel up. For the box's Orca to outlive your ssh logins, turn on lingering for the box's user (`loginctl
+enable-linger`, on the box). Setup does not do that, and systemd normally stops a user's services after their last
+login ends without it. A run with the desktop off has not been tested.
+
+```
+              DESKTOP                                              BOX
+
+direction 1: the desktop controls the box
+   Orca app (client)                                    orcad = Orca's server (server)
+        |                                                    listens on the box's 127.0.0.1
+        '--> 127.0.0.1:<port> ==[ orca-tunnel-<host>, ssh -L ]==> 127.0.0.1:<port>
+
+direction 2: the box's coordinator starts lanes on the desktop
+   Orca app (server)                                    Orca on the box (client)
+   listens on 127.0.0.1                                      |
+   127.0.0.1:<port> <==[ lane-tunnel@<host>, ssh -R ]== 127.0.0.1:<box port> <--'
+```
+
+| | Direction 1 | Direction 2 |
+|---|---|---|
+| What it is for | you watch and drive the box's coordinator and lanes in your Orca window | the box gets what it lacks (graphics, a browser, a GPU): its coordinator starts a lane on the desktop |
+| Server (is dialled) | the box's `orcad` | the desktop's Orca app |
+| Client (dials) | the desktop's Orca | the box's Orca |
+| Tunnel | `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair` | `lane-tunnel@<host>` (`ssh -R`), made by `project-setup` after the share link |
+| systemd units | desktop: `orca-tunnel-<host>.service`; box: `orcad.service` when it has a user manager, else a detached process | desktop: `lane-tunnel@<host>.service` |
+| Who makes the pairing code | the box's `orcad`, by itself; `orca-host-install` reads it over ssh | **you**, in the desktop's Orca |
+| Who saves it | `orca-host-install` runs `orca environment add` on the desktop | `project-setup` sends it on ssh's stdin; the box runs `environment add --pairing-code -` |
+
+**Direction 1 is automatic.** `orchestrators/orca-cotal/scripts/orca-host-install <host> --pair` (`project-setup` runs
+it when the box's server does not answer yet) copies `orcad` and its Node runtime from the desktop's own Orca install,
+so the box downloads nothing, and checks Node's checksum. It starts `orcad` on the box's 127.0.0.1, opens the `-L`
+tunnel, reads the box's pairing code and adds the box to your Orca. No click and no code from you. The script sits in
+the parked Orca + Cotal folder, but native Orca uses it. Without `--pair` it only puts the files on the box, for
+Orca's own Settings > SSH connect to reuse (useful where the box has no internet); that route makes no
+`orca-tunnel-<host>`.
+
+**Direction 2 needs one thing from you**, once per box: in the desktop's Orca, Settings > Servers > "Share this
+computer", choosing **127.0.0.1**, then paste that link at `project-setup`'s hidden prompt. Setup does the rest:
+`core/scripts/lane-tunnel` opens the `-R` tunnel, which makes the desktop's Orca port appear on the box's 127.0.0.1,
+and the box saves the desktop as an environment. Press Enter at the prompt, or pass `--no-desktop-lanes`, to skip
+direction 2. The two ends can use different ports (`--tunnel-remote-port` in `project-setup`, `--remote-port` in
+`lane-tunnel`). The link lets the box run commands as you on the desktop until you revoke it in the same Settings page.
+
+**The way, and the fallback.** The owner decided (2026-11-25): "we do it with share link, with --on-client as
+fallback, but must make sure to make it as painless as possible for user". So direction 2 is the share link and
+`lane-tunnel`. The documented fallback is the hand-off with `send --on-client` (Orca 1.4.272 or later), for when the
+link step cannot be done. **Pending:** lane-control has not built or tried it, and setup does not fall back to it by
+itself; the testbed work (TB-1) is to evaluate it. The pending audit (PR #69, row 16) read in Orca's help that it
+mails bots only and that a person approves it once, so how it will serve as the fallback is still open. Also pending
+(PAIN-1, lc-bmk, after PR #71): making the share-link step as painless as possible.
+
+**The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; make sure ssh can log in
+without asking anything (for a smartcard or agent key, `lane-tunnel` has extra options; `orca-tunnel-<host>` has
+none); sign the agents in on the box; sign `gh` in there and let git use it, for beads; answer setup's
+yes/no questions. Removing: `project-setup --remove-host <host>` undoes direction 2 only, prints how to drop direction
+1, and you revoke the link.
+
+**Is `lane-tunnel` still needed?** This is about how direction 2 is carried; direction 2 itself stays. The tunnel is
+not needed when the box can reach the desktop directly (same LAN or Tailscale) **and** you accept the desktop's Orca
+listening on every network interface, not only on the address you picked. It is needed when the desktop must stay on
+127.0.0.1 or only outbound ssh gets through.
+`project-setup` itself always sets the tunnel up: it refuses a link with any other address.
+Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you-need-the-tunnel).
+
+**How far this is tested, and what is pending:**
+- On main, the native Orca trial ran both with containers: a container as the box, and a second Orca server standing in
+  for the desktop. The desktop app's own share link and a lane started from a box's coordinator were not run
+  ([record](../orchestrators/native-orca/record.md), NO-6). The docs on main say the no-tunnel route is not run.
+- Pending, PR #68: a container testbed, `tests/testbed/README.md`. Its own coverage table reports both directions
+  passing on headless Orca, and the no-tunnel route passing with `orca serve`, which then listens on every interface.
+  It does not cover the desktop app or its share link.
+- Pending, PR #71: `docs/research/2026-11-25-orca-pairing.md`: why the share link stays a hand step.
+- A lane's report across the two machines is poll-only: nothing proves it wakes the coordinator that started it.
+
+More: [native Orca on an SSH host](../orchestrators/native-orca/remote.md).
+
+## Automations
+
+`machine-setup` creates three **Orca automations** in the machine coordinator's folder. Each first runs a **precheck**,
+a plain script that spends no model tokens; an agent starts only when the precheck finds something.
+
+| Automation | Runs | Precheck | What its agent does | Why Orca 1.4.274 does not make it unnecessary |
+|---|---|---|---|---|
+| `night manager` | hourly | `night-precheck` | sends a check-in to each coordinator that is due: idle while you are away or it is night (and, day or night, one that away-improve mode covers); passes on offline CI runners | no Orca built-in wakes an idle coordinator, or checks budget steps or runners |
+| `lane sweep` | every 3 hours | `lane-sweep --precheck` (new findings only) | sends each new finding to that lane's coordinator; removes nothing | Orca tells a coordinator about its supervised workers; the sweep also sees lane worktrees with no live worker |
+| `machine check` | every 30 minutes | `machine-check` | passes changes (budget step, memory, runners, a coordinator Orca cannot find) to the machine coordinator | Orca has no budget steps, no runner state and no "memory low" warning |
+
+They are already Orca automations, so there is nothing of ours to move onto that feature. The reasons come from the
+overlap audit, **pending in PR #69**: `docs/research/2026-11-25-orca-overlap.md`, rows 8 to 12 and 18. It read Orca's
+help and release notes and ran nothing live. It also says:
+
+- **`STUCK` reports (pending, lc-cnm):** the sweep's stuck report, and the night manager repeating it, may give way to
+  Orca's own worker notices for supervised workers, after a trial. Today both still report it.
+- **Removing merged lanes (pending, lc-93i):** Orca's cleanup rule does the everyday removal. `lane-sweep --apply` is
+  your manual bulk fallback; no automation runs it. The plan is that it removes only lanes Orca's rules did not take.
+  **Not built yet:** today `--apply` removes any merged lane that passes its own checks, and also a clean, quiet lane
+  whose open pull request already holds everything in it.
+
+Two other things run by themselves and are not Orca automations: **`ci-presence`**, a systemd user timer (every 15
+minutes and at boot) that sets CI's CPU and memory limits by whether you are there, and the tunnels above.
+
+Tell the machine you leave or return with `lane-away on|off|status`. It changes limits and allows night check-ins; it
+never starts away-improve mode.
+
+More: [night manager](../orchestrators/native-orca/night-manager.md), [a machine](../orchestrators/native-orca/setup.md#a-machine).
+
+## Budgets
+
+- A **metered budget** has a usage feed (how much is used) and a weekly **ceiling** you set. Steps count down from it:
+  at ceiling-15 a notice, -7 no new work, -4 push and write handovers, -2 stop. A short window (such as 5 hours) pauses
+  new work at 95 % and asks lanes to push at 98 %.
+- **`budget-state`** prints each budget's step now. Coordinators check the budget before a lane; the night manager's and
+  machine check's prechecks run it. With no usage feed at all there are no steps and the machine's caps are the limit.
+- **`window-guard`** is a daemon that sends budget and low-memory orders by itself. It sends them through Cotal, so it
+  works only on the parked Orca + Cotal setup (`window-guard-install` installs it). On native Orca nothing like it
+  runs: the machine check and the coordinators do this.
+
+More: [budget steps](../core/model-routing.md#budget-thresholds-per-metered-budget-ceiling--the-owners-weekly-percent),
+[usage feeds](../core/machine.md#usage-feeds-per-metered-budget).
+
+## Away-improve mode
+
+Off unless **you** switch it on (`lane-improve on`). Each chosen project's coordinator then keeps improving its product
+on one `away/<date>` branch, merging there only through `away-merge`, and keeps one draft pull request for you. Nothing
+reaches the main line without your word. `lane-improve off` ends it; running work finishes first.
+
+More: [away-improve mode, the owner's guide](away-improve.md).
+
+## Cleanup
+
+- **Orca removes a merged lane's worktree**, with its own rule "Delete merged workspaces". Orca's rules are off by
+  default and you turn them on; setup reports what it can tell and never changes Orca's settings. "Delete released
+  orchestration worker workspaces" is recommended beside it.
+- GitHub's "Automatically delete head branches" removes the remote branch; `project-setup` offers to turn it on.
+- When Orca does not take a merged lane, the coordinator removes it by hand, after checks.
+- `lane-sweep` reports what is left over. Without `--apply` it removes nothing.
+
+More: [lane cleanup](orca-cleanup.md).
+
+## Parked parts
+
+Orca + Cotal, Rove and wsp are parked and herdr is untested. Their scripts are still in the repo, marked parked in the
+[Scripts table](../core/README.md#scripts). This page does not describe them.
+
+More: [orchestrators](../orchestrators/README.md), [switching a project](../orchestrators/switching.md).
