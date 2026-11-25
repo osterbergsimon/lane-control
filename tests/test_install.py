@@ -3,7 +3,9 @@
 A scratch HOME and XDG_DATA_HOME, and a small lane-control repo made here (the marker, a lane tool, a persona), so a
 test controls its commits."""
 import importlib.util
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,11 +37,14 @@ class Scratch(unittest.TestCase):
         self.data = self.tmp / "data"
         self.env = {**os.environ, "HOME": str(self.home), "XDG_DATA_HOME": str(self.data),
                     "XDG_CONFIG_HOME": str(self.home / ".config")}
+        self.env.pop("LANE_CONTROL_SWITCH", None)  # these tests check when a setup may switch by itself
         self.old_env = dict(os.environ)
         os.environ.update(HOME=str(self.home), XDG_DATA_HOME=str(self.data))
+        os.environ.pop("LANE_CONTROL_SWITCH", None)
         self.src = self.tmp / "lane-control"
         (self.src / "core" / "scripts").mkdir(parents=True)
         (self.src / ".lane-control-root").write_text("")
+        (self.src / "core" / "install.py").write_text("# the install itself: a commit without it is refused\n")
         tool = self.src / "core" / "scripts" / "lane-heavy"
         tool.write_text("#!/bin/sh\necho one\n")
         tool.chmod(0o755)
@@ -89,7 +94,7 @@ class InstallTests(Scratch):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(f"exists {self.one}", r.stdout)
         self.assertEqual((self.root / self.one).stat().st_ino, ino)
-        self.assertEqual(sorted(p.name for p in self.root.iterdir()), sorted([self.one, "current", "source"]))
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), sorted([".lock", self.one, "current", "source"]))
 
     def test_a_new_commit_switches_current_and_keeps_the_old_tree(self):
         self.cli("install", "--from", str(self.src))
@@ -196,25 +201,122 @@ class UseTests(Scratch):
 
 
 class BoxScriptTests(Scratch):
+    def box(self):
+        box = self.tmp / "box"
+        box.mkdir(exist_ok=True)
+        env = {k: v for k, v in os.environ.items() if k != "XDG_DATA_HOME"}
+        env["HOME"] = str(box)
+        return box, env, box / ".local" / "share" / "lane-control"
+
+    def send(self, shell, data=None, count=None):
+        tree = self.root / self.one
+        box, env, broot = self.box()
+        if data is None:
+            data = subprocess.run(self.I.tar_tree(tree), capture_output=True, check=True).stdout
+        script = self.I.box_script(self.one, count or self.I.tree_count(tree))
+        return subprocess.run([shell, "-c", script], input=data, env=env, capture_output=True), broot
+
+    def shells(self):
+        return ["sh"] + (["fish"] if shutil.which("fish") else [])  # M3: a fish login shell runs it too
+
     def test_the_box_gets_the_whole_tree_at_the_same_sha(self):
         self.I.install(self.src)
-        box = self.tmp / "box"
-        box.mkdir()
-        env = {**os.environ, "HOME": str(box), "XDG_DATA_HOME": ""}
-        env.pop("XDG_DATA_HOME")
-        for want in ("installed", "exists"):
-            pack = subprocess.Popen(self.I.tar_tree(self.root / self.one), stdout=subprocess.PIPE)
-            r = subprocess.run(["sh", "-c", self.I.box_script(self.one)], stdin=pack.stdout, env=env,
+        for shell in self.shells():
+            shutil.rmtree(self.tmp / "box", ignore_errors=True)
+            for want in ("installed", "exists"):
+                r, broot = self.send(shell)
+                self.assertEqual(r.returncode, 0, (shell, r.stderr))
+                self.assertEqual(r.stdout.decode().strip(), f"{want} {self.one}")
+            self.assertEqual(os.readlink(broot / "current"), self.one)
+            local = {str(p.relative_to(self.root / self.one)) for p in (self.root / self.one).rglob("*")}
+            remote = {str(p.relative_to(broot / self.one)) for p in (broot / self.one).rglob("*")}
+            self.assertEqual(local, remote)
+            self.assertEqual(self.I.tree_sha(broot / self.one), self.one)
+
+    def test_every_box_command_is_sh_c(self):
+        self.assertTrue(self.I.box_script(self.one, 3).startswith("sh -c '"))
+        self.assertTrue(self.I.box_run("scripts/project-setup", "--show").startswith("sh -c '"))
+        with self.assertRaises(ValueError):
+            self.I.sh("echo a\\b")
+
+    def test_a_cut_stream_lays_nothing_and_a_resend_repairs_it(self):
+        self.I.install(self.src)  # M6: a short stream must never become a tree that says `exists`
+        full = subprocess.run(self.I.tar_tree(self.root / self.one), capture_output=True, check=True).stdout
+        short = subprocess.run(["tar", "-C", str(self.root / self.one), f"--exclude=./{self.I.MARK}",
+                                "--exclude=./core", "-cf", "-", "."], capture_output=True, check=True).stdout
+        r, broot = self.send("sh", short)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn(b"entries arrived", r.stderr)
+        self.assertFalse((broot / "current").exists())
+        self.assertFalse((broot / self.one).exists())
+        r, broot = self.send("sh", full)
+        self.assertEqual(r.stdout.decode().strip(), f"installed {self.one}")
+
+    def test_box_run_falls_back_to_a_copy_from_before_the_install(self):
+        box, env, broot = self.box()  # M2: a flat copy and no `current`
+        (broot / "scripts").mkdir(parents=True)
+        tool = broot / "scripts" / "project-setup"
+        tool.write_text("#!/bin/sh\necho flat \"$@\"\n")
+        tool.chmod(0o755)
+        for shell in self.shells():
+            r = subprocess.run([shell, "-c", self.I.box_run("scripts/project-setup", "--remove-host x")], env=env,
                                capture_output=True, text=True)
-            pack.wait()
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(r.stdout.strip(), f"{want} {self.one}")
-        broot = box / ".local" / "share" / "lane-control"
-        self.assertEqual(os.readlink(broot / "current"), self.one)
-        local = {str(p.relative_to(self.root / self.one)) for p in (self.root / self.one).rglob("*")}
-        remote = {str(p.relative_to(broot / self.one)) for p in (broot / self.one).rglob("*")}
-        self.assertEqual(local, remote)
-        self.assertEqual(self.I.tree_sha(broot / self.one), self.one)
+            self.assertEqual(r.stdout.strip(), "flat --remove-host x", (shell, r.stderr))
+
+
+class PolicyTests(Scratch):
+    """M5: a setup moves the machine's `current` by itself only from the main checkout on its default branch, at a
+    commit not older than the installed one."""
+
+    def test_a_linked_worktree_keeps_the_installed_tree(self):
+        self.I.use(self.src)
+        lane = self.tmp / "lane"
+        git("worktree", "add", "-q", "-b", "lane", str(lane), cwd=self.src)
+        (lane / "core" / "scripts" / "lane-heavy").write_text("#!/bin/sh\necho lane\n")
+        git("commit", "-qam", "lane", cwd=lane)
+        u = self.I.use(lane)
+        self.assertEqual((u.state, u.sha), ("kept", self.one))
+        self.assertTrue(any("linked worktree" in n for n in u.notes), u.notes)
+        self.assertEqual(self.I.installed(), self.one)
+        self.assertEqual(self.I.use(lane, ask=lambda q: True).state, "installed")  # the owner's yes
+        self.assertEqual(self.I.source(), self.src.resolve())  # a lane is never remembered as the source
+
+    def test_an_older_commit_and_another_branch_keep_it(self):
+        two = self.commit_two()
+        self.I.use(self.src)
+        self.assertEqual(self.I.installed(), two)
+        git("checkout", "-q", self.one, cwd=self.src)
+        self.assertEqual(self.I.use(self.src).state, "kept")
+        git("checkout", "-q", "-b", "other", cwd=self.src)
+        u = self.I.use(self.src)
+        self.assertEqual(u.state, "kept")
+        self.assertTrue(any("not its default branch" in n for n in u.notes), u.notes)
+        os.environ["LANE_CONTROL_SWITCH"] = "1"
+        self.assertEqual(self.I.use(self.src).sha, self.one)
+
+    def test_nothing_installed_and_no_yes_is_an_error(self):
+        git("checkout", "-q", "-b", "other", cwd=self.src)
+        with self.assertRaises(self.I.InstallError):
+            self.I.use(self.src)
+        self.assertIsNone(self.I.installed())
+
+    def test_a_commit_without_the_install_is_refused(self):
+        (self.src / "core" / "install.py").unlink()
+        git("commit", "-qam", "old", cwd=self.src)
+        with self.assertRaises(self.I.InstallError):
+            self.I.install(self.src)
+
+    def test_a_disk_error_is_an_install_error_and_current_stays(self):
+        self.I.install(self.src)
+        two = self.commit_two()
+        self.root.chmod(0o500)
+        try:
+            with self.assertRaises(self.I.InstallError):
+                self.I.install(self.src)
+        finally:
+            self.root.chmod(0o700)
+        self.assertEqual(self.I.installed(), self.one)
+        self.assertNotEqual(two, self.one)
 
 
 class DoctorPruneTests(Scratch):
@@ -238,6 +340,24 @@ class DoctorPruneTests(Scratch):
         d = json.loads(self.cli("doctor", "--json", "--no-ssh").stdout)
         self.assertEqual(d["current"], self.one)
         self.assertEqual(d["links"]["lane-heavy"], "link")
+
+    def test_doctor_names_a_hook_outside_current_and_dirty_text(self):
+        self.cli("install", "--from", str(self.src))
+        proj = self.tmp / "proj"
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "settings.local.json").write_text(
+            '{"hooks": {"SessionStart": [{"hooks": [{"command": "/old/checkout/core/harnesses/persona-hook.sh"}]}]}}')
+        self.store("p-1", root=str(proj), lane_control=self.one, lane_control_dirty=True)
+        r = self.cli("doctor", "--no-ssh")
+        self.assertIn("its persona hook is /old/checkout/core/harnesses/persona-hook.sh", r.stdout)
+        self.assertIn("not the installed tree", r.stdout)
+
+    def test_prune_removes_nothing_without_a_valid_current(self):
+        self.cli("install", "--from", str(self.src))
+        (self.root / "current").unlink()
+        r = self.cli("prune", "--apply")
+        self.assertIn("no valid current", r.stdout)
+        self.assertTrue((self.root / self.one).is_dir())
 
     def test_doctor_names_a_box_behind(self):
         self.cli("install", "--from", str(self.src))
@@ -263,6 +383,14 @@ class DoctorPruneTests(Scratch):
             finally:
                 held.kill()
                 held.wait()
+        proj = self.tmp / "proj"  # B1: a hook in a project names the old tree, and no process holds it
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "settings.local.json").write_text(json.dumps(
+            {"hooks": {"SessionStart": [{"hooks": [{"command": str(self.root / self.one / "core" / "x.sh")}]}]}}))
+        self.store("p-1", root=str(proj))
+        r = self.cli("prune", "--apply")
+        self.assertIn(f"keep {self.one} (named by {proj / '.claude' / 'settings.local.json'})", r.stdout)
+        (proj / ".claude" / "settings.local.json").write_text("{}")
         r = self.cli("prune", "--apply")
         self.assertIn(f"removed {self.one}", r.stdout)
         self.assertFalse((self.root / self.one).exists())

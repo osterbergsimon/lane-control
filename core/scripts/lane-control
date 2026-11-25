@@ -23,6 +23,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -53,12 +54,16 @@ def cmd_install(a) -> int:
     if src is None:
         print("lane-control: no checkout to install from: give --from <checkout of lane-control>", file=sys.stderr)
         return 2
+    moves = I.installed() is None and I.old_copies()
     try:
         state, sha, before = I.install(src, a.version or "HEAD")
     except I.InstallError as e:
         print(f"lane-control: {e}", file=sys.stderr)
         return 1
     print(f"{state} {sha}")
+    if moves:
+        print("note: " + I.MOVES.format(current=I.data_root() / "current", here=src) + " (after each project's "
+              "project-setup --refresh)")
     if before and before != sha:
         print(f"current: was {I.short(before)}, now {I.short(sha)}")
     if (a.version or "HEAD") == "HEAD" and I.dirty(src):
@@ -86,17 +91,44 @@ def cmd_status(a) -> int:
     return 0
 
 
+SKILLS = {"native-orca-lanes": "orchestrators/native-orca/skills/native-orca-lanes/SKILL.md",
+          "component-gallery": "core/skills/component-gallery/SKILL.md",
+          "away-improve": "orchestrators/native-orca/skills/away-improve/SKILL.md"}
+
+
+def project_todos(root: str, sha, cur) -> list:
+    """What is out of date in one project: its recorded sha, a hook or persona that names a checkout or one sha's
+    tree instead of .../current, text rendered from uncommitted changes."""
+    r, stable = Path(root), str(I.data_root() / "current")
+    out = []
+    if cur and sha != cur:
+        out.append(f"{root}: lane-control {I.short(cur)} installed, project set up with {I.short(sha)}: "
+                   f"run project-setup {root} --refresh")
+    hook = r / ".claude" / "settings.local.json"
+    try:
+        text = hook.read_text() if hook.is_file() else ""
+    except OSError:
+        text = ""
+    for m in re.findall(r"[^\s\"']*core/harnesses/persona-hook\.sh", text):
+        if not m.startswith(stable + "/"):
+            out.append(f"{root}: its persona hook is {m}, not under {stable}: run project-setup {root} --refresh")
+            break
+    return out
+
+
 def doctor(a) -> dict:
     cur = I.installed()
     out = {"current": cur, "root": str(I.data_root()), "projects": [], "links": {}, "skills": {}, "boxes": [],
            "todo": []}
     if not cur:
         out["todo"].append("lane-control is not installed: run lane-control install (from a checkout)")
-    for root, sha in I.projects():
-        out["projects"].append({"root": root, "lane_control": sha})
-        if cur and sha != cur:
-            out["todo"].append(f"{root}: lane-control {I.short(cur)} installed, project set up with {I.short(sha)}: "
-                               f"run project-setup {root} --refresh")
+    for root, sha, dirty in I.projects(with_dirty=True):
+        out["projects"].append({"root": root, "lane_control": sha, "dirty": dirty})
+        out["todo"] += project_todos(root, sha, cur)
+        if dirty:
+            out["todo"].append(f"{root}: its personas were rendered from text that is not the installed tree "
+                               f"(uncommitted changes, or an older install kept): commit, install, then "
+                               f"project-setup {root} --refresh")
     stable = I.data_root() / "current"
     for n in I.BIN_TOOLS:
         f = I.bin_dir() / n
@@ -105,16 +137,28 @@ def doctor(a) -> dict:
         out["links"][n] = state
         if cur and state != "link":
             out["todo"].append(f"{f} is a {state}: run lane-control install (it links the lane tools)")
-    for n in ("native-orca-lanes", "component-gallery", "away-improve"):
-        out["skills"][n] = (I.home() / ".agents" / "skills" / n / "SKILL.md").is_file()
+    for n, rel in SKILLS.items():
+        f = I.home() / ".agents" / "skills" / n / "SKILL.md"
+        try:
+            same = f.read_text() == (stable / rel).read_text()
+        except OSError:
+            same = None if f.is_file() else False
+        out["skills"][n] = "ok" if same else "missing" if not f.is_file() else "differs" if same is False else "unknown"
+        if cur and out["skills"][n] != "ok":
+            out["todo"].append(f"skill {n} is {out['skills'][n]}: run project-setup <project> --refresh")
     for host, sent in I.boxes():
-        there = None if a.no_ssh else I.box_current(host)
-        out["boxes"].append({"host": host, "sent": sent, "current": there, "reachable": None if a.no_ssh else bool(there)})
+        there = None if a.no_ssh else I.box_doctor(host)
+        b = {"host": host, "sent": sent, "current": there and there.get("current"),
+             "checked": not a.no_ssh, "todo": (there or {}).get("todo", [])}
+        out["boxes"].append(b)
         if not a.no_ssh and there is None:
-            out["todo"].append(f"box {host}: its lane-control could not be read over ssh")
-        elif cur and (there or sent) != cur:
-            out["todo"].append(f"box {host}: has {I.short(there or sent)}, here {I.short(cur)}: "
+            out["todo"].append(f"box {host}: its lane-control doctor could not be run over ssh (unreachable, or set "
+                               f"up before the install): run project-setup <repo on the host> {host} --refresh")
+            continue
+        if cur and (b["current"] or sent) != cur:
+            out["todo"].append(f"box {host}: has {I.short(b['current'] or sent)}, here {I.short(cur)}: "
                                f"run project-setup <repo on the host> {host} --refresh")
+        out["todo"] += [f"box {host}: {t}" for t in b["todo"]]
     return out
 
 
@@ -127,10 +171,10 @@ def cmd_doctor(a) -> int:
     for p in d["projects"]:
         print(f"project {p['root']}: set up with {p['lane_control'] or 'none (before the install)'}")
     print("links: " + ", ".join(f"{n} {s}" for n, s in d["links"].items()))
-    print("skills: " + ", ".join(f"{n} {'ok' if ok else 'missing'}" for n, ok in d["skills"].items()))
+    print("skills: " + ", ".join(f"{n} {state}" for n, state in d["skills"].items()))
     for b in d["boxes"]:
         print(f"box {b['host']}: sent {b['sent'] or 'none'}, current there "
-              f"{b['current'] or ('not checked' if b['reachable'] is None else 'unreachable')}")
+              f"{b['current'] or ('not checked' if not b['checked'] else 'unknown')}")
     for t in d["todo"]:
         print(f"todo: {t}")
     if not d["todo"]:

@@ -73,6 +73,10 @@ class Env:
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.state),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
         self.env.pop("XDG_CONFIG_HOME", None)  # the store is under the temp HOME
+        # The install goes under the temp HOME too, never a real XDG_DATA_HOME (INST-1 review M1). Tests run from a lane
+        # worktree or CI's detached merge, so they say yes to switching the scratch install (LANE_CONTROL_SWITCH).
+        self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
+        self.env["LANE_CONTROL_SWITCH"] = "1"
         self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
         # The design skills table (core/design-skills.tsv) names upstream repos: tests install none unless they ask.

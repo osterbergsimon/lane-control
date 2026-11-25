@@ -230,7 +230,7 @@ def free_port(start: int) -> int:
 
 SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
-                "paired_environment", "beads_repo", "lane_control")  # all that is ever written: names and choices, never a secret
+                "paired_environment", "beads_repo", "lane_control", "lane_control_dirty")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -459,23 +459,31 @@ def remote_target_ok(target: str) -> bool:
 
 
 def remote_cmd(script: str, args: list) -> str:
-    """A command line for the host's shell: lane-control's copy there, a leading ~/ kept for it to expand."""
+    """A command line for the host's login shell, whatever it is (fish too): `sh -c` running lane-control's tree there
+    (its `current`, else a copy from before the install), a leading ~/ kept for sh to expand."""
     def q(x):
         return "~/" + shlex.quote(x[2:]) if x.startswith("~/") else shlex.quote(x)
-    return f"{REMOTE}/{script} " + " ".join(q(x) for x in args)
+    try:
+        return INSTALL.box_run(script, " ".join(q(x) for x in args))
+    except ValueError as e:
+        raise Fail(f"{e}: {' '.join(args)}") from None
+
+
+LC_DIRTY = False  # the rendered text may not be the installed tree's (uncommitted changes, or a kept older install)
 
 
 def use_install() -> None:
-    """Install (or use) this lane-control's tree (core/install.py): from a checkout its HEAD goes to
-    .../lane-control/<sha> and `current` is switched to it; personas and ~/.agents/bin then name .../current, never a
-    checkout or a lane worktree. A plain copy (neither) is used as it is, as before."""
-    global LC, TREE, LC_SHA
+    """Install (or use) this lane-control's tree (core/install.py): from the owner's main checkout on its default
+    branch its HEAD goes to .../lane-control/<sha> and `current` is switched to it; from a lane worktree, another
+    branch or an older commit the installed one is kept unless the owner says yes in a terminal (or
+    LANE_CONTROL_SWITCH=1). Personas, hooks and ~/.agents/bin then name .../current, never a checkout or a lane
+    worktree. A plain copy (neither) is used as it is, as before. A failed install is a Fail: nothing is rendered."""
+    global LC, TREE, LC_SHA, LC_DIRTY
     try:
-        u = INSTALL.use(HERE)
+        u = INSTALL.use(HERE, ask=lambda q: owner_says_yes(q, step="lane-control") if has_terminal() else None)
     except INSTALL.InstallError as e:
-        say("lane-control", "warning", f"not installed ({e}); this run uses {HERE} as before")
-        return
-    LC, TREE, LC_SHA = u.stable, u.tree, u.sha
+        raise Fail(f"lane-control: {e}; nothing was changed") from None
+    LC, TREE, LC_SHA, LC_DIRTY = u.stable, u.tree, u.sha, u.dirty
     say("lane-control", u.state, f"{u.sha or ''} at {u.stable}".strip())
     for n in u.notes:  # on stderr, like the other warnings: a re-run's stdout stays all `exists`
         print(f"project-setup: note: {n}", file=sys.stderr)
@@ -487,6 +495,10 @@ def record_version(repo: Path, set_up_before: bool) -> None:
     if not LC_SHA:
         return
     was = settings(repo).get("lane_control")
+    if LC_DIRTY:
+        settings(repo, lane_control_dirty=True)
+    else:
+        settings(repo, drop=("lane_control_dirty",))
     if was and was != LC_SHA:
         say("lane-control", "updated", f"project was set up with {INSTALL.short(was)}, now {INSTALL.short(LC_SHA)}")
     elif not was and set_up_before:
@@ -511,7 +523,7 @@ def copy_to_host(place: "Place") -> None:
                    "run project-setup from a checkout of lane-control")
     pack = subprocess.Popen(INSTALL.tar_tree(TREE), stdout=subprocess.PIPE)
     try:
-        copy = subprocess.run(place.ssh_argv(INSTALL.box_script(LC_SHA)), stdin=pack.stdout,
+        copy = subprocess.run(place.ssh_argv(INSTALL.box_script(LC_SHA, INSTALL.tree_count(TREE))), stdin=pack.stdout,
                               capture_output=True, text=True, timeout=900)
     except subprocess.TimeoutExpired:
         pack.kill()
@@ -565,7 +577,8 @@ def on_host(host: str, argv: list, target: str, value_flags: set = frozenset()) 
     place = Place(host)
     place.legacy = True  # the Orca + Cotal path keeps its ssh command lines as they were (main checked the host)
     try:
-        copy_to_host(place)
+        if "--show" not in argv:  # --show sends nothing: the host's own copy shows its store
+            copy_to_host(place)
     except Fail as e:
         print(f"project-setup: {e}", file=sys.stderr)
         return 1
@@ -856,7 +869,9 @@ def lane_tools(home: Path):
     for name in LANE_TOOLS:
         src, dst = HERE / "core" / "scripts" / name, bin_dir / name
         mode = src.stat().st_mode & 0o777
-        if dst.exists() and not dst.is_symlink() and dst.read_bytes() == src.read_bytes() and dst.stat().st_mode & 0o777 == mode:
+        if dst.is_symlink():  # a link into an install is never turned back into a copy (INST-1 review M4)
+            continue
+        if dst.exists() and dst.read_bytes() == src.read_bytes() and dst.stat().st_mode & 0o777 == mode:
             continue
         bin_dir.mkdir(parents=True, exist_ok=True)
         tmp = bin_dir / f".{name}.{os.getpid()}.tmp"
@@ -3177,6 +3192,9 @@ def load_harness(name: str):
     if core not in sys.path:
         sys.path.insert(0, core)
     import harnesses
+    # The hook a harness writes into a checkout names the stable path (.../lane-control/current), never this checkout
+    # or one sha's tree, which a later install and prune may remove (INST-1 review B1).
+    harnesses.PERSONA_HOOK = LC / "core" / "harnesses" / "persona-hook.sh"
     return harnesses.load_harness(name)
 
 
@@ -4193,7 +4211,8 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
     try:
         if not LOCAL.found():
             raise Fail("Orca CLI not found here (orca-ide; or set ORCA_CLI)")
-        copy_to_host(place)  # the copy and the question need no Orca server on the host yet
+        if not a.show:  # the copy and the question need no Orca server on the host yet; --show sends nothing
+            copy_to_host(place)
         rest = host_argv(argv, value_flags, host)
         r = place.ssh(remote_cmd("scripts/project-setup", [*rest, "--via-host", "--which-orchestrator"]), timeout=120)
         which = (r.stdout.strip().splitlines() or [""])[-1]
@@ -4603,8 +4622,12 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 2
         return check_host(a, host)
-    if host or not a.show:
-        use_install()  # before the host copy and before anything is rendered; a local --show writes nothing
+    if not a.show:  # before the host copy and before anything is rendered; --show sends and switches nothing
+        try:
+            use_install()
+        except Fail as e:
+            print(f"project-setup: {e}", file=sys.stderr)
+            return 1
     if host:
         if a.orchestrator == "orca-cotal":
             return on_host(host, argv, a.target, value_flags)

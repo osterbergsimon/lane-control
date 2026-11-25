@@ -170,7 +170,8 @@ class MachineTest(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(("LANE_", "XDG_", "CLAUDE_CONFIG", "GITHUB_ACTIONS", "PLAYBOOK", "ORCA_"))}
         self.env.update(HOME=str(self.home), PATH=f"{self.bin}:{os.environ['PATH']}", LANE_PROC_DIR=str(self.proc),
-                        LANE_STATE_DIR=str(self.tmp / "slots"), LANE_HOUR="12", PYTHONDONTWRITEBYTECODE="1")
+                        LANE_STATE_DIR=str(self.tmp / "slots"), LANE_HOUR="12", PYTHONDONTWRITEBYTECODE="1",
+                        XDG_DATA_HOME=str(self.home / ".local" / "share"), LANE_CONTROL_SWITCH="1")  # INST-1 M1
 
     def run_script(self, name, *args, env=None, input=None):
         e = dict(self.env, **(env or {}))

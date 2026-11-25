@@ -69,7 +69,16 @@ ROLE = "machine-coordinator"
 TITLE = "machine coordinator"
 PERSONA = ROOT / "orchestrators" / "native-orca" / "personas" / f"{ROLE}.md"
 LC = ROOT  # the path the persona, automations and timer name: .../lane-control/current once main() installed it
-REMOTE = install.BOX_ROOT + "/current"  # a host's installed tree, for its shell (project-setup's copy_to_host too)
+
+
+def ask(question: str):
+    """The owner's yes in a terminal (install.use asks before it moves the machine's lane-control), else None."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        return input(question).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
 NOTES_STUB = ("# Machine coordinator notes\n\n"
               "Private: owner decisions, caps, priorities. Never push this folder to a public remote.\n")
 FEED_MAX_AGE_MIN = 60
@@ -391,22 +400,25 @@ def ssh_base() -> list:
 def on_host(host: str, argv: list) -> int:
     """Copy what machine-setup needs to the host and run it there with the same arguments minus --host."""
     try:
-        u = install.use(ROOT)
+        u = install.use(ROOT, ask=ask)
     except install.InstallError as e:
-        print(f"machine-setup: {e}", file=sys.stderr)
+        print(f"machine-setup: {e}; nothing was changed", file=sys.stderr)
         return 1
     if not u.sha:
         print(f"machine-setup: {ROOT} is neither a git checkout nor an install: no versioned tree to send to {host}",
               file=sys.stderr)
         return 1
     pack = subprocess.Popen(install.tar_tree(u.tree), stdout=subprocess.PIPE)
-    copy = subprocess.run([*ssh_base(), host, install.box_script(u.sha)], stdin=pack.stdout, stdout=subprocess.PIPE,
+    copy = subprocess.run([*ssh_base(), host, install.box_script(u.sha, install.tree_count(u.tree))], stdin=pack.stdout, stdout=subprocess.PIPE,
                           text=True)
     pack.stdout.close()
     if pack.wait() != 0 or copy.returncode != 0:
         print(f"machine-setup: copying lane-control to {host} failed", file=sys.stderr)
         return 1
     say("lane-control", "exists" if (copy.stdout or "").startswith("exists") else "copied", f"{u.sha} on {host}")
+    rec = install.config_home() / "lane-control" / "boxes" / (re.sub(r"[^A-Za-z0-9._-]", "-", host) + ".json")
+    rec.parent.mkdir(parents=True, exist_ok=True)  # for lane-control doctor, as project-setup's copy writes it
+    rec.write_text(json.dumps({"host": host, "lane_control": u.sha}, indent=2) + "\n")
     args, skip = [], False
     for x in argv:
         if skip:
@@ -418,7 +430,7 @@ def on_host(host: str, argv: list) -> int:
 
     def q(x):  # keep a leading ~/ for the remote shell to expand
         return "~/" + shlex.quote(x[2:]) if x.startswith("~/") else shlex.quote(x)
-    cmd = f"{REMOTE}/core/scripts/machine-setup " + " ".join(q(x) for x in args)
+    cmd = install.box_run("core/scripts/machine-setup", " ".join(q(x) for x in args))
     tty = sys.stdin.isatty()
     return subprocess.run([*ssh_base(), *(["-t"] if tty else []), host, cmd.rstrip()],
                           stdin=None if tty else subprocess.DEVNULL).returncode
@@ -450,11 +462,12 @@ def main(argv) -> int:
     folder = Path(os.path.expanduser(a.folder)).resolve()
     global LC
     try:
-        u = install.use(ROOT)
+        u = install.use(ROOT, ask=ask)
     except install.InstallError as e:
-        print(f"machine-setup: {e}", file=sys.stderr)
+        print(f"machine-setup: {e}; nothing was changed", file=sys.stderr)
         return 1
     LC = u.stable
+    harnesses.PERSONA_HOOK = LC / "core" / "harnesses" / "persona-hook.sh"  # never the checkout (INST-1 review B1)
     say("lane-control", u.state, f"{u.sha or ''} at {u.stable}".strip())
     for n in u.notes:
         print(f"machine-setup: note: {n}", file=sys.stderr)

@@ -1887,10 +1887,6 @@ class CleanupSetupTests(Case):
         self.assertIn("github: exists", r.stdout)
         self.assertFalse([c for c in self.gh_calls() if c.startswith("repo edit")])
 
-    def test_a_host_gets_the_cleanup_module_with_the_copy(self):
-        self.assertIn("core/cleanup.py", subprocess.run(["git", "ls-files", "core/cleanup.py"], cwd=ROOT,
-                                                        capture_output=True, text=True).stdout)  # the whole tree goes
-
     def test_gh_that_cannot_answer_is_skipped(self):
         r = self.setup()
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
@@ -2014,3 +2010,53 @@ class InstallTests(Case):
         self.assertIn("lane-control: moved", r.stdout)
         self.assertTrue(tool.is_symlink())
         self.assertIn(str(self.lc() / "current"), self.lane("coordinator").read_text())
+
+    def test_the_persona_hook_names_current_not_the_checkout(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        hook = (self.repo / ".claude" / "settings.local.json").read_text()  # INST-1 review B1
+        self.assertIn(str(self.lc() / "current" / "core" / "harnesses" / "persona-hook.sh"), hook)
+        self.assertNotIn(str(ROOT), hook)
+
+    def test_a_failed_install_exits_1_and_changes_nothing(self):
+        self.e.run(str(self.repo), "--no-start")
+        other = "e" * 40  # the machine is on another install; this run would switch, but tar fails
+        (self.lc() / other).mkdir()
+        (self.lc() / other / ".lane-control-sha").write_text(other + "\n")
+        (self.lc() / "current").unlink()
+        (self.lc() / "current").symlink_to(other)
+        tar = self.e.bin / "tar"
+        tar.write_text("#!/bin/sh\necho 'tar: No space left on device' >&2\nexit 2\n")
+        tar.chmod(0o755)
+        persona = self.lane("coordinator").read_text()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("nothing was changed", r.stderr)
+        self.assertEqual(os.readlink(self.lc() / "current"), other)
+        self.assertTrue((self.e.home / ".agents" / "bin" / "lane-heavy").is_symlink())
+        self.assertEqual(self.lane("coordinator").read_text(), persona)
+
+    def test_a_lane_worktree_keeps_the_installed_tree_without_a_yes(self):
+        self.e.run(str(self.repo), "--no-start")
+        other = "d" * 40
+        (self.lc() / other).mkdir()
+        (self.lc() / other / ".lane-control-sha").write_text(other + "\n")
+        (self.lc() / "current").unlink()
+        (self.lc() / "current").symlink_to(other)
+        r = self.e.run(str(self.repo), "--refresh", adapt=True, env_extra={"LANE_CONTROL_SWITCH": ""})
+        if not subprocess.run(["git", "rev-parse", "--git-dir"], cwd=ROOT, capture_output=True, text=True
+                              ).stdout.strip().endswith(".git"):  # this checkout is a linked worktree (a lane)
+            self.assertIn("lane-control: kept", r.stdout)
+            self.assertEqual(os.readlink(self.lc() / "current"), other)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+    def test_tests_never_install_into_a_real_xdg_data_home(self):
+        sentinel = Path(self.e.home) / "sentinel-data"  # INST-1 review M1: stands in for a real XDG_DATA_HOME
+        sentinel.mkdir(exist_ok=True)
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(sentinel)}):
+            e = NativeEnv()
+        self.addCleanup(e.close)
+        self.assertNotEqual(e.env["XDG_DATA_HOME"], str(sentinel))
+        r = e.run(str(e.repo()), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(list(sentinel.iterdir()), [])
