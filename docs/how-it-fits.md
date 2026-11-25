@@ -173,10 +173,12 @@ direction 2. The two ends can use different ports (`--tunnel-remote-port` in `pr
 **The way, and the fallback.** The owner decided (2026-11-25): "we do it with share link, with --on-client as
 fallback, but must make sure to make it as painless as possible for user". So direction 2 is the share link and
 `lane-tunnel`. The documented fallback is the hand-off with `send --on-client` (Orca 1.4.272 or later), for when the
-link step cannot be done. **Pending:** lane-control has not built or tried it, and setup does not fall back to it by
-itself; the testbed work (TB-1) is to evaluate it. The pending audit (PR #69, row 16) read in Orca's help that it
-mails bots only and that a person approves it once, so how it will serve as the fallback is still open. Also pending
-(PAIN-1, lc-bmk, after PR #71): making the share-link step as painless as possible.
+link step cannot be done. **It is not a drop-in:** it mails a bot on the desktop, and a person approves it once
+([overlap audit](research/2026-11-25-orca-overlap.md), row 16). lane-control has not built it, and setup does not fall
+back to it by itself. **Pending, PR #68:** the testbed tried it without the desktop app and reports a gap (there was no
+bot to send to). Its verdict is "fallback only": it needs the desktop app open, a bot you made and an approval, and it
+gives the box mail rather than the lane. Also pending (PAIN-1, lc-bmk, after PR #71): making the share-link step as
+painless as possible.
 
 **The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; make sure ssh can log in
 without asking anything (for a smartcard or agent key, `lane-tunnel` has extra options; `orca-tunnel-<host>` has
@@ -215,8 +217,8 @@ a plain script that spends no model tokens; an agent starts only when the preche
 | `machine check` | every 30 minutes | `machine-check` | passes changes (budget step, memory, runners, a coordinator Orca cannot find) to the machine coordinator | Orca has no budget steps, no runner state and no "memory low" warning |
 
 They are already Orca automations, so there is nothing of ours to move onto that feature. The reasons come from the
-overlap audit, **pending in PR #69**: `docs/research/2026-11-25-orca-overlap.md`, rows 8 to 12 and 18. It read Orca's
-help and release notes and ran nothing live. It also says:
+[overlap audit](research/2026-11-25-orca-overlap.md), rows 8 to 12 and 18. It read Orca's help, guides, release notes
+and source; no row was verified by a run. It also says:
 
 - **`STUCK` reports (pending, lc-cnm):** the sweep's stuck report, and the night manager repeating it, may give way to
   Orca's own worker notices for supervised workers, after a trial. Today both still report it.

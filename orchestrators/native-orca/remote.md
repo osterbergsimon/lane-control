@@ -98,7 +98,7 @@ reason. direction 2 must stay."). Orca's own model, a coordinator on the client 
 with `--on`, is covered by direction 1. lane-control also lets a project's coordinator live on its box, so that it keeps
 working while the desktop is off or unreachable; to run lanes on the desktop it needs the box paired the other way.
 The way is the share link and `lane-tunnel` (below). The documented fallback, for when the link step cannot be done, is
-the `send --on-client` hand-off (Orca 1.4.272+; owner 2026-11-25): pending, not built or tried
+the `send --on-client` hand-off (Orca 1.4.272+; owner 2026-11-25): it mails a bot, and lane-control has not built it
 ([how the parts fit](../../docs/how-it-fits.md#a-box-two-directions)).
 
 For what the box lacks (graphics, a browser, a GPU), its coordinator starts a lane in this desktop's Orca with
