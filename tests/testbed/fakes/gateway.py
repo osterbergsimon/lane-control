@@ -24,23 +24,44 @@ import json
 import re
 import sys
 
+USAGE = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+DEFAULT_ALIASES = ["chat=testbed/fake-chat-small", "code=testbed/fake-code-large", "embed=testbed/fake-embed:embedding"]
+
 # The worker_done line of an Orca worker brief: `orca orchestration send --from <h> --type worker_done --subject "..."
 # --body "..." --task-id <t> --dispatch-id <d> --outcome succeeded`.
 WORKER_DONE = re.compile(r'(orca orchestration send --from \S+ --type worker_done) --subject "[^"]*" --body "[^"]*"'
                          r'(.*?--task-id \S+ --dispatch-id \S+)')
 
 
-def steps(text):
-    """The commands a message asks the fake agent to run, in order."""
-    out = [m.group(1).strip() for m in re.finditer(r"RUN-TOOL: ([^\n\"\\]+)", text)]
-    m = WORKER_DONE.search(text.replace('\\"', '"'))
-    if m:
-        out.append(f'{m.group(1)} --subject "testbed lane done" --body "The fake agent ran the steps of its spec. '
-                   f'Nothing was found. Nothing is left."{m.group(2)} --outcome succeeded')
-    return out
+CHECK = re.compile(r"`((?:orca|orca-ide|\S+/orca) orchestration check[^`]*)`")
 
-USAGE = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-DEFAULT_ALIASES = ["chat=testbed/fake-chat-small", "code=testbed/fake-code-large", "embed=testbed/fake-embed:embedding"]
+
+def run_tools(text):
+    return [m.group(1).strip() for m in re.finditer(r"RUN-TOOL: ([^\n\"\\]+)", text)]
+
+
+def done_command(brief):
+    m = WORKER_DONE.search(brief.replace('\\"', '"'))
+    if not m:
+        return None
+    return (f'{m.group(1)} --subject "testbed lane done" --body "The fake agent ran the steps of its spec. Nothing was '
+            f'found. Nothing is left."{m.group(2)} --outcome succeeded')
+
+
+def steps(text, brief=None, results=()):
+    """The commands the fake agent runs for the last user message `text`, in order: its RUN-TOOL lines, the `orca
+    orchestration check` an Orca message prompt names, the RUN-TOOL lines that check's output carries (`results`: the
+    tool results so far), then the brief's own worker_done: after the brief's steps, or, when the brief says
+    WAIT-FOR-MESSAGE, only after a message has been read."""
+    brief = text if brief is None else brief
+    out = run_tools(text) + [c.group(1) for c in CHECK.finditer(text)]
+    for r in results:
+        out += run_tools(r)
+    done = done_command(brief)
+    waits = "WAIT-FOR-MESSAGE" in brief
+    if done and ((text is brief and not waits) or (text is not brief and waits and CHECK.search(text))):
+        out.append(done)
+    return out
 
 
 def parse_aliases(items):
@@ -111,18 +132,22 @@ def make_handler(aliases, key, log):
                 return self.reply(404, {"error": {"message": f"no route {path}"}})
             if model not in aliases or aliases[model]["mode"] != "chat":
                 return self.reply(400, {"error": {"message": f"Invalid model name passed in model={model}"}})
-            msgs = req.get("messages") or []
-            last_user, idx = "", -1
-            for i, m in enumerate(msgs):
-                if isinstance(m, dict) and m.get("role") == "user":
-                    c = m.get("content")
-                    last_user, idx = (c if isinstance(c, str) else json.dumps(c)), i
-            done = sum(1 for m in msgs[idx + 1:] if isinstance(m, dict) and m.get("role") == "tool")
-            todo = steps(last_user) if req.get("tools") else []
+            msgs = [m for m in req.get("messages") or [] if isinstance(m, dict)]
+            text = lambda m: m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
+            users = [(i, text(m)) for i, m in enumerate(msgs) if m.get("role") == "user"]
+            idx, last_user = users[-1] if users else (-1, "")
+            brief = next((t for _, t in users if WORKER_DONE.search(t.replace('\\"', '"'))), last_user)
+            if brief == last_user:
+                brief = last_user
+            results = [text(m) for m in msgs[idx + 1:] if m.get("role") == "tool"]
+            done = len(results)
+            todo = steps(last_user, brief, results) if req.get("tools") else []
             call = None
+            offered = [t.get("function", {}).get("name") for t in req.get("tools") or [] if isinstance(t, dict)]
+            tool = next((n for n in ("bash", "shell") if n in offered), "bash")  # OpenCode v1 says bash, v2 shell
             if done < len(todo):
                 call = {"index": 0, "id": f"call_{done + 1}", "type": "function",
-                        "function": {"name": "bash", "arguments": json.dumps({"command": todo[done],
+                        "function": {"name": tool, "arguments": json.dumps({"command": todo[done],
                                                                               "description": "testbed tool call"})}}
             if not req.get("stream"):
                 msg = {"role": "assistant", "content": None if call else "ok"}

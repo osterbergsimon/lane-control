@@ -20,8 +20,9 @@ or in CI. It is not `tests/test-orca-host-install.sh` (never run that one: it wi
   key each); `up` lets the desktop's key into `jump` and `box` and writes their host keys into the desktop's
   `known_hosts`. Your own keys are never used, and the generated ones go with the containers. The desktop's
   `~/.ssh/config` has `box` (direct), `jump` and `box-via-jump` (`ProxyJump jump`).
-- **Orca** is pinned to **1.4.268** in `orca-pin.json` (version, download URL, sha256). By default `up` downloads that
-  official server release (`orca-server-linux-x64.tar.gz` from Orca's GitHub releases) once into `TESTBED_WORK`,
+- **Orca** is pinned in `orca-pin.json`: **1.4.268** (the default, what the owner's desktop runs) and **1.4.274** (the
+  newest release when this was built), each with its download URL and sha256; `TESTBED_ORCA_VERSION=1.4.274` picks the
+  other. By default `up` downloads the chosen official server release (`orca-server-linux-x64.tar.gz` from Orca's GitHub releases) once into `TESTBED_WORK`,
   checks its sha256 against the pin before it unpacks or uses anything (a mismatch is deleted and refused), and copies
   its `orcad/` slot and Node into the image. `up --orca-from DIR` takes an Orca you have instead: an Orca app's
   `resources` folder, its `orcad-template`, or an unpacked server release; `--orca-from local` is the app `orca-ide` on
@@ -29,7 +30,8 @@ or in CI. It is not `tests/test-orca-host-install.sh` (never run that one: it wi
   (the common files, the `linux-x64-glibc` target, the packaged ripgrep) with the app's own Node. Either way the slot
   is asked for its content digest (its profile preflight) and named by it, since orcad takes no other name, and
   nothing is mounted. `up` refuses an Orca whose version is not the pin unless `TESTBED_ORCA_VERSION` names it.
-  Tested: both the pinned download and `--orca-from local` (the nix-packaged 1.4.268 app) pass `scenario all`. The
+  Tested on 1.4.268: the pinned download and `--orca-from local` (the nix-packaged app) both pass `scenario all` (and
+  give the same slot digest). For 1.4.274 see Coverage. The
   desktop runs that slot as its server; the same slot is in `ORCA_ARTIFACTS` there, so `orca-host-install` puts it on
   the box exactly as it does from a real desktop.
 - **The base image** is pinned by digest (`base_image` in `orca-pin.json`, Python 3.12 on Debian bookworm); its
@@ -40,9 +42,12 @@ or in CI. It is not `tests/test-orca-host-install.sh` (never run that one: it wi
 - **The fake gateway** (`fakes/gateway.py`, built on `tests/stubs/fake_llm.py`) is OpenAI- and LiteLLM-compatible:
   `/v1/models` lists the aliases `chat`, `code` and `embed`, `/model/info` names made-up models behind them
   (`testbed/fake-chat-small`, `testbed/fake-code-large`, and an embedding model), and chat completions answer `ok`
-  (streamed when asked). When the request offers tools, the last user message's steps come back as bash tool calls,
-  one per answer: each `RUN-TOOL: <command>` in order, then, for an Orca worker brief, the brief's own `worker_done`
-  command filled in, so an OpenCode worker on it can do a whole lane and report. It wants the key
+  (streamed when asked). When the request offers tools, the last user message's steps come back as tool calls of
+  OpenCode's shell tool (`shell` in v2, `bash` in v1), one per answer: each `RUN-TOOL: <command>` in order; for an Orca
+  message prompt ("Run `orca orchestration check ...`") that check, then each `RUN-TOOL:` the messages carry; and the
+  worker brief's own `worker_done` command filled in, after the brief's steps or, when the brief says
+  `WAIT-FOR-MESSAGE`, after a message was read. So an OpenCode worker on it does a whole lane, takes a message and
+  reports, at no cost. Its OpenCode config allows the shell tool without asking (the lanes' hosts only). It wants the key
   `testbed-not-a-secret` (made up), which each container sets as `LITELLM_API_KEY` where agents start: before its
   Orca server starts, and in sshd's environment for the box's server; OpenCode's config in a container points at it
   as provider `litellm`, as `orchestrators/native-orca/setup.md` describes. OpenCode lanes run against it at no cost.
@@ -121,15 +126,39 @@ gateway or a plain shell command in an Orca terminal, never a real model.
 | `d1-direct` | `orca-host-install box --pair --port 6769` from the desktop (the `-L` tunnel unit), then again | it says `installed`, `started`, `paired`; `orca-ide status --environment box` is reachable; a terminal made from the desktop through that environment runs on the box (its `hostname` lands there); the re-run says `exists`, `running`, `already-paired` |
 | `d1-jump` | the same after the box is reset, as `box-via-jump` (`ProxyJump jump`) | as `d1-direct`, and nothing of Orca is on the jump host |
 | `d2-tunnel` | on the desktop `lane-tunnel start <box> 6768` (`ssh -R`, through the jump after `d1-jump`); on the box `project-setup --box-pairing add desktop` with the desktop server's pairing link on stdin | the port is open on the box's loopback and not its network; pairing exits 0; the link is in no output and no file under the box's `~/.config` or lane-control copy; `status --environment desktop` from the box is reachable; a terminal the box makes through it runs on the desktop |
+| `lane-a-direct` | after `d1-direct`: a shell coordinator on the desktop (`run-create`), `worker-start --on box --worktree new-top-level --repo path:<scratch on the box> --agent opencode`, a message by `send --to dispatch:<id>`, then `check`, `worker-release`, `worktree rm --environment box` | the lane runs on the box in its own worktree and branch; the message makes it act (a file it writes there); its `worker_done` reaches the desktop's `check` (polled, as remote.md says for reports across hosts); after release its terminal is gone from `terminal list --environment box`; the worktree is gone from the box |
+| `lane-a-jump` | the same after `d1-jump`, `--on box-via-jump` | as `lane-a-direct` |
+| `lane-b-jump` | after `d2-tunnel` (through the jump): the same with the coordinator on the box and `--on desktop` | as `lane-a-direct`, from the box's side, the lane on the desktop |
+| `d2-ports` | `d2-tunnel` direct to `box` with other ports (TUN-1): `lane-tunnel start --remote-port 6870 box 6768`, the link pointed at 6870 by project-setup's own `link_for_port`, after a restart of the desktop's server (a link pairs once) | as `d2-tunnel`, on port 6870 on the box |
+| `lane-b-direct` | `lane-b-jump` again over that tunnel | as `lane-b-jump` |
 | `refresh` | on the box: a second scratch project set up by lane-control `48a38ab` (main before LIT-1, whose lane-tier refuses OpenCode tiers), then `project-setup --refresh` from this checkout | the old setup left an older `~/.agents/bin/lane-tier`; after `--refresh` it and the `native-orca-lanes` skill are this checkout's |
 
-Not built yet (the next slices, in this order): a `worker-start` lane on one host through its report, a stub review,
-the merge on the fake GitHub, release and cleanup; a lane with `--on` across hosts; away-improve (`lane-improve on`,
-the cap, the summary PR, drained). For the first, the gateway's worker mode is in (a worker brief's steps, then its own
-`worker_done` command, as tool calls) and a probe got this far: on Orca 1.4.268 an OpenCode worker starts only as
-`worker-start --agent opencode --model litellm/chat --worktree path:<a worktree made first>` (`--agent opencode2 --model`
-and `new-child` with `--model` are refused, lc-69b); it started and called the gateway with its key, but did not run
-its tool steps yet, which is where that slice starts.
+Lanes start the way the lane skill says for OpenCode, as far as Orca 1.4.268 lets them: `--agent opencode` without
+`--model` (the model is OpenCode's own default, `litellm/chat`): `--agent opencode2 --model` and `--model` with
+`new-child` or `new-top-level` are refused (lc-69b). A scripted stand-in agent under another agent id (Aider's) was
+tried and dropped: Orca's launch readiness did not accept it.
+
+Not built yet (the next slices): a lane through a PR, a stub review, the merge on the fake GitHub and the cleanup of its
+branch; away-improve (`lane-improve on`, the cap, the summary PR, drained); and the items marked not verified below.
+
+## Coverage
+
+What remote.md and the owner's questions claim, and what the testbed checks. Verified means a scenario above passes on
+that Orca version (`scenario all` from a fresh `up`).
+
+| Claim | 1.4.268 | 1.4.274 | Scenario |
+|---|---|---|---|
+| Direction 1: `orca-host-install --pair` installs and pairs a box over `-L`, direct and via ProxyJump; a re-run is idempotent | verified | see below | `d1-direct`, `d1-jump` |
+| Direction 2: `lane-tunnel -R` opens the port on the box's loopback only; `--box-pairing add` with the link on stdin pairs the box; the link is in no argv output or file | verified | see below | `d2-tunnel`, `d2-ports` |
+| TUN-1: different local and remote tunnel ports, the link pointed at the box's port | verified | see below | `d2-ports` |
+| A desktop coordinator controls a lane on the box (`--on`, `new-top-level --repo`): worktree and branch there, `send --to dispatch:<id>` reaches it and it acts, its `worker_done` reaches the desktop's `check`, release closes its terminal, cleanup | verified | see below | `lane-a-direct`, `lane-a-jump` |
+| A box coordinator runs a lane on the desktop through `-R`, the same checks | verified | see below | `lane-b-jump`, `lane-b-direct` |
+| Reports across hosts arrive in the coordinator's `check` (poll) | verified | see below | the lane scenarios |
+| A cross-host `worker_done` wakes an idle agent coordinator | not verified: needs a real agent coordinator (the opt-in `TESTBED_REAL_MODEL`, not built); the testbed's coordinators are shells | | none |
+| A newer client against an older server (and back) | not verified: needs two Orca versions in one run (the pin file holds both; a mixed-pair scenario is not built) | | none |
+| A runtime restart: workers keep or lose their dispatch (`worker_identity_changed`), `worker-start --retry-of` | not verified (`d2-ports` restarts the desktop's server with no lane running, and only checks that it comes back) | | none |
+| 1.4.272: `send --on-client <installation> --to bot:<name>`, `recipient_delivery_held` receipts, resume work on restart, a paired server's follow-up report no longer refused | not verified (not built) | | none |
+| Onboarding with no Claude (`--skip-adapt`), `--suggest-tiers` against a LiteLLM-like gateway, `--refresh` from an older checkout | verified | see below | `suggest-tiers`, `onboard`, `refresh` |
 
 ## Not covered
 

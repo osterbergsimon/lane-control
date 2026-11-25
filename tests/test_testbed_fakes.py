@@ -200,6 +200,28 @@ class FakeGateway(unittest.TestCase):
         self.assertNotIn("<short status>", cmds[2])
         self.assertEqual(m["content"], "ok")
 
+    def test_an_orca_message_prompt_runs_check_then_its_steps_then_the_held_report(self):
+        self.start()
+        brief = ("RUN-TOOL: echo one\nWAIT-FOR-MESSAGE\n orca orchestration send --from term_ab --type worker_done "
+                 '--subject "<s>" --body "<b>" --task-id task_1 --dispatch-id ctx_9 --outcome succeeded\n')
+        tools = [{"type": "function", "function": {"name": "shell"}}]
+        msgs, cmds = [{"role": "user", "content": brief}], []
+        for user in (None, "You have 1 orchestration message. Run `orca orchestration check --terminal term_ab`."):
+            if user:
+                msgs.append({"role": "user", "content": user})
+            for _ in range(5):
+                m = self.call("/v1/chat/completions", {"model": "chat", "messages": msgs, "tools": tools})["choices"][0]["message"]
+                if not m.get("tool_calls"):
+                    break
+                self.assertEqual(m["tool_calls"][0]["function"]["name"], "shell")  # OpenCode v2's tool
+                cmd = json.loads(m["tool_calls"][0]["function"]["arguments"])["command"]
+                cmds.append(cmd)
+                out = "msg act: RUN-TOOL: echo acted > f\n" if "check" in cmd else "done"
+                msgs += [{"role": "assistant", "tool_calls": m["tool_calls"]}, {"role": "tool", "content": out}]
+        self.assertEqual(cmds[:3], ["echo one", "orca orchestration check --terminal term_ab", "echo acted > f"])
+        self.assertIn("--type worker_done", cmds[3])
+        self.assertEqual(len(cmds), 4)
+
     def test_key_is_required_when_set_and_never_logged(self):
         self.start("--key", "sk-testbed-secret", "--alias", "chat=testbed/x")
         with self.assertRaises(urllib.error.HTTPError) as e:
@@ -218,13 +240,17 @@ class TestbedPin(unittest.TestCase):
         """Replicable elsewhere (owner 2026-11-25): one pinned Orca release with its sha256, the base image by digest."""
         import re
         pin = json.loads((ROOT / "tests" / "testbed" / "orca-pin.json").read_text())
-        self.assertRegex(pin["version"], r"^\d+\.\d+\.\d+$")
-        self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
-        self.assertTrue(pin["url"].startswith("https://github.com/") and f"v{pin['version']}/" in pin["url"], pin["url"])
+        self.assertIn(pin["default"], pin["versions"])
+        self.assertIn("1.4.268", pin["versions"])  # what the owner's desktop runs
+        for version, p in pin["versions"].items():
+            self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+            self.assertRegex(p["sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(p["url"].startswith("https://github.com/") and f"v{version}/" in p["url"], p["url"])
         self.assertRegex(pin["base_image"], r"@sha256:[0-9a-f]{64}$")
         docker = (ROOT / "tests" / "testbed" / "image" / "Dockerfile").read_text()
         self.assertFalse(re.search(r"^FROM (?!\$\{BASE\})", docker, re.M), "a FROM that is not the pinned base")
-        self.assertIn(pin["version"], (ROOT / "tests" / "testbed" / "README.md").read_text())
+        for version in pin["versions"]:
+            self.assertIn(version, (ROOT / "tests" / "testbed" / "README.md").read_text())
 
 
 class TestbedIsOptIn(unittest.TestCase):

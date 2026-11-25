@@ -35,7 +35,7 @@ PREFIX = "lc-testbed"
 NET = f"{PREFIX}-net"
 VOLUME = f"{PREFIX}-forge"
 ROLES = ("desktop", "jump", "box")
-PIN = os.environ.get("TESTBED_ORCA_VERSION") or json.loads((HERE / "orca-pin.json").read_text())["version"]
+PIN = os.environ.get("TESTBED_ORCA_VERSION") or json.loads((HERE / "orca-pin.json").read_text())["default"]
 ENGINE = os.environ.get("TESTBED_ENGINE") or ("docker" if shutil.which("docker") or not shutil.which("podman") else "podman")
 IMAGE = f"{PREFIX}:orca-{PIN}"
 BASE_IMAGE = f"{PREFIX}:base-orca-{PIN}"
@@ -88,12 +88,17 @@ def pin():
 
 
 def fetch_pinned():
-    """The pinned official Orca server release (orca-pin.json), downloaded once into TESTBED_WORK/downloads and
-    checked against the pinned sha256 before it is unpacked or used; a mismatch is deleted and refused."""
-    p = pin()
+    """The pinned official Orca server release (orca-pin.json; TESTBED_ORCA_VERSION picks one of its versions, else its
+    default), downloaded once into TESTBED_WORK/downloads and checked against the pinned sha256 before it is unpacked or
+    used; a mismatch is deleted and refused."""
+    pins = pin()["versions"]
+    if PIN not in pins:
+        raise SystemExit(f"testbed: Orca {PIN} is not pinned in orca-pin.json (pinned: {', '.join(pins)}); add it with "
+                         "its release URL and sha256, or use --orca-from")
+    p = dict(pins[PIN], version=PIN)
     dl = WORK / "downloads"
     dl.mkdir(parents=True, exist_ok=True)
-    tar = dl / p["url"].rsplit("/", 1)[-1]
+    tar = dl / f"orca-server-{PIN}-linux-x64.tar.gz"
     if not tar.exists():
         import urllib.request
         print(f"testbed: downloading Orca {p['version']} ({p['url']})", file=sys.stderr)
@@ -148,7 +153,7 @@ def stage_orca(src: Path, ctx: Path):
     release the slot is its orcad/ folder; from an app (its resources folder, or orcad-template itself) the slot is
     assembled from orcad-template (the common files, the linux-x64-glibc target, the packaged ripgrep), as the canary
     did (docs/research/2026-11-21-orca-newer.md). Either way `up` then names it by the digest the slot reports."""
-    want = os.environ.get("TESTBED_ORCA_VERSION") or pin()["version"]
+    want = PIN
     o = ctx / "orca"
     ver = "0.1.0+000000000000"  # provisional: up renames the slot to its own content digest
     slot = o / "artifacts" / "linux-x64-glibc" / ver
@@ -450,13 +455,13 @@ def doctor(_args):
         src = os.environ.get(var) or shutil.which(tool) or shutil.which(tool.rstrip("2"))
         ok = bool(src) and "ELF 64-bit" in sh("file", "-L", src, check=False).stdout if src and shutil.which("file") else bool(src)
         row(ok, f"{why}: a linux-x64 glibc binary ({src or 'none'})", f"install it on PATH, or set {var} to one")
-    p = pin()
+    p = dict(pin()["versions"].get(PIN, {"sha256": "?" * 12}), version=PIN)
     src = os.environ.get("TESTBED_ORCA")
     if src:
         row(Path(src).is_dir(), f"Orca from TESTBED_ORCA={src}", "point it at an Orca app's resources folder, its "
             "orcad-template or an unpacked server release")
     else:
-        cached = (WORK / "downloads" / p["url"].rsplit("/", 1)[-1]).exists()
+        cached = (WORK / "downloads" / f"orca-server-{PIN}-linux-x64.tar.gz").exists()
         row(True, f"Orca {p['version']}: the pinned release ({'downloaded' if cached else 'downloaded by up'}, sha256 "
                   f"{p['sha256'][:12]}... checked)")
     free = shutil.disk_usage(WORK if WORK.exists() else WORK.parent).free / 2**30

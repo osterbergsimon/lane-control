@@ -207,26 +207,57 @@ def d1_jump(ctx):
 
 # --- 4. direction 2: the box runs lanes on the desktop ---------------------------------------------------------------
 
-def d2(ctx, host):
-    """The box (paired from the desktop as `host`) gets the desktop's own server: lane-tunnel -R on the desktop, the
-    desktop's pairing link on stdin to project-setup --box-pairing add on the box, then a terminal on the desktop made
-    from the box."""
-    st = json.loads(run(ctx, "desktop", f"orca-ide status --environment {host} --json", check=False).stdout or "{}")
-    if not st.get("result", {}).get("runtime", {}).get("reachable"):
-        raise Skip(f"the box is not paired as {host} (run d1-{'jump' if 'jump' in host else 'direct'} first)")
-    ctx.copy_lane_control("box", dest=".local/share/lane-control")
+def box_cli_ready(ctx):
+    return run(ctx, "box", "test -x ~/.orca/cli/bin/orca && ~/.orca/cli/bin/orca status --json | jq -e "
+                           "'.result.runtime.state == \"ready\"' >/dev/null", check=False).returncode == 0
+
+
+def fresh_desktop_link(ctx):
+    """A pairing link the desktop's server has not given out yet: its readiness line's, after a restart of the server
+    when that one was used (a link pairs once)."""
+    used = run(ctx, "desktop", "test -f ~/tmp/desktop-link-used", check=False).returncode == 0
+    if used:
+        run(ctx, "desktop", "rm -f ~/.orca-desktop-readiness; for p in $(pgrep -f 'orcad[.]js .*--port 6768'); do "
+                            "kill $p; done")
+        for _ in range(90):
+            if run(ctx, "desktop", "head -1 ~/.orca-desktop-readiness 2>/dev/null | grep -q orca_server_ready && "
+                                   "orca-ide status --json | jq -e '.result.runtime.state == \"ready\"' >/dev/null",
+                   check=False).returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise Fail("the desktop's Orca server did not come back after a restart")
     link = run(ctx, "desktop", "head -1 ~/.orca-desktop-readiness | jq -r .pairing.url").stdout.strip()
     expect(link.startswith("orca://"), "the desktop server's readiness line has no pairing link")
-    run(ctx, "desktop", f"{LC}/core/scripts/lane-tunnel stop {host} >/dev/null 2>&1; true", check=False)
-    p = run(ctx, "desktop", f"LANE_TUNNEL_SETTLE=3 {LC}/core/scripts/lane-tunnel start {host} 6768", check=False)
+    run(ctx, "desktop", "touch ~/tmp/desktop-link-used")
+    return link
+
+
+def d2(ctx, host, remote_port=None):
+    """lane-tunnel -R on the desktop to ssh host `host` (6768 here; `remote_port` on the box when given, TUN-1), the
+    desktop's pairing link (pointed at the box's port by project-setup's own link_for_port) on stdin to project-setup
+    --box-pairing add on the box, then a terminal on the desktop made from the box."""
+    if not box_cli_ready(ctx):
+        raise Skip("the box has no Orca server yet (run d1-direct or d1-jump first)")
+    rport = remote_port or 6768
+    ctx.copy_lane_control("box", dest=".local/share/lane-control")
+    link = fresh_desktop_link(ctx)
+    if rport != 6768:  # the box dials its own end of the tunnel: the link's endpoint moves there, as project-setup does
+        link = run(ctx, "desktop", "python3 -c 'import importlib.machinery as m, sys; ps = m.SourceFileLoader(\"ps\", "
+                                   "sys.argv[1]).load_module(); print(ps.link_for_port(sys.stdin.read().strip(), 6768, "
+                                   f"{rport}))' ~/lane-control/core/scripts/project-setup", input=link).stdout.strip()
+    for h in ("box", "box-via-jump"):
+        run(ctx, "desktop", f"{LC}/core/scripts/lane-tunnel stop {h} >/dev/null 2>&1; true", check=False)
+    extra = f"--remote-port {rport} " if remote_port else ""
+    p = run(ctx, "desktop", f"LANE_TUNNEL_SETTLE=3 {LC}/core/scripts/lane-tunnel start {extra}{host} 6768", check=False)
     expect(p.returncode == 0, f"lane-tunnel start exited {p.returncode}: {(p.stdout + p.stderr)[-600:]}")
     for _ in range(20):
-        if run(ctx, "box", "ss -ltn | grep -q '127.0.0.1:6768 '", check=False).returncode == 0:
+        if run(ctx, "box", f"ss -ltn | grep -q '127.0.0.1:{rport} '", check=False).returncode == 0:
             break
         time.sleep(1)
     else:
-        raise Fail("the -R tunnel's port 6768 never opened on the box's loopback")
-    expect(run(ctx, "box", "ss -ltn | grep -q '0.0.0.0:6768 '", check=False).returncode != 0,
+        raise Fail(f"the -R tunnel's port {rport} never opened on the box's loopback")
+    expect(run(ctx, "box", f"ss -ltn | grep -q '0.0.0.0:{rport} '", check=False).returncode != 0,
            "the tunnel's port is open on the box's network, not only its loopback")
     run(ctx, "box", "~/.orca/cli/bin/orca environment rm --environment desktop --json >/dev/null 2>&1; true", check=False)
     p = run(ctx, "box", "~/.local/share/lane-control/core/scripts/project-setup --box-pairing add desktop",
@@ -239,17 +270,125 @@ def d2(ctx, host):
     expect(not leak, f"the pairing link is in a file on the box: {leak}")
     st = json.loads(run(ctx, "box", "~/.orca/cli/bin/orca status --environment desktop --json").stdout)
     expect(st.get("result", {}).get("runtime", {}).get("reachable") is True, f"desktop not reachable from the box: {st}")
-    proof_on(ctx, "desktop", "desktop", f"d2-{host}")
-    return "lane-tunnel -R up on the box's loopback only; box paired with the desktop by stdin; a terminal made " \
-           "from the box ran on the desktop"
+    proof_on(ctx, "desktop", "desktop", f"d2-{host}-{rport}")
+    ports = f"6768 here, {rport} on the box" if remote_port else "6768 at both ends"
+    return f"lane-tunnel -R to {host} ({ports}) open on the box's loopback only; box paired with the desktop by " \
+           "stdin; a terminal made from the box ran on the desktop"
 
 
-@scenario("direction 2: the box reaches the desktop's Orca through lane-tunnel -R (after d1-jump: through the jump)")
+@scenario("direction 2 via the jump host: lane-tunnel -R to box-via-jump, the box pairs with the desktop's server")
 def d2_tunnel(ctx):
-    host = "box-via-jump" if json.loads(run(ctx, "desktop", "orca-ide status --environment box-via-jump --json",
-                                            check=False).stdout or "{}").get("result", {}).get("runtime", {}).get(
-        "reachable") else "box"
-    return d2(ctx, host) + f" (ssh host {host})"
+    return d2(ctx, "box-via-jump")
+
+
+# --- 5. lanes across hosts ----------------------------------------------------------------------------------------------
+
+CLI = {"desktop": "orca-ide", "box": "~/.orca/cli/bin/orca"}
+
+
+def lane_across(ctx, coord, env, target, tag):
+    """A coordinator on `coord` runs a lane on `target` (its paired environment `env`): worker-start --on env
+    --worktree new-top-level --repo; the lane's worktree and branch are on `target`; send --to dispatch:<id> reaches it
+    and it acts; its worker_done reaches the coordinator's check (poll: remote.md, Reports across hosts);
+    worker-release closes its terminal; the worktree is removed. The worker is OpenCode on the target's fake gateway."""
+    cli = CLI[coord]
+    st = json.loads(run(ctx, coord, f"{cli} status --environment {env} --json", check=False).stdout or "{}")
+    if not st.get("result", {}).get("runtime", {}).get("reachable"):
+        raise Skip(f"{coord} has no reachable environment {env} (run the scenario that pairs it first)")
+    cfg = dict(OPENCODE_CONFIG, permission={"bash": "allow", "edit": "allow", "external_directory": "allow"})
+    run(ctx, target, "mkdir -p ~/.config/opencode && cat > ~/.config/opencode/opencode.json", input=json.dumps(cfg))
+    repo = scratch_project(ctx, target)
+    run(ctx, coord, f"{cli} repo add --environment {env} --path /home/u/code/scratch --json >/dev/null")
+    run(ctx, coord, f"mkdir -p ~/code/coord && cd ~/code/coord && (git rev-parse 2>/dev/null || (git init -q && git commit "
+                    f"-q --allow-empty -m coord)); {cli} repo add --path /home/u/code/coord --json >/dev/null")
+    t0 = json.loads(run(ctx, coord, f"{cli} terminal create --worktree path:/home/u/code/coord --title 'tb {tag} "
+                                    "coordinator' --command bash --json").stdout)["result"]["terminal"]["handle"]
+    run(ctx, coord, f"{cli} orchestration run-create --objective 'testbed {tag}' --from {t0} --json >/dev/null")
+    name = f"tb-{tag}-{int(time.time()) % 100000}"
+    spec = (f"Testbed lane {tag}.\nRUN-TOOL: git rev-parse --abbrev-ref HEAD > ~/tmp/{name}-branch; pwd > "
+            f"~/tmp/{name}-pwd; hostname > ~/tmp/{name}-host\nWAIT-FOR-MESSAGE\n")
+    run(ctx, coord, f"cat > ~/tmp/{name}.md", input=spec)
+    p = run(ctx, coord, f"{cli} orchestration worker-start --on {env} --worktree new-top-level --repo "
+                        f"path:/home/u/code/scratch --name {name} --agent opencode --spec-file ~/tmp/{name}.md "
+                        f"--from {t0} --json", check=False, timeout=300)
+    try:
+        ws = json.loads(p.stdout)
+    except ValueError:
+        ws = {}
+    res = ws.get("result") or {}
+    expect(ws.get("ok") and res.get("dispatchId"), f"worker-start --on {env} failed: {(p.stdout + p.stderr)[-700:]}")
+    disp, term = res["dispatchId"], res.get("terminal")
+    for _ in range(90):
+        seen = run(ctx, target, f"cat ~/tmp/{name}-host ~/tmp/{name}-branch ~/tmp/{name}-pwd 2>/dev/null",
+                   check=False).stdout.split()
+        if len(seen) == 3:
+            break
+        time.sleep(2)
+    expect(len(seen) == 3, f"the lane never ran its first step on {target}")
+    expect(seen[0] == target, f"the lane ran on {seen[0]}, not {target}")
+    expect(name in seen[1] and seen[2].startswith("/home/u/orca/workspaces/"),
+           f"the lane's branch or worktree is not its own: {seen}")
+    expect(run(ctx, target, f"git -C {seen[2]} rev-parse --abbrev-ref HEAD").stdout.strip() == seen[1],
+           "the worktree's branch changed")
+    run(ctx, coord, f"{cli} orchestration send --to dispatch:{disp} --subject act --body 'RUN-TOOL: echo acted > "
+                    f"~/tmp/{name}-acted' --from {t0} --json >/dev/null")
+    for _ in range(90):
+        if run(ctx, target, f"test -s ~/tmp/{name}-acted", check=False).returncode == 0:
+            break
+        time.sleep(2)
+    else:
+        raise Fail(f"send --to dispatch:{disp} never made the lane act")
+    done = False
+    for _ in range(60):
+        out = run(ctx, coord, f"{cli} orchestration check --terminal {t0} --json", check=False).stdout
+        try:
+            msgs = json.loads(out).get("result", {}).get("messages", [])
+        except ValueError:
+            msgs = []
+        if any(m.get("type") == "worker_done" and term and m.get("from") == term for m in msgs) or \
+                any(m.get("type") == "worker_done" and disp in json.dumps(m) for m in msgs):
+            done = True
+            break
+        time.sleep(2)
+    expect(done, f"the lane's worker_done never reached {coord}'s check")
+    rel = run(ctx, coord, f"{cli} orchestration worker-release --dispatch {disp} --json", check=False)
+    expect(rel.returncode == 0, f"worker-release failed: {(rel.stdout + rel.stderr)[-400:]}")
+    for _ in range(30):
+        terms = run(ctx, coord, f"{cli} terminal list --environment {env} --json", check=False).stdout
+        if term not in terms:
+            break
+        time.sleep(1)
+    expect(term not in terms, f"the lane's terminal {term} is still open after worker-release")
+    run(ctx, coord, f"{cli} worktree rm --environment {env} --worktree path:{seen[2]} --force --json >/dev/null",
+        check=False)
+    expect(run(ctx, target, f"test ! -e {seen[2]}", check=False).returncode == 0, f"{seen[2]} is still on {target}")
+    return (f"worker-start --on {env}: worktree and branch {seen[1]} on {target}; a message made it act; worker_done "
+            f"reached {coord}'s check; released (terminal closed); worktree removed")
+
+
+@scenario("lane A, direct: the desktop's coordinator runs and controls a lane on the box (--on box)")
+def lane_a_direct(ctx):
+    return lane_across(ctx, "desktop", "box", "box", "a-direct")
+
+
+@scenario("lane A via the jump host: the same with the box paired through ProxyJump (--on box-via-jump)")
+def lane_a_jump(ctx):
+    return lane_across(ctx, "desktop", "box-via-jump", "box", "a-jump")
+
+
+@scenario("lane B via the jump host: the box's coordinator runs a lane on the desktop through lane-tunnel -R")
+def lane_b_jump(ctx):
+    return lane_across(ctx, "box", "desktop", "desktop", "b-jump")
+
+
+@scenario("direction 2, direct, with other ports (TUN-1): lane-tunnel --remote-port 6870 to box, 6768 on the desktop")
+def d2_ports(ctx):
+    return d2(ctx, "box", remote_port=6870)
+
+
+@scenario("lane B, direct: the box's coordinator runs a lane on the desktop through the tunnel with other ports")
+def lane_b_direct(ctx):
+    return lane_across(ctx, "box", "desktop", "desktop", "b-direct")
 
 
 # --- 2. --refresh on a host set up before ------------------------------------------------------------------------------
@@ -280,3 +419,9 @@ def refresh(ctx):
     run(ctx, "box", f"cmp -s ~/.agents/skills/native-orca-lanes/SKILL.md "
                     f"{new}/orchestrators/native-orca/skills/native-orca-lanes/SKILL.md")
     return f"set up with {OLD_REF}, refreshed with this checkout: lane-tier and the lane skill replaced"
+
+
+# The order `all` runs them in: each lane right after the pairing it uses (d1-jump resets the box's server).
+ORDER = ["suggest-tiers", "onboard", "d1-direct", "lane-a-direct", "d1-jump", "lane-a-jump", "d2-tunnel", "lane-b-jump",
+         "d2-ports", "lane-b-direct", "refresh"]
+ALL.sort(key=lambda s: ORDER.index(s.name) if s.name in ORDER else len(ORDER))
