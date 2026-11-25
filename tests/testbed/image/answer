@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Run a command on a terminal (a pty) and answer its questions, as the owner would at a keyboard (testbed only).
+
+  answer [--reply 'REGEX=>TEXT']... [--default TEXT] [--timeout S] -- <command> [args...]
+
+Each time the output so far ends in a question (a line ending in `? `, `] ` or `: ` with no newline yet) the first
+--reply whose REGEX matches the question's line is typed with Enter; with none, --default (default: empty, Enter).
+Output goes to stdout; the exit code is the command's (124 on timeout).
+"""
+import os
+import pty
+import re
+import select
+import signal
+import sys
+import time
+
+
+def main(argv):
+    replies, default, timeout = [], "", 900.0
+    while argv and argv[0] != "--":
+        flag = argv.pop(0)
+        if flag == "--reply":
+            rx, _, text = argv.pop(0).partition("=>")
+            replies.append((re.compile(rx), text))
+        elif flag == "--default":
+            default = argv.pop(0)
+        elif flag == "--timeout":
+            timeout = float(argv.pop(0))
+        else:
+            sys.exit(f"answer: unknown flag {flag}")
+    cmd = argv[1:]
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvp(cmd[0], cmd)
+    buf, end = b"", time.time() + timeout
+    while True:
+        if time.time() > end:
+            os.kill(pid, signal.SIGTERM)
+            sys.stdout.write("\nanswer: timed out\n")
+            return 124
+        r, _, _ = select.select([fd], [], [], 0.5)
+        if r:
+            try:
+                data = os.read(fd, 4096)
+            except OSError:
+                data = b""
+            if not data:
+                break
+            sys.stdout.write(data.decode("utf8", "replace"))
+            sys.stdout.flush()
+            buf = (buf + data)[-4000:]
+            continue
+        line = buf.decode("utf8", "replace").rsplit("\n", 1)[-1]
+        if line and re.search(r"(\?|\]|:)\s*$", line):
+            text = next((t for rx, t in replies if rx.search(line)), default)
+            os.write(fd, text.encode() + b"\r")
+            buf = b""
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""lane-control's testbed: three throwaway, unprivileged containers on a private network, to test lane-control end to
+end (tests/testbed/README.md). Opt-in only: never part of the unit suite or CI.
+
+  tests/testbed/run up                  build the image (through lane-heavy) and start desktop, jump and box
+  tests/testbed/run scenario <name>|all run scenarios and print a pass/fail table (exit 1 when one fails)
+  tests/testbed/run status              what runs, and the last result of each scenario
+  tests/testbed/run down                remove every container, network, volume and image tag it made, nothing else
+  tests/testbed/run list                the scenarios, in order
+
+Env: TESTBED_WORK (its state and build context; default $TMPDIR/lane-control-testbed-<uid>), TESTBED_ORCA (the Orca
+app's resources folder to copy; default the one `orca-ide` on PATH resolves to), TESTBED_ORCA_VERSION (the pinned Orca
+version, default 1.4.268: up refuses another), TESTBED_BD and TESTBED_OPENCODE (binaries copied into the image;
+default the ones on PATH), TESTBED_REAL_MODEL=1 (opt-in, off by default and reserved: no scenario uses a real model
+yet; one would need the owner's sign-in in the container, and CI never sets it). Nothing of the owner's (HOME, ~/.config,
+~/.ssh, ~/.orca, the docker socket) is mounted into a container; every container runs as a normal user with every
+capability dropped and no-new-privileges, never privileged and never on the host network.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
+LABEL = "lane-control-testbed=1"
+PREFIX = "lc-testbed"
+NET = f"{PREFIX}-net"
+VOLUME = f"{PREFIX}-forge"
+ROLES = ("desktop", "jump", "box")
+PIN = os.environ.get("TESTBED_ORCA_VERSION", "1.4.268")
+IMAGE = f"{PREFIX}:orca-{PIN}"
+BASE_IMAGE = f"{PREFIX}:base-orca-{PIN}"
+WORK = Path(os.environ.get("TESTBED_WORK") or Path(tempfile.gettempdir()) / f"lane-control-testbed-{os.getuid()}")
+HEAVY = Path.home() / ".agents" / "bin" / "lane-heavy"
+UID = 1000
+
+
+def name(role):
+    return f"{PREFIX}-{role}"
+
+
+def sh(*cmd, check=True, capture=True, input=None, timeout=None):
+    p = subprocess.run(list(cmd), capture_output=capture, text=True, input=input, timeout=timeout)
+    if check and p.returncode:
+        raise SystemExit(f"testbed: {' '.join(cmd[:4])} failed ({p.returncode}): {(p.stderr or p.stdout or '').strip()[-800:]}")
+    return p
+
+
+def docker(*args, **kw):
+    return sh("docker", *args, **kw)
+
+
+def ex(role, script, check=True, timeout=600, input=None, user="lc"):
+    """Run a bash script in a container as its normal user, in a login-like environment."""
+    return docker("exec", "-i", "-u", user, "-w", "/home/lc", "-e", "HOME=/home/lc", name(role), "bash", "-c",
+                  "set -o pipefail; " + script, check=check, timeout=timeout, input=input)
+
+
+def state():
+    try:
+        return json.loads((WORK / "state.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save(st):
+    WORK.mkdir(parents=True, exist_ok=True)
+    (WORK / "state.json").write_text(json.dumps(st, indent=1))
+
+
+# --- up ----------------------------------------------------------------------------------------------------------------
+
+def orca_resources():
+    if os.environ.get("TESTBED_ORCA"):
+        return Path(os.environ["TESTBED_ORCA"])
+    cli = shutil.which("orca-ide")
+    if not cli:
+        raise SystemExit("testbed: orca-ide is not on PATH; set TESTBED_ORCA to an Orca app's resources folder")
+    return Path(os.path.realpath(cli)).parents[1]
+
+
+def stage_orca(res: Path, ctx: Path):
+    """Copy (never mount) the Orca build: its node runtime and an orcad slot assembled from its orcad-template (the
+    common files, the linux-x64-glibc target, the packaged ripgrep), as the canary did (docs/research/2026-11-21)."""
+    app = json.loads((res / "app.asar.unpacked" / "out" / "package.json").read_text()).get("version")
+    if app != PIN:
+        raise SystemExit(f"testbed: the Orca at {res} is {app}, the testbed is pinned to {PIN}; set "
+                         f"TESTBED_ORCA_VERSION={app} to test that one on purpose")
+    tpl = res / "orcad-template"
+    meta = json.loads((tpl / "orcad-template.json").read_text())
+    target = meta["targets"]["linux-x64-glibc"]
+    node = res / "node-runtime" / "bin" / "node"
+    nodesha = sh("sha256sum", str(node)).stdout.split()[0]
+    # A provisional name: the image build renames the slot to the content digest orcad computes for it (Dockerfile).
+    ver = "0.1.0+000000000000"
+    o = ctx / "orca"
+    slot = o / "artifacts" / "linux-x64-glibc" / ver
+    slot.mkdir(parents=True)
+    for item in tpl.iterdir():
+        if item.name in ("targets", "orcad-template.json"):
+            continue
+        dst = slot / item.name
+        (shutil.copytree(item, dst, symlinks=True) if item.is_dir() else shutil.copy2(item, dst))
+    sh("chmod", "-R", "u+w", str(slot))  # the store's copies are read-only
+    shutil.copytree(tpl / "targets" / "linux-x64-glibc", slot, dirs_exist_ok=True, symlinks=True)
+    sh("chmod", "-R", "u+w", str(slot))
+    (slot / "ripgrep" / "linux-x64").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(res / "ripgrep" / "linux-x64" / "rg", slot / "ripgrep" / "linux-x64" / "rg")
+    (slot / ".version").write_text(ver + "\n")
+    (slot / ".runtime-node").write_text(nodesha + "\n")
+    (slot / ".server-target").write_text("linux-x64-glibc\n")
+    missing = [f for f in target["files"] if not (slot / f).exists() and not f.startswith(".")]
+    if missing:
+        print(f"testbed: note: the slot lacks {', '.join(missing)} (not in this build's orcad-template)", file=sys.stderr)
+    (o / "resources" / "node-runtime" / "bin").mkdir(parents=True)
+    shutil.copy2(node, o / "resources" / "node-runtime" / "bin" / "node")
+    sh("chmod", "-R", "u+w", str(o))
+    (o / "resources" / "bin").mkdir(parents=True)
+    # orca-ide in a container is the CLI launcher the local orcad writes (~/.orca/cli/bin/orca), as on a box.
+    (o / "resources" / "bin" / "orca-ide").write_text(
+        '#!/bin/sh\n# testbed: the Orca CLI of the Orca server this container runs (written by orcad when it starts)\n'
+        'cli="$HOME/.orca/cli/bin/orca"\n[ -x "$cli" ] || { echo "orca-ide (testbed): no Orca server has run here '
+        'yet ($cli missing)" >&2; exit 127; }\nexec "$cli" "$@"\n')
+    (o / "resources" / "bin" / "orca-ide").chmod(0o755)
+    for p in o.rglob("*"):
+        if p.is_file() and not p.is_symlink():
+            p.chmod(p.stat().st_mode | 0o644)
+    (o / "VERSION").write_text(ver + "\n")
+    (o / "APP_VERSION").write_text(app + "\n")
+    (o / "SOURCE").write_text(f"orca app {app}, node {nodesha[:12]}, slot {ver}\n")
+    return ver, app
+
+
+def stage(ctx: Path):
+    if ctx.exists():
+        shutil.rmtree(ctx)
+    ctx.mkdir(parents=True)
+    (ctx / "empty").mkdir()
+    for f in ("Dockerfile", "rename.Dockerfile", "entrypoint", "systemctl", "answer"):
+        shutil.copy2(HERE / "image" / f, ctx / f)
+    for f in ("gh", "gateway.py"):
+        shutil.copy2(HERE / "fakes" / f, ctx / f)
+    (ctx / "bin").mkdir()
+    for var, tool, dest in (("TESTBED_BD", "bd", "bd"), ("TESTBED_OPENCODE", "opencode2", "opencode2")):
+        src = os.environ.get(var) or shutil.which(tool) or shutil.which(tool.rstrip("2"))
+        if not src:
+            raise SystemExit(f"testbed: {tool} not found on PATH; set {var} to a linux-x64 glibc binary")
+        shutil.copy2(os.path.realpath(src), ctx / "bin" / dest)
+    os.symlink("opencode2", ctx / "bin" / "opencode")
+    return stage_orca(orca_resources(), ctx)
+
+
+def heavy(*cmd):
+    if HEAVY.exists():
+        return sh(str(HEAVY), *cmd, capture=False)
+    print("testbed: note: no ~/.agents/bin/lane-heavy here, building without the machine-wide gate", file=sys.stderr)
+    return sh(*cmd, capture=False)
+
+
+def exists(kind, n):
+    return docker(kind, "inspect", n, check=False).returncode == 0
+
+
+def up(_args):
+    WORK.mkdir(parents=True, exist_ok=True)
+    ctx = WORK / "context"
+    _, app = stage(ctx)
+    heavy("docker", "build", "-q", "--label", LABEL, "--build-arg", f"UID={UID}", "-t", BASE_IMAGE, str(ctx))
+    # orcad takes only a slot named by its content digest; the slot's own profile preflight (it needs a PTY, so in a
+    # container, not in a build step) says what that is.
+    pre = docker("run", "--rm", "-t", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                 "--label", LABEL, "--entrypoint", "sh", BASE_IMAGE, "-c",
+                 "mkdir -p /tmp/pf; a=/opt/orca/artifacts/linux-x64-glibc; v=$(cat /opt/orca/VERSION); cd $a/$v && "
+                 "ORCA_USER_DATA=/tmp/pf HOME=/tmp/pf $a/runtimes/node-$(cat .runtime-node)/bin/node ./orcad.js "
+                 "--orcad-profile-state-preflight 3f2b8c1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f").stdout
+    line = next((l for l in pre.splitlines() if "orca_profile_state_ready" in l), None)
+    if not line:
+        raise SystemExit(f"testbed: the orcad slot's preflight did not answer: {pre[-600:]}")
+    ver = json.loads(line)["artifactVersion"]
+    heavy("docker", "build", "-q", "--label", LABEL, "--build-arg", f"BASE={BASE_IMAGE}", "--build-arg", f"VER={ver}",
+          "-t", IMAGE, "-f", str(ctx / "rename.Dockerfile"), str(ctx / "empty"))
+    shutil.rmtree(ctx)
+    print(f"testbed: Orca {app} (orcad slot {ver}) from {orca_resources()}, copied into the image")
+    if not exists("network", NET):
+        docker("network", "create", "--internal", "--label", LABEL, NET)
+    if not exists("volume", VOLUME):
+        docker("volume", "create", "--label", LABEL, VOLUME)
+    for role in ROLES:
+        if exists("container", name(role)):
+            continue
+        vol = ["-v", f"{VOLUME}:/forge"] if role != "jump" else []
+        docker("run", "-d", "--name", name(role), "--hostname", role, "--network", NET, "--network-alias", role,
+               "--label", LABEL, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", str(UID),
+               "--pids-limit", "4096", "--memory", "4g", "-e", f"TESTBED_ROLE={role}", *vol, IMAGE)
+    for role in ROLES:
+        for _ in range(60):
+            if ex(role, "test -f ~/tmp/entrypoint.done", check=False).returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise SystemExit(f"testbed: {role} did not start: {docker('logs', name(role), check=False).stderr[-800:]}")
+    wire_ssh()
+    copy_lane_control("desktop")
+    st = {"up": time.time(), "orca": app, "slot": ver, "results": state().get("results", {})}
+    save(st)
+    print("testbed: up (desktop, jump, box on network " + NET + ")")
+    return 0
+
+
+def wire_ssh():
+    """Each container's own user key and host key were made at its start; the desktop may log in to jump and box (and
+    to box through jump), and knows their host keys. Nothing here is the owner's."""
+    user_key = ex("desktop", "cat ~/.ssh/id_ed25519.pub").stdout.strip()
+    for role in ("jump", "box"):
+        ex(role, f"grep -qxF '{user_key}' ~/.ssh/authorized_keys || echo '{user_key}' >> ~/.ssh/authorized_keys")
+    known = ""
+    for role in ROLES:
+        hk = ex(role, "cut -d' ' -f1,2 ~/.ssh-host/ssh_host_ed25519_key.pub").stdout.strip()
+        known += f"[{role}]:2222 {hk}\n"
+    cfg = ("Host jump box desktop\n  Port 2222\n  User lc\n  IdentityFile ~/.ssh/id_ed25519\n  IdentitiesOnly yes\n"
+           "  StrictHostKeyChecking yes\n  UserKnownHostsFile ~/.ssh/known_hosts\n"
+           "Host box-via-jump\n  HostName box\n  HostKeyAlias [box]:2222\n  Port 2222\n  User lc\n  ProxyJump jump\n"
+           "  IdentityFile ~/.ssh/id_ed25519\n  IdentitiesOnly yes\n  StrictHostKeyChecking yes\n")
+    for role in ROLES:
+        ex(role, "cat > ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts", input=known)
+    ex("desktop", "cat > ~/.ssh/config && chmod 600 ~/.ssh/config", input=cfg)
+
+
+def copy_lane_control(role, ref=None, dest="lane-control"):
+    """lane-control into the container's ~/<dest>: the worktree as it is (tracked and untracked files, no ignored ones),
+    or the commit `ref`."""
+    if ref:
+        tar = subprocess.run(["git", "-C", str(REPO), "archive", "--format=tar", ref], capture_output=True).stdout
+    else:
+        files = subprocess.run(["git", "-C", str(REPO), "ls-files", "-co", "--exclude-standard", "-z"],
+                               capture_output=True, check=True).stdout
+        files = b"\0".join(f for f in files.split(b"\0") if f and (REPO / f.decode()).exists())
+        tar = subprocess.run(["tar", "-C", str(REPO), "--null", "-T", "-", "-cf", "-"], input=files,
+                             capture_output=True, check=True).stdout
+    subprocess.run(["docker", "exec", "-i", "-u", "lc", name(role), "sh", "-c",
+                    f"rm -rf ~/{dest} && mkdir -p ~/{dest} && tar -C ~/{dest} -xf -"], input=tar, check=True, capture_output=True)
+
+
+# --- down / status ------------------------------------------------------------------------------------------------------
+
+def labelled(kind):
+    if kind == "container":
+        return docker("ps", "-aq", "--filter", f"label={LABEL}").stdout.split()
+    if kind == "image":
+        return [l for l in docker("images", "--filter", f"label={LABEL}", "--format", "{{.Repository}}:{{.Tag}}").stdout.split()
+                if l.startswith(PREFIX + ":")]
+    return docker(kind, "ls", "-q", "--filter", f"label={LABEL}").stdout.split()
+
+
+def down(_args):
+    for c in labelled("container"):
+        docker("rm", "-f", c)
+    for n in labelled("network"):
+        docker("network", "rm", n)
+    for v in labelled("volume"):
+        docker("volume", "rm", "-f", v)
+    for i in labelled("image"):
+        docker("rmi", "-f", i, check=False)
+    if (WORK / "state.json").exists():
+        (WORK / "state.json").unlink()
+    print("testbed: down (containers, network, volume and image tags labelled " + LABEL + " removed)")
+    return 0
+
+
+def status(_args):
+    st = state()
+    print(docker("ps", "-a", "--filter", f"label={LABEL}", "--format", "{{.Names}}\t{{.Status}}").stdout.strip()
+          or "testbed: nothing runs")
+    if st.get("orca"):
+        print(f"orca {st['orca']} (slot {st['slot']})")
+    for k, v in st.get("results", {}).items():
+        print(f"{k}\t{v['result']}\t{v.get('detail', '')}")
+    return 0
+
+
+# --- scenarios ----------------------------------------------------------------------------------------------------------
+
+def scenario(args):
+    sys.path.insert(0, str(HERE))
+    import scenarios
+    if not args:
+        raise SystemExit("testbed: scenario <name>|all (run `tests/testbed/run list`)")
+    if not exists("container", name("desktop")):
+        raise SystemExit("testbed: not up (tests/testbed/run up)")
+    names = [s.name for s in scenarios.ALL] if args[0] == "all" else args
+    unknown = [n for n in names if n not in {s.name for s in scenarios.ALL}]
+    if unknown:
+        raise SystemExit(f"testbed: no scenario {', '.join(unknown)} (tests/testbed/run list)")
+    st = state()
+    results = st.setdefault("results", {})
+    rows = []
+    ctx = scenarios.Ctx(ex=ex, copy_lane_control=copy_lane_control, docker=docker, repo=REPO, work=WORK)
+    for s in scenarios.ALL:
+        if s.name not in names:
+            continue
+        t0 = time.time()
+        try:
+            detail = s.fn(ctx) or ""
+            res = "pass"
+        except scenarios.Skip as e:
+            res, detail = "skip", str(e)
+        except scenarios.Fail as e:
+            res, detail = "FAIL", str(e)
+        except subprocess.TimeoutExpired as e:
+            res, detail = "FAIL", f"timed out: {str(e)[:200]}"
+        except SystemExit as e:
+            res, detail = "FAIL", str(e)
+        rows.append((s.name, res, f"{time.time() - t0:.0f}s", detail))
+        results[s.name] = {"result": res, "detail": detail, "at": time.time()}
+        save(st)
+        print(f"  {s.name}: {res} {detail}", flush=True)
+    w = max(len(r[0]) for r in rows)
+    print("\n" + "scenario".ljust(w) + "  result  time  check")
+    for r in rows:
+        print(f"{r[0].ljust(w)}  {r[1].ljust(6)}  {r[2].rjust(4)}  {r[3]}")
+    return 1 if any(r[1] == "FAIL" for r in rows) else 0
+
+
+def listing(_args):
+    sys.path.insert(0, str(HERE))
+    import scenarios
+    for s in scenarios.ALL:
+        print(f"{s.name}\t{s.doc}")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if argv else 2
+    cmds = {"up": up, "down": down, "status": status, "scenario": scenario, "list": listing}
+    if argv[0] not in cmds:
+        print(f"testbed: unknown command {argv[0]} (up, scenario, status, down, list)", file=sys.stderr)
+        return 2
+    if shutil.which("docker") is None:
+        print("testbed: docker is not installed; nothing was done", file=sys.stderr)
+        return 2
+    return cmds[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
