@@ -9,11 +9,21 @@
         The checkout is --from, else the one this script is in, else the one the last install came from.
   lane-control status
         the current sha, the checkout's sha, and whether they differ.
+  lane-control doctor [--json] [--no-ssh]
+        the installed sha against each project's (from its settings store), the ~/.agents/bin links, the lane skills,
+        and each box project-setup sent a tree to (its current sha over ssh, unless --no-ssh). Exit 1 when something
+        needs doing; each such line says what to run.
+  lane-control prune [--apply]
+        the trees that are not current and that no running process uses (cwd, open file or command line): listed, and
+        removed only with --apply.
 
 After an install, run `project-setup --refresh <project>` for each project: its personas and skills are rendered
 from the tree, and the project records the sha it was set up with."""
 import argparse
 import importlib.util
+import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -76,6 +86,72 @@ def cmd_status(a) -> int:
     return 0
 
 
+def doctor(a) -> dict:
+    cur = I.installed()
+    out = {"current": cur, "root": str(I.data_root()), "projects": [], "links": {}, "skills": {}, "boxes": [],
+           "todo": []}
+    if not cur:
+        out["todo"].append("lane-control is not installed: run lane-control install (from a checkout)")
+    for root, sha in I.projects():
+        out["projects"].append({"root": root, "lane_control": sha})
+        if cur and sha != cur:
+            out["todo"].append(f"{root}: lane-control {I.short(cur)} installed, project set up with {I.short(sha)}: "
+                               f"run project-setup {root} --refresh")
+    stable = I.data_root() / "current"
+    for n in I.BIN_TOOLS:
+        f = I.bin_dir() / n
+        state = ("link" if f.is_symlink() and os.readlink(f) == str(stable / "core" / "scripts" / n) else
+                 "other link" if f.is_symlink() else "copy" if f.exists() else "missing")
+        out["links"][n] = state
+        if cur and state != "link":
+            out["todo"].append(f"{f} is a {state}: run lane-control install (it links the lane tools)")
+    for n in ("native-orca-lanes", "component-gallery", "away-improve"):
+        out["skills"][n] = (I.home() / ".agents" / "skills" / n / "SKILL.md").is_file()
+    for host, sent in I.boxes():
+        there = None if a.no_ssh else I.box_current(host)
+        out["boxes"].append({"host": host, "sent": sent, "current": there, "reachable": None if a.no_ssh else bool(there)})
+        if not a.no_ssh and there is None:
+            out["todo"].append(f"box {host}: its lane-control could not be read over ssh")
+        elif cur and (there or sent) != cur:
+            out["todo"].append(f"box {host}: has {I.short(there or sent)}, here {I.short(cur)}: "
+                               f"run project-setup <repo on the host> {host} --refresh")
+    return out
+
+
+def cmd_doctor(a) -> int:
+    d = doctor(a)
+    if a.json:
+        print(json.dumps(d, indent=2))
+        return 1 if d["todo"] else 0
+    print(f"current: {d['current'] or 'none'} ({d['root']}/current)")
+    for p in d["projects"]:
+        print(f"project {p['root']}: set up with {p['lane_control'] or 'none (before the install)'}")
+    print("links: " + ", ".join(f"{n} {s}" for n, s in d["links"].items()))
+    print("skills: " + ", ".join(f"{n} {'ok' if ok else 'missing'}" for n, ok in d["skills"].items()))
+    for b in d["boxes"]:
+        print(f"box {b['host']}: sent {b['sent'] or 'none'}, current there "
+              f"{b['current'] or ('not checked' if b['reachable'] is None else 'unreachable')}")
+    for t in d["todo"]:
+        print(f"todo: {t}")
+    if not d["todo"]:
+        print("ok: nothing to do")
+    return 1 if d["todo"] else 0
+
+
+def cmd_prune(a) -> int:
+    root = I.data_root()
+    plan = I.prune_plan(root)
+    for sha, what, why in plan:
+        if what == "remove" and a.apply:
+            shutil.rmtree(root / sha)
+            print(f"removed {sha} ({why})")
+        else:
+            print(f"{'would remove' if what == 'remove' else 'keep'} {sha} ({why})")
+    if not a.apply and any(w == "remove" for _, w, _ in plan):
+        print("dry run: nothing removed; lane-control prune --apply removes them")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="lane-control", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -85,8 +161,13 @@ def main(argv=None) -> int:
     p.add_argument("--from", dest="from_", metavar="CHECKOUT")
     p = sub.add_parser("status", help="the current sha against the checkout's")
     p.add_argument("--from", dest="from_", metavar="CHECKOUT")
+    p = sub.add_parser("doctor", help="installed sha against each project, the links, skills and boxes")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--no-ssh", action="store_true", help="do not ask the boxes")
+    p = sub.add_parser("prune", help="remove trees no running process uses (dry run without --apply)")
+    p.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
-    return {"install": cmd_install, "status": cmd_status}[a.cmd](a)
+    return {"install": cmd_install, "status": cmd_status, "doctor": cmd_doctor, "prune": cmd_prune}[a.cmd](a)
 
 
 if __name__ == "__main__":

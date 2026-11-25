@@ -409,6 +409,7 @@ persona text it started with. Pick the case that fits.
 
 ```bash
 lane-control status                            # the installed sha, the checkout's, and whether they differ
+lane-control doctor                            # every project, link, skill and box against the install, with what to run
 project-setup ~/code/<project> --show          # says "lane-control <a> installed, project set up with <b>: run --refresh"
 ```
 

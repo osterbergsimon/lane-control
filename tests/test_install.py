@@ -217,5 +217,57 @@ class BoxScriptTests(Scratch):
         self.assertEqual(self.I.tree_sha(broot / self.one), self.one)
 
 
+class DoctorPruneTests(Scratch):
+    def store(self, name, **st):
+        d = self.home / ".config" / "lane-control" / "projects" / name
+        d.mkdir(parents=True)
+        import json
+        (d / "settings.json").write_text(json.dumps(st))
+
+    def test_doctor_names_a_project_set_up_with_another_sha(self):
+        self.cli("install", "--from", str(self.src))
+        self.store("a-1", root="/p/a", lane_control=self.one)
+        self.store("b-2", root="/p/b")
+        r = self.cli("doctor", "--no-ssh")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("todo: /p/b: lane-control", r.stdout)
+        self.assertIn("run project-setup /p/b --refresh", r.stdout)
+        self.assertNotIn("todo: /p/a", r.stdout)
+        self.assertIn("lane-heavy link", r.stdout)
+        import json
+        d = json.loads(self.cli("doctor", "--json", "--no-ssh").stdout)
+        self.assertEqual(d["current"], self.one)
+        self.assertEqual(d["links"]["lane-heavy"], "link")
+
+    def test_doctor_names_a_box_behind(self):
+        self.cli("install", "--from", str(self.src))
+        b = self.home / ".config" / "lane-control" / "boxes"
+        b.mkdir(parents=True)
+        (b / "box.json").write_text('{"host": "user@box", "lane_control": "' + "0" * 40 + '"}')
+        r = self.cli("doctor", "--no-ssh")
+        self.assertIn("todo: box user@box: has 000000000000", r.stdout)
+
+    def test_prune_is_a_dry_run_and_keeps_current(self):
+        self.cli("install", "--from", str(self.src))
+        two = self.commit_two()
+        self.cli("install", "--from", str(self.src))
+        r = self.cli("prune")
+        self.assertIn(f"would remove {self.one}", r.stdout)
+        self.assertIn(f"keep {two} (current)", r.stdout)
+        self.assertTrue((self.root / self.one).is_dir())
+        with open(self.root / self.one / "core" / "scripts" / "lane-heavy"):  # a process using the old tree
+            held = subprocess.Popen(["sleep", "30"], cwd=self.root / self.one)
+            try:
+                r = self.cli("prune", "--apply")
+                self.assertRegex(r.stdout, rf"keep {self.one} \(in use by pid [0-9, ]*\b{held.pid}\b")
+            finally:
+                held.kill()
+                held.wait()
+        r = self.cli("prune", "--apply")
+        self.assertIn(f"removed {self.one}", r.stdout)
+        self.assertFalse((self.root / self.one).exists())
+        self.assertTrue((self.root / two).is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()

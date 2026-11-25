@@ -227,3 +227,93 @@ def box_script(sha: str) -> str:
 def tar_tree(tree: Path) -> list:
     """The command that writes a tree as a tar to stdout, for box_script."""
     return ["tar", "-C", str(tree), "--exclude=__pycache__", "-cf", "-", "."]
+
+
+# --- doctor and prune (slice 2) -------------------------------------------------------------------------------------
+
+def config_home() -> Path:
+    v = os.environ.get("XDG_CONFIG_HOME")
+    return Path(v) if v else home() / ".config"
+
+
+def projects() -> list:
+    """(root, sha the project was set up with or None) for each project's settings store on this machine."""
+    out = []
+    for f in sorted((config_home() / "lane-control" / "projects").glob("*/settings.json")):
+        try:
+            import json
+            st = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(st, dict) and st.get("root"):
+            out.append((st["root"], st.get("lane_control")))
+    return out
+
+
+def boxes() -> list:
+    """(host, sha last sent) for each box project-setup sent a tree to."""
+    import json
+    out = []
+    for f in sorted((config_home() / "lane-control" / "boxes").glob("*.json")):
+        try:
+            b = json.loads(f.read_text())
+            out.append((b["host"], b.get("lane_control")))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def box_current(host: str):
+    """The sha a box's `current` points at, over ssh (no password prompt), or None when it cannot be read."""
+    ssh = ["ssh", "-F", os.path.expanduser(os.environ["LANE_SSH_CONFIG"])] if os.environ.get("LANE_SSH_CONFIG") else ["ssh"]
+    try:
+        r = subprocess.run([*ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", host,
+                            f'readlink {BOX_ROOT}/current'], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    sha = r.stdout.strip()
+    return sha if r.returncode == 0 and SHA_RE.fullmatch(sha) else None
+
+
+def users(tree: Path) -> list:
+    """Pids of this user's processes that use a tree: their cwd, an open file or their command line in it (Linux
+    /proc). A tree a running lane reads through `current` is the current one, which prune always keeps."""
+    t = str(tree.resolve())
+    found = []
+    for d in Path("/proc").glob("[0-9]*"):
+        try:
+            if d.stat().st_uid != os.getuid():
+                continue
+            hit = os.readlink(d / "cwd").startswith(t)
+            if not hit:
+                hit = t in (d / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            if not hit:
+                for fd in (d / "fd").iterdir():
+                    try:
+                        if os.readlink(fd).startswith(t):
+                            hit = True
+                            break
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        if hit and d.name != str(os.getpid()):
+            found.append(int(d.name))
+    return found
+
+
+def prune_plan(root: Path = None) -> list:
+    """(sha, "keep"|"remove", why) for each tree in the data root."""
+    root = root or data_root()
+    cur = installed(root)
+    plan = []
+    for d in sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink() and SHA_RE.fullmatch(p.name)) \
+            if root.is_dir() else []:
+        if d.name == cur:
+            plan.append((d.name, "keep", "current"))
+            continue
+        pids = users(d)
+        plan.append((d.name, "keep", f"in use by pid {', '.join(map(str, pids))}") if pids else
+                    (d.name, "remove", "not current, no process uses it"))
+    return plan

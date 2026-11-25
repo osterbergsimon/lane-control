@@ -66,6 +66,11 @@ the links.
   checkout's HEAD; no network) laid at `${XDG_DATA_HOME:-~/.local/share}/lane-control/<sha>/`, then `current` switched
   to it by renaming a new link over it. Prints `installed <sha>` or `exists <sha>`. Old trees are kept.
 - `lane-control status`: the current sha, the checkout's sha, and whether they differ.
+- `lane-control doctor [--json] [--no-ssh]`: the installed sha against each project's (its settings store), the
+  `~/.agents/bin` links, the lane skills, and each box a tree was sent to (its `current` over ssh). Exit 1 with a
+  `todo:` line saying what to run for each thing out of date.
+- `lane-control prune [--apply]`: the trees that are not current and that no running process of yours uses (its cwd,
+  an open file or its command line); a dry run unless `--apply`.
 - `project-setup` and `machine-setup` run from a checkout install its HEAD first (or use the tree they run from), render
   `{{LANE_CONTROL}}` as `.../lane-control/current`, link the lane tools, and record the sha in the project's settings
   store (`lane_control`); `--show` says `lane-control <a> installed, project set up with <b>: run --refresh` when they
