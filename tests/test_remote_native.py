@@ -881,29 +881,43 @@ class ReviewRound1Tests(Case):
 
 
 class CheckTests(Case):
-    """PAIR-1 (lc-lxd): project-setup --check <repo> <host> lists every prerequisite and changes nothing; a set-up run
-    says what pairing each direction has, and the steps for the desktop's link, before any box work."""
+    """PAIR-1 (lc-lxd): project-setup --check <repo> <host> lists every prerequisite and changes nothing; a row it
+    could not read says so and fails the check; a set-up run says what pairing each direction has, and the steps for
+    the desktop's link, before the box's server and its own run."""
 
     def setUp(self):
         super().setUp()
         self.e.env["LANE_DESKTOP_ORCA_PORT"] = str(free_port())  # nothing listens there: loopback only
 
     def snapshot(self):
-        return sorted(str(p.relative_to(self.e.home)) for p in self.e.home.rglob("*")
-                      if not p.name.startswith("stub."))  # the stub Orca's own state and logs
+        """Every file here and on the box with a hash of its content, but the stub Orca's own state and logs."""
+        return {str(p.relative_to(self.e.home)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in self.e.home.rglob("*") if p.is_file() and not p.is_symlink() and not p.name.startswith("stub.")}
 
-    def check(self, *args, env_extra=None):
-        return subprocess.run([sys.executable, str(SETUP), "--check", str(self.repo), "box", *args],
+    def check(self, *args, env_extra=None, target=None):
+        return subprocess.run([sys.executable, str(SETUP), "--check", target or str(self.repo), "box", *args],
                               env={**self.e.env, **(env_extra or {})}, capture_output=True, text=True,
                               stdin=subprocess.DEVNULL)
 
-    def test_a_fresh_box_lists_what_is_missing_and_nothing_changes(self):
+    def versions(self, here, box):
+        st = self.e.stub_state()
+        st["app_version"] = here
+        self.e.state.write_text(json.dumps(st))
+        (self.e.box / "stub.json").write_text(json.dumps({**self.e.box_state(), "app_version": box}))
+
+    def pair(self):
+        self.e.saved("box")
+        link, _, _ = make_link(free_port())
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=link)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_fresh_box_lists_the_steps_and_nothing_changes(self):
         before = self.snapshot()
         r = self.check()
-        self.assertEqual(r.returncode, 1, r.stderr + r.stdout)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)  # what setup does, and the link it asks for, pass
         for line in ("check orca here: ok", "check desktop listener: ok", "check ssh: ok", "check direction 1: to do",
-                     "check direction 2: missing", "check systemd here: ok", "check tunnel: to do",
-                     "check agent on box: ok", "check lane-control on box: to do", "nothing was changed"):
+                     "check direction 2: to do", "check systemd here: ok", "check tunnel: to do",
+                     "check agent on box: ok", "check lane-control on box: to do", "check: ok", "nothing was changed"):
             self.assertIn(line, r.stdout)
         self.assertIn('Settings > Servers > "Share this computer"', r.stdout)  # the owner's steps, in the line itself
         self.assertIn("127.0.0.1", r.stdout)
@@ -912,34 +926,60 @@ class CheckTests(Case):
         self.assertEqual(self.e.lines(".systemctl"), ["--user show-environment"])
         self.assertFalse(any("tar" in c[-1] or "--box-pairing" in c[-1] for c in self.e.jlines(".ssh")))
 
-    def test_a_paired_box_has_nothing_missing(self):
-        self.e.saved("box")
-        link, _, _ = make_link(free_port())
-        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=link)
-        self.assertEqual(rc, 0, out)
+    def test_a_paired_box_has_nothing_missing_and_nothing_changes(self):
+        self.pair()
+        self.versions("1.4.274", "1.4.274")
+        before = self.snapshot()
         r = self.check()
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        for line in ("check direction 1: ok", "check direction 2: ok", "check tunnel: ok", "check lane-control on box: ok",
-                     "check: ok"):
+        for line in ("check direction 1: ok", "check versions: ok", "check direction 2: ok", "check tunnel: ok",
+                     "check lane-control on box: ok", "check: ok"):
             self.assertIn(line, r.stdout)
+        self.assertEqual(self.snapshot(), before)  # the record, the env file, the box's store: byte for byte
         self.assertEqual(len([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x]), 1)  # no new link
 
-    def test_versions_on_both_sides_are_compared(self):
+    def test_versions_on_both_sides_are_compared_and_an_unsaid_one_is_not_ok(self):
         self.e.saved("box")
-        st = self.e.stub_state()
-        st["app_version"] = "1.4.274"
-        self.e.state.write_text(json.dumps(st))
-        (self.e.box / "stub.json").write_text(json.dumps({**self.e.box_state(), "app_version": "1.4.268"}))
-        r = self.check()
-        self.assertIn("check versions: warn (here 1.4.274, box 1.4.268", r.stdout)
-        (self.e.box / "stub.json").write_text(json.dumps({**self.e.box_state(), "app_version": "1.4.274"}))
+        self.versions("1.4.274", "1.4.268")
+        self.assertIn("check versions: warn (here 1.4.274, box 1.4.268", self.check().stdout)
+        self.versions("1.4.274", "1.4.274")
         self.assertIn("check versions: ok (here 1.4.274, box 1.4.274)", self.check().stdout)
+        st = self.e.stub_state()
+        st.pop("app_version")
+        self.e.state.write_text(json.dumps(st))
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check versions: could not check", r.stdout)
 
-    def test_an_unreachable_box_says_ssh_and_how(self):
+    def test_an_unreachable_box_says_ssh_and_reads_nothing_as_a_no(self):
+        self.pair()
         r = self.check(env_extra={"STUB_SSH_DOWN": "1"})
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("check ssh: missing", r.stdout)
         self.assertIn("ssh box` once by hand", r.stdout)
+        for name in ("direction 2", "agent on box", "lane-control on box"):  # every row is kept, none is a guess
+            self.assertIn(f"check {name}: could not check (ssh box did not answer)", r.stdout)
+        self.assertNotIn("no link", r.stdout)
+        self.assertIn("could not check", r.stdout.splitlines()[-1])
+
+    def test_a_box_whose_orca_cannot_answer_is_not_ok(self):
+        self.pair()
+        self.versions("1.4.274", "1.4.274")
+        cli = self.e.box / ".orca" / "cli" / "bin" / "orca"
+        cli.write_text("#!/bin/sh\necho not json\nexit 1\n")
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check direction 2: could not check", r.stdout)
+        self.assertNotIn("has what it needs", r.stdout)
+
+    def test_orca_here_down_makes_direction_one_unread(self):
+        st = self.e.stub_state()
+        st["orca_up"] = False
+        self.e.state.write_text(json.dumps(st))
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check orca here: missing", r.stdout)
+        self.assertIn("check direction 1: could not check", r.stdout)
 
     def test_a_missing_agent_and_a_saved_but_silent_server_are_named(self):
         self.e.saved("box")
@@ -953,10 +993,13 @@ class CheckTests(Case):
         self.assertIn("orca-tunnel-box.service", r.stdout)
         self.assertIn("check agent on box: missing (opencode2", r.stdout)
 
-    def test_the_gateway_key_is_named_never_its_value(self):
+    def test_the_gateway_key_is_the_coordinators_providers_and_never_its_value(self):
         cfg = self.e.box / ".config" / "opencode"
         cfg.mkdir(parents=True)
-        (cfg / "opencode.json").write_text(json.dumps({"provider": {"gw": {"options": {"apiKey": "{env:GW_TEST_KEY}"}}}}))
+        (cfg / "opencode.json").write_text(json.dumps({
+            "mcp": {"tool": {"environment": {"TOKEN": "{env:MCP_TEST_TOKEN}"}}},
+            "provider": {"other": {"options": {"apiKey": "{env:OTHER_TEST_KEY}"}},
+                         "gw": {"options": {"baseURL": "http://127.0.0.1:4000/v1", "apiKey": "{env:GW_TEST_KEY}"}}}}))
         r = self.check("--coordinator", "opencode/gw/chat", env_extra={"GW_TEST_KEY": "sk-not-for-output-123"})
         self.assertIn("check gateway key: ok (GW_TEST_KEY is set", r.stdout)
         self.assertNotIn("sk-not-for-output-123", r.stdout + r.stderr)
@@ -964,6 +1007,7 @@ class CheckTests(Case):
         r = subprocess.run([sys.executable, str(SETUP), "--check", str(self.repo), "box", "--coordinator",
                             "opencode/gw/chat"], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertIn("check gateway key: warn (GW_TEST_KEY", r.stdout)
+        self.assertNotIn("MCP_TEST_TOKEN", r.stdout)
 
     def test_a_desktop_listening_beyond_loopback_is_a_warning(self):
         import socket
@@ -974,25 +1018,58 @@ class CheckTests(Case):
         self.assertIn("check desktop listener: warn", r.stdout)
         self.assertIn("A 127.0.0.1 link does not change it", r.stdout)
 
-    def test_check_needs_a_host(self):
+    def test_check_needs_a_host_and_a_target_setup_would_take(self):
         r = subprocess.run([sys.executable, str(SETUP), "--check", str(self.repo)], env=self.e.env,
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("--check takes a repo and a host", r.stderr)
+        r = self.check(target="not/absolute")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("absolute (or ~/) path on the host", r.stderr)
+        self.assertEqual(self.e.jlines(".ssh"), [])
 
-    def test_the_steps_for_the_link_come_before_any_box_work(self):
-        self.e.saved("box")
+    def test_check_with_a_flag_that_acts_is_refused_before_anything_runs(self):
+        self.pair()
+        before, ssh, sysd = self.snapshot(), len(self.e.jlines(".ssh")), len(self.e.lines(".systemctl"))
+        for args in (("--remove-host", "box"), ("--refresh",), ("--suggest-tiers", "gw"), ("--trust-folder",)):
+            r = subprocess.run([sys.executable, str(SETUP), "--check", *(() if args[0] == "--remove-host" else
+                                                                        (str(self.repo), "box")), *args],
+                               env=self.e.env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            self.assertEqual(r.returncode, 2, (args, r.stdout, r.stderr))
+            self.assertIn(f"--check changes nothing, so it does not go with {args[0]}", r.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual((len(self.e.jlines(".ssh")), len(self.e.lines(".systemctl"))), (ssh, sysd))
+
+    def test_direction_one_to_do_needs_systemd_here_even_without_desktop_lanes(self):
+        r = self.check("--no-desktop-lanes", env_extra={"STUB_NO_SYSTEMD": "1"})
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check systemd here: missing", r.stdout)
+        self.assertIn("check direction 2: skipped", r.stdout)
+
+    def test_a_server_source_that_is_not_there_is_named(self):
+        r = self.check("--orca-from", str(self.e.home / "no-such-slots"))
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check orca source: missing", r.stdout)
+
+    def test_the_steps_for_the_link_come_before_the_boxs_server_and_its_run(self):
         link, _, _ = make_link(free_port())
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=link)
         self.assertEqual(rc, 0, out)
-        self.assertIn("pairing: direction 1 saved", out)
+        self.assertIn("pairing: direction 1 to do", out)
         steps = out.index("Before setup asks")
-        self.assertLess(steps, out.index("lane-control: copied"))
+        self.assertLess(steps, out.index("orca server: created"))
         for s in ('Settings > Servers > "Share this computer"', "127.0.0.1", "hidden prompt", "ssh's stdin",
                   "orca pair"):
             self.assertIn(s, out[steps:steps + 1200])
 
-    def test_a_fresh_host_run_says_direction_one_is_to_do_and_without_a_terminal_asks_nothing(self):
+    def test_a_cotal_box_project_gets_no_steps_for_a_link_it_is_never_asked(self):
+        (self.repo / ".cotal" / "agents").mkdir(parents=True)
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("Before setup asks", out)
+        self.assertNotIn("pairing: direction", out)
+
+    def test_a_fresh_host_run_without_a_terminal_asks_nothing(self):
         r = self.e.setup(str(self.repo), "box", "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("pairing: direction 1 to do", r.stdout)

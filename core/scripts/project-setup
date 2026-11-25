@@ -3678,10 +3678,14 @@ def saved_environments() -> "list | None":
 
 
 def pairing_preview(place: Place, desktop_lanes_on: bool) -> None:
-    """Before any box work: the pairing each direction has, and when the desktop's link will be asked for, the steps
-    to make it now (owner 2026-11-25: a hand step is a prerequisite, said up front). Changes nothing."""
+    """Before the box's server and the box's own run, for a native-Orca box project: the pairing each direction has,
+    and when the desktop's link will be asked for, the steps to make it now (owner 2026-11-25: a hand step is a
+    prerequisite, said up front). Changes nothing."""
     host, envs = place.host, saved_environments()
-    if envs is not None and place.env in envs:
+    if envs is None:
+        say("pairing", "direction 1 unknown", "(this machine's Orca did not list its environments; the next step "
+            "checks the server itself)")
+    elif place.env in envs:
         say("pairing", "direction 1 saved", f"(environment {place.env} here; whether it answers is checked next)")
     else:
         say("pairing", "direction 1 to do", f"(no environment {place.env} here: setup puts Orca's server on {host} "
@@ -3698,30 +3702,68 @@ def pairing_preview(place: Place, desktop_lanes_on: bool) -> None:
 
 DESKTOP_PORT = int(os.environ.get("LANE_DESKTOP_ORCA_PORT") or 6768)  # the desktop Orca's own listener
 BOX_PROBE = r'''
-import json, os, re, shutil, sys
+import json, os, re, shutil, subprocess, sys
+me, want = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
 home = os.path.expanduser("~")
 path = os.environ.get("PATH", "") + os.pathsep + home + "/bin" + os.pathsep + home + "/.local/bin"
-key = None
-for f in ((os.environ.get("XDG_CONFIG_HOME") or home + "/.config") + "/opencode/opencode.json",
-          (os.environ.get("XDG_CONFIG_HOME") or home + "/.config") + "/opencode/opencode.jsonc"):
+out = {"lane_control": os.access(home + "/.local/share/lane-control/scripts/project-setup", os.X_OK),
+       "agents": [n for n in ("claude", "opencode", "opencode2", "codex") if shutil.which(n, path=path)]}
+# Orca's CLI as project-setup --box-pairing finds it (orca_cli), but never a bare `orca`: that may be another program
+cli = next((c for c in (os.environ.get("ORCA_CLI"), home + "/.orca/cli/bin/orca", shutil.which("orca-ide"),
+                        home + "/.config/orca/linux-orca-cli-shim/orca") if c and os.access(c, os.X_OK)), None)
+out["orca_cli"] = bool(cli)
+def orca(*args):
+    p = subprocess.run([cli, *args, "--json"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    return json.loads(p.stdout)
+if cli:
     try:
-        m = re.search(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", open(f).read())
+        names = [e.get("name") for e in orca("environment", "list")["result"]["environments"]]
+        if me not in names:
+            out["desktop"] = "missing"
+        else:
+            try:
+                rt = orca("status", "--environment", me)["result"]["runtime"]
+                out["desktop"] = "reachable" if rt.get("reachable") and rt.get("state") == "ready" else "saved"
+            except Exception:
+                out["desktop"] = "saved"
+    except Exception as e:
+        out["desktop_error"] = "environment list: " + type(e).__name__
+# the gateway key: the {env:NAME} of a provider's options.apiKey in OpenCode's config, the coordinator's provider first
+key, conf = None, os.environ.get("XDG_CONFIG_HOME") or home + "/.config"
+for f in (conf + "/opencode/opencode.json", conf + "/opencode/opencode.jsonc"):
+    try:
+        text = open(f).read()
     except OSError:
         continue
-    if m:
-        key = m.group(1)
+    try:
+        provs = json.loads(re.sub(r"(?m)^\s*//.*$", "", text)).get("provider") or {}
+        for name in ([want] if want in provs else []) + [k for k in provs if k != want]:
+            m = re.fullmatch(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}",
+                             str(((provs.get(name) or {}).get("options") or {}).get("apiKey") or ""))
+            if m:
+                key = m.group(1)
+                break
+    except (ValueError, AttributeError, TypeError):
+        out["gateway_config_error"] = os.path.basename(f)
+    if key:
         break
-print(json.dumps({"lane_control": os.access(home + "/.local/share/lane-control/scripts/project-setup", os.X_OK),
-                  "orca_cli": os.access(home + "/.orca/cli/bin/orca", os.X_OK),
-                  "agents": [n for n in ("claude", "opencode", "opencode2", "codex") if shutil.which(n, path=path)],
-                  "gateway_key_env": key, "gateway_key_set": bool(key and os.environ.get(key))}))
+out["gateway_key_env"] = key
+out["gateway_key_set"] = bool(key and os.environ.get(key))
+print(json.dumps(out))
 '''  # what --check asks the box in one ssh call: names and yes/no only, never a value
+CHECK_REFUSES = ("--remove-host", "--suggest-tiers", "--refresh", "--readapt", "--show", "--write-orca-yaml",
+                 "--trust-folder", "--with", "--private", "--beads-repo", "--via-host", "--desktop-environment")
+UNCHECKED = "could not check"  # a row whose answer was not read: --check is then not ok
 
 
 def check_host(a, host: str) -> int:
     """--check <repo> <host>: every prerequisite of `project-setup <repo> <host>`, each on its own line, missing ones
-    with what fixes them. Reads only: nothing is copied, installed, paired, started or written, here or there. Exit 0
-    when nothing is missing, 1 otherwise."""
+    with what fixes them. Reads only: nothing is copied, installed, paired, started or written, here or there. A row
+    it could not read says so ("could not check: <why>"). Exit 0 when nothing is missing and every row was read; 1
+    otherwise. A step setup does itself, and the link the owner makes when setup asks, are "to do" and pass."""
+    if not remote_target_ok(a.target):
+        print("project-setup: with a host, give a URL or an absolute (or ~/) path on the host", file=sys.stderr)
+        return 2
     global ORCA
     add_orca_cli_to_path()
     ORCA = orca_cli()
@@ -3731,43 +3773,55 @@ def check_host(a, host: str) -> int:
         rows.append((name, state))
         say(f"check {name}", state, detail)
 
+    def unread(name, why):
+        row(name, UNCHECKED, f"({why})")
+
     here, ready = None, False
     if not LOCAL.found():
         row("orca here", "missing", "(the Orca CLI is not found: orca-ide, or set ORCA_CLI)")
     else:
         try:
             rt = json.loads(LOCAL.run("status", "--json", check=False, timeout=30).stdout)["result"]["runtime"]
-            ready = rt.get("reachable") and rt.get("state") == "ready"
+            ready = bool(rt.get("reachable") and rt.get("state") == "ready")
             here = rt.get("appVersion") if ready else None
         except (Fail, ValueError, KeyError, TypeError, AttributeError):
             ready = False
-        ready = bool(ready)
         row("orca here", "ok" if ready else "missing",
-            f"(Orca {here or 'unknown version'})" if ready else "(Orca's runtime does not answer: start Orca here)")
+            f"(Orca {here or 'of a version it does not report'})" if ready else
+            "(Orca's runtime does not answer: start Orca here)")
     if listens_beyond_loopback(DESKTOP_PORT):
         row("desktop listener", "warn", f"(this desktop's Orca listens beyond loopback on port {DESKTOP_PORT}, so "
             "anything that reaches this machine can try it: an earlier network pairing did that, and it stays while "
             "that client is paired. A 127.0.0.1 link does not change it; see remote.md, Do you need the tunnel?)")
     else:
         row("desktop listener", "ok", f"(loopback only on port {DESKTOP_PORT})")
-    probe = None
+    harness, _, rest = (a.coordinator or "claude/opus").partition("/")
+    provider = rest.split("/", 1)[0] if harness == "opencode" and "/" in rest else ""
+    me, probe, no_probe = this_machine(), None, None
     try:
-        r = place.ssh("python3 -", input=BOX_PROBE, timeout=60)
+        r = place.ssh(f"python3 - {shlex.quote(me)} {shlex.quote(provider)}", input=BOX_PROBE, timeout=90)
         if r.returncode == 255:
+            no_probe = f"ssh {host} did not answer"
             row("ssh", "missing", f"(ssh {host} needs a prompt or fails: run `ssh {host}` once by hand for its host "
                 "key, and give it a key it can use without asking)")
         else:
             row("ssh", "ok", f"({host} answers without a prompt)")
             try:
                 probe = json.loads((r.stdout.strip().splitlines() or [""])[-1])
+                if not isinstance(probe, dict):
+                    raise ValueError
             except ValueError:
+                probe, no_probe = None, f"python3 did not run on {host}"
                 row("python on box", "missing", f"(python3 does not run on {host}; setup needs it there)")
     except Fail as e:
+        no_probe = str(e)
         row("ssh", "missing", f"({e})")
     envs = saved_environments() if ready else None
+    d1_todo = False
     if envs is None:
-        row("direction 1", "unknown", "(Orca here does not answer)")
+        unread("direction 1", "this machine's Orca did not list its environments")
     elif place.env not in envs:
+        d1_todo = True
         row("direction 1", "to do", f"(no environment {place.env} here: project-setup <repo> {host} puts Orca's "
             "server there and pairs it, orca-host-install)")
     elif not place.reachable():
@@ -3781,70 +3835,89 @@ def check_host(a, host: str) -> int:
             box = None
         row("direction 1", "ok", f"(environment {place.env} answers here)")
         if not (here and box):
-            row("versions", "unknown", f"(here {here or 'unknown'}, {host} {box or 'unknown'})")
+            unread("versions", f"Orca did not say its version: here {here or 'not said'}, {host} {box or 'not said'}")
         else:
             row("versions", "ok" if here == box else "warn", f"(here {here}, {host} {box}" + (
                 "" if here == box else ": keep both on one version, remote.md direction 1 step 2") + ")")
+    if d1_todo and (a.orca_from or a.orca_bundle):
+        src = a.orca_from or a.orca_bundle
+        there = Path(src).expanduser().is_dir() if a.orca_from else Path(src).expanduser().is_file()
+        row("orca source", "ok" if there else "missing", f"({src} is there)" if there else
+            f"({src} is not a {'folder' if a.orca_from else 'file'} here, so orca-host-install has no source)")
+    if d1_todo or not a.no_desktop_lanes:  # orca-host-install's -L unit (direction 1), lane-tunnel's -R unit (2)
+        sysd = shutil.which("systemctl") is not None and subprocess.run(
+            ["systemctl", "--user", "show-environment"], capture_output=True, stdin=subprocess.DEVNULL).returncode == 0
+        row("systemd here", "ok" if sysd else "missing", "(a user manager runs the tunnels here)" if sysd else
+            "(no systemd user manager here, so the tunnels cannot run: log in with one, or loginctl enable-linger "
+            "$USER)")
     ports = recorded_ports(host)
     if a.no_desktop_lanes:
         row("direction 2", "skipped", "(--no-desktop-lanes)")
-    elif probe and probe.get("lane_control") and probe.get("orca_cli"):
-        me = this_machine()
-        try:
-            state = box_pairing_remote(place, "status", me)
-        except Fail as e:
-            state = None
-            row("direction 2", "unknown", f"({e})")
-        if state == "reachable":
-            row("direction 2", "ok", f"({host} reaches this machine's Orca as environment {me})")
-        elif state == "saved":
-            row("direction 2", "missing", f"({host} has this machine's Orca as {me} but cannot reach it: the tunnel "
-                "is down, see the tunnel line)")
-        elif state is not None:
-            row("direction 2", "missing", f"({host} has no link to this desktop's Orca. " + PAIR_STEPS_SHORT + ")")
+    elif probe is None:
+        unread("direction 2", no_probe)
+    elif not probe.get("orca_cli"):
+        row("direction 2", "to do", f"(no Orca CLI on {host} yet, so no link either: setup puts Orca's server there "
+            f"first and then asks for the link, a step of yours. {PAIR_STEPS_SHORT})")
+    elif probe.get("desktop_error"):
+        unread("direction 2", f"Orca's CLI on {host} failed: {probe['desktop_error']}")
+    elif probe.get("desktop") == "reachable":
+        row("direction 2", "ok", f"({host} reaches this machine's Orca as environment {me})")
+    elif probe.get("desktop") == "saved":
+        row("direction 2", "missing", f"({host} has this machine's Orca as {me} but cannot reach it: the tunnel "
+            "is down, see the tunnel line)")
+    elif probe.get("desktop") == "missing":
+        row("direction 2", "to do", f"({host}'s Orca has no environment {me}, so no link to this desktop yet: a "
+            f"step of yours that setup asks for. {PAIR_STEPS_SHORT})")
     else:
-        row("direction 2", "missing", f"({host} has no link to this desktop's Orca yet. " + PAIR_STEPS_SHORT + ")")
-    sysd = subprocess.run(["systemctl", "--user", "show-environment"], capture_output=True).returncode == 0 \
-        if shutil.which("systemctl") else False
+        unread("direction 2", f"the answer from {host} named no state")
     if not a.no_desktop_lanes:
-        row("systemd here", "ok" if sysd else "missing", "(a user manager runs the tunnel back here)" if sysd else
-            "(no systemd user manager here, so the tunnel back cannot run: log in with one, or loginctl "
-            "enable-linger $USER)")
-    if ports and not a.no_desktop_lanes:
-        up = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "status", host],
-                            capture_output=True).returncode == 0
-        row("tunnel", "ok" if up else "missing", f"(lane-tunnel@{env_name(host)} is running)" if up else
-            f"(lane-tunnel@{env_name(host)} is not running: core/scripts/lane-tunnel start <options> --remote-port "
-            f"{ports[1]} {host} {ports[0]})")
-    elif not a.no_desktop_lanes:
-        row("tunnel", "to do", "(setup starts it once you give the link)")
-    harness = (a.coordinator or "claude/opus").split("/", 1)[0]
-    program = BINARIES.get(harness, harness)
-    if probe is not None:
-        if a.no_start:
-            row("agent on box", "skipped", "(--no-start)")
+        if ports:
+            up = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "status", host],
+                                capture_output=True, stdin=subprocess.DEVNULL).returncode == 0
+            row("tunnel", "ok" if up else "missing", f"(lane-tunnel@{env_name(host)} is running)" if up else
+                f"(lane-tunnel@{env_name(host)} is not running: core/scripts/lane-tunnel start <options> "
+                f"--remote-port {ports[1]} {host} {ports[0]})")
         else:
-            have = program in probe.get("agents", [])
-            row("agent on box", "ok" if have else "missing", f"({program} on {host})" if have else
-                f"({program} is not on {host}'s PATH, ~/bin or ~/.local/bin: install it there and sign in once by "
-                "hand; setup never copies a credential)")
-        key = probe.get("gateway_key_env")
-        if harness == "opencode" or key:
-            if not key:
-                row("gateway key", "warn", f"(OpenCode's config on {host} names no {{env:...}} key; "
-                    "docs/getting-started.md 2.3)")
-            else:
-                row("gateway key", "ok" if probe.get("gateway_key_set") else "warn",
-                    f"({key} is set in an ssh shell on {host})" if probe.get("gateway_key_set") else
-                    f"({key}, which OpenCode's config on {host} names, is not set in an ssh shell there; Orca's "
-                    "environment on the box must have it, docs/getting-started.md 2.3)")
+            row("tunnel", "to do", "(setup starts it once you give the link)")
+    program = BINARIES.get(harness, harness)
+    if a.no_start:
+        row("agent on box", "skipped", "(--no-start)")
+    elif probe is None:
+        unread("agent on box", no_probe)
+    else:
+        have = program in probe.get("agents", [])
+        row("agent on box", "ok" if have else "missing", f"({program} on {host})" if have else
+            f"({program} is not on {host}'s PATH, ~/bin or ~/.local/bin: install it there and sign in once by "
+            "hand; setup never copies a credential)")
+    if harness == "opencode":
+        key = probe.get("gateway_key_env") if probe else None
+        if probe is None:
+            unread("gateway key", no_probe)
+        elif probe.get("gateway_config_error"):
+            unread("gateway key", f"OpenCode's {probe['gateway_config_error']} on {host} is not plain JSON")
+        elif not key:
+            row("gateway key", "warn", f"(OpenCode's config on {host} names no provider apiKey as {{env:...}}; "
+                "docs/getting-started.md 2.3)")
+        else:
+            row("gateway key", "ok" if probe.get("gateway_key_set") else "warn",
+                f"({key} is set in an ssh shell on {host})" if probe.get("gateway_key_set") else
+                f"({key}, which OpenCode's config on {host} names, is not set in an ssh shell there; Orca's "
+                "environment on the box must have it, docs/getting-started.md 2.3)")
+    if probe is None:
+        unread("lane-control on box", no_probe)
+    else:
         row("lane-control on box", "ok" if probe.get("lane_control") else "to do",
-            "(a copy from an earlier run; setup replaces it)" if probe.get("lane_control") else
-            "(setup copies it)")
+            "(a copy from an earlier run; setup replaces it)" if probe.get("lane_control") else "(setup copies it)")
     missing = [n for n, s in rows if s == "missing"]
-    say("check", "ok" if not missing else f"{len(missing)} missing", "(" + (", ".join(missing) if missing else
-        f"project-setup <repo> {host} has what it needs") + "; nothing was changed)")
-    return 1 if missing else 0
+    unchecked = [n for n, s in rows if s == UNCHECKED]
+    todo = [n for n, s in rows if s == "to do"]
+    if not missing and not unchecked:
+        say("check", "ok", f"(project-setup <repo> {host} has what it needs" +
+            (f"; to do in that run: {', '.join(todo)}" if todo else "") + "; nothing was changed)")
+        return 0
+    said = [f"{len(missing)} missing" if missing else "", f"{len(unchecked)} {UNCHECKED}" if unchecked else ""]
+    say("check", ", ".join(s for s in said if s), "(" + ", ".join(missing + unchecked) + "; nothing was changed)")
+    return 1
 
 
 PAIR_STEPS_SHORT = ('Make the link in Orca here: Settings > Servers > "Share this computer", choosing 127.0.0.1, then '
@@ -4045,8 +4118,6 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
     try:
         if not LOCAL.found():
             raise Fail("Orca CLI not found here (orca-ide; or set ORCA_CLI)")
-        if not (a.show or a.refresh):
-            pairing_preview(place, not a.no_desktop_lanes)
         copy_to_host(place)  # the copy and the question need no Orca server on the host yet
         rest = host_argv(argv, value_flags, host)
         r = place.ssh(remote_cmd("scripts/project-setup", [*rest, "--via-host", "--which-orchestrator"]), timeout=120)
@@ -4059,6 +4130,7 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
             return reexec(place, rest)
         if a.show or a.refresh:  # the host's own --show or --refresh, and nothing else: no server, link or machine
             return reexec(place, rest)
+        pairing_preview(place, not a.no_desktop_lanes)  # a native-Orca box project: before its server and its run
         host_server(place, a.orca_port, [*(["--from", a.orca_from] if a.orca_from else []),
                                          *(["--bundle", a.orca_bundle] if a.orca_bundle else []),
                                          *(["--version", a.orca_version] if a.orca_version else [])])
@@ -4350,6 +4422,11 @@ def main(argv=None) -> int:
         why = host_refusal(h) if h is not None else None
         if why:
             print(f"project-setup: {why}", file=sys.stderr)
+            return 2
+    if a.check:  # --check changes nothing: never together with a flag that acts (some run before the check would)
+        given = [f for f in CHECK_REFUSES if any(x == f or x.startswith(f + "=") for x in argv)]
+        if given:
+            print(f"project-setup: --check changes nothing, so it does not go with {' '.join(given)}", file=sys.stderr)
             return 2
     if a.via_host:  # a non-interactive ssh shell's PATH lacks the folders agents are often installed in; they go
         home = Path(os.environ.get("HOME", str(Path.home())))  # last, so nothing there shadows git or python3
