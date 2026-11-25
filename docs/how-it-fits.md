@@ -110,7 +110,8 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
   the tier table and engines, starts and commits nothing. Restart the coordinator (`project-pause stop`, then
   `start`) so it reads the new persona.
 - Both say `exists` for what is already done, so running them again is safe.
-- **Pending (PR #71):** `project-setup --check <repo> <host>` lists everything a box setup needs and changes nothing.
+- **`project-setup --check <repo> <host>`**: run it before a box setup. It lists every prerequisite, says what is
+  missing or could not be checked, and changes nothing.
 
 More: [getting started](getting-started.md), [native Orca setup](../orchestrators/native-orca/setup.md).
 
@@ -173,18 +174,19 @@ direction 2. The two ends can use different ports (`--tunnel-remote-port` in `pr
 **The way, and the fallback.** The owner decided (2026-11-25): "we do it with share link, with --on-client as
 fallback, but must make sure to make it as painless as possible for user". So direction 2 is the share link and
 `lane-tunnel`. The documented fallback is the hand-off with `send --on-client` (Orca 1.4.272 or later), for when the
-link step cannot be done. **It is not a drop-in:** it mails a bot on the desktop, and a person approves it once
-([overlap audit](research/2026-11-25-orca-overlap.md), row 16). lane-control has not built it, and setup does not fall
-back to it by itself. **Pending, PR #68:** the testbed tried it without the desktop app and reports a gap (there was no
-bot to send to). Its verdict is "fallback only": it needs the desktop app open, a bot you made and an approval, and it
-gives the box mail rather than the lane. Also pending (PAIN-1, lc-bmk, after PR #71): making the share-link step as
-painless as possible.
+link step cannot be done. **It is not a drop-in:** it needs direction 1 in place and the desktop connected, it mails a
+bot on the desktop, and a person approves it once. It reaches a bot, not a lane, so it can ask the desktop for work
+but cannot start a supervised lane there ([pairing research](research/2026-11-25-orca-pairing.md), section 6; not run
+there). lane-control has not built it, and setup does not fall back to it by itself. **Pending, PR #68:** the testbed
+tried it without the desktop app and reports a gap (there was no bot to send to). Its verdict is "fallback only": it
+needs the desktop app open, a bot you made and an approval, and it gives the box mail rather than the lane. Also
+pending (PAIN-1, lc-bmk): making the share-link step as painless as possible.
 
-**The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; make sure ssh can log in
-without asking anything (for a smartcard or agent key, `lane-tunnel` has extra options; `orca-tunnel-<host>` has
-none); sign the agents in on the box; sign `gh` in there and let git use it, for beads; answer setup's
-yes/no questions. Removing: `project-setup --remove-host <host>` undoes direction 2 only, prints how to drop direction
-1, and you revoke the link.
+**The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; run `project-setup
+--check <repo> <host>`; make sure ssh can log in without asking anything (for a smartcard or agent key, `lane-tunnel`
+has extra options; `orca-tunnel-<host>` has none); sign the agents in on the box; sign `gh` in there and let git use
+it, for beads; answer setup's yes/no questions. Removing: `project-setup --remove-host <host>` undoes direction 2
+only, prints how to drop direction 1, and you revoke the link.
 
 **Is `lane-tunnel` still needed?** This is about how direction 2 is carried; direction 2 itself stays. The tunnel is
 not needed when the box can reach the desktop directly (same LAN or Tailscale) **and** you accept the desktop's Orca
@@ -200,7 +202,8 @@ Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you
 - Pending, PR #68: a container testbed, `tests/testbed/README.md`. Its own coverage table reports both directions
   passing on headless Orca, and the no-tunnel route passing with `orca serve`, which then listens on every interface.
   It does not cover the desktop app or its share link.
-- Pending, PR #71: `docs/research/2026-11-25-orca-pairing.md`: why the share link stays a hand step.
+- Why the share link stays your step: `orca pair` would make the desktop listen on every interface
+  ([pairing research](research/2026-11-25-orca-pairing.md), read from Orca's source).
 - A lane's report across the two machines is poll-only: nothing proves it wakes the coordinator that started it.
 
 More: [native Orca on an SSH host](../orchestrators/native-orca/remote.md).
