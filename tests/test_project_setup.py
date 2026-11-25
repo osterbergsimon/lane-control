@@ -57,6 +57,8 @@ class Env:
             p.chmod(0o755)
         self.log = self.home / "stub.log"
         self.state = self.home / "stub.json"
+        # for a stub started with a minimal environment (an OpenCode onboarding run): tests/stubs/fake_agent.py
+        (self.bin / "stub-env.json").write_text(json.dumps({"STUB_LOG": str(self.log), "STUB_STATE": str(self.state)}))
         # gh: prints $STUB_GH (e.g. PRIVATE); fails when it is unset, like a machine with no login or network.
         # direnv: $STUB_DIRENV allowed | notallowed | allowfail (status says allowed, `allow` fails) | fail.
         for name, body in (("gh", 'echo "$@" >> "$STUB_LOG.gh"\n[ -n "$STUB_GH" ] || exit 1\necho "$STUB_GH"\n'),
@@ -2122,7 +2124,10 @@ class OnboardingTests(unittest.TestCase):
         # an OpenCode adapter's files come back from its copy only at its template paths (copy_back)
         self.e.script_agents(**{"x/y": [{"write": {".lane-control/project.md": "facts\n"}}], "opus": [PASS]})
         (self.e.bin / "opencode2").symlink_to(FAKE_AGENT)
-        r = self.e.run(str(self.repo), "--adapter", "opencode/x/y", adapt=True)
+        conf = self.e.home / ".config" / "opencode" / "opencode.json"  # the owner's provider block, key by name
+        conf.parent.mkdir(parents=True)
+        conf.write_text(json.dumps({"provider": {"x": {"options": {"apiKey": "{env:X_KEY}"}}}}))
+        r = self.e.run(str(self.repo), "--adapter", "opencode/x/y", adapt=True, env_extra={"X_KEY": "k"})
         self.assertEqual(r.returncode, 3, r.stderr)  # no terminal for the yes: stopped before the commit
         self.assertNotIn("claude/<model>", r.stderr)
         self.assertEqual([(a["tool"], a["model"]) for a in self.e.agent_runs()], [("opencode2", "x/y"), ("claude", "opus")])

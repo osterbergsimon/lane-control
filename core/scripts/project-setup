@@ -1860,17 +1860,7 @@ def opencode_export(repo: Path):
     remote, no hooks) first: OpenCode takes the nearest git work tree as the project, so a copy under a TMPDIR inside
     some other repo (a HOME kept in git) would otherwise give the agent all of that repo. A TMPDIR inside this repo is
     refused. Yields (folder, its state); removed after."""
-    import tempfile
-    saved, tempfile.tempdir = tempfile.tempdir, None  # TMPDIR as it is now, not as this process first saw it
-    try:
-        base = tempfile.gettempdir()
-    finally:
-        tempfile.tempdir = saved
-    top = Path(tempfile.mkdtemp(prefix="lane-onboard-", dir=base))
-    if top.resolve().is_relative_to(repo.resolve()):
-        top.rmdir()
-        raise Fail(f"the temporary folder ({top.parent}, TMPDIR) is inside the repo, where an OpenCode onboarding "
-                   "agent's copy of the project must not be: set TMPDIR to a folder outside it and run again")
+    top = scratch_dir(repo, "lane-onboard-")
     try:
         run(["git", "init", "-q", "--template=", str(top)], cwd=top)
         for n, src in export_files(repo).items():
@@ -1913,33 +1903,45 @@ def copy_back(repo: Path, top: Path, before: dict, write: bool) -> None:
                 raise Fail(f"{n}: {here.relative_to(repo)} in the repo is a link or not a "
                            f"{'file' if here == repo / n else 'folder'}, so the OpenCode adapter's files were not copied "
                            "back. Nothing was committed")
-        if n not in before and (repo / n).exists():  # in the repo but not in the copy: ignored or private
+        if n not in before and (repo / n).exists() and (repo / n) not in RENDERED:  # ignored or private; a rendered
+            # persona is the exception: what the agent wrote there is its additions (move_role_files moves it)
             raise Fail(f"{n} is in the repo but was left out of the OpenCode adapter's copy (ignored or private), so "
                        "its file was not copied over it, nor any other. Nothing was committed")
-    for n in changed:
-        dest = repo / n
-        dest.parent.mkdir(parents=True, exist_ok=True)  # .lane-control/ or its additions/ only (adapter_names)
-        tmp = dest.with_name(f".{dest.name}.lane-control-{os.getpid()}")
-        shutil.copyfile(top / n, tmp)
-        tmp.replace(dest)
+    temps = []
+    try:  # every file written beside its place first, then all put in place; on an error none is left behind
+        for n in changed:
+            dest = repo / n
+            dest.parent.mkdir(parents=True, exist_ok=True)  # .lane-control/ or its additions/ only (adapter_names)
+            tmp = dest.with_name(f".{dest.name}.lane-control-{os.getpid()}")
+            temps.append((tmp, dest))
+            shutil.copyfile(top / n, tmp)
+        for tmp, dest in temps:
+            tmp.replace(dest)
+    except OSError as e:
+        for tmp, _ in temps:
+            tmp.unlink(missing_ok=True)
+        raise Fail(f"the OpenCode adapter's files could not be copied back ({e.strerror or e}: "
+                   f"{getattr(e, 'filename', '') or ''}). Nothing was committed; check {ADAPTED}/ with git status")
+
+
+GIT_NAMES = {".git", "head", "commondir", "gitdir", "objects", "refs"}  # any case; no template is named so
 
 
 def refuse_git_metadata(repo: Path) -> None:
     """Stop when anything under .lane-control/ could pass for a repo: a .git (folder or file, any case, any depth) or a
-    folder laid out as a bare one (HEAD with objects/ or refs/). A git command run in there would read its config,
-    and so run whatever command it names (core.fsmonitor, hooks). Checked before and after every onboarding agent, on
-    both harnesses, before any git command can go in."""
+    folder laid out as a bare one or a worktree's: any HEAD, commondir, gitdir, objects or refs, any case. A git
+    command run in there would read its config, and so run whatever command it names (core.fsmonitor, hooks).
+    Checked before and after every onboarding agent, on both harnesses, before any git command can go in."""
     top = repo / ADAPTED
     if not top.is_dir() or top.is_symlink():
         return
     for here, dirs, files in os.walk(top):
-        names = {n.lower() for n in dirs + files}
-        bare = "head" in names and ({"objects", "refs"} & names)
-        if ".git" in names or bare:
+        hit = sorted(n for n in dirs + files if n.lower() in GIT_NAMES)
+        if hit:
             where = Path(here).relative_to(repo).as_posix()
-            raise Fail(f"{where} holds {'a .git' if '.git' in names else 'what git takes for a bare repo'}, which an "
-                       "onboarding agent must never write: a git command in there could run a command it names. "
-                       f"Nothing was committed; remove it by hand (rm -rf {where}/.git, or the folder) and run again")
+            raise Fail(f"{where}/{hit[0]} is git's own name ({', '.join(sorted(GIT_NAMES))} under {ADAPTED}/ make or "
+                       "point to a repo), which an onboarding agent must never write: a git command in there could run a "
+                       f"command its config names. Nothing was committed; remove {where}/{hit[0]} by hand and run again")
 
 
 def git_z(repo: Path, *args) -> list:
@@ -1976,78 +1978,129 @@ def check_limit() -> None:
                         "(the time counts again from zero; --readapt starts the adapting over)")
 
 
-ENV_LIMIT = 120000  # bytes of OpenCode's config in its environment (no memfd): one string may hold at most 128 KiB
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+KEEP_ENV = re.compile(r"PATH|LANG|LC_\w+|TZ|SSL_CERT_FILE|SSL_CERT_DIR|NIX_SSL_CERT_FILE|NODE_EXTRA_CA_CERTS|"
+                      r"(?i:https?_proxy|no_proxy|all_proxy)")  # what an OpenCode run gets from this environment
 
 
 def opencode_rules(write: bool) -> list:
     """OpenCode's permissions for one onboarding run, a second layer behind its scratch copy (opencode_export), which
-    holds nothing private: every tool off, then read on, and edit only under .lane-control/ for the adapting agent.
-    Shell, web, grep, glob, sub-agents and anything outside the copy stay off (grep and glob have rules that match
-    the pattern searched for, never a folder, so they could not be kept in it)."""
+    holds nothing private: every tool off, then read on, and edit on the adapter's own paths (adapter_names) only,
+    for the adapting agent. Shell, web, grep, glob, sub-agents and anything outside the copy stay off (grep and glob
+    have rules that match the pattern searched for, never a folder, so they could not be kept in it)."""
     rules = [("*", "*", "deny"), ("read", "*", "allow")]
-    if write:  # then no .git and no dot-name in it (copy_back refuses them too)
-        rules += [("edit", f"{ADAPTED}/**", "allow")] + [("edit", f"{ADAPTED}/{x}", "deny") for x in (
-            ".git", ".git/**", "**/.git", "**/.git/**", ".*", "**/.*")]
+    if write:
+        rules += [("edit", n, "allow") for n in sorted(adapter_names())]
     return [{"action": a, "resource": r, "effect": e} for a, r, e in rules]
 
 
-@contextlib.contextmanager
-def opencode_agent(model: str, write: bool, memfd: bool = True):
-    """A plain headless OpenCode run, `opencode2 run`, as agent_cmd is for Claude: yields (argv, environment, route).
+def opencode_provider(model: str) -> tuple:
+    """(provider id, its block for the run's config, the NAME of its key variable) for `<provider>/<model>`, from the
+    owner's own OpenCode config (OPENCODE_CONFIG_CONTENT, else the file OPENCODE_CONFIG names, else
+    ~/.config/opencode/opencode.json[c]), never its auth store. Only what reaching the gateway needs is kept (npm,
+    name, models, options.baseURL, options.apiKey), and the key only as the reference `{env:NAME}`: a key written in
+    the config, or none at all (OpenCode would take it from its auth store, which is never read here), stops the run
+    with one line."""
+    TS = _tiersuggest()
+    provider = model.split("/", 1)[0]
+    entry, where = None, ""
+    content = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    sources = ([("OPENCODE_CONFIG_CONTENT", content)] if content else []) + [
+        (str(f), f) for f in TS.opencode_config_paths(os.environ)]
+    for name, src in sources:
+        try:
+            conf = json.loads(TS.strip_jsonc(src if isinstance(src, str) else src.read_text()))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            raise Fail(f"cannot read OpenCode's config {name}: {e}")
+        found = ((conf.get("provider") or {}) if isinstance(conf, dict) else {}).get(provider)
+        if isinstance(found, dict):
+            entry, where = found, name
+            break
+    if entry is None:
+        raise Fail(f"OpenCode's config has no provider {provider!r} for the onboarding agent {model}: an OpenCode "
+                   "onboarding run gets only that provider's block from your config, with its key as "
+                   '"apiKey": "{env:NAME}". Add the block, or pass another --adapter/--adapt-reviewer. Nothing was '
+                   "committed")
+    opts = entry.get("options") if isinstance(entry.get("options"), dict) else {}
+    key = opts.get("apiKey")
+    ref = TS.ENV_REF.fullmatch(key) if isinstance(key, str) else None
+    if not ref:
+        raise Fail(f"{where}: provider {provider!r} has " + ("its apiKey written in the config" if key else "no apiKey")
+                   + ", and an OpenCode onboarding run takes the key only from an environment variable it names "
+                   '("apiKey": "{env:NAME}"); a key kept in OpenCode\'s auth store (opencode auth login) is never read '
+                   "by lane-control. Nothing was committed")
+    if not os.environ.get(ref.group(1)):
+        raise Fail(f"the key's environment variable {ref.group(1)} (provider {provider!r} in {where}) is not set "
+                   "here. Nothing was committed")
+    block = {k: entry[k] for k in ("npm", "name", "models") if k in entry}
+    block["options"] = {"apiKey": key, **({"baseURL": opts["baseURL"]} if isinstance(opts.get("baseURL"), str) else {})}
+    return provider, block, ref.group(1)
 
-    The prompt goes on stdin (an argument that starts with - would be read as a flag). --standalone runs a private
-    server started in the run's folder, so the config below reaches it. The run uses an agent of its own whose name
-    is new each run (lane-onboard-<random>), so no config of the owner's can name it in advance, and no agent of
-    theirs (or default_agent) applies; its rules come after the owner's and so win. Steps are MAX_TURNS plus
-    OpenCode's forced last answer. The config goes in by OPENCODE_CONFIG as a memfd (/proc/<this process>/fd/<n>):
-    in memory only, never a file, and the owner's own OPENCODE_CONFIG_CONTENT (which may hold the provider) is kept.
-    Where there is no memfd, the owner's environment sets OPENCODE_CONFIG already, or `memfd` is False, it goes by
-    OPENCODE_CONFIG_CONTENT instead. The project's own OpenCode config and plugins are not loaded
-    (OPENCODE_DISABLE_PROJECT_CONFIG): a plugin there is code. The owner's own config is, for the provider: the
-    gateway's URL and the variable its key is in. Nothing here carries a key. LANE_ROLE and LANE_PERSONA are dropped,
-    so a coordinator's persona and guard plugins stay out of it."""
-    name = f"lane-onboard-{secrets.token_hex(6)}"
-    conf = json.dumps({"agents": {name: {"mode": "primary", "model": model, "steps": MAX_TURNS[write] + 1,
-                                         "permissions": opencode_rules(write)}}})
-    env = {k: v for k, v in os.environ.items() if k not in ("LANE_ROLE", "LANE_PERSONA")}
-    env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
-    fd = None
-    if memfd and hasattr(os, "memfd_create") and "OPENCODE_CONFIG" not in env \
-            and Path(f"/proc/{os.getpid()}/fd").is_dir():
-        fd = os.memfd_create("lane-onboard-config")
-        os.write(fd, conf.encode())
-        env["OPENCODE_CONFIG"] = f"/proc/{os.getpid()}/fd/{fd}"
-    elif len(conf) > ENV_LIMIT:
-        raise Fail("OpenCode's config is too big for its environment")
-    else:
-        env["OPENCODE_CONFIG_CONTENT"] = conf
+
+def scratch_dir(repo: Path, prefix: str) -> Path:
+    """A new mode-700 folder under TMPDIR (as it is now, not as this process first saw it), never inside the repo."""
+    import tempfile
+    saved, tempfile.tempdir = tempfile.tempdir, None
     try:
-        yield ([BINARIES["opencode"], "run", "--standalone", "--model", model, "--agent", name, "--format", "json"],
-               env, "memfd" if fd is not None else "environment")
+        base = tempfile.gettempdir()
     finally:
-        if fd is not None:
-            os.close(fd)
+        tempfile.tempdir = saved
+    top = Path(tempfile.mkdtemp(prefix=prefix, dir=base))
+    if top.resolve().is_relative_to(repo.resolve()):
+        top.rmdir()
+        raise Fail(f"the temporary folder ({top.parent}, TMPDIR) is inside the repo, where an OpenCode onboarding "
+                   "agent's copy of the project must not be: set TMPDIR to a folder outside it and run again")
+    return top
+
+
+@contextlib.contextmanager
+def opencode_agent(repo: Path, model: str, write: bool):
+    """A plain headless OpenCode run, `opencode2 run`, as agent_cmd is for Claude: yields (argv, environment).
+
+    OpenCode starts from nothing: HOME and the XDG folders are a scratch folder of their own (removed after), so no
+    config, plugin, agent, formatter, MCP server, auth or session of the owner's, nor the project's
+    (OPENCODE_DISABLE_PROJECT_CONFIG) nor Claude Code's (OPENCODE_DISABLE_CLAUDE_CODE), is loaded, and the session is
+    kept in that folder, not the owner's store. Its one config file holds only the adapter's provider block
+    (opencode_provider: the key by its variable's name, never the key), formatter, lsp and MCP off, and the run's
+    agent, whose name is new each run (lane-onboard-<random>), with opencode_rules and steps MAX_TURNS plus OpenCode's
+    forced last answer. The environment is PATH, locale, TLS and proxy settings (KEEP_ENV) and the key's variable;
+    nothing else of this one (no LANE_ROLE, no OPENCODE_*). The prompt goes on stdin (an argument that starts with -
+    would be read as a flag); --standalone runs a private server started in the run's folder."""
+    provider, block, key_env = opencode_provider(model)
+    name = f"lane-onboard-{secrets.token_hex(6)}"
+    conf = {"provider": {provider: block}, "formatter": False, "lsp": False, "mcp": {}, "instructions": [],
+            "autoupdate": False, "share": "disabled",
+            "agents": {name: {"mode": "primary", "model": model, "steps": MAX_TURNS[write] + 1,
+                              "permissions": opencode_rules(write)}}}
+    home = scratch_dir(repo, "lane-onboard-home-")
+    try:
+        env = {k: v for k, v in os.environ.items() if KEEP_ENV.fullmatch(k)}
+        env[key_env] = os.environ[key_env]
+        for var, sub in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
+                         ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")):
+            (home / sub).mkdir()
+            env[var] = str(home / sub)
+        (home / "config" / "opencode").mkdir()
+        (home / "config" / "opencode" / "opencode.json").write_text(json.dumps(conf))
+        env.update(OPENCODE_DISABLE_PROJECT_CONFIG="1", OPENCODE_DISABLE_CLAUDE_CODE="1",
+                   OPENCODE_DISABLE_AUTOUPDATE="1")
+        yield ([BINARIES["opencode"], "run", "--standalone", "--model", model, "--agent", name, "--format", "json"],
+               env)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def run_opencode(repo: Path, model: str, prompt: str, write: bool):
-    """One OpenCode onboarding run in a scratch copy of the repo (opencode_export), then copy_back. Where OpenCode could
-    not read the memfd (a sandbox or container around opencode2: it then says the agent is not found, before any model
-    request), it runs once more with the config in its environment, when the owner's environment holds none of its
-    own; else it stops and says so."""
+    """One OpenCode onboarding run in a scratch copy of the repo (opencode_export), then copy_back, only after a run
+    that succeeded: a failed, empty or cut-off run brings nothing back (run_agent says why)."""
     with opencode_export(repo) as (top, before):
-        for memfd in (True, False):
-            with opencode_agent(model, write, memfd) as (cmd, env, route):
-                p = run(cmd, cwd=top, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
-            said = opencode_result(p.stdout)[2] + "\n" + ANSI.sub("", p.stderr)  # never the transcript's tool text
-            lost = route == "memfd" and p.returncode != 0 and "Agent not found" in said
-            if not lost:
-                break
-            if "OPENCODE_CONFIG_CONTENT" in os.environ:
-                raise Fail("opencode2 could not read its config from project-setup's memfd (/proc/<pid>/fd/<n>; a "
-                           "sandbox or container around opencode2?), and the environment's own OPENCODE_CONFIG_CONTENT "
-                           "leaves no other route. Run project-setup where opencode2 runs. Nothing was committed")
-        copy_back(repo, top, before, write)
+        with opencode_agent(repo, model, write) as (cmd, env):
+            p = run(cmd, cwd=top, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
+        out, steps, error = opencode_result(p.stdout)
+        if p.returncode == 0 and not error and (out.strip() or steps) and steps < MAX_TURNS[write]:
+            copy_back(repo, top, before, write)
     return p
 
 
@@ -2102,8 +2155,9 @@ def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
         shown = (stderr or p.stdout.strip()).splitlines()
     if failed or out_of_turns:
         # the adapter may have left half-written files; a plain re-run would review them as if they were complete
-        left = (f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or remove {ADAPTED}/"
-                if write else "")
+        left = ((" Nothing it wrote was copied back." if opencode else
+                 f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or put {ADAPTED}/ back as "
+                 f"committed (`git status {ADAPTED}` shows what changed)") if write else "")
         if out_of_turns:
             raise Fail(f"the {'adapting agent' if write else 'reviewer'} used all {MAX_TURNS[write]} turns and was "
                        f"stopped before it finished. Nothing was committed and no Orca step ran.{left}")
@@ -2239,7 +2293,7 @@ def review_prompt(repo: Path, project: str, earlier: str = "", visibility: str =
     The first review is the full audit; with `earlier` (the findings the last fix answered) it only checks those."""
     changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
     files = "\n".join(f"- {p} ({m})" for p, m in changes)
-    tracked = [p for p, m in changes if m != "added"]
+    tracked = [p for p, m in changes if m != "added" and not export_private(p)]  # a private one is named, never shown
     diff = run(["git", "diff", "HEAD", "--", *tracked], cwd=repo, check=False).stdout if tracked else ""
     diff = clip(diff, DIFF_LIMIT)
     head = (fill("check-prompt.md", project, clip(earlier, FINDINGS_LIMIT), visibility) if earlier
@@ -2369,11 +2423,20 @@ def coordinator_kickoff() -> str:
             + fence + "\n" + LEFTOVER.replace(fence, "") + "\n" + fence)
 
 
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def plain(text: str) -> str:
+    """Model text as it may be printed: no control character (an escape sequence could rewrite the file list above the
+    owner's question, or reach the clipboard), tabs and newlines kept."""
+    return CONTROL.sub("", text)
+
+
 def show_suggestions(repo: Path):
     f = kept_suggestions(repo)
     if f.is_file() and f.read_text(errors="replace").strip():
         print("\nSuggested AGENTS.md edits (not applied, not committed):")
-        for line in f.read_text(errors="replace").strip().splitlines():
+        for line in plain(f.read_text(errors="replace")).strip().splitlines():
             print(f"  {line}")
 
 
@@ -2383,7 +2446,7 @@ def show_changes(repo: Path, changes: list, notes: list = ()):
         print(f"  {mark}: {p}")
     show_suggestions(repo)
     for note in notes:
-        print(f"\n{note}")
+        print(f"\n{plain(note)}")
     print(flush=True)
 
 
@@ -2843,7 +2906,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     write_section(repo)
     unresolved, notes = review_with_fixes(repo, project, adapter, reviewer, before, visibility)
     if unresolved is not None:
-        print(f"\n{unresolved}\n")
+        print(f"\n{plain(unresolved)}\n")
         say("adapt", "stopped", f"nothing committed, no Orca setup. Owner: fix {ADAPTED}/ and run again, or remove it")
         return False
     notes += ask_and_apply_answers(repo, project, adapter, before)
@@ -2970,7 +3033,7 @@ def bad_glob(g) -> bool:
     """A --private glob project-setup will not take; POSIX classes too, which an OpenCode run's matcher (private_glob)
     cannot carry: write the range ([0-9])."""
     return not isinstance(g, str) or not g or g.startswith(("/", "~", "!")) or ".." in Path(g).parts \
-        or bool(RULE_UNSAFE & set(g) - set("*?[]")) or "[[:" in g \
+        or bool(RULE_UNSAFE & set(g) - set("*?[]")) or "[:" in g \
         or bool({"", "."} & set(g.rstrip("/").split("/")))  # ./x, a//b, a/./b: no matcher reads them alike
 
 

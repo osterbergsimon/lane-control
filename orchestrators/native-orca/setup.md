@@ -115,45 +115,54 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    a run on a default says so; only a harness a role uses must be on PATH, so a box without Claude needs no `claude`).
    Each runs `opencode2 run --standalone --model <provider>/<model> --agent lane-onboard-<random> --format json`, the
    prompt on stdin, with the same prompts, checks and review round as Claude, but in a scratch copy of the project
-   (`opencode_export`, mode 700, removed after the run), not in the repo. The copy is made its own empty git repo (no
-   history, remote or hooks) before anything goes in, since OpenCode takes the nearest git work tree as the project: a
-   copy under a TMPDIR inside some other repo (a HOME kept in git) would otherwise give the agent all of that repo (seen
-   live). A TMPDIR inside the project's repo is refused. Deny rules alone did not hold on OpenCode: it matches the path
-   it is asked for, never what a symlink leads to; its wildcard is not git's; and it attaches an `AGENTS.md` by itself,
-   past every read rule, when it reads in or lists that folder (each seen live). So the copy holds only what the agents
-   may see: the tracked files (git's index, read from the repo's root, checked-out submodules included, with what is on
-   disk now) and onboarding's own new files (`.lane-control/`, `AGENTS.lane-control.md`), minus `.env*` files, a tracked
-   file a `.gitignore` line matches, and everything a `--private` glob covers. The globs are matched by project-setup
-   with fnmatch from the repo root, as ignore lines are (a name alone covers a folder and all below it, `dir/`, each
-   `**/` as a folder or none, `[^...]`), never by git, so no `.gitignore` negation, leading `#` or working folder
-   changes them; they err towards covering more (a test checks each form against git's own matching); a POSIX class
-   (`[[:digit:]]`) and a `./`, `//` or `/./` spelling are refused, on both harnesses, with the way to write it. A glob
-   may not cover the adapter's files, `AGENTS.lane-control.md`, `AGENTS.md` or the file it links to: a review that
-   cannot see them proves nothing, and the reviewer's prompt holds AGENTS.md's diff. The copy has no `.git`, no ignored
-   file and no symlink: a link to a file that is itself in the copy comes as that file's content (`AGENTS.md ->
-   CLAUDE.md`), every other link is left out, and so is a file below a folder that has become a link. Untracked files,
-   untracked embedded repos and anything ignored are not in it; a repo committed as a gitlink is copied like a
+   (`opencode_export`, mode 700, removed after the run), not in the repo, and with OpenCode starting from nothing
+   (`opencode_agent`): HOME and the XDG folders are a scratch folder of the run's own, so no config, plugin, agent,
+   formatter, LSP, MCP server, auth or session of yours is loaded (an owner formatter made OpenCode run JavaScript from
+   the copy after a write: seen live), and the session stays in that folder. Its one config file holds only the
+   adapter's provider block, copied from your config (`OPENCODE_CONFIG_CONTENT`, the file `OPENCODE_CONFIG` names, or
+   `~/.config/opencode/opencode.json`): npm, name, models, `baseURL` and the key as `"apiKey": "{env:NAME}"`, never the
+   key itself; formatter, LSP and MCP off; and the run's agent and rules. A provider with no such block, a key written
+   in the config, or none (OpenCode would take it from its auth store, which lane-control never reads) stops the run
+   with one line: add `"apiKey": "{env:NAME}"` and set NAME. The run's environment is PATH, locale, TLS and proxy
+   settings and that one variable, nothing else of yours. The copy is made its own empty git repo (no history, remote or
+   hooks) before anything goes in, since OpenCode takes the nearest git work tree as the project: a copy under a TMPDIR
+   inside some other repo (a HOME kept in git) would otherwise give the agent all of that repo (seen live). A TMPDIR
+   inside the project's repo is refused. Deny rules alone did not hold on OpenCode: it matches the path it is asked for,
+   never what a symlink leads to; its wildcard is not git's; and it attaches an `AGENTS.md` by itself, past every read
+   rule, when it reads in or lists that folder (each seen live). So the copy holds only what the agents may see: the
+   tracked files (git's index, read from the repo's root, checked-out submodules included, with what is on disk now) and
+   onboarding's own new files (`.lane-control/`, `AGENTS.lane-control.md`), minus `.env*` files, a tracked file a
+   `.gitignore` line matches, and everything a `--private` glob covers. The globs are matched by project-setup with
+   fnmatch from the repo root, as ignore lines are (a name alone covers a folder and all below it, `dir/`, each `**/` as
+   a folder or none, `[^...]`), never by git, so no `.gitignore` negation, leading `#` or working folder changes them;
+   they err towards covering more (a test checks each form against git's own matching); a POSIX class (`[:` anywhere:
+   `[[:digit:]]`, `[![:alpha:]]`) and a `./`, `//` or `/./` spelling are refused, on both harnesses, with the way to
+   write it. A glob may not cover the adapter's files, `AGENTS.lane-control.md`, `AGENTS.md` or the file it links to: a
+   review that cannot see them proves nothing, and the reviewer's prompt holds AGENTS.md's diff. The copy has no `.git`,
+   no ignored file and no symlink: a link to a file that is itself in the copy comes as that file's content (`AGENTS.md
+   -> CLAUDE.md`), every other link is left out, and so is a file below a folder that has become a link. Untracked
+   files, untracked embedded repos and anything ignored are not in it; a repo committed as a gitlink is copied like a
    submodule, its tracked files only, also with no `.gitmodules` entry (mark it `--private` if it should stay out).
-   After the run only new or changed plain files at the adapter's own paths, each template as `.lane-control/<its name>`
-   or `.lane-control/additions/<its name>` and `.lane-control/SUGGESTIONS.md`, and only from the adapter, are copied
-   back; anything else that changed (a file elsewhere, a dot-name or `.git`, a folder of its own, a deletion, a link, a
-   link or a folder in the repo where a file goes, a file in the repo the copy left out (ignored or private) that it
-   would replace, any write by the reviewer) stops the run with one line, checked before anything is written, and
-   nothing is copied or made. On both harnesses, a `.git` (any case, folder or file) or a bare-repo layout under
-   `.lane-control/` stops the run before and after each agent, before any git command can go in: git would run a command
-   its config names. A second layer, the run's rules: every tool off, then read on, edit only under `.lane-control/`,
-   never a `.git` or a dot-name there, and only for the adapter, so no shell, web, grep, glob, sub-agent or path outside
-   the copy. They go in by `OPENCODE_CONFIG` as a memfd of project-setup's (`/proc/<pid>/fd/<n>`: in memory, never a
-   file; `OPENCODE_CONFIG_CONTENT` where there is no memfd or the owner's environment sets `OPENCODE_CONFIG`; where
-   OpenCode cannot read the memfd, a sandbox or a container around it, it runs once more with `OPENCODE_CONFIG_CONTENT`,
-   or says why when the owner's environment holds one), for an agent whose name is new each run, so no config of the
-   owner's can name it and its rules come after the owner's. The project's own OpenCode config and plugins are not
-   loaded (`OPENCODE_DISABLE_PROJECT_CONFIG=1`); the session is kept in OpenCode's own store (it has no switch to keep
-   none); the owner's MCP servers start, with their tools off by the first rule. A run that uses all its steps (80 for
-   the adapter, 60 for the reviewer) fails as a Claude run out of turns does, and so does one that exits 0 with no
-   answer and no tool call. `--refresh` runs no agent and needs no Claude either. The opt-in live check (real opencode2,
-   a fake model on 127.0.0.1, every request searched for a marker in each private file): `LANE_LIVE_OPENCODE=1 python3
-   -m unittest discover -s tests -p test_project_setup_native.py -k OpenCodeOnboardingLiveTests`.
+   After a run that succeeded (a failed, empty or cut-off one brings nothing back) only new or changed plain files at
+   the adapter's own paths, each template as `.lane-control/<its name>` or `.lane-control/additions/<its name>` and
+   `.lane-control/SUGGESTIONS.md`, and only from the adapter, are copied back; anything else that changed (a file
+   elsewhere, a dot-name or `.git`, a folder of its own, a deletion, a link, a link or a folder in the repo where a file
+   goes, a file in the repo the copy left out (ignored or private) that it would replace, any write by the reviewer)
+   stops the run with one line, checked before anything is written, and nothing is copied or made; the files go beside
+   their places first and are all put in place at the end, so an error leaves none (a role file over a rendered persona
+   on native Orca becomes that role's additions, as on Claude). On both harnesses, any of git's own names under
+   `.lane-control/` (`.git`, `HEAD`, `commondir`, `gitdir`, `objects`, `refs`, any case, folder or file) stops the run
+   before and after each agent, before any git command can go in: git would run a command its config names. A second
+   layer, the run's rules: every tool off, then read on, and edit only on the adapter's exact paths above, only for the
+   adapter, so no shell, web, grep, glob, sub-agent or path outside the copy, for an agent whose name is new each run.
+   The project's own OpenCode config and plugins are not loaded (`OPENCODE_DISABLE_PROJECT_CONFIG=1`), nor Claude Code's
+   (`OPENCODE_DISABLE_CLAUDE_CODE=1`). A run that uses all its steps (80 for the adapter, 60 for the reviewer) fails as
+   a Claude run out of turns does, and so does one that exits 0 with no answer and no tool call. `--refresh` runs no
+   agent and needs no Claude either. The opt-in live check (real opencode2, a fake model on 127.0.0.1, every request
+   searched for a marker in each private file; the owner's config there turns formatters, LSP, an MCP server, a plugin
+   and instructions on, and the copy has prettier and a prettier config that would leave a marker):
+   `LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p test_project_setup_native.py -k
+   OpenCodeOnboardingLiveTests`.
 
 The URL, the key's variable and the model names stay in OpenCode's config and the project's settings store: no key,
 host or gateway URL in any repo.

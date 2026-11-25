@@ -17,6 +17,11 @@ from pathlib import Path
 
 tool = Path(sys.argv[0]).name
 args = sys.argv[1:]
+# an OpenCode onboarding run gets a minimal environment: the stub's own settings are also beside its link
+side = Path(sys.argv[0]).parent / "stub-env.json"
+given_env = sorted(os.environ)  # as the caller started it
+if "STUB_STATE" not in os.environ and side.is_file():
+    os.environ.update({k: v for k, v in json.loads(side.read_text()).items() if k not in os.environ})
 opencode = tool in ("opencode", "opencode2")
 model = args[args.index("--model") + 1]
 state_path = Path(os.environ["STUB_STATE"])
@@ -34,8 +39,14 @@ if opencode:
                                                  "OPENCODE_DISABLE_PROJECT_CONFIG", "LANE_ROLE", "LANE_PERSONA",
                                                  "LITELLM_API_KEY")}
     # the config as OpenCode reads it: the file OPENCODE_CONFIG names (project-setup's memfd), else the variable
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", "/nonexistent")) / "opencode" / "opencode.json"
     row["config"] = (Path(os.environ["OPENCODE_CONFIG"]).read_text() if os.environ.get("OPENCODE_CONFIG")
-                     else os.environ.get("OPENCODE_CONFIG_CONTENT"))
+                     else os.environ.get("OPENCODE_CONFIG_CONTENT") or (xdg.read_text() if xdg.is_file() else None))
+    row["env_keys"] = given_env
+    row["dirs"] = {k: os.environ.get(k) for k in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+                                                  "XDG_CACHE_HOME")}
+    row["config_dir"] = sorted(str(f.relative_to(xdg.parent.parent)) for f in xdg.parent.parent.rglob("*")
+                               if f.is_file()) if xdg.is_file() else []
     # what the run can see: every path in its folder (project-setup's scratch copy), links marked
     files = []
     for h, ds, fs in os.walk("."):
