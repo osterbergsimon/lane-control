@@ -880,6 +880,126 @@ class ReviewRound1Tests(Case):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
 
 
+class CheckTests(Case):
+    """PAIR-1 (lc-lxd): project-setup --check <repo> <host> lists every prerequisite and changes nothing; a set-up run
+    says what pairing each direction has, and the steps for the desktop's link, before any box work."""
+
+    def setUp(self):
+        super().setUp()
+        self.e.env["LANE_DESKTOP_ORCA_PORT"] = str(free_port())  # nothing listens there: loopback only
+
+    def snapshot(self):
+        return sorted(str(p.relative_to(self.e.home)) for p in self.e.home.rglob("*")
+                      if not p.name.startswith("stub."))  # the stub Orca's own state and logs
+
+    def check(self, *args, env_extra=None):
+        return subprocess.run([sys.executable, str(SETUP), "--check", str(self.repo), "box", *args],
+                              env={**self.e.env, **(env_extra or {})}, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL)
+
+    def test_a_fresh_box_lists_what_is_missing_and_nothing_changes(self):
+        before = self.snapshot()
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stderr + r.stdout)
+        for line in ("check orca here: ok", "check desktop listener: ok", "check ssh: ok", "check direction 1: to do",
+                     "check direction 2: missing", "check systemd here: ok", "check tunnel: to do",
+                     "check agent on box: ok", "check lane-control on box: to do", "nothing was changed"):
+            self.assertIn(line, r.stdout)
+        self.assertIn('Settings > Servers > "Share this computer"', r.stdout)  # the owner's steps, in the line itself
+        self.assertIn("127.0.0.1", r.stdout)
+        self.assertEqual(self.snapshot(), before)  # no copy, no record, no unit, no env file, here or on the box
+        self.assertEqual(self.e.jlines(".install"), [])
+        self.assertEqual(self.e.lines(".systemctl"), ["--user show-environment"])
+        self.assertFalse(any("tar" in c[-1] or "--box-pairing" in c[-1] for c in self.e.jlines(".ssh")))
+
+    def test_a_paired_box_has_nothing_missing(self):
+        self.e.saved("box")
+        link, _, _ = make_link(free_port())
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=link)
+        self.assertEqual(rc, 0, out)
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        for line in ("check direction 1: ok", "check direction 2: ok", "check tunnel: ok", "check lane-control on box: ok",
+                     "check: ok"):
+            self.assertIn(line, r.stdout)
+        self.assertEqual(len([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x]), 1)  # no new link
+
+    def test_versions_on_both_sides_are_compared(self):
+        self.e.saved("box")
+        st = self.e.stub_state()
+        st["app_version"] = "1.4.274"
+        self.e.state.write_text(json.dumps(st))
+        (self.e.box / "stub.json").write_text(json.dumps({**self.e.box_state(), "app_version": "1.4.268"}))
+        r = self.check()
+        self.assertIn("check versions: warn (here 1.4.274, box 1.4.268", r.stdout)
+        (self.e.box / "stub.json").write_text(json.dumps({**self.e.box_state(), "app_version": "1.4.274"}))
+        self.assertIn("check versions: ok (here 1.4.274, box 1.4.274)", self.check().stdout)
+
+    def test_an_unreachable_box_says_ssh_and_how(self):
+        r = self.check(env_extra={"STUB_SSH_DOWN": "1"})
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check ssh: missing", r.stdout)
+        self.assertIn("ssh box` once by hand", r.stdout)
+
+    def test_a_missing_agent_and_a_saved_but_silent_server_are_named(self):
+        self.e.saved("box")
+        st = self.e.stub_state()
+        st["environments"][0]["reachable"] = False
+        self.e.state.write_text(json.dumps(st))
+        (self.e.bin / "opencode2").unlink()  # the box's PATH is the test's: no OpenCode there now
+        r = self.check("--coordinator", "opencode/gw/chat")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check direction 1: missing", r.stdout)
+        self.assertIn("orca-tunnel-box.service", r.stdout)
+        self.assertIn("check agent on box: missing (opencode2", r.stdout)
+
+    def test_the_gateway_key_is_named_never_its_value(self):
+        cfg = self.e.box / ".config" / "opencode"
+        cfg.mkdir(parents=True)
+        (cfg / "opencode.json").write_text(json.dumps({"provider": {"gw": {"options": {"apiKey": "{env:GW_TEST_KEY}"}}}}))
+        r = self.check("--coordinator", "opencode/gw/chat", env_extra={"GW_TEST_KEY": "sk-not-for-output-123"})
+        self.assertIn("check gateway key: ok (GW_TEST_KEY is set", r.stdout)
+        self.assertNotIn("sk-not-for-output-123", r.stdout + r.stderr)
+        env = {k: v for k, v in self.e.env.items() if k != "GW_TEST_KEY"}
+        r = subprocess.run([sys.executable, str(SETUP), "--check", str(self.repo), "box", "--coordinator",
+                            "opencode/gw/chat"], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertIn("check gateway key: warn (GW_TEST_KEY", r.stdout)
+
+    def test_a_desktop_listening_beyond_loopback_is_a_warning(self):
+        import socket
+        with socket.socket() as s:
+            s.bind(("0.0.0.0", 0))
+            s.listen()
+            r = self.check(env_extra={"LANE_DESKTOP_ORCA_PORT": str(s.getsockname()[1])})
+        self.assertIn("check desktop listener: warn", r.stdout)
+        self.assertIn("A 127.0.0.1 link does not change it", r.stdout)
+
+    def test_check_needs_a_host(self):
+        r = subprocess.run([sys.executable, str(SETUP), "--check", str(self.repo)], env=self.e.env,
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("--check takes a repo and a host", r.stderr)
+
+    def test_the_steps_for_the_link_come_before_any_box_work(self):
+        self.e.saved("box")
+        link, _, _ = make_link(free_port())
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", answer=link)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("pairing: direction 1 saved", out)
+        steps = out.index("Before setup asks")
+        self.assertLess(steps, out.index("lane-control: copied"))
+        for s in ('Settings > Servers > "Share this computer"', "127.0.0.1", "hidden prompt", "ssh's stdin",
+                  "orca pair"):
+            self.assertIn(s, out[steps:steps + 1200])
+
+    def test_a_fresh_host_run_says_direction_one_is_to_do_and_without_a_terminal_asks_nothing(self):
+        r = self.e.setup(str(self.repo), "box", "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("pairing: direction 1 to do", r.stdout)
+        self.assertIn("pairing: direction 2 skipped", r.stdout)
+        self.assertNotIn("Before setup asks", r.stdout)
+
+
 class LoopbackTests(unittest.TestCase):
     def test_only_a_non_loopback_listener_counts_as_exposed(self):
         # m6 / n1: what the box checks after the tunnel is up (Linux /proc/net/tcp*).
@@ -1508,6 +1628,23 @@ class DocTests(unittest.TestCase):
                   "tunnel_remote_port", "refuses", "every interface (0.0.0.0)", "firewall", "not run here"):
             self.assertIn(s, text, s)  # review M1: a network link widens the desktop to every interface
         self.assertNotIn("listening on that address", text)
+
+    def test_the_docs_put_the_check_first_and_keep_the_link_a_hand_step(self):
+        # PAIR-1 (lc-lxd): orca pair widens the desktop, so the 127.0.0.1 link stays the owner's, and --check comes first
+        remote = " ".join(REMOTE_DOC.read_text().split())
+        for s in ("## Check first", "project-setup --check <repo> <host>", "changes nothing", "This stays a hand step",
+                  "`orca pair`", "--address 127.0.0.1", "refusing to widen to all interfaces",
+                  "docs/research/2026-11-25-orca-pairing.md", "Orca on your SSH hosts"):
+            self.assertIn(s, remote, s)
+        self.assertLess(remote.index("## Check first"), remote.index("## Direction 1"))
+        guide = " ".join((ROOT / "docs" / "getting-started.md").read_text().split())
+        self.assertLess(guide.index("project-setup --check ~/code/<project> example-host"),
+                        guide.index("Then `project-setup ~/code/<project> example-host`"))
+        self.assertIn('"Share this computer", choosing 127.0.0.1', guide)
+        research = ROOT / "docs" / "research" / "2026-11-25-orca-pairing.md"
+        text = research.read_text()
+        for s in ("ensureNetworkExposure", "this-computer", "Orca on your SSH hosts", "airgap", "not supported"):
+            self.assertIn(s, text, s)
 
     def test_the_coordinator_persona_names_the_stored_key(self):
         text = (ROOT / "orchestrators" / "native-orca" / "personas" / "coordinator.md").read_text()

@@ -9,6 +9,18 @@ space, a newline) is refused before anything runs. Setup's own ssh calls never w
 by hand first: with `BatchMode` an unknown host key is refused ("Host key verification failed"), not asked about. With `--show` or
 `--refresh`, only the copy and the host's own `--show` or `--refresh` run. Every step says `exists` on a re-run.
 
+## Check first
+`project-setup --check <repo> <host>` lists every prerequisite at once and changes nothing, here or on the box (no copy,
+no install, no pairing, no tunnel, no file): Orca here and whether this desktop's Orca already listens beyond loopback
+(`desktop listener`), ssh without a prompt, direction 1 (the box's server saved here and answering) and the Orca
+versions on both sides, direction 2 (the box has this desktop as an environment, read only when lane-control is
+already on the box), systemd here, the tunnel, the coordinator's agent CLI on the box and the gateway key's variable
+there (its name only, never its value). Each line is `check <what>: ok|missing|warn|to do|unknown|skipped`, a missing
+one with what fixes it; `to do` is a step setup does itself. It exits 1 when something is missing.
+Then `project-setup <repo> <host>` says, before any box work, what pairing each direction has (`pairing: direction 1
+saved|to do`, `pairing: direction 2 recorded|skipped`) and, when it will ask for the desktop's link, the steps to make
+it now (direction 2, step 1), so the link is ready when the prompt comes.
+
 ## Direction 1: this machine drives the box
 1. lane-control is copied to `~/.local/share/lane-control` on the box, and the box's copy says which orchestrator the
    project is on there (`--which-orchestrator`). A project the box already runs on Orca + Cotal keeps that path, and
@@ -86,11 +98,13 @@ For what the box lacks (graphics, a browser, a GPU), its coordinator starts a la
 is poll-only (Reports across hosts, below).
 1. The owner makes a share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this
    computer's own address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a
-   link). Orca 1.4.250 has no CLI for it. `orca pair` (1.4.254 and later) is not a tested stand-in: in the canary
-   (2026-11-21) a scratch 1.4.268 `serve` pinned with `--bind` to its container-network address refused it, also with
-   `--address 127.0.0.1` ("Runtime bind address is pinned to <ip>; refusing to widen to all interfaces"). That wording
-   says the offer widens the server to every interface; the widening itself was not observed, and a desktop listening
-   on 127.0.0.1 was not tried. Keep to the Settings > Servers link with 127.0.0.1.
+   link). This stays a hand step. `orca pair` cannot stand in for it, not even with `--address 127.0.0.1`: in Orca
+   1.4.274 every offer the CLI asks for widens the desktop to every interface first, whatever the address, because the CLI's
+   `pairing.createOffer` has no way to ask for the window's "this computer" reach (read from the source; a scratch
+   `serve` pinned to 127.0.0.1 refused it with "refusing to widen to all interfaces", PAIR-1,
+   `docs/research/2026-11-25-orca-pairing.md`). Nothing but the window can make a link that keeps the desktop on
+   127.0.0.1, and nothing but the window revokes one. Orca's own SSH install (Settings > "Orca on your SSH hosts", an
+   SSH target) is the other way to pair a box; it too is a window action (the same doc, section 1).
 2. `project-setup <repo> <host>` asks for the link on a hidden prompt, in a terminal only (Enter, no terminal or
    `--no-desktop-lanes` skips it; a box already paired is not asked again). A terminal that cannot hide what is
    typed is refused instead of asked.
