@@ -18,6 +18,9 @@ Orca worktrees and Orca's own orchestration (run, task, worker, check), with no 
   design reviewer (on every frontend lane), the `component-gallery` skill and `design-shots`
   (`docs/superpowers/specs/2026-11-21-design-kit-design.md`). `--design-lead` is refused and `--no-design-lead` does
   nothing. OpenCode lanes may do frontend work, and setup installs the design skills for OpenCode as well as Claude.
+- 2026-11-25: "lets use orca where we can": prefer Orca's own feature over lane-control code. The doctrine is in the
+  README (Doctrines, "Use Orca where we can"); the audit of what overlaps, as of 1.4.274, is
+  `docs/research/2026-11-25-orca-overlap.md`.
 
 ## History
 - 2026-11-15 trial (ORCH-1, Orca 1.4.250): adopt with changes for Claude lanes.
