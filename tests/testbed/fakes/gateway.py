@@ -11,7 +11,7 @@ Built on tests/stubs/fake_llm.py (same answers), plus what LiteLLM adds and lane
   POST /v1/chat/completions (and /chat/completions)   "ok" (streamed when asked); when the request offers tools, the
                                        last user message's steps as bash tool calls, one per answer, then "ok": each
                                        `RUN-TOOL: <command>` in order, then, if the message is an Orca worker brief, its
-                                       own `worker_done` command filled in (so an OpenCode worker on this gateway does a
+                                       own `worker_done` command filled in, unless the brief says NO-REPORT (so an OpenCode worker on this gateway does a
                                        whole lane and reports, at no cost)
 Default aliases: chat -> testbed/fake-chat-small, code -> testbed/fake-code-large, embed -> testbed/fake-embed (mode
 embedding). With --key every request needs `Authorization: Bearer KEY` (401 otherwise); the key is never logged.
@@ -57,7 +57,7 @@ def steps(text, brief=None, results=()):
     out = run_tools(text) + [c.group(1) for c in CHECK.finditer(text)]
     for r in results:
         out += run_tools(r)
-    done = done_command(brief)
+    done = None if "NO-REPORT" in brief else done_command(brief)
     waits = "WAIT-FOR-MESSAGE" in brief
     if done and ((text is brief and not waits) or (text is not brief and waits and CHECK.search(text))):
         out.append(done)

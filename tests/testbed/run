@@ -164,6 +164,11 @@ def stage_orca(src: Path, ctx: Path):
         nodesha = (slot / ".runtime-node").read_text().strip()
         node = src / "runtimes" / f"node-{nodesha}" / "bin" / "node"
         kind = "official server release"
+        # The release's own launcher, for `orca serve` (orcad's CLI will not serve); its orcad/ and runtimes/ are
+        # linked to the slot and its node once the slot has its name (rename.Dockerfile).
+        (o / "server" / "bin").mkdir(parents=True)
+        shutil.copy2(src / "bin" / "orca-ide", o / "server" / "bin" / "orca-ide")
+        copy_tree(src / "out", o / "server" / "out")  # serve picks its runtime from here (else it tries Electron)
     else:
         res = src.parent if src.name == "orcad-template" else src
         tpl = res / "orcad-template"
@@ -395,6 +400,8 @@ def scenario(args):
             res = "pass"
         except scenarios.Skip as e:
             res, detail = "skip", str(e)
+        except scenarios.Gap as e:
+            res, detail = "gap", str(e)
         except scenarios.Fail as e:
             res, detail = "FAIL", str(e)
         except subprocess.TimeoutExpired as e:

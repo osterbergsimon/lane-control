@@ -14,6 +14,11 @@ class Skip(Exception):
     pass
 
 
+class Gap(Exception):
+    """An Orca built-in that falls short of what lane-control does: a finding, reported as such (owner 2026-11-25:
+    record the gap, do not route around it)."""
+
+
 class Ctx:
     def __init__(self, **kw):
         self.__dict__.update(kw)
@@ -434,46 +439,70 @@ def listeners(ctx, role, port):
     return sorted(set(run(ctx, role, f"ss -ltnH 'sport = :{port}' | awk '{{print $4}}'", check=False).stdout.split()))
 
 
-@scenario("direction 2 without lane-tunnel: the box pairs with the desktop's network address (orca pair --address), "
-          "then a lane from the box on the desktop; records what the desktop's Orca then listens on")
+def desktop_server(ctx, mode):
+    """Run the desktop's server as `mode` (orcad or serve, image/entrypoint) and wait until it answers."""
+    run(ctx, "desktop", f"echo {mode} > ~/.testbed-desktop-server; for p in $(pgrep -f 'orcad[.]js|index[.]js serve'); "
+                        "do kill $p; done; rm -f ~/.orca-desktop-readiness")
+    for _ in range(120):
+        if run(ctx, "desktop", "orca-ide status --json 2>/dev/null | jq -e '.result.runtime.state == \"ready\"' "
+                               ">/dev/null", check=False).returncode == 0:
+            return
+        time.sleep(1)
+    raise Fail(f"the desktop's Orca did not come back as {mode}")
+
+
+def pair_offer(ctx, address):
+    p = run(ctx, "desktop", f"orca-ide pair --address {address} --json", check=False)
+    try:
+        res = json.loads(p.stdout).get("result", {})
+    except ValueError:
+        res = {}
+    return res.get("pairingUrl") or "", res.get("reason") or (p.stdout + p.stderr).strip()[-200:]
+
+
+@scenario("direction 2 without lane-tunnel: orca pair on the desktop (orcad, then `orca serve`), the box pairs with "
+          "the desktop's network address, a lane from the box on the desktop; records what the desktop listens on")
 def d2_no_tunnel(ctx):
-    """Is lane-tunnel still needed? (owner 2026-11-25). Driven with the Orca CLI directly: project-setup refuses a link
-    that is not 127.0.0.1. Afterwards the desktop's server is restarted, back on loopback, and the box forgets it."""
+    """Is lane-tunnel still needed? (owner 2026-11-25). Orca's own commands only: orca pair, environment add (the link
+    on stdin through the preload project-setup uses), worker-start --on. project-setup refuses a link that is not
+    127.0.0.1, so it is not used. Afterwards the desktop is back on orcad and the box forgets the pairing."""
     if not box_cli_ready(ctx):
         raise Skip("the box has no Orca server yet (run d1-direct or d1-jump first)")
     ip = run(ctx, "desktop", "hostname -i | awk '{print $1}'").stdout.strip()
-    before = listeners(ctx, "desktop", 6768)
-    p = run(ctx, "desktop", f"orca-ide pair --address {ip} --json", check=False)
+    found = []
+    for address in ("127.0.0.1", ip):
+        link, why = pair_offer(ctx, address)
+        pinned = run(ctx, "desktop", "grep -o 'Runtime bind address is pinned to [0-9.]*; refusing to widen to all "
+                                     "interfaces' ~/.orca-desktop.log | tail -1", check=False).stdout.strip()
+        expect(not link, f"orcad gave a network pairing link for {address}: that changes the finding")
+        found.append(f"orcad: orca pair --address {address}: {why} ({pinned})")
+    orcad_listens = listeners(ctx, "desktop", 6768)
+    if run(ctx, "desktop", "test -x /opt/orca/server/bin/orca-ide", check=False).returncode:
+        raise Skip("; ".join(found) + f"; listens on {', '.join(orcad_listens)}. `orca serve` needs the official server "
+                   "release (up without --orca-from)")
     try:
-        link = json.loads(p.stdout).get("result", {}).get("url") or ""
-    except ValueError:
-        link = ""
-    if not link.startswith("orca://"):
-        link = next((w for w in (p.stdout + p.stderr).split() if w.startswith("orca://")), "")
-    if not link and "network_exposure_failed" in p.stdout:
-        why = run(ctx, "desktop", "grep -o 'Runtime bind address is pinned to [0-9.]*; refusing to widen to all interfaces' "
-                  "~/.orca-desktop.log | tail -1",
-                  check=False).stdout.strip()
-        raise Skip(f"orca pair --address {ip}: network_exposure_failed; headless orcad will not widen ({why or 'see '
-                   '~/.orca-desktop.log'}), even started without --bind; only the desktop app widens itself. The "
-                   f"desktop kept listening on {', '.join(before)}. Not verified here: needs the desktop app, or orcad "
-                   "started with --bind 0.0.0.0 (next slice)")
-    expect(link, f"orca pair --address {ip} gave no link ({p.returncode}): {(p.stdout + p.stderr)[-500:]}")
-    time.sleep(2)
-    after = listeners(ctx, "desktop", 6768)
-    try:
-        run(ctx, "box", "~/.orca/cli/bin/orca environment rm --environment desktop-net --json >/dev/null 2>&1; true",
-            check=False)
-        # The link reaches the box on stdin, through the same preload project-setup uses (pairing-code-stdin.cjs).
+        desktop_server(ctx, "serve")
+        serve_listens = listeners(ctx, "desktop", 6768)
+        link, why = pair_offer(ctx, ip)
+        expect(link.startswith("orca://"), f"orca serve: orca pair --address {ip} gave no link: {why}")
+        # One environment per server: Orca refuses a second ("This server is already paired as \"desktop\""), so the
+        # tunnel's pairing goes first.
+        had = run(ctx, "box", "~/.orca/cli/bin/orca environment rm --environment desktop --json >/dev/null 2>&1 && echo "
+                              "yes; ~/.orca/cli/bin/orca environment rm --environment desktop-net --json >/dev/null 2>&1; "
+                              "true", check=False).stdout.strip()
+        if had:
+            found.append("the box's tunnel pairing (environment desktop) removed first: Orca keeps one environment per "
+                         "server and refuses a second for the same desktop")
         ctx.copy_lane_control("box", dest=".local/share/lane-control")
-        add = run(ctx, "box", "cli=$(readlink -f ~/.orca/cli/bin/orca); "
-                              "node=$(grep -o '/[^ \"]*/bin/node' \"$cli\" | head -1); "
-                              "idx=$(grep -o '/[^ \"]*/out/cli/index.js' \"$cli\" | head -1); "
-                              "$node --require ~/.local/share/lane-control/core/scripts/pairing-code-stdin.cjs $idx "
-                              "environment add --name desktop-net --pairing-code - --json", check=False, input=link + "\n")
-        if add.returncode:  # the launcher's shape differs: the CLI's own argument (a throwaway container's link)
-            add = run(ctx, "box", "~/.orca/cli/bin/orca environment add --name desktop-net --pairing-code "
-                                  f"{shlex.quote(link)} --json", check=False)
+        # project-setup's own launcher reading (shim_parts) and preload, without its 127.0.0.1-only rule
+        add = run(ctx, "box", "python3 -c 'import importlib.machinery as m, os, subprocess, sys; "
+                              "ps = m.SourceFileLoader(\"ps\", os.path.expanduser(\"~/.local/share/lane-control/core/"
+                              "scripts/project-setup\")).load_module(); "
+                              "node, js, data = ps.shim_parts(os.path.expanduser(\"~/.orca/cli/bin/orca\")); "
+                              "env = dict(os.environ, **({\"ORCA_USER_DATA_PATH\": data} if data else {})); "
+                              "sys.exit(subprocess.run([node, \"--require\", str(ps.PRELOAD), js, \"environment\", "
+                              "\"add\", \"--name\", \"desktop-net\", \"--pairing-code\", \"-\", \"--json\"], "
+                              "input=sys.stdin.read(), text=True, env=env).returncode)'", check=False, input=link + "\n")
         expect(add.returncode == 0, f"environment add on the box failed: {(add.stdout + add.stderr)[-400:]}")
         st = json.loads(run(ctx, "box", "~/.orca/cli/bin/orca status --environment desktop-net --json").stdout)
         expect(st.get("result", {}).get("runtime", {}).get("reachable") is True,
@@ -482,19 +511,190 @@ def d2_no_tunnel(ctx):
     finally:
         run(ctx, "box", "~/.orca/cli/bin/orca environment rm --environment desktop-net --json >/dev/null 2>&1; true",
             check=False)
-        run(ctx, "desktop", "for p in $(pgrep -f 'orcad[.]js .*--port 6768'); do kill $p; done", check=False)
-        for _ in range(90):
-            if run(ctx, "desktop", "orca-ide status --json | jq -e '.result.runtime.state == \"ready\"' >/dev/null",
-                   check=False).returncode == 0:
-                break
-            time.sleep(1)
-    restored = listeners(ctx, "desktop", 6768)
-    return (f"without a tunnel: {lane}. The desktop's Orca listened on {', '.join(before) or 'nothing'} before, on "
-            f"{', '.join(after)} after orca pair (exposure: every interface of the desktop); after a restart on "
-            f"{', '.join(restored)}")
+        desktop_server(ctx, "orcad")
+    return ("; ".join(found) + f"; orcad listens on {', '.join(orcad_listens)}. orca serve (no --bind) listens on "
+            f"{', '.join(serve_listens)} from its start, gives a link for {ip}, and without a tunnel: {lane}. "
+            f"Back on orcad: {', '.join(listeners(ctx, 'desktop', 6768))}")
+
+
+# --- 6. Orca's built-ins against lane-control's own pieces (docs/research/2026-11-25-orca-overlap.md) ------------------
+
+@scenario("overlap row 4: the box as one of Orca's own SSH targets, in place of orca-host-install and the -L tunnel")
+def builtin_ssh_target(ctx):
+    """Orca's built-in direction 1 is an SSH target (`--host ssh:<id>`); the desktop's ~/.ssh/config names box, jump and
+    box-via-jump. The check: Orca lists them, or offers a command that adds one."""
+    hosts = json.loads(run(ctx, "desktop", "orca-ide host list --json").stdout).get("result", {}).get("hosts", [])
+    ssh = [h for h in hosts if h.get("kind") not in ("local", "environment")]  # a paired server is not an SSH target
+    helptext = run(ctx, "desktop", "orca-ide host --help", check=False).stdout
+    adds = [w for w in ("add", "import", "connect") if f"\n  {w} " in helptext]
+    if ssh:
+        return f"Orca lists SSH targets: {', '.join(h.get('name', '?') for h in ssh)}"
+    raise Gap("headless Orca lists only 'this machine' (host list), does not read ~/.ssh/config, and `orca host` has "
+              f"{'no add command' if not adds else 'only ' + ', '.join(adds)} (list, rm, name): an SSH target is made in "
+              "the desktop app's Settings only, so the built-in direction 1 cannot be set up or tested headless; "
+              "orca-host-install stays (lc-65b)")
+
+
+def coordinator_terminal(ctx, role, tag):
+    cli = CLI[role]
+    run(ctx, role, f"mkdir -p ~/code/coord && cd ~/code/coord && (git rev-parse 2>/dev/null || (git init -q && git "
+                   f"commit -q --allow-empty -m coord)); {cli} repo add --path /home/u/code/coord --json >/dev/null")
+    t0 = json.loads(run(ctx, role, f"{cli} terminal create --worktree path:/home/u/code/coord --title 'tb {tag} "
+                                   "coordinator' --command bash --json").stdout)["result"]["terminal"]["handle"]
+    run(ctx, role, f"{cli} orchestration run-create --objective 'testbed {tag}' --from {t0} --json >/dev/null")
+    return t0
+
+
+def local_worker(ctx, t0, name, spec):
+    """An OpenCode worker on the desktop's fake gateway, in a new worktree of the scratch project."""
+    cfg = dict(OPENCODE_CONFIG, permission={"bash": "allow", "edit": "allow", "external_directory": "allow"})
+    run(ctx, "desktop", "mkdir -p ~/.config/opencode && cat > ~/.config/opencode/opencode.json", input=json.dumps(cfg))
+    scratch_project(ctx, "desktop")
+    run(ctx, "desktop", "orca-ide repo add --path /home/u/code/scratch --json >/dev/null")
+    run(ctx, "desktop", f"cat > ~/tmp/{name}.md", input=spec)
+    p = run(ctx, "desktop", f"orca-ide orchestration worker-start --worktree new-top-level --repo path:/home/u/code/scratch "
+                            f"--name {name} --agent opencode --spec-file ~/tmp/{name}.md --from {t0} --json",
+            check=False, timeout=300)
+    try:
+        res = json.loads(p.stdout).get("result") or {}
+    except ValueError:
+        res = {}
+    expect(res.get("dispatchId"), f"worker-start failed: {(p.stdout + p.stderr)[-500:]}")
+    return res
+
+
+def messages(ctx, role, t0):
+    out = run(ctx, role, f"{CLI[role]} orchestration check --terminal {t0} --json", check=False).stdout
+    try:
+        return json.loads(out).get("result", {}).get("messages", [])
+    except ValueError:
+        return []
+
+
+@scenario("overlap row 10: Orca tells the coordinator when a worker stops without reporting (lane-sweep's STUCK)")
+def builtin_worker_notice(ctx):
+    t0 = coordinator_terminal(ctx, "desktop", "notice")
+    name = f"tb-quiet-{int(time.time()) % 100000}"
+    res = local_worker(ctx, t0, name, "Testbed quiet lane: do nothing and do not report.\nNO-REPORT\n")
+    seen = []
+    for _ in range(90):
+        seen += messages(ctx, "desktop", t0)
+        hit = [m for m in seen if m.get("type") == "escalation" and res["dispatchId"] in json.dumps(m)
+               or m.get("type") == "escalation" and res.get("terminal") and res["terminal"] in json.dumps(m)]
+        if hit:
+            break
+        time.sleep(2)
+    run(ctx, "desktop", f"orca-ide orchestration worker-release --dispatch {res['dispatchId']} --json >/dev/null 2>&1",
+        check=False)
+    expect(hit, "no escalation reached the coordinator for a worker that ended its turn without reporting "
+                f"(messages: {[m.get('subject') for m in seen][:6]})")
+    return f"Orca's escalation \"{hit[0].get('subject')}\" reached the coordinator's check for a worker that ended " \
+           "its turn without reporting"
+
+
+@scenario("overlap row 14: Orca's worker-list counts the running lane workers (lane-room's agent count, side by side)")
+def builtin_worker_count(ctx):
+    t0 = coordinator_terminal(ctx, "desktop", "count")
+    started = []
+    for i in (1, 2):
+        name = f"tb-count{i}-{int(time.time()) % 100000}"
+        started.append(local_worker(ctx, t0, name, f"Testbed counted lane {i}.\nWAIT-FOR-MESSAGE\n"))
+    time.sleep(5)
+    try:
+        rows = json.loads(run(ctx, "desktop", "orca-ide orchestration worker-list --json").stdout).get("result", {}).get(
+            "workers", [])
+        mine = [r for r in rows if r.get("dispatchId") in {w["dispatchId"] for w in started}]
+        live = [r for r in mine if r.get("liveness") == "live" and r.get("outcome") == "in_progress"]
+        active = json.loads(run(ctx, "desktop", "orca-ide orchestration worker-list --terminal-state active --json")
+                            .stdout).get("result", {}).get("workers", [])
+        n_active = sum(1 for r in active if r in mine or r.get("dispatchId") in {w["dispatchId"] for w in started})
+        states = sorted({r.get("terminalState") for r in mine})
+        room = run(ctx, "desktop", "~/lane-control/core/scripts/lane-room", check=False)
+        line = next((l for l in room.stdout.splitlines() if "agent" in l.lower()), room.stdout.strip()[-120:])
+    finally:
+        for r in started:  # a running worker is stopped first: worker-release takes only a settled one
+            run(ctx, "desktop", f"orca-ide orchestration worker-stop --dispatch {r['dispatchId']} --json >/dev/null 2>&1; "
+                                f"orca-ide orchestration worker-release --dispatch {r['dispatchId']} --json >/dev/null 2>&1",
+                check=False)
+    expect(len(live) == 2, f"worker-list shows {len(live)} of the 2 running workers as live and in progress")
+    return (f"worker-list shows both running workers (liveness live, outcome in_progress); their terminalState is "
+            f"{', '.join(states)}, so `--terminal-state active` (the overlap doc's proposal) counts {n_active} of them; "
+            f"lane-room says: {line.strip()}")
+
+
+# --- 7. a lane through PR, review and merge on the fake GitHub; Orca's cleanup after it ---------------------------------
+
+def gh_in(ctx, role, args, check=True):
+    return run(ctx, role, f"cd ~/code/scratch && gh {args}", check=check)
+
+
+@scenario("a lane through its PR: the worker commits, pushes and opens a PR; a stub review; a failing check blocks the "
+          "merge, a passing one lets it; merged on the fake GitHub, its branch deleted; the lane released")
+def lane_pr_merge(ctx):
+    t0 = coordinator_terminal(ctx, "desktop", "pr")
+    name = f"tb-pr-{int(time.time()) % 100000}"
+    scratch_project(ctx, "desktop")
+    gh_in(ctx, "desktop", "repo edit --delete-branch-on-merge >/dev/null")
+    spec = (f"Testbed lane {name}: add lane.txt and open a pull request.\nRUN-TOOL: echo {name} > lane-{name}.txt && "
+            f"git add lane-{name}.txt && git commit -qm 'testbed lane {name}' && git push -q origin HEAD && gh pr create "
+            f"--head $(git branch --show-current) --base main --title 'testbed lane {name}' --body 'from the fake agent' "
+            f"> ~/tmp/{name}-pr 2>&1; pwd > ~/tmp/{name}-pwd\n")
+    res = local_worker(ctx, t0, name, spec)
+    done = False
+    for _ in range(90):
+        if any(m.get("type") == "worker_done" and res["dispatchId"] in json.dumps(m) or
+               m.get("type") == "worker_done" and m.get("from") == res.get("terminal")
+               for m in messages(ctx, "desktop", t0)):
+            done = True
+            break
+        time.sleep(2)
+    expect(done, "the lane's worker_done never reached the coordinator")
+    url = run(ctx, "desktop", f"cat ~/tmp/{name}-pr").stdout.strip().splitlines()[-1]
+    expect("/pull/" in url, f"the lane opened no PR: {url}")
+    n = url.rsplit("/", 1)[-1]
+    pr = json.loads(gh_in(ctx, "desktop", f"pr view {n} --json headRefName,state,files,isDraft").stdout)
+    expect(pr["state"] == "OPEN" and any(f["path"] == f"lane-{name}.txt" for f in pr["files"]), f"the PR is not the lane's: {pr}")
+    gh_in(ctx, "desktop", f"pr comment {n} --body 'Review (testbed stub reviewer): approve.'")
+    gh_in(ctx, "desktop", f"testbed checks {n} failure")
+    blocked = gh_in(ctx, "desktop", f"pr merge {n} --merge", check=False)
+    expect(blocked.returncode != 0 and "testbed-ci" in blocked.stderr, "a failing check did not block the merge")
+    gh_in(ctx, "desktop", f"testbed checks {n} success")
+    gh_in(ctx, "desktop", f"pr merge {n} --merge")
+    run(ctx, "desktop", f"cd ~/code/scratch && git fetch -q --prune origin && git show origin/main:lane-{name}.txt "
+                        f">/dev/null && ! git rev-parse -q --verify origin/{pr['headRefName']} >/dev/null")
+    rel = run(ctx, "desktop", f"orca-ide orchestration worker-release --dispatch {res['dispatchId']} --json", check=False)
+    expect(rel.returncode == 0, f"worker-release failed: {(rel.stdout + rel.stderr)[-300:]}")
+    wt = run(ctx, "desktop", f"cat ~/tmp/{name}-pwd").stdout.strip()
+    run(ctx, "desktop", f"echo {shlex.quote(wt)} > ~/tmp/tb-merged-worktree")
+    return (f"PR #{n} from the lane's branch {pr['headRefName']}; stub review; a failing check blocked the merge, a "
+            f"passing one merged it into main; its branch is gone from the fake GitHub; the lane released")
+
+
+@scenario("overlap row 11: Orca's own Workspace Cleanup on the merged lane's worktree (after lane-pr-merge)")
+def builtin_cleanup(ctx):
+    wt = run(ctx, "desktop", "cat ~/tmp/tb-merged-worktree 2>/dev/null", check=False).stdout.strip()
+    if not wt or run(ctx, "desktop", f"test -d {shlex.quote(wt)}", check=False).returncode:
+        raise Skip("no merged lane worktree left (run lane-pr-merge first)")
+    before = int(run(ctx, "desktop", "wc -l < /forge/calls.log").stdout.strip() or 0)
+    pre = json.loads(run(ctx, "desktop", "orca-ide workspace cleanup preview --json").stdout).get("result", {})
+    rows = [r for r in json.dumps(pre).split("},") if wt in r]
+    gh_calls = run(ctx, "desktop", f"tail -n +{before + 1} /forge/calls.log | jq -rc '.argv | join(\" \")' | sort | uniq -c "
+                                   "| head -5", check=False).stdout.strip().replace("\n", "; ")
+    ran = json.loads(run(ctx, "desktop", "orca-ide workspace cleanup run --json").stdout).get("result", {})
+    gone = run(ctx, "desktop", f"test ! -e {shlex.quote(wt)}", check=False).returncode == 0
+    what = (rows[0] if rows else json.dumps(pre))[:400]
+    if gone:
+        return f"workspace cleanup run removed the merged lane's worktree; its preview row: {what}; gh calls: {gh_calls}"
+    # lane-control's own fallback (native-orca-lanes, section 7): remove it by hand, so the next scenario starts clean
+    run(ctx, "desktop", f"orca-ide worktree rm --worktree path:{shlex.quote(wt)} --force --json >/dev/null", check=False)
+    raise Gap(f"workspace cleanup did not remove the merged lane's worktree on a headless profile: its rules are set in "
+              f"Orca's settings only ('these commands never change them'), and none is on here. Preview row: {what}. "
+              f"Run: {json.dumps(ran)[:200]}. Orca's gh calls meanwhile: {gh_calls or 'none'}. Removed by hand "
+              "instead (lane-control's fallback)")
 
 
 # The order `all` runs them in: each lane right after the pairing it uses (d1-jump resets the box's server).
 ORDER = ["suggest-tiers", "onboard", "d1-direct", "lane-a-direct", "d1-jump", "lane-a-jump", "d2-tunnel", "lane-b-jump",
-         "d2-ports", "lane-b-direct", "d2-no-tunnel", "refresh"]
+         "d2-ports", "lane-b-direct", "d2-no-tunnel", "builtin-ssh-target", "builtin-worker-notice",
+         "builtin-worker-count", "lane-pr-merge", "builtin-cleanup", "refresh"]
 ALL.sort(key=lambda s: ORDER.index(s.name) if s.name in ORDER else len(ORDER))

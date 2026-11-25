@@ -49,9 +49,16 @@ if [ "$TESTBED_ROLE" = desktop ]; then
     mkdir -p "$HOME/.orca-remote"; rm -rf "$slot"; cp -r "/opt/orca/artifacts/linux-x64-glibc/$ver" "$slot"; touch "$slot/.install-complete"
   fi
   # The desktop's server: kept running, its first stdout line (the readiness line with the pairing link) per start.
+  # ~/.testbed-desktop-server picks how: orcad (the default, as orca-host-install runs a box's) or serve (`orca serve`
+  # from the official release, with no --bind: it listens on every interface; d2-no-tunnel uses it).
   ( cd "$slot"; while :; do
-      ORCA_VERSION=$ver ORCA_USER_DATA=$HOME/.orca TMPDIR=$HOME/tmp "$node" --max-semi-space-size=8 "$slot/orcad.js" \
-        --json --port 6768 > "$HOME/.orca-desktop-readiness" 2>> "$HOME/.orca-desktop.log" < /dev/null || true
+      if [ "$(cat "$HOME/.testbed-desktop-server" 2>/dev/null)" = serve ] && [ -x /opt/orca/server/bin/orca-ide ]; then
+        ORCA_USER_DATA_PATH=$HOME/.orca TMPDIR=$HOME/tmp /opt/orca/server/bin/orca-ide serve --port 6768 --json \
+          > "$HOME/.orca-desktop-readiness" 2>> "$HOME/.orca-desktop.log" < /dev/null || true
+      else
+        ORCA_VERSION=$ver ORCA_USER_DATA=$HOME/.orca TMPDIR=$HOME/tmp "$node" --max-semi-space-size=8 "$slot/orcad.js" \
+          --json --port 6768 > "$HOME/.orca-desktop-readiness" 2>> "$HOME/.orca-desktop.log" < /dev/null || true
+      fi
       sleep 2
     done ) &
 fi

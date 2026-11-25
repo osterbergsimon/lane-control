@@ -20,9 +20,10 @@ or in CI. It is not `tests/test-orca-host-install.sh` (never run that one: it wi
   key each); `up` lets the desktop's key into `jump` and `box` and writes their host keys into the desktop's
   `known_hosts`. Your own keys are never used, and the generated ones go with the containers. The desktop's
   `~/.ssh/config` has `box` (direct), `jump` and `box-via-jump` (`ProxyJump jump`).
-- **Orca** is pinned in `orca-pin.json`: **1.4.268** (the default, what the owner's desktop runs) and **1.4.274** (the
-  newest release when this was built), each with its download URL and sha256; `TESTBED_ORCA_VERSION=1.4.274` picks the
-  other. By default `up` downloads the chosen official server release (`orca-server-linux-x64.tar.gz` from Orca's GitHub releases) once into `TESTBED_WORK`,
+- **Orca** is pinned in `orca-pin.json`: **1.4.274** (the default, what the owner's desktop runs since 2026-11-25) and
+  **1.4.268** (what it ran before), each with its download URL and sha256; `TESTBED_ORCA_VERSION=1.4.268` picks the
+  other. From the official release `up` also keeps its launcher, so the desktop's server can run as `orca serve`
+  (`~/.testbed-desktop-server` says `orcad`, the default, or `serve`). By default `up` downloads the chosen official server release (`orca-server-linux-x64.tar.gz` from Orca's GitHub releases) once into `TESTBED_WORK`,
   checks its sha256 against the pin before it unpacks or uses anything (a mismatch is deleted and refused), and copies
   its `orcad/` slot and Node into the image. `up --orca-from DIR` takes an Orca you have instead: an Orca app's
   `resources` folder, its `orcad-template`, or an unpacked server release; `--orca-from local` is the app `orca-ide` on
@@ -131,7 +132,12 @@ gateway or a plain shell command in an Orca terminal, never a real model.
 | `lane-b-jump` | after `d2-tunnel` (through the jump): the same with the coordinator on the box and `--on desktop` | as `lane-a-direct`, from the box's side, the lane on the desktop |
 | `d2-ports` | `d2-tunnel` direct to `box` with other ports (TUN-1): `lane-tunnel start --remote-port 6870 box 6768`, the link pointed at 6870 by project-setup's own `link_for_port`, after a restart of the desktop's server (a link pairs once) | as `d2-tunnel`, on port 6870 on the box |
 | `lane-b-direct` | `lane-b-jump` again over that tunnel | as `lane-b-jump` |
-| `d2-no-tunnel` | after `lane-b-direct`: on the desktop `orca pair --address <its network address>`, the link to the box on stdin (the same preload project-setup uses), then the lane checks from the box over it; project-setup is not used (it refuses a link that is not 127.0.0.1); the desktop's listeners are recorded before and after, and its server is restarted afterwards | skips plainly today: headless orcad answers `network_exposure_failed` ("Runtime bind address is pinned to 127.0.0.1; refusing to widen") even started without `--bind`, and keeps listening on 127.0.0.1 only |
+| `d2-no-tunnel` | after `lane-b-direct`, with Orca's own commands only (project-setup refuses a link that is not 127.0.0.1): `orca pair --address 127.0.0.1` and `--address <the desktop's network address>` on the desktop's orcad; then the desktop's server as `orca serve` (the official release's launcher, no `--bind`), `orca pair --address <address>`, the link to the box on stdin (project-setup's own preload), and the lane checks from the box over it; listeners recorded; the desktop back on orcad afterwards | orcad refuses both (`network_exposure_failed`, "Runtime bind address is pinned to 127.0.0.1; refusing to widen to all interfaces") and stays on 127.0.0.1; `orca serve` listens on 0.0.0.0 from its start, gives a link, and the box's lane on the desktop passes all the lane checks without lane-tunnel |
+| `builtin-ssh-target` | overlap row 4: `orca host list` and `orca host --help` on the desktop, whose `~/.ssh/config` names box, jump and box-via-jump | reports a **gap** when Orca lists no SSH target and has no command to add one (so far it does: an SSH target is made in the desktop app's Settings only) |
+| `builtin-worker-notice` | overlap row 10: a local OpenCode worker whose brief says `NO-REPORT` ends its turn without reporting | Orca's escalation reaches the coordinator's `check` |
+| `builtin-worker-count` | overlap row 14: two local workers waiting for a message; `worker-list` with and without `--terminal-state active`; `lane-room` | `worker-list` shows both as `liveness: live`, `outcome: in_progress`; the result names their `terminalState` and what lane-room counts |
+| `lane-pr-merge` | a local OpenCode worker commits, pushes its branch and opens a PR on the fake GitHub, then reports; a stub review (`gh pr comment`); the PR's check set to failure, then success | the PR is the lane's (its branch, its file); the failing check blocks `gh pr merge`, the passing one merges it into main; with "delete head branches" on, the branch is gone; the worker releases |
+| `builtin-cleanup` | overlap row 11: `workspace cleanup preview` and `run` on the merged lane's worktree | passes when Orca's cleanup removes it; today reports a **gap**: the row says `keep`, cause `rules-off` (rules are set in Orca's settings only), the run removes nothing; the worktree is then removed by hand (lane-control's fallback) |
 | `refresh` | on the box: a second scratch project set up by lane-control `48a38ab` (main before LIT-1, whose lane-tier refuses OpenCode tiers), then `project-setup --refresh` from this checkout | the old setup left an older `~/.agents/bin/lane-tier`; after `--refresh` it and the `native-orca-lanes` skill are this checkout's |
 
 Lanes start the way the lane skill says for OpenCode, as far as Orca 1.4.268 lets them: `--agent opencode` without
@@ -139,13 +145,16 @@ Lanes start the way the lane skill says for OpenCode, as far as Orca 1.4.268 let
 `new-child` or `new-top-level` are refused (lc-69b). A scripted stand-in agent under another agent id (Aider's) was
 tried and dropped: Orca's launch readiness did not accept it.
 
-Not built yet (the next slices): a lane through a PR, a stub review, the merge on the fake GitHub and the cleanup of its
-branch; away-improve (`lane-improve on`, the cap, the summary PR, drained); and the items marked not verified below.
+Not built yet (the next slices): away-improve (`lane-improve on`, the cap, the summary PR, drained) and the items marked
+not verified below.
 
 ## Coverage
 
-What remote.md and the owner's questions claim, and what the testbed checks. Verified means the scenario passed in a
-`scenario all` from a fresh `up` on that Orca version (2026-11-25, docker 29.8, the pinned official server releases).
+What remote.md, the overlap audit (docs/research/2026-11-25-orca-overlap.md, ORC-1) and the owner's questions claim,
+and what the testbed checks. Verified means the scenario passed from a fresh `up` on that Orca version (2026-11-25,
+docker 29.8, the pinned official server releases); gap means an Orca built-in falls short, recorded as a finding with
+its issue. Scenarios drive Orca's own commands first; lane-tunnel, orca-host-install and project-setup's box pairing run
+in the scenarios that compare them (`d1-*`, `d2-*`, the lanes over them) next to the built-in path.
 
 | Claim | 1.4.268 | 1.4.274 | Scenario |
 |---|---|---|---|
@@ -156,7 +165,14 @@ What remote.md and the owner's questions claim, and what the testbed checks. Ver
 | A box coordinator runs a lane on the desktop through `-R`, the same checks | verified | verified | `lane-b-jump`, `lane-b-direct` |
 | Reports across hosts arrive in the coordinator's `check` (polled) | verified | verified | the lane scenarios |
 | The first OpenCode lane started on the desktop from the box gets its brief | not always: OpenCode came up with an empty composer, the start was retried (lc-7dd) | the same | `lane-b-jump` |
-| Is lane-tunnel still needed? Direction 2 without it, the box pairing with the desktop's network address | not verified: headless orcad will not widen to the network (`network_exposure_failed`, "pinned to 127.0.0.1") even without `--bind`; the desktop app widens itself on a network pairing (`orca pair --help`: "makes a loopback-only Orca listen on every interface"), so without the tunnel the desktop's Orca listens on every interface: that is the exposure lane-tunnel avoids. Needs the desktop app, or orcad with `--bind 0.0.0.0` (next slice) | the same | `d2-no-tunnel` (skips) |
+| Is lane-tunnel still needed? With `orca serve` (no `--bind`) on the desktop, the box pairs with its network address and a box-to-desktop lane passes every lane check without the tunnel; the desktop's Orca then listens on 0.0.0.0, every interface, from its start | | verified | `d2-no-tunnel` |
+| Overlap row 2: `orca pair --address 127.0.0.1` mints the box's link on a desktop that stays on loopback | | not on headless Orca: orcad (with or without `--bind`) and `serve --bind 127.0.0.1` refuse (`network_exposure_failed`, "pinned to 127.0.0.1"); the desktop app was not run | `d2-no-tunnel` |
+| Overlap row 4: the box as an Orca SSH target (`--host ssh:<id>`) in place of orca-host-install | | **gap**: `host list` shows this machine and paired servers only, never `~/.ssh/config`; `orca host` has no add (lc-65b) | `builtin-ssh-target` |
+| Overlap row 10: Orca tells the coordinator when a worker ends its turn without reporting | | verified (one machine) | `builtin-worker-notice` |
+| Overlap row 14: `worker-list` counts the running lane workers | | verified, but not with `--terminal-state active`: a running worker's `terminalState` is `retained`, so count `liveness: live` and `outcome: in_progress` (lc-sq0); lane-room counts 0 lane agents meanwhile | `builtin-worker-count` |
+| A lane through its PR: PR on the fake GitHub, stub review, a failing check blocks the merge, merge, branch deleted, release | | verified | `lane-pr-merge` |
+| Overlap row 11: Orca's Workspace Cleanup removes a merged lane's worktree | | **gap** on a headless profile: `keep`, cause `rules-off`; rules are set in settings only, no CLI turns one on (lc-93i) | `builtin-cleanup` |
+| One environment per server: a box that paired with the desktop through the tunnel must forget it before pairing with the desktop's network address ("This server is already paired as \"desktop\"") | | verified | `d2-no-tunnel` |
 | A cross-host `worker_done` wakes an idle agent coordinator | not verified: needs a real agent coordinator (the opt-in `TESTBED_REAL_MODEL`, not built); the testbed's coordinators are shells | | none |
 | A newer client against an older server (and back) | not verified: the pin file holds both versions; a mixed-pair scenario is not built | | none |
 | A runtime restart: workers keep or lose their dispatch (`worker_identity_changed`), `worker-start --retry-of` | not verified (`d2-ports` restarts the desktop's server with no lane running and checks only that it comes back) | | none |
