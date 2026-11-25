@@ -3663,15 +3663,18 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
     remote_port is the port the box dials (default: the link's)."""
     host, me = place.host, this_machine()
     state = box_pairing_remote(place, "status", me)
+    ports = recorded_ports(host)
+    again = (f"core/scripts/lane-tunnel start <options> --remote-port {ports[1]} {host} {ports[0]}" if ports else
+             f"core/scripts/lane-tunnel start <options> --remote-port <box port> {host} <port> (the ports are "
+             "tunnel_port and tunnel_remote_port in the host's record under ~/.config/lane-control/hosts/)")
+    if state == "saved" and ports:  # paired before, the tunnel is down (a reboot, a locked card): no new link needed
+        say("tunnel", "down", f"{host} has this machine's Orca as environment {me} but cannot reach it. To bring the "
+            f"tunnel back without a new link run {again} (and skip the link below with Enter)")
     if state == "reachable":
         given = [f for f, v in (("--tunnel-auth-sock", tunnel_opts and "--auth-sock" in tunnel_opts),
                                 ("--tunnel-ssh", tunnel_opts and "--ssh" in tunnel_opts),
                                 ("--tunnel-no-enable", tunnel_opts and "--no-enable" in tunnel_opts),
                                 ("--tunnel-remote-port", remote_port is not None)) if v]
-        ports = recorded_ports(host)
-        again = (f"core/scripts/lane-tunnel start <options> --remote-port {ports[1]} {host} {ports[0]}" if ports else
-                 f"core/scripts/lane-tunnel start <options> --remote-port <box port> {host} <port> (the ports are "
-                 "tunnel_port and tunnel_remote_port in the host's record under ~/.config/lane-control/hosts/)")
         unused = (f"; {' '.join(given)} not used: the tunnel is already paired and running. To change its options "
                   f"run {again}; another port on the box needs pairing again (project-setup --remove-host {host}, "
                   "then a new link)") if given else ""
@@ -3708,7 +3711,8 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
     # The box's end must be ours: whatever else listens there (the box's own Orca server, another user's program)
     # would get the code instead of this machine.
     if not wait_box_port(place, remote, "free"):
-        raise Fail(f"port {remote} on {host} is in use (its own Orca server, or another program), so the tunnel back "
+        raise Fail(f"port {remote} on {host} is in use (its own Orca server, or another program) or not open to your "
+                   "user there, so the tunnel back "
                    f"here cannot open there; nothing was sent. Run again with --tunnel-remote-port <a free port on "
                    f"{host}> for the box's end, or move what listens there (Orca's server: orca-host-install {host} "
                    "--pair --port <another>)")
@@ -4176,9 +4180,10 @@ def main(argv=None) -> int:
     if a.orca_from and a.orca_bundle:
         print("project-setup: --orca-from and --orca-bundle exclude each other: give one source", file=sys.stderr)
         return 2
-    if a.tunnel_remote_port is not None and not 1 <= a.tunnel_remote_port <= 65535:
-        print(f"project-setup: --tunnel-remote-port takes a port from 1 to 65535, got {a.tunnel_remote_port}",
-              file=sys.stderr)
+    if a.tunnel_remote_port is not None and not 1024 <= a.tunnel_remote_port <= 65535:
+        # ssh -R as a normal user (setup never runs as root there) cannot open a port below 1024 on the box
+        print(f"project-setup: --tunnel-remote-port takes a port from 1024 to 65535 (a normal user's ssh -R cannot "
+              f"open a lower one on the box), got {a.tunnel_remote_port}", file=sys.stderr)
         return 2
     if a.tunnel_auth_sock or a.tunnel_ssh:  # lane-tunnel's own rules, before anything runs on the host
         c = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "check", *tunnel_options(a)],

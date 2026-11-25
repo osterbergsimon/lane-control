@@ -1080,7 +1080,7 @@ class TwoPortTests(Case):
         self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
 
     def test_a_bad_remote_port_is_refused_before_anything_runs(self):
-        for bad in ("0", "70000", "x"):
+        for bad in ("0", "81", "1023", "70000", "x"):  # below 1024: a normal user's ssh -R cannot open it (review n1)
             rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", bad,
                                        answer=self.link)
             self.assertEqual(rc, 2, (bad, out))
@@ -1103,6 +1103,24 @@ class TwoPortTests(Case):
         rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-no-enable")
         self.assertEqual(rc, 0, out)
         self.assertIn(f"lane-tunnel start <options> --remote-port {self.port} box {self.port}", out)
+
+    def test_a_paired_box_whose_tunnel_is_down_gets_the_line_from_the_record_before_the_link_is_asked(self):
+        # review m1: after a reboot or a locked card the box still has this machine's environment but cannot reach it
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", str(self.remote),
+                                   answer=self.link)
+        self.assertEqual(rc, 0, out)
+        subprocess.run(["sh", str(TUNNEL), "stop", "box"], env=self.e.env, capture_output=True)
+        box = self.e.box_state()
+        for env in box["environments"]:
+            env["reachable"] = False
+        (self.e.box / "stub.json").write_text(json.dumps(box))
+        rc, out = self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-no-enable", answer="")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("tunnel: down", out)
+        line = f"lane-tunnel start <options> --remote-port {self.remote} box {self.port}"
+        self.assertIn(line, out)
+        self.assertLess(out.index(line), out.index("share link for box"))  # before the question
+        self.assertIn("desktop lanes: skipped", out)
 
 
 class LinkRewriteTests(unittest.TestCase):
@@ -1215,12 +1233,15 @@ class LaneTunnelTests(unittest.TestCase):
     def test_status_and_stop_work_on_a_tunnel_started_before(self):
         tunnels = self.e.home / ".config" / "lane-control" / "tunnels"
         tunnels.mkdir(parents=True)
-        (tunnels / "box.env").write_text("SSH_HOST=box\nPORT=6768\nSSH_CONFIG=\nPATH=/usr/bin:/bin\n")
-        self.assertNotEqual(self.tunnel("status", "box").returncode, 2)
+        (tunnels / "box.env").write_text(f"SSH_HOST=box\nPORT={free_port()}\nSSH_CONFIG=\nPATH=/usr/bin:/bin\n")
+        self.assertEqual(self.tunnel("status", "box").returncode, 3)  # not running yet: systemctl's inactive
+        subprocess.run(["systemctl", "--user", "start", "lane-tunnel@box.service"], env=self.e.env, check=True)
+        self.assertEqual(self.tunnel("status", "box").returncode, 0)  # running from the old file (review n2)
         r = self.tunnel("stop", "box")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse((tunnels / "box.env").exists())
         self.assertIn("--user disable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
+        self.assertEqual(self.tunnel("status", "box").returncode, 3)
 
     def test_a_bad_port_is_refused(self):
         for p in ("0", "70000", "x", "22 -oProxyCommand=x"):
@@ -1484,8 +1505,9 @@ class DocTests(unittest.TestCase):
         text = " ".join(REMOTE_DOC.read_text().split())
         self.assertIn("Do you need the tunnel?", text)
         for s in ("Tailscale", "LAN", "NAT", "outbound ssh", "--tunnel-remote-port", "--remote-port",
-                  "tunnel_remote_port", "refuses"):
-            self.assertIn(s, text, s)
+                  "tunnel_remote_port", "refuses", "every interface (0.0.0.0)", "firewall", "not run here"):
+            self.assertIn(s, text, s)  # review M1: a network link widens the desktop to every interface
+        self.assertNotIn("listening on that address", text)
 
     def test_the_coordinator_persona_names_the_stored_key(self):
         text = (ROOT / "orchestrators" / "native-orca" / "personas" / "coordinator.md").read_text()

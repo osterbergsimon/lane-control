@@ -135,9 +135,13 @@ Direction 1's `-L` tunnel has the same shape (one port at both ends, `--orca-por
 ### Do you need the tunnel?
 The box's Orca dials the address the link names; the tunnel is one way to give it one.
 - Not needed when the box can reach this machine directly (the same LAN, or both on Tailscale) and you accept this
-  desktop's Orca listening on that address: a link made with that address ("Share this computer", choosing the LAN
-  or Tailscale address) works on the box with no tunnel. Anything that can reach that address can then try the port
-  (the link's token is still needed).
+  desktop's Orca listening on every network interface: a link made with that address ("Share this computer",
+  choosing the LAN or Tailscale address) should then work on the box with no tunnel (not run here). The address you
+  choose only sets what the link says. The first network pairing makes this desktop's Orca listen on every
+  interface (0.0.0.0), not only that address (`orca pair --help`: "The first network pairing makes a loopback-only
+  Orca listen on every interface"). So anything that can reach any of this machine's addresses can try the port
+  (the LAN, a café's Wi-Fi, a public address); only a firewall limits it to the LAN or the tailnet, and the link's
+  token is still needed. It stays that way across restarts while such a client remains paired.
 - Needed when the desktop must stay on 127.0.0.1, or the box cannot reach it (NAT, a company network: only outbound
   ssh from here gets through). The box then dials its own 127.0.0.1, and `ssh -R` carries it here.
 - What setup does: it takes only a 127.0.0.1 link and refuses any other, so it always sets up the tunnel. Pairing a
@@ -159,9 +163,10 @@ the card unlocked. The owner unlocks it, then starts the tunnel:
   `--tunnel-no-enable`. They are read here only; the box's own run never sees them. They apply while the box is
   being paired. Bringing the tunnel up again later (after a reboot, or when the card was locked) is `lane-tunnel start`
   with the same options and the ports in `~/.config/lane-control/hosts/<host>.json` (`lane-tunnel start <options>
-  --remote-port <tunnel_remote_port> <host> <tunnel_port>`; a re-run for an already-paired box with a `--tunnel-`
-  option prints that line); a new share
-  link is not needed while the box still has this machine's environment.
+  --remote-port <tunnel_remote_port> <host> <tunnel_port>`). A re-run of `project-setup <repo> <host>` prints that
+  line from the record: when the box cannot reach this machine (the tunnel is down), before it asks for a link, and
+  while it runs, when a `--tunnel-` option was given. A new share link is not needed while the box still has this
+  machine's environment: press Enter at the prompt and run that line instead.
 
 A key or card the unit cannot use is not a silent restart loop, and a short outage does not end the tunnel. The unit
 never gives up (`StartLimitIntervalSec=0`): it retries every 10 seconds at first and backs off to every 5 minutes
