@@ -2,8 +2,9 @@
 
 Status: in use
 
-Adapter: `adapter.py`, plugin `lane-persona.js`. Orca agent id `opencode2`; Orca passes `--model` only. The model
-must be one the tier rules allow for the project (`core/scripts/lane-tier`).
+Adapter: `adapter.py`, plugin `lane-persona.js`. Orca agent id `opencode2`. `worker-start` refuses `--model` for that
+id: a lane with a tier's model starts as agent id `opencode` (the `native-orca-lanes` skill). The model must be one
+the tier rules allow for the project (`core/scripts/lane-tier`).
 - Start: `env LANE_ROLE=<role> LANE_PERSONA=<persona> OPENCODE_CONFIG_CONTENT=<config> opencode2 --standalone
   [--auto]`, `<config>` being `{"model": "<provider/model>", "agents": {"build": {"model": "<provider/model>"}}}`.
   `opencode2` is the v2 package's own command and what Orca detects as `opencode2` (a plain `opencode` may be v1 on
