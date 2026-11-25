@@ -169,9 +169,12 @@ def proof_on(ctx, env, role, tag):
     expect(seen == role, f"the terminal made through {env} did not run on {role} (saw {seen!r})")
 
 
-def d1(ctx, host, port):
-    p = run(ctx, "desktop", f"{LC}/orchestrators/orca-cotal/scripts/orca-host-install {host} --pair --port {port}",
-            check=False, timeout=600)
+def d1(ctx, host, port, version=None):
+    """orca-host-install --pair, the box's server pinned to `version` (an orcad slot name; default the desktop's own: the
+    image may hold other pinned versions too, and orca-host-install otherwise takes the newest)."""
+    version = version or run(ctx, "desktop", "cat /opt/orca/VERSION").stdout.strip()
+    p = run(ctx, "desktop", f"{LC}/orchestrators/orca-cotal/scripts/orca-host-install {host} --pair --port {port} "
+                            f"--version {version}", check=False, timeout=600)
     out = p.stdout + p.stderr
     expect(p.returncode == 0, f"orca-host-install {host} exited {p.returncode}: {out[-800:]}")
     for want in ("installed orcad-", f"started orcad {port}", f"paired {host}"):
@@ -180,7 +183,8 @@ def d1(ctx, host, port):
     rt = st.get("result", {}).get("runtime", {})
     expect(rt.get("reachable") is True, f"environment {host} is not reachable: {rt}")
     proof_on(ctx, host, "box", host)
-    again = run(ctx, "desktop", f"{LC}/orchestrators/orca-cotal/scripts/orca-host-install {host} --pair --port {port}")
+    again = run(ctx, "desktop", f"{LC}/orchestrators/orca-cotal/scripts/orca-host-install {host} --pair --port {port} "
+                                f"--version {version}")
     expect("exists orcad-" in again.stdout and "running orcad" in again.stdout and "already-paired" in again.stdout,
            f"a re-run is not idempotent: {again.stdout}")
     return rt.get("appVersion")
@@ -517,6 +521,41 @@ def d2_no_tunnel(ctx):
             f"Back on orcad: {', '.join(listeners(ctx, 'desktop', 6768))}")
 
 
+# --- 4c. direction 2 as an --on-client hand-off (the fallback, owner 2026-11-25) ----------------------------------------
+
+@scenario("direction 2 by --on-client hand-off, after direction 1 only: the box mails a bot on the desktop to start the "
+          "lane there (an evaluation of the fallback; share link + lane-tunnel stays first)")
+def d2_on_client(ctx):
+    """Orca's own commands only: bot list and bot create on the desktop, send --on-client from a box terminal. Needs
+    the box paired from the desktop (d1-direct or d1-jump), and no share link or tunnel."""
+    if not box_cli_ready(ctx):
+        raise Skip("the box has no Orca server yet (run d1-direct or d1-jump first)")
+    bots = json.loads(run(ctx, "desktop", "orca-ide bot list --json").stdout).get("result", {}).get("bots", [])
+    made = run(ctx, "desktop", "orca-ide bot create --offer --name tb-relay --purpose 'testbed relay for box lanes' "
+                               "--json", check=False).stdout
+    try:
+        made_msg = (json.loads(made).get("error") or {}).get("message") or "offered"
+    except ValueError:
+        made_msg = made.strip()[-160:]
+    t = coordinator_terminal(ctx, "box", "on-client")
+    out = run(ctx, "box", f"~/.orca/cli/bin/orca orchestration send --from {t} --on-client desktop --to bot:tb-relay "
+                          "--type question --subject 'testbed lane request' --body 'start a lane' --json",
+              check=False).stdout
+    try:
+        sent = json.loads(out[out.index("{"):])
+    except ValueError:
+        sent = {}
+    err = (sent.get("error") or {}).get("message")
+    if sent.get("ok"):
+        return f"send --on-client desktop was accepted: {json.dumps(sent.get('result'))[:300]}"
+    raise Gap(f"not usable headless. The desktop has {len(bots)} bots; `bot create --offer` says \"{made_msg}\" (a bot "
+              "is made from a bot's chat, on the owner's Create); the box's send --on-client desktop says \""
+              f"{err}\": a desktop that drives the box through the CLI is no connected computer, only the desktop app "
+              "is. As a fallback it needs the desktop app open and connected, a bot made by the owner, and a person's "
+              "approval on the desktop; the box then gets mail and a reply, not the lane: no send to the lane, no "
+              "release or cleanup from the box, the report relayed by the bot")
+
+
 # --- 6. Orca's built-ins against lane-control's own pieces (docs/research/2026-11-25-orca-overlap.md) ------------------
 
 @scenario("overlap row 4: the box as one of Orca's own SSH targets, in place of orca-host-install and the -L tunnel")
@@ -622,6 +661,90 @@ def builtin_worker_count(ctx):
             f"lane-room says: {line.strip()}")
 
 
+# --- 8. mixed versions: the desktop on one pinned Orca, the box on another --------------------------------------------
+
+@scenario("mixed versions: the box's server on the other pinned Orca; lane A (desktop client, box server) and lane B "
+          "(box client, desktop server) across the version gap")
+def mixed_pair(ctx):
+    also = run(ctx, "desktop", "cat /opt/orca/ALSO 2>/dev/null", check=False).stdout.split()
+    if len(also) < 2:
+        raise Skip("the image holds one Orca version only (up from the official release with another pinned version; "
+                   "TESTBED_ORCA_ALSO)")
+    other_app, other_slot = also[0], also[1]
+    mine = run(ctx, "desktop", "orca-ide status --json | jq -r .result.runtime.appVersion").stdout.strip()
+    unpair_box(ctx, "box")
+    got = d1(ctx, "box", 6769, version=other_slot)
+    expect(got == other_app, f"the box's server reports {got}, not {other_app}")
+    a = lane_across(ctx, "desktop", "box", "box", "mixed-a")
+    b_host = d2(ctx, "box")
+    b = lane_across(ctx, "box", "desktop", "desktop", "mixed-b")
+    unpair_box(ctx, "box")
+    return (f"desktop {mine}, box {other_app}. Lane A ({mine} client, {other_app} server): {a}. Tunnel: {b_host}. "
+            f"Lane B ({other_app} client, {mine} server): {b}")
+
+
+# --- 9. a runtime restart with a lane running -------------------------------------------------------------------------
+
+@scenario("a runtime restart with a lane waiting: the desktop's server is killed and comes back; does the worker keep "
+          "its dispatch and report (1.4.272+ resume work on restart), else does worker-start --retry-of recover it")
+def restart_retry(ctx):
+    t0 = coordinator_terminal(ctx, "desktop", "restart")
+    name = f"tb-rs-{int(time.time()) % 100000}"
+    res = local_worker(ctx, t0, name, f"Testbed restart lane.\nRUN-TOOL: pwd > ~/tmp/{name}-pwd\nWAIT-FOR-MESSAGE\n")
+    disp, task = res["dispatchId"], res.get("taskId")
+    for _ in range(60):
+        if run(ctx, "desktop", f"test -s ~/tmp/{name}-pwd", check=False).returncode == 0:
+            break
+        time.sleep(2)
+    wt = run(ctx, "desktop", f"cat ~/tmp/{name}-pwd").stdout.strip()
+    run(ctx, "desktop", "for p in $(pgrep -f 'orcad[.]js .*--port 6768'); do kill $p; done; rm -f ~/.orca-desktop-readiness")
+    time.sleep(3)
+    for _ in range(120):
+        if run(ctx, "desktop", "orca-ide status --json 2>/dev/null | jq -e '.result.runtime.state == \"ready\"' "
+                               ">/dev/null", check=False).returncode == 0:
+            break
+        time.sleep(1)
+    time.sleep(10)
+    show = run(ctx, "desktop", f"orca-ide orchestration worker-show --dispatch {disp} --json", check=False).stdout
+    try:
+        w = json.loads(show).get("result", {})
+        w = w.get("worker", w)
+    except ValueError:
+        w = {}
+    after = {k: w.get(k) for k in ("state", "outcome", "liveness", "terminalState")}
+    run(ctx, "desktop", f"orca-ide orchestration send --to dispatch:{disp} --subject act --body 'RUN-TOOL: echo acted > "
+                        f"~/tmp/{name}-acted' --from {t0} --json >/dev/null", check=False)
+    kept = False
+    for _ in range(60):
+        if any(m.get("type") == "worker_done" and (disp in json.dumps(m) or m.get("from") == res.get("terminal"))
+               for m in messages(ctx, "desktop", t0)):
+            kept = True
+            break
+        time.sleep(2)
+    if kept:
+        return f"after the restart the worker kept its dispatch ({after}), took a message and reported: resumed"
+    notes = [m.get("subject") for m in messages(ctx, "desktop", t0)]
+    run(ctx, "desktop", f"orca-ide orchestration worker-stop --dispatch {disp} --json >/dev/null 2>&1; orca-ide "
+                        f"orchestration worker-abandon --dispatch {disp} --json >/dev/null 2>&1", check=False)
+    retry = run(ctx, "desktop", f"orca-ide orchestration worker-start --task {task} --retry-of {disp} --worktree "
+                                f"path:{wt} --agent opencode --spec-file ~/tmp/{name}.md --from {t0} --json",
+                check=False, timeout=300)
+    try:
+        r2 = json.loads(retry.stdout).get("result") or {}
+    except ValueError:
+        r2 = {}
+    expect(r2.get("dispatchId"), f"the worker did not report after the restart ({after}; notices {notes}) and "
+                                 f"--retry-of failed: {(retry.stdout + retry.stderr)[-400:]}")
+    run(ctx, "desktop", f"orca-ide orchestration send --to dispatch:{r2['dispatchId']} --subject act --body 'go' --from "
+                        f"{t0} --json >/dev/null", check=False)
+    for _ in range(60):
+        if any(m.get("type") == "worker_done" and r2["dispatchId"] in json.dumps(m) for m in messages(ctx, "desktop", t0)):
+            return (f"after the restart the worker did not report ({after}; notices {notes}); worker-start --retry-of "
+                    f"{disp} on the same task and worktree started {r2['dispatchId']}, which reported")
+        time.sleep(2)
+    raise Fail(f"neither the worker ({after}) nor its --retry-of ({r2['dispatchId']}) reported after the restart")
+
+
 # --- 7. a lane through PR, review and merge on the fake GitHub; Orca's cleanup after it ---------------------------------
 
 def gh_in(ctx, role, args, check=True):
@@ -695,6 +818,6 @@ def builtin_cleanup(ctx):
 
 # The order `all` runs them in: each lane right after the pairing it uses (d1-jump resets the box's server).
 ORDER = ["suggest-tiers", "onboard", "d1-direct", "lane-a-direct", "d1-jump", "lane-a-jump", "d2-tunnel", "lane-b-jump",
-         "d2-ports", "lane-b-direct", "d2-no-tunnel", "builtin-ssh-target", "builtin-worker-notice",
-         "builtin-worker-count", "lane-pr-merge", "builtin-cleanup", "refresh"]
+         "d2-ports", "lane-b-direct", "d2-no-tunnel", "d2-on-client", "builtin-ssh-target", "builtin-worker-notice",
+         "builtin-worker-count", "lane-pr-merge", "builtin-cleanup", "restart-retry", "refresh", "mixed-pair"]
 ALL.sort(key=lambda s: ORDER.index(s.name) if s.name in ORDER else len(ORDER))

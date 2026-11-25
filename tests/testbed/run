@@ -87,18 +87,19 @@ def pin():
     return json.loads(PINFILE.read_text())
 
 
-def fetch_pinned():
-    """The pinned official Orca server release (orca-pin.json; TESTBED_ORCA_VERSION picks one of its versions, else its
+def fetch_pinned(version=None):
+    """A pinned official Orca server release (orca-pin.json; TESTBED_ORCA_VERSION picks one of its versions, else its
     default), downloaded once into TESTBED_WORK/downloads and checked against the pinned sha256 before it is unpacked or
     used; a mismatch is deleted and refused."""
+    version = version or PIN
     pins = pin()["versions"]
-    if PIN not in pins:
-        raise SystemExit(f"testbed: Orca {PIN} is not pinned in orca-pin.json (pinned: {', '.join(pins)}); add it with "
-                         "its release URL and sha256, or use --orca-from")
-    p = dict(pins[PIN], version=PIN)
+    if version not in pins:
+        raise SystemExit(f"testbed: Orca {version} is not pinned in orca-pin.json (pinned: {', '.join(pins)}); add it "
+                         "with its release URL and sha256, or use --orca-from")
+    p = dict(pins[version], version=version)
     dl = WORK / "downloads"
     dl.mkdir(parents=True, exist_ok=True)
-    tar = dl / f"orca-server-{PIN}-linux-x64.tar.gz"
+    tar = dl / f"orca-server-{version}-linux-x64.tar.gz"
     if not tar.exists():
         import urllib.request
         print(f"testbed: downloading Orca {p['version']} ({p['url']})", file=sys.stderr)
@@ -169,6 +170,19 @@ def stage_orca(src: Path, ctx: Path):
         (o / "server" / "bin").mkdir(parents=True)
         shutil.copy2(src / "bin" / "orca-ide", o / "server" / "bin" / "orca-ide")
         copy_tree(src / "out", o / "server" / "out")  # serve picks its runtime from here (else it tries Electron)
+        # The other pinned releases' slots beside it (TESTBED_ORCA_ALSO, default every other pinned version; none for
+        # none), so a box can be put on another version than the desktop (the mixed pair). They are named by their own
+        # .version and must use the same node.
+        also = os.environ.get("TESTBED_ORCA_ALSO", ",".join(v for v in pin()["versions"] if v != PIN))
+        extra = []
+        for v in [x for x in also.split(",") if x and x != "none" and x != PIN]:
+            other = fetch_pinned(v)
+            name = (other / "orcad" / ".version").read_text().strip()
+            if (other / "orcad" / ".runtime-node").read_text().strip() != nodesha:
+                raise SystemExit(f"testbed: Orca {v} runs another node than {PIN}; set TESTBED_ORCA_ALSO=none")
+            copy_tree(other / "orcad", slot.parent / name)
+            extra.append(f"{v} {name}")
+        (o / "ALSO").write_text("".join(f"{e}\n" for e in extra))
     else:
         res = src.parent if src.name == "orcad-template" else src
         tpl = res / "orcad-template"

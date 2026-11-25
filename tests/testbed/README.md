@@ -133,11 +133,14 @@ gateway or a plain shell command in an Orca terminal, never a real model.
 | `d2-ports` | `d2-tunnel` direct to `box` with other ports (TUN-1): `lane-tunnel start --remote-port 6870 box 6768`, the link pointed at 6870 by project-setup's own `link_for_port`, after a restart of the desktop's server (a link pairs once) | as `d2-tunnel`, on port 6870 on the box |
 | `lane-b-direct` | `lane-b-jump` again over that tunnel | as `lane-b-jump` |
 | `d2-no-tunnel` | after `lane-b-direct`, with Orca's own commands only (project-setup refuses a link that is not 127.0.0.1): `orca pair --address 127.0.0.1` and `--address <the desktop's network address>` on the desktop's orcad; then the desktop's server as `orca serve` (the official release's launcher, no `--bind`), `orca pair --address <address>`, the link to the box on stdin (project-setup's own preload), and the lane checks from the box over it; listeners recorded; the desktop back on orcad afterwards | orcad refuses both (`network_exposure_failed`, "Runtime bind address is pinned to 127.0.0.1; refusing to widen to all interfaces") and stays on 127.0.0.1; `orca serve` listens on 0.0.0.0 from its start, gives a link, and the box's lane on the desktop passes all the lane checks without lane-tunnel |
+| `d2-on-client` | after direction 1 only (no share link, no tunnel): `orca bot list` and `bot create --offer` on the desktop, `orchestration send --on-client desktop --to bot:<name>` from a box terminal | reports a **gap** today (Orca 1.4.274): the desktop has no bot and `bot create` must run from a bot's chat ("Run this from a bot's chat"); the box's send says "desktop is offline: it isn't connected to this Orca right now. Nothing was sent." |
 | `builtin-ssh-target` | overlap row 4: `orca host list` and `orca host --help` on the desktop, whose `~/.ssh/config` names box, jump and box-via-jump | reports a **gap** when Orca lists no SSH target and has no command to add one (so far it does: an SSH target is made in the desktop app's Settings only) |
 | `builtin-worker-notice` | overlap row 10: a local OpenCode worker whose brief says `NO-REPORT` ends its turn without reporting | Orca's escalation reaches the coordinator's `check` |
 | `builtin-worker-count` | overlap row 14: two local workers waiting for a message; `worker-list` with and without `--terminal-state active`; `lane-room` | `worker-list` shows both as `liveness: live`, `outcome: in_progress`; the result names their `terminalState` and what lane-room counts |
 | `lane-pr-merge` | a local OpenCode worker commits, pushes its branch and opens a PR on the fake GitHub, then reports; a stub review (`gh pr comment`); the PR's check set to failure, then success | the PR is the lane's (its branch, its file); the failing check blocks `gh pr merge`, the passing one merges it into main; with "delete head branches" on, the branch is gone; the worker releases |
 | `builtin-cleanup` | overlap row 11: `workspace cleanup preview` and `run` on the merged lane's worktree | passes when Orca's cleanup removes it; today reports a **gap**: the row says `keep`, cause `rules-off` (rules are set in Orca's settings only), the run removes nothing; the worktree is then removed by hand (lane-control's fallback) |
+| `restart-retry` | a local worker waiting for a message; the desktop's server killed and back; then a message | the worker keeps its dispatch and reports (resumed); else `worker-start --retry-of` on the same task and worktree must start one that reports |
+| `mixed-pair` | after `refresh`: the box's server on the other pinned Orca (`orca-host-install --version`), then lane A, `d2`, lane B | every lane check passes across the version gap, both ways (run once with each version as the desktop's) |
 | `refresh` | on the box: a second scratch project set up by lane-control `48a38ab` (main before LIT-1, whose lane-tier refuses OpenCode tiers), then `project-setup --refresh` from this checkout | the old setup left an older `~/.agents/bin/lane-tier`; after `--refresh` it and the `native-orca-lanes` skill are this checkout's |
 
 Lanes start the way the lane skill says for OpenCode, as far as Orca 1.4.268 lets them: `--agent opencode` without
@@ -147,6 +150,28 @@ tried and dropped: Orca's launch readiness did not accept it.
 
 Not built yet (the next slices): away-improve (`lane-improve on`, the cap, the summary PR, drained) and the items marked
 not verified below.
+
+## Direction 2, and its fallback
+
+lane-control needs direction 2 (the box starts lanes on the desktop) as well as Orca's own model of direction 1 (the
+coordinator on the client, `--on` to paired servers): a project's coordinator may live on its box so it keeps working
+while the desktop is off or unreachable, and it still needs the desktop for what the box lacks (owner 2026-11-25:
+"coordinator lives on box for just that reason. direction 2 must stay."). So direction 2 is the share link plus
+lane-tunnel, first class; Orca's `--on-client` hand-off is the documented fallback ("we do it with share link, with
+--on-client as fallback"). Side by side, on the lane checks (Orca 1.4.274):
+
+| | Share link + lane-tunnel (`d2-tunnel`, `d2-ports`, `lane-b-*`) | `--on-client` hand-off (`d2-on-client`) | No tunnel, `orca serve` (`d2-no-tunnel`) |
+|---|---|---|---|
+| Works without the desktop window | yes (the link is the owner's, once) | no: the desktop app must be open and connected to the box's server | yes, but only with `orca serve` |
+| Approvals and hand steps | the share link, once per box | a bot made by the owner in a bot chat; a person approves the first mail | none, after the link |
+| Lane control from the box (send to the lane, release, cleanup) | all of it | none: the box mails a bot; the bot starts and releases the lane | all of it |
+| Reports | the lane's `worker_done` in the box's `check` | the bot's reply in the box's `check` | as the tunnel |
+| The desktop's exposure | loopback only | loopback only | every interface |
+| Failure modes seen | the first start's brief may not arrive (lc-7dd, retried) | "desktop is offline" when the desktop app is not connected; declined when the person says no | as the tunnel |
+
+Verdict on `--on-client`: **fallback only**: it needs the desktop app open, an owner-made bot and an approval, and it
+gives the box mail rather than the lane; the share link and lane-tunnel do everything from the box with the desktop on
+loopback.
 
 ## Coverage
 
@@ -167,15 +192,17 @@ in the scenarios that compare them (`d1-*`, `d2-*`, the lanes over them) next to
 | The first OpenCode lane started on the desktop from the box gets its brief | not always: OpenCode came up with an empty composer, the start was retried (lc-7dd) | the same | `lane-b-jump` |
 | Is lane-tunnel still needed? With `orca serve` (no `--bind`) on the desktop, the box pairs with its network address and a box-to-desktop lane passes every lane check without the tunnel; the desktop's Orca then listens on 0.0.0.0, every interface, from its start | | verified | `d2-no-tunnel` |
 | Overlap row 2: `orca pair --address 127.0.0.1` mints the box's link on a desktop that stays on loopback | | not on headless Orca: orcad (with or without `--bind`) and `serve --bind 127.0.0.1` refuse (`network_exposure_failed`, "pinned to 127.0.0.1"); the desktop app was not run | `d2-no-tunnel` |
-| Overlap row 4: the box as an Orca SSH target (`--host ssh:<id>`) in place of orca-host-install | | **gap**: `host list` shows this machine and paired servers only, never `~/.ssh/config`; `orca host` has no add (lc-65b) | `builtin-ssh-target` |
+| Overlap row 4: the box as an Orca SSH target (`--host ssh:<id>`) in place of orca-host-install | | **gap**: `host list` shows this machine and paired servers only, never `~/.ssh/config`; `orca host` has no add (lc-65b) | `d2-on-client` | after direction 1 only (no share link, no tunnel): `orca bot list` and `bot create --offer` on the desktop, `orchestration send --on-client desktop --to bot:<name>` from a box terminal | reports a **gap** today (Orca 1.4.274): the desktop has no bot and `bot create` must run from a bot's chat ("Run this from a bot's chat"); the box's send says "desktop is offline: it isn't connected to this Orca right now. Nothing was sent." |
+| `builtin-ssh-target` |
 | Overlap row 10: Orca tells the coordinator when a worker ends its turn without reporting | | verified (one machine) | `builtin-worker-notice` |
 | Overlap row 14: `worker-list` counts the running lane workers | | verified, but not with `--terminal-state active`: a running worker's `terminalState` is `retained`, so count `liveness: live` and `outcome: in_progress` (lc-sq0); lane-room counts 0 lane agents meanwhile | `builtin-worker-count` |
 | A lane through its PR: PR on the fake GitHub, stub review, a failing check blocks the merge, merge, branch deleted, release | | verified | `lane-pr-merge` |
 | Overlap row 11: Orca's Workspace Cleanup removes a merged lane's worktree | | **gap** on a headless profile: `keep`, cause `rules-off`; rules are set in settings only, no CLI turns one on (lc-93i) | `builtin-cleanup` |
 | One environment per server: a box that paired with the desktop through the tunnel must forget it before pairing with the desktop's network address ("This server is already paired as \"desktop\"") | | verified | `d2-no-tunnel` |
+| Direction 2 by `--on-client` hand-off after direction 1 only | | **gap** headless: no bot without a bot chat; "desktop is offline" (only the desktop app is a connected computer) | `d2-on-client` |
+| Mixed versions: a 1.4.274 desktop with a 1.4.268 box, and a 1.4.268 desktop with a 1.4.274 box: lane A and lane B, every lane check | verified (both ways) | verified (both ways) | `mixed-pair` |
+| A runtime restart with a lane waiting: the worker keeps its dispatch, takes a message and reports (resume work on restart) | | verified (one machine; `--retry-of` not needed, so not run) | `restart-retry` |
 | A cross-host `worker_done` wakes an idle agent coordinator | not verified: needs a real agent coordinator (the opt-in `TESTBED_REAL_MODEL`, not built); the testbed's coordinators are shells | | none |
-| A newer client against an older server (and back) | not verified: the pin file holds both versions; a mixed-pair scenario is not built | | none |
-| A runtime restart: workers keep or lose their dispatch (`worker_identity_changed`), `worker-start --retry-of` | not verified (`d2-ports` restarts the desktop's server with no lane running and checks only that it comes back) | | none |
 | 1.4.272+: `send --on-client <installation> --to bot:<name>`, `recipient_delivery_held` receipts, resume work on restart, a paired server's follow-up report no longer refused | | not verified (not built) | none |
 | Onboarding with no Claude (`--skip-adapt`), `--suggest-tiers` against a LiteLLM-like gateway, `--refresh` from an older checkout | verified | verified | `suggest-tiers`, `onboard`, `refresh` |
 
