@@ -124,6 +124,8 @@ def _problem(state, drain: bool = False) -> "str | None":
     mx = state.get("max_items")
     if mx is not None and not (isinstance(mx, int) and not isinstance(mx, bool) and mx >= 1):
         return "max_items is not a whole number above 0"
+    if not isinstance(state.get("max_hours_off", False), bool):
+        return "max_hours_off is not true or false"
     mh = state.get("max_hours")
     if mh is not None and not (isinstance(mh, (int, float)) and not isinstance(mh, bool) and 0 < mh <= MAX_HOURS_LIMIT):
         return f"max_hours is not a number of hours above 0 and at most {MAX_HOURS_LIMIT}"
@@ -161,6 +163,21 @@ def _read(f: Path, drain: bool, quiet: bool) -> "dict | None":
             print(f"improve: {f} ignored ({why}); improve is off", file=sys.stderr)
         return None
     return state
+
+
+def file_problem(f: Path, drain: bool) -> "str | None":
+    """Why a state file that is there cannot be used, or None (no file, or a good one)."""
+    try:
+        text = f.read_text()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"{f.name} cannot be read ({e.strerror})"
+    try:
+        why = _problem(json.loads(text), drain)
+    except ValueError:
+        why = "not valid JSON"
+    return f"{f.name}: {why}" if why else None
 
 
 def _ended(state: dict) -> bool:
@@ -312,7 +329,7 @@ def _locked():
 
 
 def _has_caps(state: dict) -> bool:
-    return bool(state.get("max_items")) or state.get("stop_at") is not None
+    return bool(state.get("max_items")) or state.get("stop_at") is not None or bool(state.get("max_hours"))
 
 
 def _fresh_period(state: dict) -> dict:
@@ -556,9 +573,10 @@ def parse_cap(flag: str, text: "str | None", whole: bool):
 # projects, improve-cycle.json beside the improve file, keyed to the period's `started` like the period record; written under
 # the improve lock. The ledger, improve-ledger.jsonl, gets one line per closed cycle (merged by away-merge, or parked).
 
-PHASES = ("scout", "build", "review", "merge", "idle")
-LANE_PHASES = ("scout", "build", "review", "merge")   # a lane is out: its deadline counts
-NEW_LANE_PHASES = ("scout", "build")                  # a lane starts here: lane_started and the deadline are set
+PHASES = ("queued", "scout", "build", "review", "merge", "idle")
+LANE_PHASES = ("queued", "scout", "build", "review", "merge")   # a lane is out: its deadline counts
+NEW_LANE_PHASES = ("queued", "scout", "build")                  # a lane starts here: lane_started and the deadline are set
+WORKERS_KEPT = 8   # the other dispatches a cycle records (`--worker`: a reviewer, a queued lane), newest last
 DEFAULT_LANE_BUDGET_MIN = 240
 ADDRESS = re.compile(r"(?:term_[A-Za-z0-9-]{1,80}|run:[A-Za-z0-9_-]{1,80}|dispatch:[A-Za-z0-9_-]{1,80})")
 DISPATCH = re.compile(r"[A-Za-z0-9_-]{1,80}")
@@ -612,11 +630,12 @@ def set_cycle(state: dict, project: str, changes: dict, budget_min: "int | None"
         phase = changes.get("phase")
         # a new lane: a scout after anything else, a build that does not follow its own build/review/merge rounds, or
         # any new dispatch; a build round after a review (the same worker fixing findings) keeps its deadline
-        same_lane = ("scout",) if phase == "scout" else ("build", "review", "merge")
+        same_lane = (phase,) if phase in ("scout", "queued") else ("build", "review", "merge")
         new_lane = phase in NEW_LANE_PHASES and (rec.get("phase") not in same_lane or
                                                  ("dispatch" in changes and changes["dispatch"] != rec.get("dispatch")))
+        worker = changes.pop("worker", None)
         if new_lane:
-            if phase == "scout":
+            if phase in ("scout", "queued"):
                 for k in ("item", "pr", "round"):
                     rec.pop(k, None)
             elif "round" not in changes and changes.get("item", rec.get("item")) != rec.get("item"):
@@ -624,12 +643,14 @@ def set_cycle(state: dict, project: str, changes: dict, budget_min: "int | None"
             rec.setdefault("round", 0)
             rec["lane_started"] = _iso(t)
         rec.update(changes)
+        if worker:  # another dispatch working for this cycle (a reviewer, say): watched as live, never a new lane
+            rec["workers"] = [w for w in rec.get("workers", []) if w != worker][-(WORKERS_KEPT - 1):] + [worker]
         if new_lane or budget_min is not None:
             b = budget_min if budget_min is not None else int(rec.get("budget_min") or DEFAULT_LANE_BUDGET_MIN)
             rec["budget_min"] = b
             rec["deadline"] = _iso(t + dt.timedelta(minutes=b))
         if rec.get("phase") == "idle":
-            for k in ("deadline", "lane_started", "dispatch"):
+            for k in ("deadline", "lane_started", "dispatch", "workers"):
                 rec.pop(k, None)
         rec["updated"] = _iso(t)
         allc[project] = rec
@@ -705,6 +726,8 @@ def cycle_text(project: str, rec: dict) -> str:
     for k in ("dispatch", "worktree", "address"):
         if rec.get(k):
             bits.append(f"{k} {rec[k]}")
+    if rec.get("workers"):
+        bits.append("other workers " + " ".join(rec["workers"]))
     d = _when(rec.get("deadline"))
     if d:
         bits.append(f"deadline {d.strftime('%a %d %b %H:%M')}" + (" (passed)" if d <= now() else ""))
@@ -743,6 +766,10 @@ def cmd_cycle(a) -> int:
             if not DISPATCH.fullmatch(a.dispatch):
                 raise ValueError("--dispatch: the lane's Orca dispatch id (ctx_...)")
             changes["dispatch"] = a.dispatch
+        if a.worker is not None:
+            if not DISPATCH.fullmatch(a.worker):
+                raise ValueError("--worker: another Orca dispatch id (ctx_...) working for this cycle, such as its reviewer")
+            changes["worker"] = a.worker
         if a.worktree is not None:
             if not os.path.isabs(a.worktree):
                 raise ValueError("--worktree: the lane worktree's absolute path")
@@ -785,6 +812,14 @@ def cmd_cycle(a) -> int:
         rec = cycle(s, a.project)
         print(json.dumps(rec, sort_keys=True) if a.json else cycle_text(a.project, rec))
         return 0
+    if changes.get("phase") == "scout" and cycle(s, a.project).get("phase") != "scout":
+        # a new cycle: refused once the project's cycles have ended (a cap, `off`, the end time); a lane already out finishes
+        stop = ("the period is draining (`lane-improve off` or its end time)" if mode == "draining"
+                else hard_stop(s, a.project) or (("a cap is reached (" + caps(s, a.project)[1] + ")") if caps(s, a.project)[1] else None))
+        if stop:
+            print(f"lane-improve: no new cycle for {a.project}: {stop}; wrap up (the away-improve skill, section 3)",
+                  file=sys.stderr)
+            return 1
     rec = set_cycle(s, a.project, changes, a.budget_min)
     print(json.dumps(rec, sort_keys=True) if a.json else "lane-improve: " + cycle_text(a.project, rec))
     return 0
@@ -792,8 +827,10 @@ def cmd_cycle(a) -> int:
 
 def status_rows() -> list:
     """One record per project for `status --json` (field report B5): this machine's coordinators and the projects the state
-    files name. improve: on | wrapped | draining | off; with the cycle's item, phase, round, PR, deadline and the minutes
-    since its last activity (cycle record, last away-merge, period start), and the cap reached, if any."""
+    files name. improve: on | wrapped | draining | off, or unknown with `error` saying why (an improve or drain file that
+    cannot be used, a period record that cannot be trusted); with the cycle's item, phase, round, PR, deadline and the
+    minutes since its last activity (cycle record, last away-merge, period start), and the cap reached, if any."""
+    broken = file_problem(path(), False) or file_problem(drain_path(), True)
     s = load(quiet=True)
     d = None if s else (load_drain(quiet=True) or (_to_drain(e) if (e := ended_state()) is not None else None))
     names = [c.name for c in _coordinator_list()]
@@ -803,10 +840,14 @@ def status_rows() -> list:
     rows = []
     for p in dict.fromkeys(names):
         row = {"project": p, "improve": "off", "item": None, "phase": None, "round": None, "pr": None, "deadline": None,
-               "deadline_passed": False, "last_activity_age_min": None, "cap": None, "branch": None}
+               "deadline_passed": False, "last_activity_age_min": None, "cap": None, "branch": None, "error": None}
         st = s if s and covers(s, p) else (d if d and p in d["pending"] else None)
+        if st is None and broken:
+            row.update(improve="unknown", error=broken)
         if st is not None:
-            row["improve"] = "draining" if st is d else ("wrapped" if is_wrapped(st, p) else "on")
+            lost = period_problem(st)
+            row["improve"] = "draining" if st is d else ("unknown" if lost else "wrapped" if is_wrapped(st, p) else "on")
+            row["error"] = lost
             row["branch"] = st["branches"].get(p)
             rec = cycle(st, p)
             row.update({k: rec.get(k) for k in ("item", "phase", "round", "pr", "deadline")})
@@ -1676,13 +1717,14 @@ def cmd_on(a) -> int:
                 resumes.append(p)
             else:
                 still_wrapped.append(p)
-    # --unmetered takes the budget steps away, never the wall clock: a period with no end keeps a --max-hours bound unless
-    # the owner gives one or drops it by name (`--max-hours none`). Set where the period becomes unmetered (its first `on`,
-    # or the re-run that adds --unmetered).
+    # --unmetered takes the budget steps away, never the wall clock: every run that leaves the period unmetered with no end
+    # and no --max-hours gives it the default, unless the owner dropped it by name (`--max-hours none`), which is kept as
+    # max_hours_off so a later re-run does not put it back; a value given later clears that.
     hours_default = ""
-    newly_unmetered = bool(a.unmetered) and not (prev or {}).get("unmetered")
+    hours_off = max_hours is CLEAR or (max_hours is None and bool((prev or {}).get("max_hours_off")))
+    eff_unmetered = bool(a.unmetered) or bool((prev or {}).get("unmetered"))
     eff_end = end or (prev or {}).get("end") or UNTIL_BACK
-    if newly_unmetered and max_hours is None and eff_hours is None and eff_end == UNTIL_BACK:
+    if eff_unmetered and eff_end == UNTIL_BACK and eff_hours is None and not hours_off:
         eff_hours = UNMETERED_DEFAULT_HOURS
         hours_default = (f"  wall clock: --unmetered has no budget steps, so a bound of {UNMETERED_DEFAULT_HOURS} h applies "
                          "(--max-hours; give another value, or `--max-hours none` to run until `lane-improve off`)")
@@ -1715,6 +1757,7 @@ def cmd_on(a) -> int:
             "stop_at": eff_stop,
             "max_items": eff_max,
             "max_hours": eff_hours,
+            "max_hours_off": bool(hours_off and eff_hours is None),
         }
     else:
         state = {
@@ -1730,6 +1773,7 @@ def cmd_on(a) -> int:
             "stop_at": eff_stop,
             "max_items": eff_max,
             "max_hours": eff_hours,
+            "max_hours_off": bool(hours_off and eff_hours is None),
         }
     lost = period_problem(state) if prev else None  # the period's record cannot be trusted: this run makes it again
     write(state)
@@ -2047,6 +2091,7 @@ def main(argv=None) -> int:
     cy.add_argument("--pr", type=int)
     cy.add_argument("--round", type=int)
     cy.add_argument("--dispatch")
+    cy.add_argument("--worker")
     cy.add_argument("--worktree")
     cy.add_argument("--budget-min", dest="budget_min", type=int)
     cy.add_argument("--address")

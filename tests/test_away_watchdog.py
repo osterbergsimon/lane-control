@@ -38,12 +38,19 @@ if a[:2] == ["orchestration", "worker-show"]:
     if w is None:
         out(None, False, "no such dispatch")
     out({"projection": {"liveness": {"verdict": w["verdict"]}, "outcome": w["outcome"], "stage": {"activity": "working"}}})
+if a[:2] == ["orchestration", "worker-list"]:
+    out({"workers": st.get("list", [])})
 if a[:2] == ["orchestration", "send"]:
     if "--body" in a:
         print("stub: a body must go through --body-file", file=sys.stderr); sys.exit(1)
+    if not opt("--from"):  # like Orca 1.4.274: no --from and no terminal of its own (a precheck) has no sender
+        out(None, False, "no_active_sender_terminal")
+    seen = os.environ.get("WD_BACKOFF_SEEN")
+    if seen:  # was the message's backoff written before the send?
+        st.setdefault("backoff_seen", []).append(os.path.exists(seen))
     if opt("--to") in st.get("send_fail", []):
         out(None, False, "unknown recipient")
-    st.setdefault("sent", []).append({"to": opt("--to"), "type": opt("--type"), "subject": opt("--subject"),
+    st.setdefault("sent", []).append({"to": opt("--to"), "from": opt("--from"), "type": opt("--type"), "subject": opt("--subject"),
                                       "body": open(opt("--body-file"), encoding="utf-8").read()})
     out({"message": {"id": "msg_%d" % len(st["sent"])}})
 print("stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
@@ -58,6 +65,7 @@ class WatchTest(ImproveTest):
         self.mc = self.home / "machine-coordinator"
         self.mc.mkdir()
         self.conf(night_end=24)  # no daily summary unless a test asks for one
+        self.playbook(20, 10)    # a metered budget at step 0: nudges may go out (M3)
         self.orca_state(terminals=[self.term("term_shop", self.shop), self.term("term_mc", self.mc)])
         r = self.on("--project", "shop")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -91,8 +99,15 @@ class WatchTest(ImproveTest):
         from test_lane_away import git
         return git(self.tmp / f"{name}.git", "for-each-ref", "--format=%(refname) %(objectname)")
 
-    def watch(self, minutes=0, *args):
-        return self.run_script("away-watchdog", *args, env=self.at(minutes))
+    def watch(self, minutes=0, send=True, env=None):
+        """One round as the automation runs it: the precheck, then (when it exits 0) its agent's `--send` from its own
+        terminal. stdout is both; returncode the precheck's; .send the agent's run (or None)."""
+        from types import SimpleNamespace
+        d = self.run_script("away-watchdog", env={**self.at(minutes), **(env or {})})
+        s = (self.run_script("away-watchdog", "--send", env={**self.at(minutes), "ORCA_TERMINAL_HANDLE": "term_auto",
+                                                              **(env or {})}) if send and d.returncode == 0 else None)
+        return SimpleNamespace(stdout=d.stdout + (s.stdout if s else ""), stderr=d.stderr + (s.stderr if s else ""),
+                               returncode=d.returncode, send=s)
 
     def cycle(self, *args, minutes=0, env=None):
         return self.run_script("lane-improve", "cycle", "shop", *args, env={**self.at(minutes), **(env or {})})
@@ -115,12 +130,14 @@ class WatchdogTests(WatchTest):
     def test_no_live_worker_and_quiet_nudges_the_recorded_address_with_the_evidence(self):
         self.build_lane(live=False)
         r = self.watch(50)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0, "something to send: the automation's agent starts")
+        self.assertIn("DUE NUDGE shop to term_shop", r.stdout)
         self.assertIn("SENT NUDGE shop to term_shop", r.stdout)
+        self.assertEqual(r.send.returncode, 0, r.send.stdout + r.send.stderr)
         (m,) = self.sent()
-        self.assertEqual((m["to"], m["type"]), ("term_shop", "status"))
-        for part in ("item: Add the x feature", "PR: #12", "idle: 5", "dispatch ctx_lane1: liveness gone, outcome succeeded",
-                     "phase: build, review round 0", "merges nothing"):
+        self.assertEqual((m["to"], m["from"], m["type"]), ("term_shop", "term_auto", "status"))
+        for part in ("item: Add the x feature", "PR: #12", "idle: 5", "worker ctx_lane1: liveness gone, outcome succeeded",
+                     "phase: build, review round 0", "merges nothing", "do not reply"):
             self.assertIn(part, m["body"])
 
     def test_quiet_for_less_than_the_threshold_sends_nothing(self):
@@ -188,7 +205,7 @@ class WatchdogTests(WatchTest):
         relay = [m for m in self.sent() if m["to"] == "term_mc"]
         self.assertEqual(len(relay), 1)
         self.assertIn("could not be reached", relay[0]["body"])
-        self.assertEqual(r.returncode, 1, "told the machine coordinator: delivered, no agent needed")
+        self.assertEqual(r.send.returncode, 0, "told the machine coordinator: delivered")
 
     def test_nobody_reachable_fails_loudly_once_per_spell(self):
         self.orca_state(terminals=[])
@@ -221,15 +238,15 @@ class WatchdogTests(WatchTest):
         heads = {b: self.git_heads(b) for b in ("shop", "blog")}
         self.watch(140)
         verbs = {tuple(c[:2]) for c in self.orca_calls()}
-        self.assertLessEqual(verbs, {("terminal", "list"), ("orchestration", "worker-show"), ("orchestration", "send")})
+        self.assertLessEqual(verbs, {("terminal", "list"), ("orchestration", "worker-show"), ("orchestration", "worker-list"),
+                                     ("orchestration", "send")})
         self.assertEqual(self.gh_log(), [])
         self.assertEqual({b: self.git_heads(b) for b in ("shop", "blog")}, heads)
         for c in self.orca_calls():
             if c[:2] == ["orchestration", "send"]:
                 self.assertNotIn("--body", c)
 
-    def test_improve_off_a_rested_or_capped_project_gets_nothing(self):
-        self.build_lane(live=False)
+    def test_a_rested_project_with_no_lane_and_a_period_that_ended_with_none_get_nothing(self):
         self.assertEqual(self.run_script("lane-improve", "rest", "shop").returncode, 0)
         self.assertEqual(self.watch(50).stdout, "")
         self.run_script("lane-improve", "off")
@@ -249,6 +266,119 @@ class WatchdogTests(WatchTest):
                      "review rounds"):
             self.assertIn(part, m["body"])
         self.assertNotIn("SUMMARY", self.watch(20).stdout)
+
+
+class WatchdogReviewTests(WatchTest):
+    """Review round 1 of AWY-2: B1 the sender, M1 crashes, M2 other live workers, M3 budget, m3 paused, M4 lanes after a
+    cap or off, M6 one worker per worktree."""
+
+    def test_the_precheck_sends_nothing_and_send_needs_a_terminal_of_its_own(self):  # B1
+        self.build_lane(live=False)
+        d = self.watch(50, send=False)
+        self.assertEqual(d.returncode, 0)
+        self.assertFalse([c for c in self.orca_calls() if c[:2] == ["orchestration", "send"]])
+        r = self.run_script("away-watchdog", "--send", env=self.at(50))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("ORCA_TERMINAL_HANDLE", r.stderr)
+        self.assertEqual(self.sent(), [])
+        for c in self.orca_calls():
+            if c[:2] == ["orchestration", "send"]:
+                self.assertIn("--from", c)
+
+    def test_a_crash_is_loud(self):  # M1
+        bad = self.tmp / "not-a-dir"
+        bad.write_text("x")
+        self.build_lane(live=False)
+        r = self.watch(50, send=False, env={"XDG_CACHE_HOME": str(bad)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("UNADDRESSED machine (away-watchdog failed", r.stdout)
+
+    def test_the_backoff_is_written_before_the_send_so_a_crash_never_sends_twice(self):  # M1
+        self.build_lane(live=False)
+        seen = self.home / ".cache" / "lane-control" / "watchdog" / "shop.nudge.json"
+        self.watch(50, env={"WD_BACKOFF_SEEN": str(seen)})
+        self.assertEqual(json.loads((self.tmp / "wd-orca.json").read_text())["backoff_seen"], [True])
+        again = self.watch(51)
+        self.assertNotIn("DUE NUDGE", again.stdout)
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_a_refused_send_is_said_again_next_time(self):  # the backoff is put back when the send fails
+        self.orca_state(send_fail=["term_shop", "term_mc"])
+        self.build_lane(live=False)
+        self.assertIn("UNADDRESSED shop", self.watch(50).stdout)
+        self.orca_state(send_fail=[])
+        self.assertIn("SENT NUDGE shop", self.watch(52).stdout)
+
+    def test_a_live_reviewer_or_any_live_worker_on_the_worktree_counts(self):  # M2
+        self.build_lane(live=False)
+        self.cycle("--phase", "review", "--round", "1", "--worker", "ctx_rev")
+        self.orca_state(workers={"ctx_lane1": {"verdict": "gone", "outcome": "succeeded"},
+                                 "ctx_rev": {"verdict": "live", "outcome": "in_progress"}})
+        self.assertEqual(self.watch(130).stdout, "")
+        self.orca_state(workers={"ctx_lane1": {"verdict": "gone", "outcome": "succeeded"}},
+                        list=[{"dispatchId": "ctx_other", "liveness": "live", "outcome": "in_progress",
+                               "workspace": "repo::" + str(self.tmp / "lane-wt")}])
+        self.assertEqual(self.watch(131).stdout, "")
+        rec = json.loads(self.cycle("--json").stdout)
+        self.assertEqual((rec["dispatch"], rec["workers"]), ("ctx_lane1", ["ctx_rev"]))
+
+    def test_a_review_round_back_to_build_with_the_reviewer_recorded_keeps_the_deadline(self):  # M2
+        self.build_lane()
+        dl = json.loads(self.cycle("--json").stdout)["deadline"]
+        self.cycle("--phase", "review", "--round", "1", "--worker", "ctx_rev", minutes=10)
+        self.cycle("--phase", "build", minutes=20)
+        self.assertEqual(json.loads(self.cycle("--json").stdout)["deadline"], dl)
+
+    def test_the_merge_phase_waits_on_ci_without_nudges(self):  # M2
+        self.build_lane(live=False)
+        self.cycle("--phase", "merge")
+        self.assertEqual(self.watch(130).stdout, "")
+
+    def test_metered_at_the_stop_step_or_with_no_reading_gets_nothing(self):  # M3
+        for weekly in (92, None):
+            with self.subTest(weekly=weekly):
+                self.playbook(weekly, 10)
+                self.assertEqual(self.watch(130).stdout, "")
+        self.playbook(20, 10)
+        self.assertIn("SENT NUDGE", self.watch(130).stdout)
+
+    def test_a_paused_project_gets_nothing(self):  # m3
+        import machineconf
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            f = machineconf.settings_file(self.shop)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"paused": True}))
+        self.build_lane(live=False)
+        r = self.watch(130)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("paused", r.stderr)
+
+    def test_a_lane_out_after_off_is_watched_until_it_reports_but_asks_no_new_cycle(self):  # M4
+        self.build_lane(live=False)
+        self.run_script("lane-improve", "off")
+        r = self.watch(50)
+        self.assertIn("SENT NUDGE shop", r.stdout)
+        self.assertIn("no new cycle", self.sent()[0]["body"])
+        self.assertNotIn("start the next cycle", self.sent()[0]["body"])
+
+    def test_a_lane_out_after_a_cap_is_watched(self):  # M4
+        self.reset()
+        self.assertEqual(self.on("--project", "shop", "--max-hours", "1").returncode, 0)
+        self.build_lane(budget=240, live=False)
+        r = self.watch(300)
+        self.assertIn("SENT DEADLINE shop", r.stdout)
+
+    def test_the_deadline_names_the_live_workers_on_the_worktree_and_never_two(self):  # M6
+        self.build_lane(budget=30, live=False)
+        self.orca_state(list=[{"dispatchId": "ctx_zombie", "liveness": "live", "outcome": "in_progress",
+                               "workspace": "repo::" + str(self.tmp / "lane-wt")}])
+        self.watch(40)
+        body = self.sent()[0]["body"]
+        self.assertIn("live workers on the worktree (Orca's worker list): ctx_zombie", body)
+        self.assertIn("only once Orca shows every worker on it settled or stopped", body)
+        self.assertIn("never reuse the worktree", body)
 
 
 class CycleStateTests(WatchTest):

@@ -392,10 +392,11 @@ def automation_specs() -> list:
              f"section of {NIGHT_DOC} says; a line without an owner goes to the machine coordinator. Then end.")
     check = (f"Run {q(str(s / 'machine-check'))} --last and send its lines, unchanged, to the machine coordinator "
              f"(session `{TITLE}`), the way the Messages section of {NIGHT_DOC} says. Do nothing else. Then end.")
-    watch = (f"Run {q(str(s / 'away-watchdog'))} --last. Its UNADDRESSED lines are away-improve problems that reached "
-             "nobody who can act (the watchdog sends everything else itself). Add them, dated, to notes.md in this folder "
-             "and end your answer with them unchanged, so the owner sees them in this run. Send nothing to anyone by a "
-             "name or a title; merge, start or stop nothing. Then end.")
+    watch = (f"Run {q(str(s / 'away-watchdog'))} --send once: it sends, from your own Orca terminal, the messages its "
+             "precheck found (a precheck has no terminal to send from). Its UNADDRESSED lines, and those of "
+             f"`{q(str(s / 'away-watchdog'))} --last`, are away-improve problems that reached nobody who can act: add them, "
+             "dated, to notes.md in this folder and end your answer with them unchanged, so the owner sees them in this run. "
+             "Send nothing yourself, to anyone, by a name or a title; merge, start or stop nothing. Then end.")
     # Orca's default precheck timeout is 60 s and a timeout skips the run; the sweep asks gh about every lane, the watchdog
     # Orca and git about each project in away-improve mode.
     return [("night manager", "37 * * * *", q(str(s / "night-precheck")), 120, night),

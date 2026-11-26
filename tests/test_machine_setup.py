@@ -1574,6 +1574,7 @@ class MachineSetupTests(MachineSetupBase):
         self.assertIn("night-manager.md", a["night manager"][a["night manager"].index("--prompt") + 1])
         watch = a["away watchdog"][a["away watchdog"].index("--prompt") + 1]
         self.assertIn("away-watchdog", watch)
+        self.assertIn("--send once", watch)
         self.assertIn("--last", watch)
         self.assertIn("by a name or a title", watch)
 
