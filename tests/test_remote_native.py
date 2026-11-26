@@ -2190,14 +2190,16 @@ class DocTests(unittest.TestCase):
         # PAIN-1 (lc-bmk, lc-l78.23, H): the mint is the default, the hand link the loopback option, --on-client the
         # documented fallback; what --address means, one name per box, the link is a credential, --rotate, revoking
         remote = " ".join(REMOTE_DOC.read_text().split())
-        for s in ("orca pair --address 127.0.0.1:<box port> --json", "what the client dials, not what this desktop binds",
+        for s in ("orca pair --address 127.0.0.1:<box port> --rotate --json", "what the client dials, not what this desktop binds",
                   "every interface (0.0.0.0)", "One name per desktop per box", "remove-then-add",
-                  "The link is a credential", "agent plane", "--grant-desktop-control", "`--rotate` replaces an unused",
-                  "keeps working until `--rotate`", "--pair-by-hand", "### The fallback: `send --on-client`",
+                  "The link is a credential", "can open terminals here", "--grant-desktop-control",
+                  "An unused offer is reused", "ends **every** unused access link", "keeps working until `--rotate`",
+                  '"Runtime" and the date it was made', "does not narrow the listener", "quit Orca and start it again",
+                  "the running Orca app's", "--pair-by-hand", "### The fallback: `send --on-client`",
                   "if we can handle automatically its much smoother for user", "lc-5zn"):
             self.assertIn(s, remote, s)
         fits = " ".join((ROOT / "docs" / "how-it-fits.md").read_text().split())
-        for s in ("orca pair --address 127.0.0.1:<box port> --json", "**The loopback option.**", "--pair-by-hand",
+        for s in ("orca pair --address 127.0.0.1:<box port> --rotate --json", "**The loopback option.**", "--pair-by-hand",
                   "**The fallback.**", "every network interface", "remove-then-add"):
             self.assertIn(s, fits, s)
         guide = " ".join((ROOT / "docs" / "getting-started.md").read_text().split())

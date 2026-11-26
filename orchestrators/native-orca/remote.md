@@ -131,34 +131,53 @@ hand-off (The fallback, below).
 For what the box lacks (graphics, a browser, a GPU), its coordinator starts a lane in this desktop's Orca with
 `--on <this machine>`; the lane works in its own clone here, pushes to GitHub, and it reports by Orca; across hosts that
 is poll-only (Reports across hosts, below).
-1. By default `project-setup <repo> <host>` makes the link, in a terminal and after one yes, with the field report's
-   recipe (lc-l78.23; measured there on two servers at the same version, run here with stubs only):
-   `orca pair --address 127.0.0.1:<box port> --json` on this desktop. Before it asks it says, in plain words, what the
-   link grants, what it does to this desktop's listener (and whether it already listens on every interface) and how
-   to revoke it; after, it prints the bind it reads again and the same revoke steps. What to know (field report, H):
+1. By default `project-setup <repo> <host>` makes the link, in a terminal and after one yes (Enter is no), with the
+   field report's recipe plus `--rotate` (lc-l78.23; measured there on two servers at the same version, run here
+   with stubs only): `orca pair --address 127.0.0.1:<box port> --rotate --json` on this desktop. Before it asks it
+   says, in plain words, what the link grants, what `--rotate` ends, what it does to this desktop's listener (and
+   whether it already listens on every interface) and how to revoke it; after, it prints the bind it reads again and
+   the same revoke steps. What to know (field report, H, and Orca 1.4.274's source):
    - `--address` is what the client dials, not what this desktop binds. The link names 127.0.0.1 and the box's own
      end of the tunnel, so it works behind `lane-tunnel`.
-   - Minting widens the listener: this desktop's Orca then listens on every interface (0.0.0.0), also after
-     restarts, while the box stays paired. In Orca 1.4.274 every offer the CLI asks for does that, whatever the
+   - Minting widens the listener: this desktop's Orca then listens on every interface (0.0.0.0) at once, also after
+     restarts while the box stays paired. In Orca 1.4.274 every offer the CLI asks for does that, whatever the
      address, because the CLI's `pairing.createOffer` has no way to ask for the window's "this computer" reach (read
      from the source; a scratch `serve` pinned to 127.0.0.1 refused it with "refusing to widen to all interfaces",
      PAIR-1, `docs/research/2026-11-25-orca-pairing.md`). Setup mints only after the tunnel is up and checked, so a
      failed check leaves the listener as it was.
-   - The link is a credential: it gives the box runtime control of this desktop's Orca agent plane (terminals,
-     worktrees, agents), not the desktop itself unless `--grant-desktop-control` is given (setup never gives it).
-     `orca pair`'s answer is read from a pipe and held in memory: never printed, logged or written.
-   - `--rotate` replaces an unused offer; an unused one is otherwise reused. After a restart Orca cannot print the
-     earlier link again: it makes a new one, and the earlier link keeps working until `--rotate`. When the box's step
-     fails after the link was sent, setup runs `orca pair --rotate` (which ends the link if the box did not use it)
-     and says to revoke it.
+   - The link is a credential. A paired client can open terminals here, so the box can run any command as you on
+     this computer. Without `--grant-desktop-control` (setup never gives it) Orca itself will not drive this
+     desktop's screen and input for the box, but a command run as you can, as anything with a terminal here can
+     (`orca pair --help`). `orca pair`'s answer is read from a pipe and held in memory: never printed, logged or
+     written.
+   - An unused offer is reused: without `--rotate` Orca hands out a link it made earlier and nobody used yet (for a
+     laptop, another box, a failed run), so two machines would hold one credential and one Settings entry. So setup
+     mints with `--rotate`, which ends **every** unused access link of this Orca, whoever it was made for (one from
+     `orca pair`, or from "Share this computer", not yet added on its machine); links in use are not touched. Setup
+     says so before the question; the hand link (step 2) ends none. After a restart Orca cannot print an earlier
+     link again; it makes a new one, and the earlier link keeps working until `--rotate`.
+   - Any failure once `orca pair` was started (the mint, the box's add, the proof after it, Ctrl-C) ends on one
+     path: an unused link is rotated again (which also ends any other unused one), the listener is read again and
+     printed, and the mint's revoke steps follow. A box that has the link already keeps the tunnel and its record,
+     so `--remove-host` finds it.
    - One name per desktop per box: a box refuses a second name for a desktop it already has. A rename is
      remove-then-add: `project-setup --remove-host <host>` first (it removes the old name there), then setup again.
      Setup reads the name an earlier run recorded: a box that still answers under it is kept, a stale one is reported
      with those steps and nothing is sent.
-   - Revoke: `project-setup --remove-host <host>`, then Settings > Servers, the client > revoke. Only the window
-     revokes a link the box has used.
-   This desktop's Orca port is `LANE_DESKTOP_ORCA_PORT` (default 6768). When nothing listens there, setup goes
-   straight to the hand link, which names its own port.
+   - A paired box whose tunnel is down (a reboot, a locked card) gets the tunnel started again from the record
+     first, and no question when that brings it back. Otherwise a new link replaces that pairing, and setup says that
+     the earlier entry stays valid here until it is revoked too.
+   - Revoke: `project-setup --remove-host <host>`, then Settings > Servers > revoke on the entry Orca made for the
+     link. Orca names every access link "Runtime" and the date it was made, not after the box; with two of one date,
+     it is the one added at the time setup ran (setup prints it, and keeps it in the host's record) and last used
+     after that. Only the window revokes a link the box has used.
+   - Revoking ends the box's access at once but does not narrow the listener: Orca keeps listening on every
+     interface until it restarts, and after a restart too while any other network pairing that was used remains
+     (`resolveInitialWebSocketBindHost`). To narrow it: revoke, then quit Orca and start it again;
+     `project-setup --check <repo> <host>` shows the desktop listener.
+   This desktop's Orca port is `LANE_DESKTOP_ORCA_PORT` (default 6768); Orca's CLI does not say its own port, so
+   setup checks that the listener there is the running Orca app's (the pid `orca status` gives). When nothing
+   listens there, or something else does, setup goes straight to the hand link, which names its own port.
 2. By hand, for a desktop that must stay on 127.0.0.1: `--pair-by-hand`, or a no at the question. The owner makes a
    share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this computer's own
    address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a link). Nothing
@@ -193,8 +212,8 @@ is poll-only (Reports across hosts, below).
    `tunnel_remote_port` on the box; a record from before has `tunnel_port` only, which is both).
 
 The link is never in an argument, a log, a file, the settings store or a test's output (`tests/test_remote_native.py`,
-`test_link_not_in_argv_or_files`). It lets the box run commands as the owner on this computer (no desktop control)
-until it is revoked.
+`test_link_not_in_argv_or_files`). It lets the box open terminals here and so run any command as the owner on this
+computer, until it is revoked (step 1, what the link grants).
 
 ### The fallback: `send --on-client`
 When neither link can be made, setup says so and points here; it does not fall back by itself, and lane-control has
@@ -276,7 +295,8 @@ line break, a backslash, a leading quote or leading or trailing spaces (systemd 
 ## Removing a box
 `project-setup --remove-host <host>`: the box forgets this machine's environment (`environment rm`, and
 `paired_environment` leaves its stores), `lane-tunnel@<host>` stops and its env file goes, and the owner is told to
-revoke the link in Orca here: Settings > Servers, the link shared with that box. An unreachable box still has its
+revoke the link in Orca here: Settings > Servers, the "Runtime" entry of the date it was made (step 1, Revoke), and,
+for a link setup made, to restart Orca to narrow the listener. An unreachable box still has its
 tunnel stopped, and the command to run there later is printed. Direction 1 (`orca-tunnel-<host>`) stays; the output
 names the two commands that drop it too.
 

@@ -3633,7 +3633,9 @@ SHARE_HELP = """\
 Desktop lanes: {host}'s coordinator can run lanes here (for what {host} lacks: graphics, a browser, a GPU), in this
 desktop's Orca, paired with its share link. Make the link in Orca here: Settings > Servers > "Share this computer",
 and choose this computer's own address (127.0.0.1; a network address would widen what the desktop listens on).
-What it grants, until you revoke it there: """ + GRANT + """. It is read hidden, passed to {host} over ssh's stdin,
+What it grants, until you revoke it there: {host}'s Orca can open terminals here, so it can run any command as you
+on this computer; a command run as you can reach this desktop's screen and input too, as anything with a terminal
+here can, whether or not you also granted desktop control to Orca itself when you made the link. It is read hidden, passed to {host} over ssh's stdin,
 and kept only in Orca's own pairing store on {host}: not in arguments, logs, other files or the settings store.
 lane-control keeps only the environment's name."""
 ENTRY = ('the entry Orca made for the link: Orca names each one "Runtime" and the date it was made ({when}), not '

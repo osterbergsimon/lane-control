@@ -178,11 +178,15 @@ Orca's own Settings > SSH connect to reuse (useful where the box has no internet
 **Direction 2 needs one yes from you**, once per box. The owner decided (2026-11-25): "we do it with share link, with
 --on-client as fallback, but must make sure to make it as painless as possible for user", and on the field report's
 recipe (2026-11-26): "if we can handle automatically its much smoother for user". So by default `project-setup` makes
-the link itself: `orca pair --address 127.0.0.1:<box port> --json` on the desktop, held in memory, sent to the box on
+the link itself: `orca pair --address 127.0.0.1:<box port> --rotate --json` on the desktop, held in memory, sent to the box on
 ssh's stdin, saved there by `environment add --pairing-code -` through `core/scripts/pairing-code-stdin.cjs`, then
-proved with the same reads `--check` makes. Before it asks, it says what the link grants (the box can run commands as
-you on this computer through Orca, not your screen), that the desktop's Orca will then listen on **every network
-interface** (or that it already does), and how to revoke it; after, it prints the bind and the revoke steps.
+proved with the same reads `--check` makes. It passes `--rotate`, so the box never gets an unused link made earlier
+for someone else; that also ends every other unused access link of this Orca. Before it asks, it says what the link
+grants (the box can open terminals here, so it can run any command as you, and such a command can reach your screen;
+Orca itself will not drive the screen for it), what `--rotate` ends, that the desktop's Orca will then listen on
+**every network interface** (or that it already does), and how to revoke it: `--remove-host`, then the "Runtime"
+entry of that date in Settings > Servers. Revoking does not narrow the listener; restarting Orca does, when no other
+used network pairing remains. After, it prints the bind and the revoke steps.
 `core/scripts/lane-tunnel` opens the `-R` tunnel first, which makes the desktop's Orca port appear on the box's
 127.0.0.1, and the link names that address. A box already paired is not paired again; a box that has this desktop
 under an older name is reported with the remove-then-add steps (a box keeps one name per desktop).

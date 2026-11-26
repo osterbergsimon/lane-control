@@ -400,11 +400,12 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
   `project-setup ~/code/<project> example-host`, driven from this machine's Orca
   ([orchestrators/native-orca/remote.md](../orchestrators/native-orca/remote.md)). For the host's coordinator to run
   lanes here it needs a link to this desktop's Orca. Setup makes it for you with `orca pair`, once you say yes: first
-  it says what the link grants (commands as you on this computer, through Orca, not your screen), that this desktop's
-  Orca will then listen on every network interface, and how to revoke it. To keep the desktop on loopback, answer no
-  (or pass `--pair-by-hand`) and make the link by hand in Orca instead: Settings > Servers > "Share this computer",
-  choosing 127.0.0.1, then paste it at setup's hidden prompt (with `--pair-by-hand` setup gives these steps before it
-  starts, so you can make it while it runs).
+  it says what the link grants (terminals here, so any command as you on this computer, which can reach your screen
+  too), that its `--rotate` ends every other unused access link of this Orca, that this desktop's Orca will then
+  listen on every network interface (revoking does not narrow that; restarting Orca does), and how to revoke it. To
+  keep the desktop on loopback, answer no (or pass `--pair-by-hand`) and make the link by hand in Orca instead:
+  Settings > Servers > "Share this computer", choosing 127.0.0.1, then paste it at setup's hidden prompt (with
+  `--pair-by-hand` setup gives these steps before it starts, so you can make it while it runs).
 - **Cleanup and branches:** [docs/orca-cleanup.md](orca-cleanup.md).
 - **More projects and models:** repeat step 4 per repo; tiers and routing are in [core/model-routing.md](../core/model-routing.md).
 - **Switch orchestrators:** `scripts/orch status ~/code/<project>`, then follow [the switch guide](../orchestrators/switching.md).
