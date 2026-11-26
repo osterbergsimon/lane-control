@@ -675,14 +675,15 @@ class Place:
             raise Fail(f"ssh {self.host}: {type(e).__name__}") from None
 
     def agent_running(self, checkout: Path, role: str, handle: "str | None" = None,
-                      title: "str | None" = None) -> "bool | None":
+                      title: "str | None" = None, in_terminal: bool = False) -> "bool | None":
         """Whether a live agent process is this checkout's session of this lane role. An agent program (is_agent) that:
         was given this checkout's persona in its first message; or has its cwd in the checkout and LANE_ROLE=<role> in
         its environment, or `--name <title>`; or runs in the terminal `handle` (ORCA_TERMINAL_HANDLE) with no other
         role, as one the owner started there by hand. Read from /proc (LANE_PROC_DIR), on this machine only. An agent
         in another sandbox namespace (a second Orca, or one that outlived a restart) shows its command line alone: it
         counts when that names the session, and says nothing about it otherwise, as every session lane-control starts
-        names itself there. None when there is no process list to read (a host, no /proc)."""
+        names itself there. in_terminal: only an agent that runs in the terminal `handle` counts. None when there is no
+        process list to read (a host, no /proc)."""
         if self.host:
             return None
         want, marker = Path(checkout).resolve(), f"LANE_ROLE={role}".encode()
@@ -701,14 +702,15 @@ class Place:
                 continue
             if not is_agent(argv):
                 continue
-            if any(persona in a for a in argv):
+            if not in_terminal and any(persona in a for a in argv):
                 return True
-            named = title is not None and any(a == "--name" and b == title for a, b in zip(argv, argv[1:]))
+            named = not in_terminal and title is not None and any(
+                a == "--name" and b == title for a, b in zip(argv, argv[1:]))
             try:
                 env = (d / "environ").read_bytes().split(b"\0")
                 if here in env and (marker in env or not any(e.startswith(b"LANE_ROLE=") for e in env)):
                     return True
-                if marker in env or named:
+                if not in_terminal and (marker in env or named):
                     cwd = Path(os.readlink(d / "cwd")).resolve()
                     if cwd == want or want in cwd.parents:
                         return True
@@ -3357,10 +3359,13 @@ def session_state(place: Place, title: str, handle: "str | None" = None, role: s
     found = [t for t in rows if handle and t.get("handle") == handle]
     found += [t for t in rows if bare_title(t.get("title")) == title and t not in found]
     found = [t for t in found if not t.get("orphaned")]
-    for t in found:
-        proof = place.agent_running(Path(t.get("worktreePath") or "/nonexistent"), role, t.get("handle"), title)
-        if proof or ((proof is None or orca_mark) and t.get("agentIdentity")):
-            return t, found, proof is None
+    # first the terminal an agent runs in: a role, a name or a persona alone does not say which of two it is
+    for in_terminal in (True, False):
+        for t in found:
+            proof = place.agent_running(Path(t.get("worktreePath") or "/nonexistent"), role, t.get("handle"), title,
+                                        in_terminal)
+            if proof or (not in_terminal and (proof is None or orca_mark) and t.get("agentIdentity")):
+                return t, found, proof is None
     return None, found, False
 
 

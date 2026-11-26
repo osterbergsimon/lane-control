@@ -134,6 +134,18 @@ class Liveness(Case):
         self.assertIn("session coordinator: exists", r.stdout, r.stderr)
         self.assertEqual(len(self.started()), 1)
 
+    def test_stop_closes_the_terminal_the_agent_runs_in_not_a_dead_one_of_the_same_title(self):
+        # the owner started it again by hand in a second tab; the recorded one is the empty shell
+        self.setup_project()
+        self.restart_server()
+        shell = self.e.settings(self.repo)["terminals"]["coordinator"]
+        second = {"handle": "term_55", "title": "app coordinator", "worktreePath": str(self.repo)}
+        self.e.set_state(terminals=[*self.terminals(), second])
+        self.process(4001, ["claude"], {"LANE_ROLE": "coordinator", "ORCA_TERMINAL_HANDLE": "term_55"})
+        r = self.e.pause("stop", str(self.repo), "--no-handover")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual([t["handle"] for t in self.terminals()], [shell])
+
     def test_an_agent_in_another_terminal_or_of_another_role_does_not_count(self):
         self.setup_project()
         self.restart_server()
