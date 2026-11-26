@@ -21,6 +21,15 @@ COORDINATORS="
 # owner/repo of each repo whose self-hosted runners the night manager and the machine check watch (space separated)
 RUNNER_REPOS=""
 
+# The models machine-setup uses. There is no default: a flag (--machine-coordinator, --automation-model) wins, then
+# these; left empty, machine-setup keeps what the machine already has (the coordinator's persona, each automation's own
+# record) and asks in a terminal for the rest.
+#   MACHINE_COORDINATOR  claude/<model> or opencode/<provider>/<model>
+#   AUTOMATION_MODEL     a name `claude --model` takes, for the three automations when Claude runs them. It is used when
+#                        one is created; an existing one keeps its own unless you pass --replace-automation-model
+MACHINE_COORDINATOR=""
+AUTOMATION_MODEL=""
+
 # Night, in local hours: from NIGHT_START to NIGHT_END (23-07 wraps past midnight).
 NIGHT_START=23
 NIGHT_END=7

@@ -74,6 +74,7 @@ More: [roles](../core/roles.md), [model routing](../core/model-routing.md), [nat
 | Skills (the three lane skills and the design skills) | `~/.agents/skills/`, linked for Claude and OpenCode | `project-setup`, `--refresh` |
 | One project's settings and tier table, **outside its repo** | `~/.config/lane-control/projects/<folder>-<hash>/` (`settings.json`, `lanes.tsv`) | `project-setup`; `--show` prints them |
 | This machine's settings and state | `~/.config/lane-control/`: `machine.conf`, `limits.sh` (optional, yours), the away file, away-improve's files, `hosts/<host>.json`, `tunnels/<host>.env` | `machine-setup`, you, `lane-away`, `lane-improve`, `project-setup`, `lane-tunnel` |
+| The model environment (optional, for a gateway) | the one source `~/.config/lane-control/model-env.conf`, and from it `model-env.sh`, `~/.config/fish/conf.d/lane-control-models.fish` and the `env` block of Claude's user settings (what it wrote there is noted in `model-env.written.json`) | `model-env`, only when you run it |
 | Budget config and weekly ceiling | `~/.config/rove/playbook.conf.sh` (an old folder name, still the default) and the ceiling file it names | you ([getting started](getting-started.md), step 2.2) |
 | In a project's repo | `AGENTS.lane-control.md` plus one pointer line in `AGENTS.md`, and the lane files in `.lane-control/`; the rendered personas there are not committed | `project-setup`, committing only on your yes |
 | Beads: issues and memories | a private repo `<project>-beads` in `~/code/`; the project's `.beads` is a git-ignored link to it | you, or `project-setup` on your yes |
@@ -90,6 +91,18 @@ persona, unit or link names, and nothing without a valid `current` (a dry run un
 
 More: [core and its scripts](../core/README.md), [where beads lives](../core/issues.md#where-beads-lives-backup-and-restore-lc-5c1),
 [updating an existing host](getting-started.md#updating-an-existing-host).
+
+## Models
+
+No setup script has a built-in model for the machine coordinator or the automations: you name them once (a flag,
+`machine.conf` or an answer in the terminal) and a re-run keeps them. An automation's own record keeps its model unless
+you pass `--replace-automation-model`. Before a model is written, a gateway in use is asked what it serves
+(`<base>/v1/models`); a name it does not list is not written. For Claude through a gateway, **`model-env`** keeps the
+model variables in one source, writes the shell file, the fish file and Claude's settings `env` from it, including the
+auto-mode classifier model (no default), and `model-env --check` compares every place that sets them. It never edits a
+line you wrote, and never writes a key. A running agent keeps the environment it was born with.
+
+More: [the model environment](../orchestrators/native-orca/setup.md#the-model-environment-claude-through-a-gateway).
 
 ## The lane tools
 

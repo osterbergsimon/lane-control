@@ -86,7 +86,9 @@ prompt comes.
    that runs Node needs Node there. A box set up before the kit gets it on its next `project-setup <repo> <host>` or
    `--refresh` (both install the lane tools, `design-shots` among them, and the skills).
 4. `core/scripts/machine-setup --host <host>` (skipped with `--no-machine-setup`): the box's own machine coordinator,
-   night manager, lane sweep and machine check.
+   night manager, lane sweep and machine check. No model is built in: on a box's first setup it asks for them in your
+   terminal. Without a terminal it needs `MACHINE_COORDINATOR=` and `AUTOMATION_MODEL=` in the box's `machine.conf`,
+   or a run of your own: `machine-setup --host <host> --machine-coordinator <h>/<model> --automation-model <model>`.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.
 
 ### Beads on a box (lc-5c1)

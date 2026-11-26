@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "core" / "scripts"
 sys.path.insert(0, str(ROOT / "core"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harnesses  # noqa: E402
 
 MEMINFO_46G = "MemTotal:       48234496 kB\nMemAvailable:   30000000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n"
@@ -93,12 +94,17 @@ if cmd == "automations create":
     if opt("--provider") in state.get("unknown_providers", []):  # Orca checks it before anything is sent
         print(json.dumps({"ok": False, "error": {"message": "Unknown provider: " + opt("--provider")}})); sys.exit(1)
     x = {"id": "auto-%d" % (len(state["automations"]) + 1), "name": opt("--name"), "prompt": opt("--prompt"),
+         "agentId": opt("--provider"),  # as Orca 1.4.268 stores it, extraAgentArgs only when there are any
          "precheck": {"command": opt("--precheck"), "timeoutSeconds": int(opt("--precheck-timeout", "60"))}}
+    for v in a:
+        if v.startswith("--extra-agent-args="): x["extraAgentArgs"] = v.split("=", 1)[1]
     state["automations"].append(x); out({"automation": x})
 if cmd == "automations edit":
     x = [x for x in state["automations"] if x["id"] == a[2]][0]
     if "--prompt" in a: x["prompt"] = opt("--prompt")
     if "--precheck" in a: x["precheck"] = {"command": opt("--precheck"), "timeoutSeconds": int(opt("--precheck-timeout", "60"))}
+    for v in a:
+        if v.startswith("--extra-agent-args="): x["extraAgentArgs"] = v.split("=", 1)[1]
     out({"automation": x})
 if cmd == "workspace cleanup":  # the preview only: `run` removes worktrees and is never modelled
     if a[2:3] != ["preview"] or "cleanup_rows" not in state: print("orca stub: not modelled", file=sys.stderr); sys.exit(1)
@@ -168,7 +174,8 @@ class MachineTest(unittest.TestCase):
         self.conf_dir = self.home / ".config" / "lane-control"
         self.conf_dir.mkdir(parents=True)
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith(("LANE_", "XDG_", "CLAUDE_CONFIG", "GITHUB_ACTIONS", "PLAYBOOK", "ORCA_"))}
+                    if not k.startswith(("LANE_", "XDG_", "CLAUDE_CONFIG", "GITHUB_ACTIONS", "PLAYBOOK", "ORCA_",
+                                         "ANTHROPIC_", "OPENCODE_"))}
         self.env.update(HOME=str(self.home), PATH=f"{self.bin}:{os.environ['PATH']}", LANE_PROC_DIR=str(self.proc),
                         LANE_STATE_DIR=str(self.tmp / "slots"), LANE_HOUR="12", PYTHONDONTWRITEBYTECODE="1",
                         XDG_DATA_HOME=str(self.home / ".local" / "share"), LANE_CONTROL_SWITCH="1")  # INST-1 M1
@@ -1336,7 +1343,7 @@ class MachineCheckTests(BudgetTest):
         self.assertIn(changed.strip(), r.stdout)
 
 
-class MachineSetupTests(BudgetTest):
+class MachineSetupBase(BudgetTest):
     def setUp(self):
         super().setUp()
         self.orca()
@@ -1347,12 +1354,25 @@ class MachineSetupTests(BudgetTest):
         self.feed.parent.mkdir(parents=True)
         self.feed.write_text("{}\n")
 
+    MODELS = ("--machine-coordinator", "claude/sonnet", "--automation-model", "sonnet")
+
     def setup_machine(self, *args):
-        return self.run_script("machine-setup", "--folder", self.folder, "--trust-folder", *args)
+        """machine-setup with both models named (there is no default, E1); a flag in args wins over them."""
+        return self.bare_setup(*self.MODELS, *args)
+
+    def bare_setup(self, *args, env=None):
+        return self.run_script("machine-setup", "--folder", self.folder, "--trust-folder", *args, env=env)
 
     def creates(self, what) -> list:
         return [c for c in self.orca_calls() if c[:2] == what]
 
+    def automations(self) -> dict:
+        out = {}
+        for c in self.creates(["automations", "create"]):
+            out[c[c.index("--name") + 1]] = c
+        return out
+
+class MachineSetupTests(MachineSetupBase):
     def test_writes_machine_conf_from_example(self):
         r = self.setup_machine("--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
@@ -1435,8 +1455,7 @@ class MachineSetupTests(BudgetTest):
         return os.pathsep.join([str(self.bin), *dirs])
 
     def test_bd_missing_says_install(self):
-        r = self.run_script("machine-setup", "--folder", self.folder, "--trust-folder", "--no-start",
-                            env={"PATH": self.path_without_bd()})
+        r = self.bare_setup(*self.MODELS, "--no-start", env={"PATH": self.path_without_bd()})
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("bd: missing", r.stdout)
         self.assertIn("1.0.4", r.stdout)
@@ -1526,12 +1545,6 @@ class MachineSetupTests(BudgetTest):
         self.assertEqual(self.creates(["terminal", "create"]), [])
         self.assertIn("machine coordinator: exists", r.stdout)
 
-    def automations(self) -> dict:
-        out = {}
-        for c in self.creates(["automations", "create"]):
-            out[c[c.index("--name") + 1]] = c
-        return out
-
     def test_creates_three_automations(self):
         r = self.setup_machine("--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
@@ -1559,7 +1572,8 @@ class MachineSetupTests(BudgetTest):
         self.assertIn("night-manager.md", a["night manager"][a["night manager"].index("--prompt") + 1])
 
     def test_automations_take_the_opencode_form_on_a_machine_without_claude(self):
-        # lc-mrz: Orca takes no extra agent args for OpenCode, so the model is OpenCode's own default
+        # lc-mrz: Orca takes no extra agent args for OpenCode, so the model is OpenCode's own default (and no
+        # automation model is asked for: Claude never runs them here)
         for args in (["--automation-provider", "opencode"], ["--machine-coordinator", "opencode/litellm/chat"]):
             with self.subTest(args=args):
                 self.orca({})
@@ -1679,7 +1693,8 @@ class MachineSetupTests(BudgetTest):
     def setup_from(self, root: Path, *args):
         e = dict(self.env)
         return subprocess.run([str(root / "core" / "scripts" / "machine-setup"), "--folder", str(self.folder),
-                               "--trust-folder", *args], env=e, capture_output=True, text=True, timeout=60)
+                               "--trust-folder", *self.MODELS, *args], env=e, capture_output=True, text=True,
+                              timeout=60)
 
     def test_existing_automation_with_an_old_path_is_repaired(self):
         copy = self.lane_control_copy(self.tmp / "lc")
@@ -1774,6 +1789,226 @@ class MachineSetupTests(BudgetTest):
         self.assertIn('p="$d/current/core/scripts/machine-setup"', inner)
         self.assertTrue(inner.endswith('exec "$p" --folder ~/machine --no-start'), inner)
         self.assertEqual(self.orca_calls(), [])  # nothing ran here
+
+
+# --- E1: no model is hardcoded, and a record's model is never overwritten unless asked (lc-l78.18) ----------------
+
+class MachineModelTests(MachineSetupBase):
+    def persona(self) -> str:
+        return (self.folder / ".lane-control" / "machine-coordinator.md").read_text()
+
+    def records(self) -> dict:
+        state = json.loads((self.tmp / "orca.json").read_text())
+        return {a["name"]: a for a in state.get("automations", [])}
+
+    def edit_record(self, name: str, **changes):
+        state = json.loads((self.tmp / "orca.json").read_text())
+        next(a for a in state["automations"] if a["name"] == name).update(changes)
+        (self.tmp / "orca.json").write_text(json.dumps(state))
+
+    def edits(self) -> list:
+        return self.creates(["automations", "edit"])
+
+    def conf(self, text: str):
+        return self.machine_conf('COORDINATORS=""\n' + text)
+
+    def test_no_coordinator_model_and_no_terminal_says_how_and_changes_nothing_in_orca(self):
+        r = self.bare_setup("--no-start", "--automation-model", "m-auto")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        for needle in ("--machine-coordinator", "MACHINE_COORDINATOR", "no default"):
+            self.assertIn(needle, r.stderr)
+        self.assertEqual(self.orca_calls(), [])
+        self.assertFalse(self.folder.exists())
+
+    def test_no_automation_model_creates_no_automation_and_the_rest_still_runs(self):
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-coord")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.creates(["automations", "create"]), [])
+        for needle in ("--automation-model", "AUTOMATION_MODEL"):
+            self.assertIn(needle, r.stdout + r.stderr)
+        self.assertIn("ci-presence timer:", r.stdout)
+        self.assertIn("model: m-coord", self.persona())
+
+    def test_the_flags_name_both_models(self):
+        r = self.bare_setup("--machine-coordinator", "claude/m-coord", "--automation-model", "m-auto")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("model: m-coord", self.persona())
+        (create,) = self.creates(["terminal", "create"])
+        self.assertIn("claude --model m-coord", create[create.index("--command") + 1])
+        self.assertEqual({a["extraAgentArgs"] for a in self.records().values()}, {"--model m-auto"})
+
+    def test_machine_conf_gives_both_models_and_a_flag_wins(self):
+        self.conf('MACHINE_COORDINATOR="claude/c-conf"\nAUTOMATION_MODEL="a-conf"\n')
+        r = self.bare_setup("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("model: c-conf", self.persona())
+        self.assertEqual({a["extraAgentArgs"] for a in self.records().values()}, {"--model a-conf"})
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/c-flag")
+        self.assertIn("model: c-flag", self.persona(), r.stderr)
+
+    def test_a_conf_that_cannot_be_read_is_said_when_no_model_is_found(self):
+        self.machine_conf('MACHINE_COORDINATOR="claude/c-conf\n')  # an open quote
+        r = self.bare_setup("--no-start")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("could not be read", r.stdout + r.stderr)
+
+    def test_a_model_in_the_callers_environment_is_not_a_setting(self):
+        r = self.bare_setup("--no-start", env={"MACHINE_COORDINATOR": "claude/x", "AUTOMATION_MODEL": "y"})
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_the_example_conf_names_both_keys_and_sets_neither(self):
+        import machineconf
+        conf = machineconf.load(ROOT / "core" / "templates" / "machine.conf.example")
+        self.assertEqual((conf["MACHINE_COORDINATOR"], conf["AUTOMATION_MODEL"]), ("", ""))
+
+    def test_a_rerun_without_flags_keeps_the_coordinator_model_the_last_run_used(self):
+        self.assertEqual(self.setup_machine("--no-start", "--machine-coordinator", "claude/m-chosen").returncode, 0)
+        r = self.bare_setup("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("model: m-chosen", self.persona())
+        self.assertIn("claude/m-chosen", r.stdout)
+
+    def test_existing_automations_need_no_model_and_a_hand_corrected_one_survives(self):
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.edit_record("lane sweep", extraAgentArgs="--model m-by-hand")
+        r = self.bare_setup("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.records()["lane sweep"]["extraAgentArgs"], "--model m-by-hand")
+        self.assertEqual(self.edits(), [])
+        self.assertIn("m-by-hand", r.stdout)
+
+    def test_another_automation_model_changes_no_record_and_says_how_to(self):
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.edit_record("lane sweep", extraAgentArgs="--model m-by-hand")
+        self.conf('AUTOMATION_MODEL="m-conf"\n')
+        for args in ((), ("--automation-model", "m-new")):
+            with self.subTest(args=args):
+                r = self.bare_setup("--no-start", *args)
+                self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+                self.assertEqual(self.records()["lane sweep"]["extraAgentArgs"], "--model m-by-hand")
+                self.assertEqual(self.edits(), [])
+                self.assertIn("--replace-automation-model", r.stdout)
+
+    lane_control_copy = MachineSetupTests.lane_control_copy
+    setup_from = MachineSetupTests.setup_from
+
+    def test_a_repair_of_a_record_never_touches_its_model(self):
+        copy = self.lane_control_copy(self.tmp / "lc")  # not a lane worktree, so records are repaired
+        self.assertEqual(self.setup_from(copy, "--no-start").returncode, 0)
+        self.edit_record("lane sweep", extraAgentArgs="--model m-by-hand", prompt="old")
+        r = self.setup_from(copy, "--no-start", "--automation-model", "m-new")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        (edit,) = self.edits()
+        self.assertFalse([x for x in edit if "model" in x or x.startswith("--extra-agent-args")], edit)
+        self.assertEqual(self.records()["lane sweep"]["extraAgentArgs"], "--model m-by-hand")
+
+    def test_asked_for_it_replaces_only_the_model_and_keeps_the_other_arguments(self):
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.edit_record("lane sweep", extraAgentArgs="--model m-by-hand --verbose --name 'a b'")
+        self.edit_record("night manager", extraAgentArgs="--model=m-old")
+        self.edit_record("machine check", extraAgentArgs="")
+        r = self.bare_setup("--no-start", "--automation-model", "m-new", "--replace-automation-model")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        got = {n: a["extraAgentArgs"] for n, a in self.records().items()}
+        self.assertEqual(got, {"lane sweep": "--model m-new --verbose --name 'a b'", "night manager": "--model m-new",
+                               "machine check": "--model m-new"})
+        self.assertIn("was", r.stdout)
+        n = len(self.edits())
+        r = self.bare_setup("--no-start", "--automation-model", "m-new", "--replace-automation-model")
+        self.assertEqual(len(self.edits()), n, r.stdout)
+
+    def test_replace_leaves_an_opencode_automation_alone(self):
+        self.assertEqual(self.setup_machine("--no-start", "--automation-provider", "opencode").returncode, 0)
+        r = self.bare_setup("--no-start", "--automation-model", "m-new", "--replace-automation-model")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.edits(), [])
+        self.assertIn("opencode2", r.stdout)
+
+    def test_replace_needs_a_model(self):
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/x", "--replace-automation-model")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertEqual(self.orca_calls(), [])
+
+    def test_a_model_name_that_would_break_the_arguments_is_refused(self):
+        for bad in ("two words", "x --dangerously-skip-permissions", "$(id)", "-p"):
+            with self.subTest(bad=bad):
+                r = self.bare_setup("--no-start", "--machine-coordinator", "claude/x", f"--automation-model={bad}")
+                self.assertEqual(r.returncode, 2, r.stdout)
+                r = self.bare_setup("--no-start", f"--machine-coordinator=claude/{bad}", "--automation-model", "m")
+                self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_in_a_terminal_it_asks_for_both(self):
+        from test_remote_native import run_pty
+        argv = [sys.executable, str(SCRIPTS / "machine-setup"), "--folder", str(self.folder), "--trust-folder",
+                "--no-start"]
+        rc, out = run_pty(argv, self.env, answers=[("Machine coordinator model", "claude/m-asked"),
+                                                   ("Model for the automations", "m-auto-asked")])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("model: m-asked", self.persona())
+        self.assertEqual({a["extraAgentArgs"] for a in self.records().values()}, {"--model m-auto-asked"})
+
+    # E2: the served-model check before a model id is written
+
+    def gateway(self, *models):
+        from test_tier_suggest import start_gateway
+        base = start_gateway(self, self.tmp, list(models), None, None, self.tmp / "gateway.log")
+        f = self.home / ".claude" / "settings.json"
+        f.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": base}}))
+
+    def test_a_coordinator_model_the_gateway_does_not_serve_writes_nothing(self):
+        self.gateway("m-live")
+        r = self.bare_setup("--machine-coordinator", "claude/m-dead", "--automation-model", "m-live")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("m-dead", r.stderr)
+        self.assertIn("--no-model-check", r.stderr)
+        self.assertEqual(self.orca_calls(), [])
+        self.assertFalse(self.folder.exists())
+
+    def test_an_automation_model_the_gateway_does_not_serve_creates_no_automation(self):
+        self.gateway("m-live")
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-live", "--automation-model", "m-dead")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.creates(["automations", "create"]), [])
+        self.assertIn("m-dead", r.stdout + r.stderr)
+
+    def test_nor_does_it_replace_a_records_model_with_one(self):
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.gateway("sonnet")
+        r = self.bare_setup("--no-start", "--automation-model", "m-dead", "--replace-automation-model")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.edits(), [])
+
+    def test_served_models_are_said_and_no_model_check_skips(self):
+        self.gateway("m-live")
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-live", "--automation-model", "m-live")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("model check: ok", r.stdout)
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-dead", "--no-model-check")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertNotIn("model check:", r.stdout)
+
+    def test_a_rerun_that_writes_no_model_asks_the_gateway_nothing(self):
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.gateway("other")
+        r = self.bare_setup("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse((self.tmp / "gateway.log").exists())
+
+    # E4: machine-setup points at model-env when a gateway has no explicit classifier model
+
+    def test_a_gateway_without_the_one_source_is_pointed_at_model_env(self):
+        self.gateway("m-live")
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-live", "--automation-model", "m-live")
+        line = next(l for l in r.stdout.splitlines() if l.startswith("model env:"))
+        for needle in ("model-env", "CLAUDE_CODE_AUTO_MODE_MODEL"):
+            self.assertIn(needle, line)
+        source = self.home / ".config" / "lane-control" / "model-env.conf"
+        source.write_text("CLAUDE_CODE_AUTO_MODE_MODEL=m-live\n")
+        line = next(l for l in self.bare_setup("--no-start").stdout.splitlines() if l.startswith("model env:"))
+        self.assertIn("model-env --check", line)
+
+    def test_without_a_gateway_nothing_is_said_about_the_model_environment(self):
+        self.assertNotIn("model env:", self.setup_machine("--no-start").stdout)
 
 
 class NightManagerDocTests(unittest.TestCase):
