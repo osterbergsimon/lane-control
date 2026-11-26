@@ -19,6 +19,9 @@ and unmark the project paused in its settings store (the night manager skips it)
 session for its handover through its own Orca Run, waits (--wait SECONDS, default 600) until each one's handover memory changes
 (handover-latest), then closes their terminals (--no-handover closes them without asking); start starts the missing ones again, each
 resuming its recorded session (Claude --resume, OpenCode --session; a fresh session when the harness no longer has it).
+A session runs only when an agent process of it does (project-setup's session_state): a terminal with its title, or
+Orca's agent mark, is no proof. One with a record or a terminal and no agent is `recorded but dead`: start says so and
+starts it, stop and wake say so and clear its record, status only says it. Its terminal is never closed for you.
 stop runs in an Orca terminal (Orca sends messages only from its own terminals), finds each session's Run (the one
 recorded at its start, else the one of its name that no earlier start made), and changes nothing when a Run, a
 handover or that terminal is missing. rest and stop refuse while a lane's agent runs. Each start makes the session a
@@ -88,7 +91,11 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
     ps.ORCA = ps.orca_cli()
     p = ps.native_project(repo)
     place = ps.Place()
-    live = ps.running_sessions(place, repo, p["project"])
+    states = ps.session_states(place, repo, p["project"])
+    live = {role: t for role, (t, _, _) in states.items() if t}
+
+    def dead():  # (role, title, terminals) of each standing session with no live agent
+        return [(r, ps.session_title(r, p["project"]), found) for r, (t, found, _) in states.items() if not t]
     if cmd in ("rest", "stop"):  # as on the Orca + Cotal path: never while a lane runs
         lanes = ps.running_lanes(place, repo)
         if lanes:
@@ -101,6 +108,8 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
         return 0
     if cmd == "wake":
         if "coordinator" not in live:
+            for role, title, found in dead():
+                ps.drop_dead_session(repo, role, title, found)
             print(f"{p['project']}: its coordinator is not running, so it stays paused until `project-pause start`.")
             return 0
         ps.settings(repo, paused=False)
@@ -112,8 +121,14 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
             state = "resting"
         names = ", ".join(ps.session_title(r, p["project"]) for r in live) or "none"
         print(f"{p['project']}: {state if live or p['st'].get('paused') else 'stopped'} (sessions running: {names})")
+        for role, title, found in dead():
+            line = ps.dead_session(repo, role, title, found)
+            if line:
+                print(f"  {title}: recorded but dead ({line[len(title) + 2:]}). `project-pause start` starts it again")
         return 0
     # stop
+    for role, title, found in dead():
+        ps.drop_dead_session(repo, role, title, found)
     if not live:
         ps.settings(repo, paused=True)
         print(f"{p['project']} paused: no standing session was running.")
@@ -156,6 +171,7 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
     ps.settings(repo, paused=True)
     for role, t in live.items():
         place.jrun("terminal", "close", "--terminal", t["handle"])
+        ps.clear_session_record(repo, role)
         ps.say(f"session {role}", "stopped", ps.session_title(role, p["project"]))
     print(f"{p['project']} paused. `project-pause start` starts them again, resuming their sessions.")
     return 0

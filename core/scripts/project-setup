@@ -669,32 +669,71 @@ class Place:
         except (OSError, subprocess.TimeoutExpired) as e:
             raise Fail(f"ssh {self.host}: {type(e).__name__}") from None
 
-    def agent_running(self, checkout: Path, role: str) -> bool:
-        """Whether an agent process of this lane role runs in the checkout: argv[0] an agent harness (or node or bun
-        running one), its cwd in the checkout, LANE_ROLE=<role> in its environment. For a terminal Orca did not mark
-        with agentIdentity. Read from /proc (Linux), on this machine only; elsewhere False."""
+    def agent_running(self, checkout: Path, role: str, handle: "str | None" = None,
+                      title: "str | None" = None) -> "bool | None":
+        """Whether a live agent process is this checkout's session of this lane role. An agent program (is_agent) that:
+        was given this checkout's persona in its first message; or has its cwd in the checkout and LANE_ROLE=<role> in
+        its environment, or `--name <title>`; or runs in the terminal `handle` (ORCA_TERMINAL_HANDLE) with no other
+        role, as one the owner started there by hand. Read from /proc (LANE_PROC_DIR), on this machine only. An agent
+        in another sandbox namespace (a second Orca, or one that outlived a restart) shows its command line alone: it
+        counts when that names the session, and says nothing about it otherwise, as every session lane-control starts
+        names itself there. None when there is no process list to read (a host, no /proc)."""
         if self.host:
-            return False
+            return None
         want, marker = Path(checkout).resolve(), f"LANE_ROLE={role}".encode()
+        here = f"ORCA_TERMINAL_HANDLE={handle}".encode() if handle else None
+        persona = f"your persona, {Path(checkout) / ADAPTED / f'{role}.md'}"  # NATIVE_KICKOFF and NATIVE_RESUME
         try:
-            pids = [d for d in Path("/proc").iterdir() if d.name.isdigit()]
+            pids = [d for d in Path(os.environ.get("LANE_PROC_DIR") or "/proc").iterdir() if d.name.isdigit()]
         except OSError:
-            return False
+            return None
         for d in pids:
             try:
-                argv = [os.path.basename(a.decode(errors="replace")) for a in (d / "cmdline").read_bytes().split(b"\0")[:2]]
-                if not (argv[0] in AGENT_PROGRAMS or (argv[0] in ("node", "bun") and len(argv) > 1
-                                                       and argv[1] in AGENT_PROGRAMS)):
+                if d.stat().st_uid != os.getuid():
                     continue
-                cwd = Path(os.readlink(d / "cwd")).resolve()
-                if (cwd == want or want in cwd.parents) and marker in (d / "environ").read_bytes().split(b"\0"):
-                    return True
-            except (OSError, IndexError):
+                argv = [a.decode(errors="replace") for a in (d / "cmdline").read_bytes().split(b"\0") if a]
+            except OSError:
                 continue
+            if not is_agent(argv):
+                continue
+            if any(persona in a for a in argv):
+                return True
+            named = title is not None and any(a == "--name" and b == title for a, b in zip(argv, argv[1:]))
+            try:
+                env = (d / "environ").read_bytes().split(b"\0")
+                if here in env and (marker in env or not any(e.startswith(b"LANE_ROLE=") for e in env)):
+                    return True
+                if marker in env or named:
+                    cwd = Path(os.readlink(d / "cwd")).resolve()
+                    if cwd == want or want in cwd.parents:
+                        return True
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # gone while we looked
+            except OSError:
+                if named:
+                    return True
         return False
 
 
-AGENT_PROGRAMS = frozenset({"claude", "opencode", "opencode2", "codex"})  # as lane-sweep matches an agent
+AGENT_PROGRAM = re.compile(r"\.?(claude|opencode2?|codex)(-wrapped)?")  # as lane-sweep matches an agent
+AGENT_PACKAGES = ("/@anthropic-ai/claude-code/", "/node_modules/opencode")
+
+
+def is_agent(argv: list) -> bool:
+    """argv[0] is claude, opencode(2) or codex, or node or bun running one. Nothing else counts: a session's own
+    children (an MCP server, a dev server) inherit its markers and can outlive it."""
+    if not argv:
+        return False
+    program = os.path.basename(argv[0])
+    if AGENT_PROGRAM.fullmatch(program):
+        return True
+    if program not in ("node", "bun"):
+        return False
+    script = next((a for a in argv[1:] if not a.startswith("-")), "")
+    return bool(AGENT_PROGRAM.fullmatch(os.path.basename(script).split(".js")[0])
+                or any(part in script for part in AGENT_PACKAGES))
+
+
 LOCAL = Place()  # this machine
 
 
@@ -3133,7 +3172,7 @@ def retire_design_lead(repo: Path, project: str, place: "Place | None") -> None:
         rid = next((r["id"] for r in place.jrun("repo", "list")["result"]["repos"] if Path(r["path"]) == repo), None)
         rows = [w for w in place.jrun("worktree", "list")["result"]["worktrees"]
                 if rid and w["id"].startswith(rid + "::") and w.get("displayName") == "design-lead"]
-        term = session_terminal(place, title, stored_handle(repo, "design-lead"), "design-lead")
+        term = session_state(place, title, stored_handle(repo, "design-lead"), "design-lead", orca_mark=True)[0]
     except Fail as e:
         say("design-lead", "unknown", f"no Orca worktree or terminal list ({e}); its rendered persona is kept")
         return
@@ -3235,20 +3274,60 @@ def bare_title(title) -> str:
     return re.sub(r"^[^\w]+", "", title or "").strip()
 
 
-def session_terminal(place: Place, title: str, handle: "str | None" = None, role: str = "coordinator"):
-    """The Orca terminal of a running standing session (its agent runs), or None: the handle recorded at its start,
-    else its title (a shell or OpenCode may retitle the tab; Claude keeps its --name)."""
-    # A tab whose agent exited stays as a shell. A running one has agentIdentity (Orca recognised the agent), or an
-    # agent process of this role in its folder (one Orca did not recognise).
+def session_state(place: Place, title: str, handle: "str | None" = None, role: str = "coordinator",
+                  orca_mark: bool = False) -> tuple:
+    """(live, found, unchecked) for a standing session: the Orca terminals that could be it are the one recorded at its
+    start (`handle`) and those with its title (a shell or OpenCode may retitle the tab; Claude keeps its --name).
+    `live` is the one an agent process runs in (Place.agent_running), or None; `found` is all of them. A title or
+    Orca's agentIdentity is no proof: Orca (1.4.274) also reads that from the title, the launch or an old hook, so it
+    stays on an empty shell, as after a server restart. It counts only when the processes cannot be read (`unchecked`),
+    so nothing is started twice, or with orca_mark (never to start one: only to leave a session's files alone)."""
     rows = place.jrun("terminal", "list")["result"]["terminals"]
-    found = [t for t in rows if handle and t.get("handle") == handle] + \
-            [t for t in rows if bare_title(t.get("title")) == title]
-    return next((t for t in found if not t.get("orphaned") and (t.get("agentIdentity") or place.agent_running(
-        Path(t.get("worktreePath") or "/nonexistent"), role))), None)
+    found = [t for t in rows if handle and t.get("handle") == handle]
+    found += [t for t in rows if bare_title(t.get("title")) == title and t not in found]
+    found = [t for t in found if not t.get("orphaned")]
+    for t in found:
+        proof = place.agent_running(Path(t.get("worktreePath") or "/nonexistent"), role, t.get("handle"), title)
+        if proof or ((proof is None or orca_mark) and t.get("agentIdentity")):
+            return t, found, proof is None
+    return None, found, False
 
 
 def stored_handle(repo: Path, role: str):
     return (settings(repo).get("terminals") or {}).get(role)
+
+
+def clear_session_record(repo: Path, role: str) -> None:
+    """Forget the session's recorded terminal and Run: both end with it. The Run is remembered in old_runs, so a lookup
+    by name never takes it for a later session's."""
+    st = settings(repo)
+    old = (st.get("runs") or {}).get(role)
+    settings(repo, runs={k: v for k, v in (st.get("runs") or {}).items() if k != role},
+             terminals={k: v for k, v in (st.get("terminals") or {}).items() if k != role},
+             **({"old_runs": [*(st.get("old_runs") or []), old][-100:]} if old else {}))
+
+
+def dead_session(repo: Path, role: str, title: str, found: list) -> str:
+    """What to say of a session with a record or a terminal but no live agent; '' when it has neither. `found`: the
+    terminals that could be it (session_state)."""
+    st = settings(repo)
+    handle, run = (st.get("terminals") or {}).get(role), (st.get("runs") or {}).get(role)
+    if not (handle or run or found):
+        return ""
+    open_ones = [str(t.get("handle")) for t in found]
+    said = [f"recorded terminal {handle} is gone"] if handle and handle not in open_ones else []
+    if open_ones:
+        said.append("no agent in " + ", ".join(open_ones) + " (left open; if that is an empty shell close it: " +
+                    "; ".join(f"orca-ide terminal close --terminal {h}" for h in open_ones) + ")")
+    return f"{title}: no live agent process" + (": " + "; ".join(said) if said else "") + (f"; run {run}" if run else "")
+
+
+def drop_dead_session(repo: Path, role: str, title: str, found: list) -> None:
+    """Say `recorded but dead` and clear the record; nothing when there is nothing recorded and no terminal."""
+    line = dead_session(repo, role, title, found)
+    if line:
+        clear_session_record(repo, role)
+        say(f"session {role}", "recorded but dead", line + ". Its record is cleared")
 
 
 def run_id(obj):
@@ -3327,21 +3406,20 @@ def wait_run(repo: Path, role: str, timeout: float = None):
 
 def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, checkout: Path, project: str,
                   kickoff: str, resume: "str | None" = None) -> bool:
-    """One standing session in its own Orca terminal; True when started now, False when its terminal already runs.
+    """One standing session in its own Orca terminal; True when started now, False when its agent already runs. A
+    record or a terminal with no live agent is said (`recorded but dead`), cleared, and the session started.
     Nothing is ever typed into a terminal: the first message is the start command's own prompt."""
     title = session_title(role, project)
-    if session_terminal(place, title, stored_handle(repo, role), role):
-        say(f"session {role}", "exists", title)
+    live, found, unchecked = session_state(place, title, stored_handle(repo, role), role)
+    if live:
+        say(f"session {role}", "exists", title + (" (could not check its processes here: Orca marks its terminal as "
+                                                  "an agent's, so no second one is started)" if unchecked else ""))
         return False
     f = launcher(repo, role, pin, mode, checkout, title, kickoff, resume, place)
     for old_rec in (run_record(repo, role), Path(f"{run_record(repo, role)}.err"),
                     Path(f"{run_record(repo, role)}.tmp")):
         old_rec.unlink(missing_ok=True)
-    st = settings(repo)  # an earlier start's Run and terminal are gone with it: never kept for this one, and its Run
-    old = (st.get("runs") or {}).get(role)  # is remembered so a lookup by name never takes it for this session's
-    settings(repo, runs={k: v for k, v in (st.get("runs") or {}).items() if k != role},
-             terminals={k: v for k, v in (st.get("terminals") or {}).items() if k != role},
-             **({"old_runs": [*(st.get("old_runs") or []), old][-100:]} if old else {}))
+    drop_dead_session(repo, role, title, found)  # an earlier start's Run and terminal are never kept for this one
     made = place.jrun("terminal", "create", "--worktree", f"path:{checkout}", "--title", title,
                       "--command", f"sh {shlex.quote(str(f))}")
     handle = ((made.get("result") or {}).get("terminal") or {}).get("handle") if isinstance(made, dict) else None
@@ -3424,13 +3502,14 @@ def running_lanes(place: Place, repo: Path) -> list:
 
 
 def running_sessions(place: Place, repo: Path, project: str) -> dict:
-    """{role: terminal} of the standing sessions that run now."""
-    out = {}
-    for role in STANDING:
-        t = session_terminal(place, session_title(role, project), stored_handle(repo, role), role)
-        if t:
-            out[role] = t
-    return out
+    """{role: terminal} of the standing sessions whose agent runs now."""
+    return {role: live for role, (live, _, _) in session_states(place, repo, project).items() if live}
+
+
+def session_states(place: Place, repo: Path, project: str) -> dict:
+    """{role: session_state(...)} of every standing session."""
+    return {role: session_state(place, session_title(role, project), stored_handle(repo, role), role)
+            for role in STANDING}
 
 
 def native_refresh(repo: Path, a, tiers: Path) -> int:

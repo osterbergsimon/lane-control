@@ -40,6 +40,9 @@ with open(os.environ["STUB_LOG"], "a") as log:
 with open(os.path.join(home, "sessions.log"), "a") as f:
     f.write(json.dumps({"bin": name, "argv": sys.argv[1:], "role": os.environ.get("LANE_ROLE"),
                         "persona": os.environ.get("LANE_PERSONA"), "cwd": os.getcwd()}) + "\\n")
+sys.path.insert(0, os.environ["STUB_DIR"])
+from fake_proc import keep_running
+keep_running(name)  # it stays in the fake /proc, unless the test says the agent exits
 """
 
 
@@ -64,6 +67,11 @@ class NativeEnv(Env):
         self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
         self.env.pop("CLAUDE_CONFIG_DIR", None)
         self.env["ORCA_TERMINAL_HANDLE"] = "term_owner"  # project-pause runs in one of Orca's terminals
+        self.env.pop("LANE_ROLE", None)
+        self.proc = self.home / "proc"  # the running agents, as /proc shows them (LANE_PROC_DIR)
+        self.proc.mkdir()
+        self.env["LANE_PROC_DIR"] = str(self.proc)
+        self.env["STUB_DIR"] = str(ROOT / "tests" / "stubs")
 
     def run(self, *args, adapt=False, env_extra=None, script=SETUP):
         args = [*args, *([] if adapt else ["--skip-adapt"])]
@@ -520,6 +528,11 @@ class StartTests(Case):
     def test_a_running_session_is_not_started_twice(self):
         self.e.set_state(terminals=[{"handle": "term_9", "title": "✳ app coordinator",
                                      "worktreePath": str(self.repo), "agentIdentity": "claude"}])
+        agent = self.e.proc / "4001"  # its agent runs: the title and Orca's mark alone are not enough (lc-l78.1)
+        agent.mkdir()
+        (agent / "cmdline").write_bytes(b"claude\0")
+        (agent / "environ").write_bytes(b"LANE_ROLE=coordinator\0")
+        (agent / "cwd").symlink_to(self.repo)
         r = self.e.run(str(self.repo), "--no-design-lead")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.e.creates(), [])
@@ -1587,6 +1600,7 @@ class Round2Tests(Case):
 
     def test_a_live_agent_process_counts_without_agent_identity(self):
         # R2-3: Orca may not mark a terminal it did not recognise; a live agent process in the checkout still counts.
+        del self.e.env["LANE_PROC_DIR"]  # real processes, the real /proc
         self.e.set_state(agent_exits=True)  # the terminal never gets agentIdentity
         self.e.run(str(self.repo), "--no-design-lead")
         self.live_agent("claude", sys.executable, "-c", "import time; time.sleep(60)")
@@ -1596,6 +1610,7 @@ class Round2Tests(Case):
         self.assertIn("exists", r.stdout)
 
     def test_a_node_run_agent_counts_too(self):
+        del self.e.env["LANE_PROC_DIR"]  # real processes, the real /proc
         script = self.e.home / "tools" / "opencode2"
         script.parent.mkdir()
         script.write_text("import time\ntime.sleep(60)\n")
@@ -1605,6 +1620,7 @@ class Round2Tests(Case):
         self.assertIn("sessions running: app coordinator", self.e.pause("status", str(self.repo)).stdout)
 
     def test_an_agent_of_another_role_or_folder_does_not_count(self):
+        del self.e.env["LANE_PROC_DIR"]  # real processes, the real /proc
         self.e.set_state(agent_exits=True)
         self.e.run(str(self.repo), "--no-design-lead")
         self.live_agent("claude", sys.executable, "-c", "import time; time.sleep(60)", role="design-lead")
