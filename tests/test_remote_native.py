@@ -1733,3 +1733,61 @@ class DocTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallOnBoxTests(Case):
+    """INST-1 (lc-7gk): the box gets the desktop's installed tree, whole and at the same sha, and renders its own
+    current path."""
+
+    def test_the_box_gets_the_whole_tree_at_the_same_sha(self):
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--no-machine-setup")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        sha = git("rev-parse", "HEAD", cwd=ROOT)
+        self.assertIn(f"lane-control: copied {sha} on box", r.stdout)
+        broot = self.e.box / ".local" / "share" / "lane-control"
+        self.assertEqual(os.readlink(broot / "current"), sha)
+        listed = set(git("ls-tree", "-r", "--name-only", sha, cwd=ROOT).split())
+        laid = {str(p.relative_to(broot / sha)) for p in (broot / sha).rglob("*")
+                if (p.is_file() or p.is_symlink()) and "__pycache__" not in p.parts}
+        self.assertEqual(laid, listed | {".lane-control-sha"})
+        text = (self.repo / ".lane-control" / "coordinator.md").read_text()
+        self.assertIn(str(broot / "current"), text)
+        self.assertNotIn(str(ROOT), text)
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--no-machine-setup")
+        self.assertIn(f"lane-control: exists {sha} on box", r.stdout)
+
+
+class RemoveHostOldBoxTests(RemoveHostTests):
+    """INST-1 review M2: --remove-host on a box set up before the install (a flat copy, no `current`)."""
+
+    def setUp(self):
+        super().setUp()
+        broot = self.e.box / ".local" / "share" / "lane-control"
+        tree = broot / os.readlink(broot / "current")
+        (broot / "current").unlink()
+        for p in tree.iterdir():  # the old layout: the files straight in ~/.local/share/lane-control
+            shutil.move(str(p), str(broot / p.name))
+        tree.rmdir()
+
+
+class BoxShellTests(Case):
+    """INST-1 review M3: every command setup sends a box is `sh -c '<script>'`, so a fish or csh login shell runs it."""
+
+    def test_every_box_command_is_wrapped_in_sh(self):
+        r = self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--no-machine-setup")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        cmds = [c[-1] for c in self.e.jlines(".ssh")]
+        self.assertTrue(cmds)
+        for c in cmds:
+            self.assertTrue(c.startswith("sh -c '") or c.startswith("python3 - "), c)
+
+    def test_show_over_a_host_sends_and_switches_nothing(self):
+        self.e.setup(str(self.repo), "box", "--no-start", "--no-desktop-lanes", "--no-machine-setup")
+        lc = self.e.home / ".local" / "share" / "lane-control"
+        before = os.readlink(lc / "current")
+        n = len(self.e.jlines(".ssh"))
+        r = subprocess.run([sys.executable, str(SETUP), str(self.repo), "box", "--show"], env=self.e.env,
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertFalse(any("tar -C" in c[-1] for c in self.e.jlines(".ssh")[n:]))
+        self.assertEqual(os.readlink(lc / "current"), before)

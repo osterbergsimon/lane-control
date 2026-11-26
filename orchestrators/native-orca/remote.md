@@ -35,7 +35,11 @@ when it will ask for the desktop's link, the steps to make it now (direction 2, 
 prompt comes.
 
 ## Direction 1: this machine drives the box
-1. lane-control is copied to `~/.local/share/lane-control` on the box, and the box's copy says which orchestrator the
+1. The desktop's installed lane-control tree, whole and at the same sha, is sent to the box's own
+   `~/.local/share/lane-control/<sha>/` (a tar on ssh's stdin; kept when the box has that sha) and the box's `current`
+   link is switched to it (`core/install.py`, `core/README.md` "The install"). The box's personas name its own
+   `~/.local/share/lane-control/current`. A box set up before has its old partial copy in that folder; it stays, unused.
+   The box's copy then says which orchestrator the
    project is on there (`--which-orchestrator`). A project the box already runs on Orca + Cotal keeps that path, and
    nothing below is done for it.
 2. Orca's server on the box: when the environment `<host>` (every character but letters, digits, `.`, `_`, `-` made

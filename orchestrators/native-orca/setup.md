@@ -10,8 +10,12 @@ where we can"; what overlaps today: `docs/research/2026-11-25-orca-overlap.md`).
   Agents run as a normal user, never root.
 - Always: beads (`bd`, bd 1.0.4 or newer: `machine-setup` checks it and says how to fix it, never installs it), `gh` (authenticated), `jq`, `git`, bash, and the agent harnesses you use (Claude Code),
   signed in once as the user the agents run as.
-- The machine caps: `~/.agents/bin/lane-heavy` and `lane-room` (copies of `core/scripts/`; `project-setup`
-  installs them, or copy them by hand with `lane-limits.sh` and `lane-tier`).
+- lane-control itself, installed once per machine: `scripts/lane-control install` from a checkout lays its last commit
+  at `~/.local/share/lane-control/<sha>/` with a `current` link (`project-setup` does it too when run from a
+  checkout; `core/README.md`, "The install"). Personas name `.../lane-control/current`, never the checkout.
+- The machine caps: `~/.agents/bin/lane-heavy` and `lane-room` (links into `.../lane-control/current/core/scripts/`;
+  `project-setup` and `lane-control install` make them, with `lane-limits.sh`, `lane-tier`, `design-shots` and
+  `lane-control`).
 - The lane skill, `skills/native-orca-lanes` (gate, lane, messages, report shape, review, close): `project-setup`
   installs it with the caps in `~/.agents/skills/native-orca-lanes` (with the lane brief as its `brief.md`), linked
   into `~/.claude/skills` and `~/.config/opencode/skills`; `--refresh` puts back a changed or missing file. Orca's
@@ -84,8 +88,9 @@ tunnel, both started on this machine (`remote.md`; the picture:
 A self-hosted gateway with any models behind it is first class, and nothing is refused by model or harness (owner
 2026-11-24, `core/model-routing.md`, "Sandbox per tier"); each project's own tier table says which models it uses.
 0. A host set up before this change still has the old copies: `~/.agents/bin/lane-tier`, the lane skills and the
-   rendered personas there refuse an OpenCode tier until they are refreshed. Update the host's lane-control checkout,
-   run `core/scripts/project-setup <repo> --refresh` from it for each project (it reinstalls the lane tools and skills
+   rendered personas there refuse an OpenCode tier until they are refreshed. Update the host's lane-control checkout
+   and install it (`git pull && scripts/lane-control install`), run `core/scripts/project-setup <repo> --refresh`
+   from it for each project (it links the lane tools, reinstalls the skills
    and re-renders the personas), then restart the coordinator (`core/scripts/project-pause stop <repo>`, then `start <repo>`), so it
    reads the new persona. The suggestion below warns while the installed lane-tier is not the checkout's.
 1. OpenCode's own config on the machine that runs the agents (`~/.config/opencode/opencode.json`) names the gateway

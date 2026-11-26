@@ -1405,7 +1405,7 @@ class HostTests(Case):
             self.assertEqual(r.returncode, 0, (args, r.stderr))
             calls = [c for c in self.e.calls() if c.startswith("ssh ")]
             self.assertEqual(len(calls), 2, calls)
-            self.assertIn(".local/share/lane-control/scripts/project-setup", calls[1])
+            self.assertIn('p="$d/current/scripts/project-setup"', calls[1])
             self.assertIn("--via-host", calls[1])
             self.assertNotIn("--host", calls[1].replace("--via-host", ""))
             self.assertNotIn(" user@host", calls[1].split(" ", 2)[2])  # the host is ssh's, not the host run's
@@ -1887,9 +1887,6 @@ class CleanupSetupTests(Case):
         self.assertIn("github: exists", r.stdout)
         self.assertFalse([c for c in self.gh_calls() if c.startswith("repo edit")])
 
-    def test_a_host_gets_the_cleanup_module_with_the_copy(self):
-        self.assertIn("core/cleanup.py", load().HOST_FILES)
-
     def test_gh_that_cannot_answer_is_skipped(self):
         r = self.setup()
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
@@ -1954,3 +1951,124 @@ class CleanupSetupTests(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallTests(Case):
+    """INST-1 (lc-7gk): project-setup installs this checkout's HEAD as the machine's tree and names its stable path."""
+
+    def lc(self):
+        return self.e.home / ".local" / "share" / "lane-control"
+
+    def lane(self, role):
+        return self.repo / ".lane-control" / f"{role}.md"
+
+    def head(self):
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+
+    def test_the_persona_names_the_installed_current_path_not_the_checkout(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn(f"lane-control: installed {self.head()} at {self.lc() / 'current'}", r.stdout)
+        text = self.lane("coordinator").read_text()
+        self.assertIn(str(self.lc() / "current"), text)
+        self.assertNotIn(str(ROOT), text)
+        self.assertEqual(os.readlink(self.lc() / "current"), self.head())
+        tool = self.e.home / ".agents" / "bin" / "lane-heavy"
+        self.assertTrue(tool.is_symlink())
+        self.assertEqual(os.readlink(tool), str(self.lc() / "current" / "core" / "scripts" / "lane-heavy"))
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertIn(f"lane-control: exists {self.head()}", r.stdout)
+
+    def test_the_sha_is_recorded_and_show_names_a_newer_install(self):
+        self.e.run(str(self.repo), "--no-start")
+        st = json.loads((self.e.store(self.repo) / "settings.json").read_text())
+        self.assertEqual(st["lane_control"], self.head())
+        r = self.e.run(str(self.repo), "--show", adapt=True)
+        self.assertNotIn("run project-setup --refresh", r.stdout)
+        other = "f" * 40  # a later install: its tree and the switched link
+        (self.lc() / other).mkdir()
+        (self.lc() / other / ".lane-control-sha").write_text(other + "\n")
+        (self.lc() / "current").unlink()
+        (self.lc() / "current").symlink_to(other)
+        r = self.e.run(str(self.repo), "--show", adapt=True)
+        self.assertIn(f"lane-control {other[:12]} installed, project set up with {self.head()[:12]}: "
+                      "run project-setup --refresh", r.stdout)
+
+    def test_a_machine_set_up_before_moves_to_the_install_with_one_line(self):
+        self.e.run(str(self.repo), "--no-start")
+        shutil.rmtree(self.lc())  # as before INST-1: copies in ~/.agents/bin, no install, no sha in the store
+        tool = self.e.home / ".agents" / "bin" / "lane-heavy"
+        tool.unlink()
+        tool.write_text("#!/bin/sh\necho copy\n")
+        f = self.e.store(self.repo) / "settings.json"
+        st = json.loads(f.read_text())
+        st.pop("lane_control")
+        f.write_text(json.dumps(st))
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("this machine moves to the install", r.stderr)
+        self.assertIn("lane-control: moved", r.stdout)
+        self.assertTrue(tool.is_symlink())
+        self.assertIn(str(self.lc() / "current"), self.lane("coordinator").read_text())
+
+    def test_the_persona_hook_names_current_not_the_checkout(self):
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        hook = (self.repo / ".claude" / "settings.local.json").read_text()  # INST-1 review B1
+        self.assertIn(str(self.lc() / "current" / "core" / "harnesses" / "persona-hook.sh"), hook)
+        self.assertNotIn(str(ROOT), hook)
+
+    def test_a_failed_install_exits_1_and_changes_nothing(self):
+        self.e.run(str(self.repo), "--no-start")
+        other = "e" * 40  # the machine is on another install; this run would switch, but tar fails
+        shutil.rmtree(self.lc() / self.head())
+        (self.lc() / other).mkdir()
+        (self.lc() / other / ".lane-control-sha").write_text(other + "\n")
+        (self.lc() / "current").unlink()
+        (self.lc() / "current").symlink_to(other)
+        tar = self.e.bin / "tar"
+        tar.write_text("#!/bin/sh\necho 'tar: No space left on device' >&2\nexit 2\n")
+        tar.chmod(0o755)
+        persona = self.lane("coordinator").read_text()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("nothing was changed", r.stderr)
+        self.assertEqual(os.readlink(self.lc() / "current"), other)
+        self.assertTrue((self.e.home / ".agents" / "bin" / "lane-heavy").is_symlink())
+        self.assertEqual(self.lane("coordinator").read_text(), persona)
+
+    def test_a_lane_worktree_keeps_the_installed_tree_and_renders_from_it(self):
+        self.e.run(str(self.repo), "--no-start")  # installs this checkout's HEAD (the tests say yes)
+        head = self.head()
+        clone, lane = Path(self.e.home) / "lc-main", Path(self.e.home) / "lc-lane"  # n2: its own clone and worktree
+        subprocess.run(["git", "clone", "-q", str(ROOT), str(clone)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "lane", str(lane)], check=True,
+                       capture_output=True)
+        skill = Path("orchestrators/native-orca/skills/native-orca-lanes/SKILL.md")
+        persona = Path("orchestrators/native-orca/personas/coordinator.md")
+        for rel in (skill, persona):
+            (lane / rel).write_text((lane / rel).read_text() + "\nUNREVIEWED LANE RULE\n")
+        subprocess.run(["git", "-C", str(lane), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "lane"],
+                       check=True, capture_output=True)
+        r = self.e.run(str(self.repo), "--refresh", adapt=True, env_extra={"LANE_CONTROL_SWITCH": ""},
+                       script=lane / "core" / "scripts" / "project-setup")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("lane-control: kept", r.stdout)
+        self.assertIn("the kept install", r.stderr)  # M7: the kept tree's own setup ran
+        self.assertEqual(os.readlink(self.lc() / "current"), head)
+        installed = self.e.home / ".agents" / "skills" / "native-orca-lanes" / "SKILL.md"
+        self.assertNotIn("UNREVIEWED LANE RULE", installed.read_text())
+        self.assertEqual(installed.read_text(), (self.lc() / head / skill).read_text())
+        self.assertNotIn("UNREVIEWED LANE RULE", self.lane("coordinator").read_text())
+        self.assertIn(str(self.lc() / "current"), self.lane("coordinator").read_text())
+
+    def test_tests_never_install_into_a_real_xdg_data_home(self):
+        sentinel = Path(self.e.home) / "sentinel-data"  # INST-1 review M1: stands in for a real XDG_DATA_HOME
+        sentinel.mkdir(exist_ok=True)
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(sentinel)}):
+            e = NativeEnv()
+        self.addCleanup(e.close)
+        self.assertNotEqual(e.env["XDG_DATA_HOME"], str(sentinel))
+        r = e.run(str(e.repo()), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(list(sentinel.iterdir()), [])

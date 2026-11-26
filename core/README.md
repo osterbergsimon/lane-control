@@ -28,6 +28,7 @@ orchestrator to another; everything that does depend on one is in `orchestrators
 | `templates/budget-ceiling.json`, `window-guard.service` | the weekly ceiling file and the guard's systemd unit |
 | `templates/machine.conf.example`, `ci-presence.service`, `ci-presence.timer` | the machine config's example and the ci-presence user units |
 | `lcroot.py` | finds the lane-control checkout by its marker file, `.lane-control-root` |
+| `install.py` | the versioned install: lays a commit's tree, switches `current`, links the lane tools, the box copy, doctor and prune |
 | `agentsdoc.py` | where generated coordination goes in a project: `AGENTS.lane-control.md` and AGENTS.md's one pointer line (`orchestrators/README.md`) |
 
 Why shared: roles, routing, budgets, the heavy-work gate, beads and the reliability log are how we work, whatever
@@ -46,6 +47,7 @@ setup; "library" is only read by other scripts. A **parked** script belongs to a
 | `core/scripts/budget-state` | prints each metered budget's step now | coordinator, owner, automation | [budget steps](model-routing.md#budget-thresholds-per-metered-budget-ceiling--the-owners-weekly-percent) |
 | `core/scripts/ci-presence` | sets CI's CPU and memory limits by whether you are there | automation | [machine caps](machine.md#machine-caps) |
 | `core/scripts/design-shots` | screenshots of a UI at two widths in both themes, and a before/after page | lane | [design kit](../docs/superpowers/specs/2026-11-21-design-kit-design.md) |
+| `core/scripts/lane-control`, `scripts/lane-control` | installs one versioned lane-control tree per machine (`install`, `status`, `doctor`, `prune`) | owner, setup | [the install](#the-install-one-versioned-tree-per-machine-and-per-box) |
 | `core/scripts/lane-away` | tells the machine you are away or back | owner, coordinator (the machine one, on your word) | [a machine](../orchestrators/native-orca/setup.md#a-machine) |
 | `core/scripts/lane-heavy`, `scripts/lane-heavy` | runs a build or full test suite under the machine-wide limit | lane, coordinator | [machine caps](machine.md#machine-caps) |
 | `core/scripts/lane-idle` | says how long a marked session has been idle, or waits for it | owner, coordinator | [session record](harnesses/session-record.md) |
@@ -84,7 +86,7 @@ uses it has been updated.
 | Old path | Now | Who uses it |
 |---|---|---|
 | `scripts/window-guard.sh` | `core/scripts/window-guard.sh` | the installed `lane-control-window-guard.service` runs it (written by `window-guard-install`) |
-| `scripts/lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh` | `core/scripts/` | docs and briefs; `project-setup` copies them to `~/.agents/bin` (from `core/scripts/` now), which project build scripts call |
+| `scripts/lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh` | `core/scripts/` | docs and briefs; `project-setup` and `lane-control install` link them into `~/.agents/bin` (from the installed tree's `core/scripts/`), which project build scripts call |
 | `scripts/lib.sh` | `core/scripts/lib.sh` | sourced by every watch script, wherever it is started from |
 | `scripts/stale-claims.sh`, `park-check.sh` | `core/scripts/` | Rove routines (`bash <repo>/scripts/...`) |
 | `scripts/window-guard-install` | `core/scripts/window-guard-install` | the install steps in the docs |
@@ -95,5 +97,38 @@ uses it has been updated.
 | `roles.md`, `model-routing.md` | `core/` | a machine coordinator whose persona was rendered before the move reads them there |
 | `model-routing.md`, `reliability.md`, `lane-ledger.tsv` | `core/` | the Rove quickstart linked them into `~/.config/rove/` |
 
-`~/.agents/bin/lane-heavy` and `~/.agents/bin/lane-limits.sh` are copies, not links: they keep working as they are
-and are refreshed from `core/scripts/` by the next `project-setup` run.
+`~/.agents/bin/lane-heavy`, `lane-limits.sh` and the other lane tools are links into the installed tree
+(`~/.local/share/lane-control/current/core/scripts/`, `core/install.py`), not into a checkout: `lane-control install`
+switches `current` by rename, and a running script keeps the file it opened because old trees are kept. A machine
+set up before the install had copies there; its next `project-setup` run (or `lane-control install`) replaces them with
+the links.
+
+## The install: one versioned tree per machine and per box
+
+`core/scripts/lane-control` (a link at `scripts/lane-control`, and at `~/.agents/bin/lane-control` once installed):
+
+- `lane-control install [--version <sha|tag>] [--from <checkout>]`: `git archive` of that commit (default the
+  checkout's HEAD; no network) laid at `${XDG_DATA_HOME:-~/.local/share}/lane-control/<sha>/`, then `current` switched
+  to it by renaming a new link over it. Prints `installed <sha>` or `exists <sha>`. Old trees are kept.
+- `lane-control status`: the current sha, the checkout's sha, and whether they differ.
+- `lane-control doctor [--json] [--no-ssh]`: the installed sha against each project's (its settings store), the
+  `~/.agents/bin` links, the lane skills, and each box a tree was sent to (its `current` over ssh). Exit 1 with a
+  `todo:` line saying what to run for each thing out of date.
+- `lane-control prune [--apply]`: the trees that are not current, that no running process of yours uses (its cwd,
+  an open file or its command line) and that no project's hook or persona, user unit, plugin or `~/.agents/bin` link
+  names; a dry run unless `--apply`, under the install lock, and nothing at all without a valid `current`.
+- `project-setup` and `machine-setup` run from the main checkout on its default branch install its HEAD first (or use
+  the tree they run from). From a lane worktree, another branch or a commit not shown to be newer than the installed one
+  (older, unrelated, or a checkout that lacks the installed commit) they keep the installed tree (`lane-control: kept
+  ...`) and run that tree's own script instead, so its skills and personas are rendered, not the checkout's, unless the
+  owner answers yes in a terminal or `LANE_CONTROL_SWITCH=1` is set. After `lane-control install --version <older>`,
+  the next setup from the main checkout at a newer commit switches back; run setups from that older tree's
+  `.../current/scripts/` to stay (the tests set it, in their scratch HOME); with nothing installed that is an error. A failed install exits 1 and
+  renders nothing. They render `{{LANE_CONTROL}}` and the persona hook as `.../lane-control/current`, link the lane
+  tools (a link is never turned back into a copy), and record the sha in the project's settings store (`lane_control`;
+  `lane_control_dirty` when the rendered text was not the installed tree's); `--show` says `lane-control <a>
+  installed, project set up with <b>: run project-setup --refresh` when they differ. A box (`project-setup <repo>
+  <host>`, `machine-setup --host`) is sent the same tree at the same sha into its own `.../lane-control/<sha>/`: every
+  box command goes as `sh -c '...'` (a fish login shell runs it too), the box counts the entries before it writes the
+  mark and switches `current` (a short stream lays nothing), and a box from before the install still runs its old
+  copy until then. `--show` sends and switches nothing.
