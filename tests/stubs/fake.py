@@ -158,7 +158,8 @@ def orca():
         out({"ok": True, "result": {"installed": ["orca-cli"]}})
     if cmd == "worktree list":
         rows = [{"id": f"{w['repo']}::{w['path']}", "displayName": w["name"], "path": w["path"],
-                 "parentWorktreeId": w["parent"]} for w in state["worktrees"]]
+                 "parentWorktreeId": w["parent"], **{k: w[k] for k in ("branch", "linkedPR", "lastActivityAt") if k in w}}
+                for w in state["worktrees"]]
         out({"ok": True, "result": {"worktrees": rows}})
     if cmd == "worktree create":
         repo = opt("--repo").split(":", 1)[1]
@@ -222,6 +223,13 @@ def orca():
             out({"ok": False, "error": {"message": "stub: --limit must be 1..100"}}, 1)
         rows = state.get("runs", [])
         page = {"runs": rows[start:start + limit]}
+        if start + limit < len(rows):
+            page["nextCursor"] = str(start + limit)
+        out({"ok": True, "result": page})
+    if cmd == "orchestration worker-list":  # Orca's concise rows, newest first, paged by --cursor (state "workers")
+        limit, start = int(opt("--limit", "100")), int(opt("--cursor", "0"))
+        rows = state.get("workers", [])
+        page = {"workers": rows[start:start + limit], "scope": {"source": state.get("worker_scope", "all")}}
         if start + limit < len(rows):
             page["nextCursor"] = str(start + limit)
         out({"ok": True, "result": page})

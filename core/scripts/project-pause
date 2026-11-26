@@ -31,6 +31,12 @@ handover or that terminal is missing. rest and stop refuse while a lane's agent 
 new Run; the older ones stay in Orca and are never used again. Nothing is typed into a session's terminal.
 
   project-pause stop <project> [--wait SECONDS] [--no-handover]
+  project-pause start <project> [--force [--yes]]
+
+--force (native Orca, start only; the owner's way out when they can tell what the check cannot): under `cannot tell`
+it shows what the check found (the terminals and the process it could not place), asks once in a terminal (without
+one: --force --yes) and starts the coordinator, recording in the settings store (forced_starts) that the owner forced
+it. It never overrides a coordinator proven to run: that is a restart (lane-control coordinator restart).
 
 A paused project keeps its space in the window guard's COORD_SPACE; the guard config is not touched. stop leaves a
 marker, <guard state dir>/paused/<space>, that makes the guard send nothing to that space; start removes it. Reruns are
@@ -84,11 +90,11 @@ def run_by_name(place, title: str, old: set):
     return ids[0] if len(ids) == 1 else None
 
 
-def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
+def native(cmd: str, repo: Path, wait: float, ask: bool, force: bool = False, yes: bool = False) -> int:
     """rest, wake, stop, start and status on native Orca: the paused mark is in the settings store (the night manager
     skips a paused project); stop asks each standing session for its handover through its own Run, never by typing."""
     if cmd == "start":
-        return ps.resume_standing(repo)
+        return ps.resume_standing(repo, force, yes)
     ps.ORCHESTRATOR = "native-orca"
     ps.add_orca_cli_to_path()
     ps.ORCA = ps.orca_cli()
@@ -291,19 +297,23 @@ def status(repo: Path, space: str) -> int:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    opts, wait, ask = argv[2:], HANDOVER_WAIT, True
+    opts, wait, ask, force, yes = argv[2:], HANDOVER_WAIT, True, False, False
+    verb = argv[0] if argv else ""
     try:
         while opts:
-            if opts[0] == "--no-handover":
+            if opts[0] == "--no-handover" and verb == "stop":
                 ask, opts = False, opts[1:]
-            elif opts[0] == "--wait" and len(opts) > 1:
+            elif opts[0] == "--wait" and len(opts) > 1 and verb == "stop":
                 wait, opts = float(opts[1]), opts[2:]
+            elif opts[0] in ("--force", "--yes") and verb == "start":
+                force, yes, opts = force or opts[0] == "--force", yes or opts[0] == "--yes", opts[1:]
             else:
                 raise ValueError(opts[0])
+        if yes and not force:
+            raise ValueError("--yes")
     except ValueError:
         argv = []
-    if len(argv) < 2 or argv[0] not in ("rest", "wake", "stop", "start", "status") or (
-            argv[2:] and argv[0] != "stop"):
+    if len(argv) < 2 or argv[0] not in ("rest", "wake", "stop", "start", "status"):
         print(__doc__, file=sys.stderr)
         return 2
     cmd, target = argv[:2]
@@ -313,7 +323,10 @@ def main(argv=None) -> int:
     try:
         repo = find_repo(target)
         if ps.which_orchestrator(None, repo) == "native-orca" and ps.attached_to(repo) is None:
-            return native(cmd, repo, wait, ask)
+            return native(cmd, repo, wait, ask, force, yes)
+        if force:
+            raise ps.Fail("--force is for a project on native Orca, where the live check can answer `cannot tell`. "
+                          "Nothing was started")
     except ps.Fail as e:
         print(f"project-pause: {e}", file=sys.stderr)
         return 1

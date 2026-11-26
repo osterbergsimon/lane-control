@@ -360,7 +360,7 @@ def front_door(argv: list) -> int:
         one = {s for (g, _), (s, *_) in F.ROUTES.items() if g == group}
         if not argv[1:] or len(one) != 1:
             return 0 if argv[1:] else 2
-        r = (one.pop(), ["--help"])  # a group of one script (ratchet): its own whole help follows
+        r = (one.pop(), [*F.shared_first(group), "--help"])  # a group of one script: its own help follows
     else:
         text = F.verb_help(argv)
         if text is not None:
