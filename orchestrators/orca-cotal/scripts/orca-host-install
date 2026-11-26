@@ -217,7 +217,15 @@ if [ -n "${LANE_SSH_CONFIG:-}" ]; then
   [ -f "$sshcfg" ] || die "LANE_SSH_CONFIG $LANE_SSH_CONFIG not found" 2
   sshf="-F $sshcfg"
 fi
-r() { ssh $sshf -o BatchMode=yes "$host" "$@"; }
+# Every command goes to the host as sh -c '<script>', so a fish or csh login shell runs it as sh does (lc-tuh, as
+# core/install.py's sh()). Single quotes are the one quoting fish and sh agree on, as long as no backslash comes
+# before a quote or another backslash.
+r() {
+  script=$*
+  case $script in *"\\'"*|*'\\\\'*) die "a command for $host holds a backslash before a quote or a backslash, which fish would read differently; nothing was sent" ;; esac
+  q=$(printf '%s' "$script" | sed "s/'/'\\\\''/g")
+  ssh $sshf -o BatchMode=yes "$host" "sh -c '$q'"
+}
 audit() { printf '%s\n' "$audit_sh" | r sh -s -- "$@"; }  # the audit on the host: <slot> <port> <action>
 
 # --- the direction-1 tunnel: unit orca-tunnel-<host>, ssh -L, the same port at both ends ---

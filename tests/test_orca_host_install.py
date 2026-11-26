@@ -23,7 +23,9 @@ while [ $# -gt 0 ]; do
 done
 shift
 echo "$*" >> "$BOX.ssh-log"
-HOME=$BOX exec sh -c "$*"
+printf '%s\0' "$*" >> "$BOX.ssh-cmds"  # one record per command, a multi-line script whole
+# the box's login shell runs the command, as sshd does: sh, or fish with BOX_LOGIN_SHELL (its files in the box's HOME)
+HOME=$BOX XDG_CONFIG_HOME=$BOX/.config XDG_DATA_HOME=$BOX/.local/share exec "${BOX_LOGIN_SHELL:-sh}" -c "$*"
 """
 FAKE_NODE = "#!/bin/sh\necho v0.0.0\n"
 NODE_SHA = hashlib.sha256(FAKE_NODE.encode()).hexdigest()
@@ -593,6 +595,37 @@ class PairTests(HostInstallCase):
         r = self.install("--pair", "--port", str(self.port))
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertNotIn(self.code.split("code=", 1)[1], r.stdout + r.stderr)
+
+
+@unittest.skipUnless(shutil.which("fish"), "fish is not installed")
+class FishBoxTests(HostInstallCase):
+    """lc-tuh (BOX-1 review M5): every command orca-host-install sends is `sh -c '<script>'`, so a box whose login shell
+    is fish installs, starts and pairs as one with sh does."""
+
+    def setUp(self):
+        super().setUp()
+        self.env["BOX_LOGIN_SHELL"] = shutil.which("fish")
+
+    def test_a_fish_box_installs_and_every_command_is_sh_c(self):
+        (slot,) = self.slots("0.1.0+aaaa")
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [f"installed orcad-0.1.0+aaaa - from {slot}"])
+        self.assertTrue((self.on_box("0.1.0+aaaa") / ".install-complete").is_file())
+        cmds = [c for c in (self.tmp / "box.ssh-cmds").read_text().split("\0") if c]
+        self.assertTrue(cmds)
+        for c in cmds:
+            self.assertTrue(c.startswith("sh -c '"), c)
+        self.assertEqual(self.install().stdout.splitlines(), [f"exists orcad-0.1.0+aaaa - from {slot}"])
+
+
+@unittest.skipUnless(shutil.which("fish"), "fish is not installed")
+class FishPairTests(PairTests):
+    """The --pair runs above with fish as the box's login shell (lc-tuh)."""
+
+    def setUp(self):
+        super().setUp()
+        self.env["BOX_LOGIN_SHELL"] = shutil.which("fish")
 
 
 class HelpTests(unittest.TestCase):
