@@ -126,6 +126,13 @@ name=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
 unit=lane-tunnel@$name.service
 envfile=$tunnels/$name.env
 sd() { systemctl --user "$@"; }
+# Whether a unit's running ssh (its MainPID, read by name) runs with ControlPath=none; true when it does not run.
+unmuxed() {
+  pid=$(sd show "$1" -p MainPID 2>/dev/null | sed -n 's/^MainPID=//p')
+  case $pid in ''|0|*[!0-9]*) return 0 ;; esac
+  [ -r "/proc/$pid/cmdline" ] || return 0
+  tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q 'ControlPath=none'
+}
 have_systemd() { command -v systemctl >/dev/null 2>&1 && sd show-environment >/dev/null 2>&1; }
 need_systemd() {
   have_systemd || die "no systemd user manager here (systemctl --user), so the tunnel to $host cannot run as a user service"
@@ -178,9 +185,21 @@ case $op in
     fi
     # A changed host, port (either end), agent or wrapper must replace a tunnel that already runs, and so must a changed
     # template (one written before ControlPath=none keeps a multiplexed ssh running until the unit restarts).
-    if { [ -n "$old" ] && [ "$old" != "$new" ]; } || { [ -n "$old_template" ] && [ "$old_template" != "$(cat "$units/lane-tunnel@.service")" ]; }; then
+    changed=0
+    [ -z "$old_template" ] || [ "$old_template" = "$(cat "$units/lane-tunnel@.service")" ] || changed=1
+    if { [ -n "$old" ] && [ "$old" != "$new" ]; } || [ "$changed" = 1 ] || ! unmuxed "$unit"; then
       sd restart "$unit" || die "systemctl --user restart $unit failed"
     fi
+    # The template is shared: every other instance that runs is restarted when it changed, or when its running ssh
+    # is from before ControlPath=none (a start for one host must not leave another host's tunnel on a ControlMaster).
+    for f in "$tunnels"/*.env; do
+      [ -e "$f" ] || continue
+      u=lane-tunnel@$(basename "$f" .env).service
+      [ "$u" != "$unit" ] && sd is-active --quiet "$u" 2>/dev/null || continue
+      [ "$changed" = 1 ] || ! unmuxed "$u" || continue
+      if sd restart "$u" >/dev/null 2>&1; then echo "restarted $u: its ssh now runs with ControlPath=none"
+      else echo "lane-tunnel: could not restart $u (systemctl --user restart $u)" >&2; fi
+    done
     # ssh runs with BatchMode, so a key or card it cannot use ends it at once: look again after a few seconds, while the
     # owner is here to read it.
     i=0

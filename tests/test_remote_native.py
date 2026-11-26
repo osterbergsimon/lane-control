@@ -171,7 +171,7 @@ def start(u):
     env = dict(l.split("=", 1) for l in open(os.path.join(conf, "lane-control", "tunnels", name + ".env")).read().splitlines() if "=" in l)
     p = subprocess.Popen([sys.executable, "-c", "import socket,sys,time\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
                           "s.bind((sys.argv[2],int(sys.argv[1])))\ns.listen()\ntime.sleep(120)", env.get("REMOTE_PORT") or env["PORT"],
-                          "0.0.0.0" if os.environ.get("STUB_TUNNEL_EXPOSED") else "127.0.0.1"],
+                          "0.0.0.0" if os.environ.get("STUB_TUNNEL_EXPOSED") else "127.0.0.1", "-o", "ControlPath=none"],
                          start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
     open(pidfile(u) + (".impostor" if impostor else ""), "w").write(str(p.pid))

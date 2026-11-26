@@ -197,7 +197,7 @@ def tunnel_units(conf: Path) -> list:
             continue
         m = re.search(r"^ExecStart=.*-L 127\.0\.0\.1:(\d+):127\.0\.0\.1:\d+ (\S+)\s*$", text, re.M)
         out.append({"unit": f.name, "host": m.group(2) if m else f.name[len("orca-tunnel-"):-len(".service")],
-                    "port": int(m.group(1)) if m else None, "controlpath": unmuxed(text),
+                    "port": int(m.group(1)) if m else None, "controlpath": unmuxed(text) and runs_unmuxed(f.name),
                     "kind": "orca-tunnel"})
     try:
         template = (units / "lane-tunnel@.service").read_text()
@@ -209,8 +209,18 @@ def tunnel_units(conf: Path) -> list:
         except OSError:
             continue
         out.append({"unit": f"lane-tunnel@{f.stem}.service", "host": env.get("SSH_HOST") or f.stem, "port": None,
-                    "controlpath": unmuxed(template), "kind": "lane-tunnel", "env": env})
+                    "controlpath": unmuxed(template) and runs_unmuxed(f"lane-tunnel@{f.stem}.service"),
+                    "kind": "lane-tunnel", "env": env})
     return out
+
+
+def runs_unmuxed(unit: str) -> bool:
+    """Whether the unit's running ssh (its MainPID) has ControlPath=none in its argv; true when it does not run. A unit
+    file rewritten after its ssh started still runs the old ssh (review M4)."""
+    st = show(unit) or {}
+    pid = num(st.get("MainPID"))
+    a = argv(pid) if pid else []
+    return not a or any("ControlPath=none" in w for w in a)
 
 
 def unmuxed(unit_text: str) -> bool:

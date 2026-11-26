@@ -349,7 +349,7 @@ class DoctorTests(Env):
         port = free_port()
         (u / "orca-tunnel-box.service").write_text(
             f"[Service]\nExecStart=/usr/bin/env ssh -N -o ControlPath=none -L 127.0.0.1:{port}:127.0.0.1:{port} box\n")
-        pid = self.spawn("ssh", port=port)
+        pid = self.spawn("ssh", "-o", "ControlPath=none", port=port)
         self.units(**{"orca-tunnel-box.service": self.running(pid, climb=True)})
         r, todo = self.doctor()
         self.assertEqual(r.returncode, 1, r.stdout)
@@ -382,7 +382,7 @@ class DoctorTests(Env):
         self.assertTrue(a1 and "flat copy" in a1[0] and "machine-setup" in a1[0], todo)
         a2 = [t for t in todo if "a2" in t]
         self.assertTrue(a2 and "itself, not current" in a2[0] and "orca-ide automations edit a2" in a2[0], todo)
-        self.assertFalse(any("a3" in t for t in todo))
+        self.assertFalse(any("(a3)" in t for t in todo))
         calls = [json.loads(x) for x in self.olog.read_text().splitlines()]
         self.assertEqual({tuple(c[:2]) for c in calls}, {("automations", "list")})
 
@@ -477,20 +477,54 @@ class LaneTunnelTests(Env):
         self.assertIn(str(self.tmp / "tree" / "core" / "templates" / "lane-tunnel@.service"), r.stderr)
         self.assertFalse((self.conf / "systemd").exists())
 
-    def test_a_changed_template_restarts_a_running_instance(self):
-        self.units(**{"lane-tunnel@box.service": self.running(1)})
+    def instance(self, name, controlpath=True):
+        """A running lane-tunnel@<name> instance with its env file; its ssh has ControlPath=none in argv or not."""
+        pid = self.spawn("ssh", *(["-o", "ControlPath=none"] if controlpath else []), "-R", "x", name)
+        self.units(**{f"lane-tunnel@{name}.service": self.running(pid)})
+        t = self.conf / "lane-control" / "tunnels"
+        t.mkdir(parents=True, exist_ok=True)
+        (t / f"{name}.env").write_text(f"SSH_HOST={name}\nPORT=6768\nSSH_CONFIG=\nPATH={self.env['PATH']}\n")
+        return pid
+
+    def restarts(self, since=0):
+        return [c[2] for c in self.calls()[since:] if c[1:2] == ["restart"]]
+
+    def test_a_changed_template_restarts_every_running_instance_and_says_so(self):
         u = self.conf / "systemd" / "user"
         u.mkdir(parents=True)
         (u / "lane-tunnel@.service").write_text("[Service]\nExecStart=/bin/sh -c 'exec ssh -N box'\n")  # before
-        t = self.conf / "lane-control" / "tunnels"
-        t.mkdir(parents=True)
-        (t / "box.env").write_text(f"SSH_HOST=box\nPORT=6768\nSSH_CONFIG=\nPATH={self.env['PATH']}\n")
-        r = self.tunnel(TUNNEL, "start", "box", "6768")
+        self.instance("a", controlpath=False)
+        self.instance("b", controlpath=False)
+        r = self.tunnel(TUNNEL, "start", "a", "6768")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(["--user", "restart", "lane-tunnel@box.service"], self.calls())
-        self.calls_before = len(self.calls())
-        r = self.tunnel(TUNNEL, "start", "box", "6768")  # the same again: no restart
-        self.assertEqual([c for c in self.calls()[self.calls_before:] if c[1:2] == ["restart"]], [])
+        self.assertEqual(sorted(self.restarts()), ["lane-tunnel@a.service", "lane-tunnel@b.service"])  # review M4
+        self.assertIn("restarted lane-tunnel@b.service: its ssh now runs with ControlPath=none", r.stdout)
+
+    def test_an_instance_whose_running_ssh_is_from_before_is_restarted_by_the_next_start(self):
+        self.instance("a")
+        self.assertEqual(self.tunnel(TUNNEL, "start", "a", "6768").returncode, 0)  # the template is now lane-tunnel's
+        self.instance("b", controlpath=False)  # its ssh started before: only that is old
+        n = len(self.calls())
+        r = self.tunnel(TUNNEL, "start", "a", "6768")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.restarts(n), ["lane-tunnel@b.service"])
+        self.assertIn("restarted lane-tunnel@b.service", r.stdout)
+
+    def test_doctor_judges_each_running_instance_not_the_template(self):
+        u = self.conf / "systemd" / "user"
+        u.mkdir(parents=True)
+        (u / "lane-tunnel@.service").write_text(TEMPLATE.read_text())
+        self.instance("a")
+        self.instance("b", controlpath=False)
+        B = load()
+        old = dict(os.environ)
+        os.environ.update({k: self.env[k] for k in ("PATH", "SYSTEMCTL_STATE", "SYSTEMCTL_LOG")})
+        try:
+            got = {t["unit"]: t["controlpath"] for t in B.tunnel_units(self.conf)}
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        self.assertEqual(got, {"lane-tunnel@a.service": True, "lane-tunnel@b.service": False})
 
 
 # --- orca-host-install ----------------------------------------------------------------------------------------------
@@ -882,7 +916,7 @@ class CheckTests(unittest.TestCase):
         (u / "orca-tunnel-box.service").write_text(
             "[Service]\nExecStart=/usr/bin/env ssh -N -o BatchMode=yes -o ControlPath=none -o ControlMaster=no "
             f"-L 127.0.0.1:{port}:127.0.0.1:{port} box\n")
-        own = self.spawn("ssh", port=port)
+        own = self.spawn("ssh", "-o", "ControlPath=none", port=port)
         r, rows = self.check(env_extra={"STUB_ORCA_TUNNEL_PID": str(own)})
         self.assertTrue(rows["direction 1 tunnel"].startswith("ok"), rows)
         rider = self.spawn("ssh", "-N")

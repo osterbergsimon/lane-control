@@ -96,7 +96,8 @@ list() {
   cands=$( { grep -l -a -F -e "$pre" /proc/[0-9]*/cmdline 2>/dev/null | sed 's|/cmdline$||'
              find /proc -mindepth 2 -maxdepth 2 -name cwd -lname "$pre*" 2>/dev/null | sed 's|/cwd$||'; } | sort -u)
   [ -n "$cands" ] || return 0
-  kids=$(awk '/^PPid:/ { n = split(FILENAME, f, "/"); print f[3], $2; nextfile }' /proc/[0-9]*/status 2>/dev/null)
+  # (cat goes on past a process that ended meanwhile; awk may stop at the first file it cannot open)
+  kids=$(cat /proc/[0-9]*/status 2>/dev/null | awk '/^Pid:/ { p = $2 } /^PPid:/ { print p, $2 }')
   pids=$(find "$HOME/.orca" "$HOME/.orca-remote" -maxdepth 4 -name 'daemon-v*.pid' -exec cat {} + 2>/dev/null | tr -cs '0-9' ' ')
   mainpid=$(systemctl --user show orcad.service -p MainPID 2>/dev/null | sed -n 's/^MainPID=//p')
   for d in $cands; do
