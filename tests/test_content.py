@@ -1587,7 +1587,7 @@ class CrossHostReportContractTests(unittest.TestCase):
 
 class OrcaCanaryTests(unittest.TestCase):
     """lc-seu: the canary for one Orca version (docs/research/2026-11-21-orca-newer.md, "Canary results"), and what
-    its results force in remote.md: `orca pair` is no stand-in for the share link, the "too old" texts a newer box
+    its results force in remote.md: what `orca pair` does to the desktop's listener, the "too old" texts a newer box
     meets on an older server, and how a report crosses servers of different versions."""
 
     REMOTE = ROOT / "orchestrators" / "native-orca" / "remote.md"
@@ -1611,10 +1611,11 @@ class OrcaCanaryTests(unittest.TestCase):
                        "needs an Orca update to nest across machines", "refusing to widen to all interfaces"):
             self.assertIn(needle, flat_text(res), needle)
 
-    def test_remote_doc_says_orca_pair_is_no_stand_in_for_the_share_link(self):
+    def test_remote_doc_says_what_orca_pair_does_to_the_desktop(self):
+        # PAIN-1 (lc-bmk): setup mints the link with `orca pair` by default; the step says it widens the desktop
         t = flat(self.REMOTE)
-        step = t[t.index("1. The owner makes a share link"):t.index("2. `project-setup <repo> <host>` asks")]
-        for needle in ("`orca pair`", "refusing to widen to all interfaces", "Settings > Servers"):
+        step = t[t.index("1. By default `project-setup <repo> <host>` makes the link"):t.index("2. By hand")]
+        for needle in ("`orca pair`", "refusing to widen to all interfaces", "Settings > Servers", "every interface"):
             self.assertIn(needle, step, needle)
 
     def test_remote_doc_names_the_too_old_texts_a_newer_box_meets(self):
@@ -1653,8 +1654,8 @@ class FieldReportDocTests(unittest.TestCase):
         t = flat(ROOT / "orchestrators" / "native-orca" / "remote.md")
         t = t[t.index("### Pairing facts"):t.index("### Two ports")]
         for needle in ("**The default route (owner, 2026-11-26, lc-bmk): the CLI mint**",
-                       "widens the desktop's listener to every interface", "The hand share link (step 1) stays",
-                       "Not built when this was written"):
+                       "widens the desktop's listener to every interface", "The hand share link (step 2) stays",
+                       "Built in PAIN-1"):
             self.assertIn(needle, t, needle)
 
     def test_upstream_asks_are_recorded_not_filed(self):

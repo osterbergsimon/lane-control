@@ -356,8 +356,18 @@ if "$orca" status --environment "$name" --json 2>/dev/null | grep -q '"reachable
   echo "already-paired $name"
 else
   url=$(pairing_url) || exit 1
-  outp=$("$orca" environment add --name "$name" --pairing-code "$url" --json 2>&1) || {
+  # The code goes to Orca's CLI on stdin, never in argv (ps, /proc), a file or a log (lc-5zn): project-setup's
+  # --box-pairing add runs the CLI as its launcher does, with core/scripts/pairing-code-stdin.cjs preloaded, and
+  # redacts what Orca says. printf is a shell builtin, so the code is on no command line here either.
+  d=$(dirname "$(readlink -f "$0")")
+  while [ ! -f "$d/.lane-control-root" ]; do
+    [ "$d" != / ] || die "lane-control root not found from $0, so the pairing code has no way in but argv; nothing was saved"
+    d=$(dirname "$d")
+  done
+  outp=$(printf '%s\n' "$url" | ORCA_CLI=$orca "$d/core/scripts/project-setup" --box-pairing add "$name" 2>&1) || {
+    url=""
     case $outp in *lready*paired*) echo "already-paired $name"; exit 0 ;; esac
     die "environment add failed: $outp"; }
+  url=""
   echo "paired $name"
 fi

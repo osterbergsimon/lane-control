@@ -23,7 +23,12 @@ if tool == "orca" and "--environment" in args:
     env_name, args = args[i + 1], args[:i] + args[i + 2:]
     env = next((e for e in state.get("environments", []) if e.get("name") == env_name), None)
     if args[:2] not in (["environment", "rm"], ["environment", "show"]):
-        if env is None or not env.get("reachable", True):
+        def _open(port):  # an environment reached through a tunnel answers only while something listens there
+            import socket
+            with socket.socket() as c:
+                c.settimeout(1)
+                return c.connect_ex(("127.0.0.1", int(port))) == 0
+        if env is None or not env.get("reachable", True) or (env.get("tunnel_port") and not _open(env["tunnel_port"])):
             print(json.dumps({"ok": False, "error": {"code": "environment_unavailable",
                                                      "message": f"stub: environment {env_name} not reachable"}}))
             sys.exit(1)
@@ -51,6 +56,17 @@ def out(obj, code=0):
     sys.exit(code)
 
 
+def stub_offer(seed, n, addr):
+    """The link `orca pair` gives in the stub: deterministic from the seed, so a test can look for it everywhere."""
+    import base64
+    import hashlib
+    h = hashlib.sha256(f"{seed}:{n}".encode()).hexdigest()
+    payload = {"v": 2, "endpoint": "ws://" + addr, "deviceToken": "dvtok-" + h[:32],
+               "publicKeyB64": base64.b64encode(bytes.fromhex(h)).decode(), "pairedDeviceId": "dev_" + h[32:40],
+               "scope": "runtime"}
+    return "orca://pair?code=" + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+
+
 def opt(name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
@@ -74,11 +90,36 @@ def orca():
     if args[:1] == ["status"]:
         if not state["orca_up"]:
             out({"ok": False, "error": {"message": "runtime not reachable"}}, 1)
-        out({"ok": True, "result": {"runtime": {"state": "ready", "reachable": True,
+        app = {"app": {"running": True, "pid": int(os.environ["STUB_APP_PID"])}} if os.environ.get("STUB_APP_PID") else {}
+        out({"ok": True, "result": {**app, "runtime": {"state": "ready", "reachable": True,
                                                 **({"appVersion": state["app_version"]} if "app_version" in state else {})}}})
     if cmd == "host list":
         out({"ok": True, "result": {"hosts": [{"kind": "local", "name": "this machine", "id": "local",
                                                "machineName": state.get("machine_name", "deskbox")}]}})
+    if args[:1] == ["pair"]:  # an access link for another Orca: made from STUB_PAIR_SEED, so no secret is in the env
+        state["pair_calls"] = state.get("pair_calls", 0) + 1
+        if os.environ.get("STUB_PAIR_UNAVAILABLE"):
+            secret = ""
+            if os.environ.get("STUB_PAIR_GUIDANCE_SECRET"):  # an Orca message that repeats an offer's link
+                secret = " " + stub_offer(os.environ.get("STUB_PAIR_SEED", "seed"), state.get("pair_rotations", 0),
+                                          opt("--address", "192.0.2.10"))
+            out({"ok": True, "result": {"available": False, "reason": "network_exposure_failed" + secret,
+                                        "guidance": "Runtime bind address is pinned to 127.0.0.1; refusing to widen "
+                                                    "to all interfaces." + secret}}, 1)
+        if "--rotate" in args:
+            state["pair_rotations"] = state.get("pair_rotations", 0) + 1
+        addr = opt("--address", "192.0.2.10")
+        if os.environ.get("STUB_PAIR_OWN_PORT"):  # an Orca that keeps its own port whatever --address says
+            addr = addr.rsplit(":", 1)[0] + ":" + os.environ["STUB_PAIR_OWN_PORT"]
+        if os.environ.get("STUB_PAIR_BAD_ENDPOINT"):  # an offer for another address than the one asked for
+            addr = "192.0.2.10:" + addr.rsplit(":", 1)[-1]
+        url = stub_offer(os.environ.get("STUB_PAIR_SEED", "seed"), state.get("pair_rotations", 0), addr)
+        if os.environ.get("STUB_PAIR_GARBLED"):  # not JSON, with the link in it
+            state_path.write_text(json.dumps(state))
+            print("pairing offer: " + url)
+            sys.exit(0)
+        out({"ok": True, "result": {"available": True, "scope": "runtime", "pairingUrl": url,
+                                    "webClientUrl": "https://web.invalid/#" + url, "endpoint": "ws://" + addr}})
     if cmd == "environment list":
         if os.environ.get("STUB_LIST_READS_STDIN"):  # a CLI that reads whatever its stdin holds
             sys.stdin.read()

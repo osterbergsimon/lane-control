@@ -413,8 +413,13 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
   versions, pairing both ways, the tunnel, the agent and the gateway key on the host) and changes nothing. Then
   `project-setup ~/code/<project> example-host`, driven from this machine's Orca
   ([orchestrators/native-orca/remote.md](../orchestrators/native-orca/remote.md)). For the host's coordinator to run
-  lanes here it asks for this desktop's link, which you make by hand in Orca: Settings > Servers > "Share this
-  computer", choosing 127.0.0.1 (setup says so before it starts, so you can make it while it runs).
+  lanes here it needs a link to this desktop's Orca. Setup makes it for you with `orca pair`, once you say yes: first
+  it says what the link grants (terminals here, so any command as you on this computer, which can reach your screen
+  too), that its `--rotate` ends every other unused access link of this Orca, that this desktop's Orca will then
+  listen on every network interface (revoking does not narrow that; restarting Orca does), and how to revoke it. To
+  keep the desktop on loopback, answer no (or pass `--pair-by-hand`) and make the link by hand in Orca instead:
+  Settings > Servers > "Share this computer", choosing 127.0.0.1, then paste it at setup's hidden prompt (with
+  `--pair-by-hand` setup gives these steps before it starts, so you can make it while it runs).
 - **Cleanup and branches:** [docs/orca-cleanup.md](orca-cleanup.md).
 - **More projects and models:** repeat step 4 per repo; tiers and routing are in [core/model-routing.md](../core/model-routing.md).
 - **Switch orchestrators:** `scripts/orch status ~/code/<project>`, then follow [the switch guide](../orchestrators/switching.md).
@@ -497,7 +502,7 @@ project-pause start ~/code/<project>
 A box has two connections, both tunnels started on the desktop ([how the parts fit](how-it-fits.md#a-box-two-directions)):
 `orca-tunnel-<host>` (`ssh -L`, direction 1: the desktop controls the box, made by `orca-host-install --pair`) and
 `lane-tunnel@<host>` (`ssh -R`, direction 2: the box's coordinator starts lanes on the desktop, made by
-`project-setup` after the share link).
+`project-setup` before it sends the box its link to the desktop).
 
 A box set up with `project-setup <repo> <host>` has no lane-control checkout of its own. It gets the desktop's installed
 tree, whole and at the same sha, in its own `~/.local/share/lane-control/<sha>/` with its own `current` link, on every
