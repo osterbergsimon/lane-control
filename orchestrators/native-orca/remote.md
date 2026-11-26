@@ -106,10 +106,15 @@ So lane-control checks what owns a port and how it got there:
   reboot, a cleaned `~/.config/systemd/user`, or a unit from before `ControlPath=none`): nothing is installed or
   started on the box and no environment is removed or added. It needs the box's server on that port and the
   environment saved here; when that does not answer through the restored tunnel, it points at `--pair`.
-- **One runtime per host.** After an Orca upgrade, `orca-host-install --pair` stops every process of an older server
-  slot on the box (a server, or a node helper still holding terminals with the old environment) and names each, then
-  proves that exactly one server runs: this slot, this port, owning the listener. Another server of the same build
-  is named, not stopped, and fails the run. `--check` and the box's `lane-control doctor` fail on more than one.
+- **One runtime per host.** Before `orca-host-install --pair` changes anything on the box it lists every process of an
+  older server slot there (a server, or a node helper such as the terminal daemon) with its pid, port, child processes
+  and whether a newer server adopted it (a `daemon-v*.pid` names it). Only an unused one (no child process: no live
+  terminal or agent, and not adopted) may be stopped, and only with `--stop-stale` or a yes in a terminal; anything
+  else is left and named. A server already serving the port from another build is replaced only with that consent and
+  when it is unused, and without `--version` (or a yes) not at all. A server of this build, or `orcad.service`, on
+  another port stops the run before anything changes, with the `--port` and pid to use. Afterwards exactly one server
+  of this build must run, on this port, owning the listener; an older one left in use is named. `--check` and the box's
+  `lane-control doctor` fail on more than one.
 - **SHELL.** A `chsh` changes passwd, not a systemd user manager that already runs, and Orca's server under that
   manager keeps launching terminals with the old shell and its environment. `orca-host-install` sets the manager's
   `SHELL` to the passwd one before it starts the server. Where the server already ran, do it on the box yourself:

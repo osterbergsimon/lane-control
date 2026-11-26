@@ -234,14 +234,38 @@ def repair(t: dict, tree=None) -> str:
 
 def orcad(home=None) -> list:
     """This user's processes that run from an Orca server slot under <home>/.orca-remote: dicts with pid, slot, role
-    (server: an orcad.js; helper: another node process of that slot) and port (its --port, or None)."""
+    (server: node running an orcad.js; helper: another node process of that slot; anything not node, such as an editor
+    on a slot's file, is left out), port (its --port, or None), children (its child processes: live terminals, agents)
+    and adopted (a daemon-v*.pid file under ~/.orca or ~/.orca-remote names it: the terminal daemon a newer server
+    keeps using)."""
     home = str(home or Path.home())
+    parent = {}
+    for p in mine():
+        try:
+            for line in (PROC / str(p) / "status").read_text().splitlines():
+                if line.startswith("PPid:"):
+                    parent[p] = int(line.split()[1])
+                    break
+        except (OSError, ValueError, IndexError):
+            continue
+    named = set()
+    for top in (Path(home) / ".orca", Path(home) / ".orca-remote"):
+        try:
+            files = [f for depth in ("*", "*/*", "*/*/*", "*/*/*/*") for f in top.glob(depth + "/daemon-v*.pid")]
+            files += list(top.glob("daemon-v*.pid"))
+        except OSError:
+            files = []
+        for f in files:
+            try:
+                named |= {int(x) for x in re.findall(r"\d+", f.read_text()[:4096])}
+            except (OSError, ValueError):
+                continue
     out = []
     for pid in mine():
         if pid == os.getpid():
             continue
         a = argv(pid)
-        if not a:
+        if not a or os.path.basename(a[0]) != "node":
             continue
         try:
             cwd = os.readlink(PROC / str(pid) / "cwd") + "/"
@@ -256,12 +280,11 @@ def orcad(home=None) -> list:
         if not slot:
             continue
         server = any(w == "orcad.js" or w.endswith("/orcad.js") for w in a)
-        if not server and os.path.basename(a[0]) != "node":
-            continue  # an editor or a pager with a slot's file open is not part of the server
         port = None
         if "--port" in a[:-1]:
             port = num(a[a.index("--port") + 1]) or None
-        out.append({"pid": pid, "slot": slot, "role": "server" if server else "helper", "port": port})
+        out.append({"pid": pid, "slot": slot, "role": "server" if server else "helper", "port": port,
+                    "children": sum(1 for pp in parent.values() if pp == pid), "adopted": pid in named})
     return out
 
 
@@ -285,8 +308,13 @@ def runtimes(procs: list, port=None) -> tuple:
 
 
 def named(procs: list) -> str:
+    """Each process with its pid, slot, port and role, and whether it is in use (child processes, or adopted)."""
+    def use(p):
+        bits = ([f"{p['children']} child processes"] if p.get("children") else []) + (
+            ["the terminal daemon a server adopted"] if p.get("adopted") else [])
+        return f", in use: {' and '.join(bits)}" if bits else ""
     return ", ".join(f"pid {p['pid']} (orcad-{p['slot']}" + (f" port {p['port']}" if p["port"] else "") +
-                     ("" if p["role"] == "server" else ", helper") + ")" for p in procs)
+                     ("" if p["role"] == "server" else ", helper") + use(p) + ")" for p in procs)
 
 
 # --- the user manager's SHELL ---------------------------------------------------------------------------------------

@@ -92,8 +92,10 @@ if a[:1] == ["status"]:
 print("orca stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 '''
 
-HOLD = """import socket, sys, time
+HOLD = """import os, socket, subprocess, sys, time
 port = int(sys.argv[1])
+if os.environ.get("HOLD_CHILD"):  # a live terminal or agent under it
+    subprocess.Popen(["sleep", "120"], stdin=subprocess.DEVNULL)
 if port:
     s = socket.socket()
     s.bind(("127.0.0.1", port))
@@ -134,7 +136,10 @@ class Env(unittest.TestCase):
     def reap(self):
         for p in self.procs:
             if p.poll() is None:
-                p.kill()
+                try:
+                    os.killpg(p.pid, 9)  # with any child it started
+                except OSError:
+                    p.kill()
             p.wait()
             p.stdout.close()
 
@@ -142,9 +147,14 @@ class Env(unittest.TestCase):
     def node(self):
         return str(self.bin / "node")
 
-    def spawn(self, *words, port=0, exe=sys.executable):
+    def spawn_node(self, *words, port=0, child=False):
+        """A process whose argv[0] is node, as Orca's server and its helpers run (review m2)."""
+        return self.spawn(*words, port=port, exe=self.node, child=child)
+
+    def spawn(self, *words, port=0, exe=sys.executable, child=False):
+        env = {**os.environ, **({"HOLD_CHILD": "1"} if child else {})}
         p = subprocess.Popen([exe, "-c", HOLD, str(port), *words], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             stdin=subprocess.DEVNULL, text=True)
+                             stdin=subprocess.DEVNULL, text=True, env=env, start_new_session=True)
         self.procs.append(p)
         self.assertEqual(p.stdout.readline().strip(), "up")
         return p.pid
@@ -246,14 +256,14 @@ class UnitHealthTests(Module):
 
 class RuntimeTests(Module):
     def test_one_server_is_ok_and_named(self):
-        pid = self.spawn(self.slot("0.2.0+bbbb"), "--json", "--port", "6769")
+        pid = self.spawn_node(self.slot("0.2.0+bbbb"), "--json", "--port", "6769")
         state, detail = self.B.runtimes(self.B.orcad(self.home), 6769)
         self.assertEqual(state, "ok", detail)
         self.assertIn(f"orcad-0.2.0+bbbb (pid {pid}, port 6769)", detail)
 
     def test_two_servers_after_an_upgrade_are_broken_and_each_is_named(self):
-        new = self.spawn(self.slot("0.2.0+bbbb"), "--port", "6769")
-        old = self.spawn(self.slot("0.1.0+aaaa"), "--port", "6770")
+        new = self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769")
+        old = self.spawn_node(self.slot("0.1.0+aaaa"), "--port", "6770")
         state, detail = self.B.runtimes(self.B.orcad(self.home))
         self.assertEqual(state, "broken")
         self.assertIn("2 Orca server processes", detail)
@@ -261,7 +271,7 @@ class RuntimeTests(Module):
         self.assertIn(f"pid {old} (orcad-0.1.0+aaaa port 6770)", detail)
 
     def test_a_helper_of_an_older_build_is_stale(self):
-        self.spawn(self.slot("0.2.0+bbbb"), "--port", "6769")
+        self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769")
         helper = self.spawn(str(self.home / ".orca-remote" / "orcad-0.1.0+aaaa" / "out" / "pty-host.js"),
                             exe=str(self.bin / "node"))
         state, detail = self.B.runtimes(self.B.orcad(self.home))
@@ -270,6 +280,7 @@ class RuntimeTests(Module):
 
     def test_a_pager_on_a_slots_log_is_not_part_of_the_server(self):
         self.spawn(str(self.home / ".orca-remote" / "orcad-0.1.0+aaaa" / "orcad.log"))
+        self.spawn(self.slot("0.1.0+aaaa"), "--port", "6769")  # an editor on orcad.js: not node, not a server (m2)
         self.assertEqual(self.B.orcad(self.home), [])
         self.assertEqual(self.B.runtimes([])[0], "none")
 
@@ -386,8 +397,8 @@ class DoctorTests(Env):
         u.mkdir(parents=True)
         (u / "orcad.service").write_text("[Service]\nExecStart=/bin/true\n")
         self.sstate.write_text(json.dumps({"shell": "/bin/oldsh"}))
-        new = self.spawn(self.slot("0.2.0+bbbb"), "--port", "6769")
-        old = self.spawn(self.slot("0.1.0+aaaa"), "--port", "6770")
+        new = self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769")
+        old = self.spawn_node(self.slot("0.1.0+aaaa"), "--port", "6770")
         r, todo = self.doctor()
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertTrue(any("2 Orca server processes" in t and str(old) in t and str(new) in t for t in todo), todo)
@@ -397,7 +408,7 @@ class DoctorTests(Env):
         self.assertEqual({p["pid"] for p in d["runtime"]["processes"]}, {new, old})
 
     def test_the_box_doctor_reports_the_serving_pin(self):
-        self.spawn(self.slot("0.2.0+bbbb"), "--port", "6769")
+        self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769")
         r, todo = self.doctor()
         self.assertEqual(todo, [], r.stdout)
         self.assertIn("orca server: one server: orcad-0.2.0+bbbb", r.stdout)
@@ -507,7 +518,7 @@ class HostInstallTests(Env):
         return self.conf / "systemd" / "user" / "orca-tunnel-box.service"
 
     def test_tunnel_restores_only_the_direction_one_unit(self):
-        server = self.spawn(self.box_slot("0.2.0+bbbb"), "--json", "--port", str(self.port), port=self.port)
+        server = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--json", "--port", str(self.port), port=self.port)
         self.units(**{"orca-tunnel-box.service": self.running(server)})  # the unit's ssh holds the port
         r = self.run_tool("--tunnel", "--port", str(self.port))
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -525,7 +536,7 @@ class HostInstallTests(Env):
 
     def test_the_unit_state_is_read_by_name_in_systemds_own_order(self):
         # review B1: real systemd prints MainPID before NRestarts whatever -p says; a fresh tunnel has 0 restarts
-        server = self.spawn(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port, exe=self.node)
+        server = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
         self.units(**{"orca-tunnel-box.service": self.running(server, NRestarts=0)})
         out = subprocess.run(["systemctl", "--user", "show", "orca-tunnel-box.service", "-p", "ActiveState", "-p",
                               "SubState", "-p", "NRestarts", "-p", "MainPID"], env=self.env, capture_output=True,
@@ -536,7 +547,7 @@ class HostInstallTests(Env):
         self.assertIn(f"its ssh (pid {server}) owns 127.0.0.1:{self.port}, restarted 0 times", r.stdout)
 
     def test_tunnel_reads_the_port_from_the_unit_it_wrote_before(self):
-        server = self.spawn(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
+        server = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
         self.unit().parent.mkdir(parents=True)
         self.unit().write_text(f"[Service]\nExecStart=/usr/bin/env ssh -N -L 127.0.0.1:{self.port}:127.0.0.1:"
                                f"{self.port} box\n")
@@ -547,7 +558,7 @@ class HostInstallTests(Env):
         self.assertIn(["--user", "restart", "orca-tunnel-box.service"], self.calls())  # the old unit was running
 
     def test_tunnel_whose_port_is_held_by_another_process_fails_and_names_it(self):
-        holder = self.spawn(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
+        holder = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
         unit_ssh = self.spawn("ssh", "-N")
         self.units(**{"orca-tunnel-box.service": self.running(unit_ssh)})
         r = self.run_tool("--tunnel", "--port", str(self.port))
@@ -562,48 +573,73 @@ class HostInstallTests(Env):
 
     def test_tunnel_for_a_host_never_paired_points_at_pair(self):
         self.ostate.write_text(json.dumps({"environments": []}))
-        server = self.spawn(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
+        server = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
         self.units(**{"orca-tunnel-box.service": self.running(server)})
         r = self.run_tool("--tunnel", "--port", str(self.port))
         self.assertEqual(r.returncode, 1)
         self.assertIn("--pair", r.stderr)
 
-    def test_the_audit_names_stale_runtimes_and_stops_them_but_not_a_second_current_one(self):
-        audit = subprocess.run(["sh", str(HOST_INSTALL), "--audit-script"], env=self.env, capture_output=True,
-                               text=True)
-        self.assertEqual(audit.returncode, 0, audit.stderr)
-        cur = self.spawn(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
-        stale = self.spawn(self.box_slot("0.1.0+aaaa"), "--port", "6799")
-        helper = self.spawn(str(self.box / ".orca-remote" / "orcad-0.1.0+aaaa" / "out" / "pty.js"),
-                            exe=str(self.bin / "node"))
-        env = {**self.env, "HOME": str(self.box)}
-        r = subprocess.run(["sh", "-s", "--", "0.2.0+bbbb", str(self.port), "stop"], input=audit.stdout, env=env,
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"stopped stale orcad-0.1.0+aaaa pid {stale}", r.stdout)
-        self.assertIn(f"stopped stale orcad-0.1.0+aaaa pid {helper}", r.stdout)
-        for p in self.procs:
-            if p.pid in (stale, helper):
-                self.assertIsNotNone(p.wait(timeout=10))
-        self.assertIsNone(next(p for p in self.procs if p.pid == cur).poll())
-        r = subprocess.run(["sh", "-s", "--", "0.2.0+bbbb", str(self.port), "prove"], input=audit.stdout, env=env,
-                           capture_output=True, text=True)
+    def audit(self, *args):
+        script = subprocess.run(["sh", str(HOST_INSTALL), "--audit-script"], env=self.env, capture_output=True,
+                                text=True).stdout
+        return subprocess.run(["sh", "-s", "--", *args], input=script, env={**self.env, "HOME": str(self.box)},
+                              capture_output=True, text=True)
+
+    def rows(self):
+        return {int(x.split()[0]): x.split()[1:] for x in self.audit("0.2.0+bbbb", str(self.port), "list").stdout
+                .splitlines()}
+
+    def alive(self, pid):
+        return next(p for p in self.procs if p.pid == pid).poll() is None
+
+    def test_list_names_each_process_with_its_children_and_whether_a_server_adopted_it(self):
+        cur = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
+        idle = self.spawn_node(self.box_slot("0.1.0+aaaa"), "--port", "6799")
+        busy = self.spawn_node(str(self.box / ".orca-remote" / "orcad-0.1.0+aaaa" / "daemon-entry.js"), child=True)
+        adopted = self.spawn_node(str(self.box / ".orca-remote" / "orcad-0.1.0+aaaa" / "daemon-entry.js"))
+        (self.box / ".orca").mkdir()
+        (self.box / ".orca" / "daemon-v3.pid").write_text(f"{adopted}\n")
+        self.spawn(self.box_slot("0.1.0+aaaa"))  # not node: an editor on the file (m2)
+        rows = self.rows()
+        self.assertEqual(rows[cur], ["0.2.0+bbbb", "server", str(self.port), "0", "no", "no"])
+        self.assertEqual(rows[idle], ["0.1.0+aaaa", "server", "6799", "0", "no", "no"])
+        self.assertEqual(rows[busy][:2] + rows[busy][3:], ["0.1.0+aaaa", "helper", "1", "no", "no"])
+        self.assertEqual(rows[adopted][4], "yes")
+        self.assertEqual(len(rows), 4)
+
+    def test_stop_stops_only_what_is_stale_and_unused(self):
+        cur = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
+        idle = self.spawn_node(self.box_slot("0.1.0+aaaa"), "--port", "6799")
+        busy = self.spawn_node(str(self.box / ".orca-remote" / "orcad-0.1.0+aaaa" / "daemon-entry.js"), child=True)
+        adopted = self.spawn_node(str(self.box / ".orca-remote" / "orcad-0.1.0+aaaa" / "daemon-entry.js"))
+        (self.box / ".orca").mkdir()
+        (self.box / ".orca" / "daemon-v3.pid").write_text(f"{adopted}\n")
+        r = self.audit("0.2.0+bbbb", str(self.port), "stop", str(idle), str(busy), str(adopted), str(cur))
+        self.assertEqual(r.returncode, 1, r.stdout)  # some were left
+        self.assertIn(f"stopped orcad-0.1.0+aaaa pid {idle}", r.stdout)
+        self.assertIn(f"left orcad-0.1.0+aaaa pid {busy}: in use now (1 child processes", r.stdout)
+        self.assertIn(f"left orcad-0.1.0+aaaa pid {adopted}: in use now (0 child processes, adopted yes)", r.stdout)
+        self.assertIn(f"left orcad-0.2.0+bbbb pid {cur}", r.stdout)  # the current slot is never stopped
+        next(p for p in self.procs if p.pid == idle).wait(timeout=10)
+        for pid in (busy, adopted, cur):
+            self.assertTrue(self.alive(pid), pid)
+
+    def test_prove_wants_one_server_of_this_slot_and_names_one_left_of_another(self):
+        cur = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
+        old = self.spawn_node(self.box_slot("0.1.0+aaaa"), "--port", "6799", child=True)
+        r = self.audit("0.2.0+bbbb", str(self.port), "prove")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn(f"one runtime orcad-0.2.0+bbbb pid {cur} on 127.0.0.1:{self.port}", r.stdout)
-        other = self.spawn(self.box_slot("0.2.0+bbbb"), "--port", "6798")  # another server of the same build
-        r = subprocess.run(["sh", "-s", "--", "0.2.0+bbbb", str(self.port), "stop"], input=audit.stdout, env=env,
-                           capture_output=True, text=True)
-        self.assertNotIn(str(other), r.stdout)  # not stale: left alone
-        r = subprocess.run(["sh", "-s", "--", "0.2.0+bbbb", str(self.port), "prove"], input=audit.stdout, env=env,
-                           capture_output=True, text=True)
+        self.assertIn(f"note: left orcad-0.1.0+aaaa pid {old}", r.stdout)
+        other = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", "6798")
+        r = self.audit("0.2.0+bbbb", str(self.port), "prove")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn(f"pid {other}", r.stdout + r.stderr)
-        self.assertIsNone(next(p for p in self.procs if p.pid == other).poll())
+        self.assertIn(f"pid {other}", r.stdout)
 
     def test_prove_fails_when_the_server_does_not_own_the_port(self):
         audit = subprocess.run(["sh", str(HOST_INSTALL), "--audit-script"], env=self.env, capture_output=True,
                                text=True).stdout
-        self.spawn(self.box_slot("0.2.0+bbbb"), "--port", str(self.port))  # says the port, listens on none
+        self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port))  # says the port, listens on none
         holder = self.spawn("something-else", port=self.port)
         r = subprocess.run(["sh", "-s", "--", "0.2.0+bbbb", str(self.port), "prove"], input=audit,
                            env={**self.env, "HOME": str(self.box)}, capture_output=True, text=True)
@@ -636,6 +672,80 @@ class HostInstallTests(Env):
         self.assertFalse(any(c[1:2] == ["set-environment"] for c in self.calls()[n:]))
         self.assertIn("systemctl --user restart orcad.service", HOST_INSTALL.read_text())  # said for a running one
 
+class PairTests(HostInstallTests):
+    """orca-host-install --pair end to end, from a fake slot, against a box whose 'servers' are this test's children
+    (review B2, M1, M2, m1): everything of an older slot is named before anything stops; only what is unused stops, and
+    only with --stop-stale or a yes; a running server is never replaced or doubled without being asked."""
+
+    def setUp(self):
+        super().setUp()
+        from test_orca_host_install import arch_of, make_node_archive, make_slot, target
+        self.art = self.tmp / "artifacts"
+        make_node_archive(self.art, arch_of(target()))
+        make_slot(self.art / target(), "0.2.0+bbbb")
+        self.env["ORCA_ARTIFACTS"] = str(self.art)
+
+    def pair(self, *args):
+        return self.run_tool("--pair", "--port", str(self.port), *args)
+
+    def test_an_older_builds_processes_are_named_first_and_only_the_unused_stop_and_only_when_asked(self):
+        cur = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
+        idle = self.spawn_node(self.box_slot("0.1.0+aaaa"), "--port", "6799")
+        busy = self.spawn_node(str(self.box / ".orca-remote" / "orcad-0.1.0+aaaa" / "daemon-entry.js"), child=True)
+        self.units(**{"orca-tunnel-box.service": self.running(cur)})
+        r = self.pair()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        out = r.stdout
+        self.assertIn(f"pid {idle} orcad-0.1.0+aaaa server port 6799: 0 child processes: stop", out)
+        self.assertIn(f"pid {busy} orcad-0.1.0+aaaa helper: 1 child processes: leave (in use)", out)
+        self.assertIn("left them: run again with --stop-stale", out)
+        self.assertLess(out.index(f"pid {idle}"), out.index("running orcad"))  # named before anything else
+        self.assertTrue(self.alive(idle) and self.alive(busy))
+        self.assertIn(f"one runtime orcad-0.2.0+bbbb pid {cur}", out)
+        self.assertIn("already-paired box", out)
+        r = self.pair("--stop-stale")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn(f"stopped orcad-0.1.0+aaaa pid {idle}", r.stdout)
+        next(p for p in self.procs if p.pid == idle).wait(timeout=10)
+        self.assertTrue(self.alive(busy) and self.alive(cur))
+
+    def test_a_serving_older_build_is_not_replaced_without_a_version_and_a_yes(self):
+        old = self.spawn_node(self.box_slot("0.1.0+aaaa"), "--port", str(self.port), port=self.port)
+        r = self.pair()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("--version 0.2.0+bbbb --stop-stale", r.stderr)
+        self.assertIn("--version 0.1.0+aaaa", r.stderr)
+        self.assertIn("Nothing was changed", r.stderr)
+        self.assertFalse((self.box / ".orca-remote" / "orcad-0.2.0+bbbb").exists())
+        self.assertTrue(self.alive(old))
+        r = self.pair("--version", "0.2.0+bbbb")  # a version is not a yes
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("--stop-stale", r.stderr)
+        self.assertTrue(self.alive(old))
+
+    def test_a_serving_older_build_with_live_terminals_is_never_replaced(self):
+        old = self.spawn_node(self.box_slot("0.1.0+aaaa"), "--port", str(self.port), port=self.port, child=True)
+        r = self.pair("--stop-stale")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("is in use, so it is not replaced", r.stderr)
+        self.assertTrue(self.alive(old))
+        self.assertFalse((self.box / ".orca-remote" / "orcad-0.2.0+bbbb").exists())
+
+    def test_a_server_already_on_another_port_stops_the_run_before_anything_changes(self):
+        other = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", "6799")
+        r = self.pair("--stop-stale")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(f"pid {other} on port 6799", r.stderr)
+        self.assertIn("--port 6799 --version 0.2.0+bbbb", r.stderr)
+        self.assertIn(f"kill {other}", r.stderr)
+        self.assertFalse((self.box / ".orca-remote" / "orcad-0.2.0+bbbb" / ".install-complete").exists())
+        next(p for p in self.procs if p.pid == other).kill()
+        old = self.spawn_node(self.box_slot("0.1.0+aaaa"), "--port", "6798")
+        self.units(**{"orcad.service": self.running(old)})
+        r = self.pair()
+        self.assertIn("orcad.service on", r.stderr)
+
+
 # --- project-setup --check <repo> <host> ----------------------------------------------------------------------------
 
 class CheckTests(unittest.TestCase):
@@ -652,8 +762,15 @@ class CheckTests(unittest.TestCase):
 
     reap = Env.reap
 
-    def spawn(self, *words, port=0):
-        return Env.spawn(self, *words, port=port)
+    def spawn(self, *words, port=0, exe=sys.executable):
+        return Env.spawn(self, *words, port=port, exe=exe)
+
+    def spawn_node(self, *words, port=0):
+        node = self.e.home / "nodebin" / "node"  # not on PATH
+        if not node.exists():
+            node.parent.mkdir(exist_ok=True)
+            node.symlink_to(sys.executable)
+        return self.spawn(*words, port=port, exe=str(node))
 
     def slot(self, ver):
         return str(self.e.box / ".orca-remote" / f"orcad-{ver}" / "orcad.js")
@@ -674,8 +791,8 @@ class CheckTests(unittest.TestCase):
 
     def test_two_servers_on_the_box_fail_the_check_and_each_is_named(self):
         self.e.saved("box")
-        new = self.spawn(self.slot("0.2.0+bbbb"), "--port", "6769")
-        old = self.spawn(self.slot("0.1.0+aaaa"), "--port", "6770")
+        new = self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769")
+        old = self.spawn_node(self.slot("0.1.0+aaaa"), "--port", "6770")
         r, rows = self.check()
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertTrue(rows["runtimes on box"].startswith("missing"), rows)
@@ -688,7 +805,7 @@ class CheckTests(unittest.TestCase):
         d = self.e.box / ".orca-remote" / "orcad-0.2.0+bbbb" / "out"
         d.mkdir(parents=True)
         (d / "package.json").write_text('{"version": "1.4.274"}')
-        self.spawn(self.slot("0.2.0+bbbb"), "--port", "6769")
+        self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769")
         r, rows = self.check()
         self.assertTrue(rows["runtimes on box"].startswith("ok"), rows)
         self.assertIn("orcad-0.2.0+bbbb", rows["runtimes on box"])
