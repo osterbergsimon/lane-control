@@ -1,11 +1,13 @@
 """core/scripts/lane-idle: how a coordinator asks, or waits, for another session's idle time (UP-6). Claude
 transcripts in temp folders; HOME and XDG point into the temp dir, so no real session state is read."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import os
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,16 +27,10 @@ class LaneIdleTests(unittest.TestCase):
         self.checkout.mkdir()
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(("XDG_", "LANE_", "CLAUDE_"))}
-        self.env["HOME"] = str(self.home)
-        saved = {k: os.environ.get(k) for k in ("HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR")}
-        os.environ["HOME"] = str(self.home)
-        os.environ.pop("XDG_STATE_HOME", None)
-        os.environ.pop("CLAUDE_CONFIG_DIR", None)
-
-        def restore():
-            for k, v in saved.items():
-                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
-        self.addCleanup(restore)
+        self.env.update(testhome.env_for(self.home))
+        patcher = mock.patch.dict(os.environ, testhome.env_for(self.home))  # the module's own calls, in this process
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def session(self, sid, age_s, role="coordinator", harness="claude"):
         rec = harnesses.session_record(self.checkout, role, harness)

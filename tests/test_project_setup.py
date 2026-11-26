@@ -1,4 +1,5 @@
 """project-setup against stub orca/cotal executables (tests/stubs/fake.py) in a temporary HOME."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -69,13 +70,12 @@ class Env:
             p.chmod(0o755)
         # Only the stub bin plus the dirs of git and python, so a real orca/cotal/claude/opencode never leaks in.
         tools = {str(Path(shutil.which(t)).parent) for t in ("git", "python3", "env", "sh")}
-        self.env = {**os.environ, "HOME": str(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
+        self.env = {**os.environ, **testhome.env_for(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.state),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
-        self.env.pop("XDG_CONFIG_HOME", None)  # the store is under the temp HOME
-        # The install goes under the temp HOME too, never a real XDG_DATA_HOME (INST-1 review M1). Tests run from a lane
-        # worktree or CI's detached merge, so they say yes to switching the scratch install (LANE_CONTROL_SWITCH).
-        self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
+        # The store and the install are under the temp HOME (env_for), never a real XDG dir (INST-1 review M1). Tests
+        # run from a lane worktree or CI's detached merge, so they say yes to switching the scratch install
+        # (LANE_CONTROL_SWITCH).
         self.env["LANE_CONTROL_SWITCH"] = "1"
         self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
         for k in [k for k in self.env if k.startswith("ANTHROPIC_") or k in ("OPENCODE_CONFIG", "CLAUDE_CONFIG_DIR",
@@ -157,7 +157,7 @@ class PureTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         home, repo = Path(tmp.name), Path(tmp.name) / "app"
         repo.mkdir()
-        p = mock.patch.dict(os.environ, {"HOME": str(home)})
+        p = mock.patch.dict(os.environ, testhome.env_for(home))
         p.start()
         self.addCleanup(p.stop)
         return home, repo
@@ -2212,7 +2212,7 @@ class DirenvLineTests(unittest.TestCase):
         self.assertIn("command -v direnv", line)
         self.assertLess(text.index("direnv allow"), text.index("uv sync"))
         for path, stubbed in (("", False), (str(self.e.bin), True)):  # no direnv at all; one whose allow fails
-            env = {"PATH": path, "STUB_DIRENV": "allowfail"}
+            env = {"PATH": path, "STUB_DIRENV": "allowfail", **testhome.env_for(self.e.home)}
             r = subprocess.run([shutil.which("sh"), "-c", line.strip()], cwd=self.repo, env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, (stubbed, r.stderr))
 
@@ -2227,7 +2227,8 @@ class DirenvLineTests(unittest.TestCase):
         for tool in ("git", "touch"):
             (tools / tool).symlink_to(shutil.which(tool))
         subprocess.run(["git", "init", "-q"], cwd=work, check=True)
-        r = subprocess.run([shutil.which("sh"), "-e", "-c", script], cwd=work, env={"PATH": str(tools)},
+        r = subprocess.run([shutil.which("sh"), "-e", "-c", script], cwd=work,
+                           env={"PATH": str(tools), **testhome.env_for(self.e.home)},
                            capture_output=True, text=True)  # -e: a failing step must still not stop the marker
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("uv not on PATH, skipped", r.stderr)
@@ -2243,8 +2244,12 @@ class DirenvLineTests(unittest.TestCase):
         (work / ".beads").rmdir()
         (work / ".beads").symlink_to("/dangling")  # [ -e ] false, ln -s then fails: File exists
         subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+        tools = self.e.home / "no-uv"  # not the whole PATH: the script's `uv sync` would run a real uv
+        tools.mkdir()
+        for tool in ("git", "touch", "ln"):
+            (tools / tool).symlink_to(shutil.which(tool))
         r = subprocess.run([shutil.which("sh"), "-e", "-c", script], cwd=work,
-                           env={"PATH": os.environ["PATH"]}, capture_output=True, text=True)
+                           env={"PATH": str(tools), **testhome.env_for(self.e.home)}, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((work / ".git" / "orca-setup-done").exists())
 

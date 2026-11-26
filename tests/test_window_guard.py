@@ -1,4 +1,5 @@
 """window-guard.sh and its install step against stub cotal, rove and systemctl in a temp dir."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import importlib.machinery
 import importlib.util
 import os
@@ -62,7 +63,8 @@ COORD_TAB=tab-1
 
     def poll(self, polls=1, **env):
         return subprocess.run(["bash", str(GUARD)], capture_output=True, text=True, timeout=60, env={
-            "PATH": f"{self.d}/bin:" + os.environ["PATH"], "HOME": str(self.d), "PLAYBOOK_CONFIG": str(self.d / "conf.sh"),
+            "PATH": f"{self.d}/bin:" + os.environ["PATH"], **testhome.env_for(self.d),
+            "PLAYBOOK_CONFIG": str(self.d / "conf.sh"),
             "GUARD_STATE_FILE": str(self.d / "state"), "GUARD_MEMINFO": str(self.d / "meminfo"),
             "GUARD_POLLS": str(polls), **env})
 
@@ -313,7 +315,7 @@ class InstallTests(unittest.TestCase):
 
     def install(self, *args):
         return subprocess.run(["bash", str(INSTALL), *args], capture_output=True, text=True, timeout=60, env={
-            "PATH": f"{self.g.d}/bin:" + os.environ["PATH"], "HOME": str(self.g.d),
+            "PATH": f"{self.g.d}/bin:" + os.environ["PATH"], **testhome.env_for(self.g.d),
             "PLAYBOOK_CONFIG": str(self.g.d / "conf.sh"), "XDG_CONFIG_HOME": str(self.g.d / "cfg")})
 
     def unit(self):
@@ -388,11 +390,10 @@ class MachineCoordinatorSetupTests(unittest.TestCase):
         tools = {str(Path(shutil.which(t)).parent) for t in ("git", "python3", "env", "sh")}
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
         self.folder = self.home / "code" / "machine-coordinator"
-        self.env = {**os.environ, "HOME": str(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
+        self.env = {**os.environ, **testhome.env_for(self.home), "PATH": ":".join([str(self.bin), *sorted(tools)]),
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.home / "stub.json"),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
-        self.env.pop("XDG_CONFIG_HOME", None)
-        self.env.update(XDG_DATA_HOME=str(self.home / ".local" / "share"), LANE_CONTROL_SWITCH="1")  # INST-1 M1
+        self.env.update(LANE_CONTROL_SWITCH="1")  # INST-1 M1
 
     def run_setup(self, *args):
         return subprocess.run([sys.executable, str(SETUP), "--folder", str(self.folder), *args], env=self.env,

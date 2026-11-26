@@ -9,6 +9,7 @@
 Everything runs against stubs (systemctl, ssh, Orca's CLI) in a scratch HOME and XDG folders. The "processes" are this
 test's own short-lived children, with the argv an Orca server or a tunnel's ssh would have. No real unit, host, tunnel or
 Orca is touched, and tests/test-orca-host-install.sh is never run."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import importlib.util
 import json
 import os
@@ -128,7 +129,7 @@ class Env(unittest.TestCase):
         (self.bin / "node").symlink_to(sys.executable)  # a helper process whose argv[0] is node
         self.sstate, self.slog = self.tmp / "systemctl.json", self.tmp / "systemctl.log"
         self.ostate, self.olog = self.tmp / "orca.json", self.tmp / "orca.log"
-        self.env = {**os.environ, "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.conf),
+        self.env = {**os.environ, **testhome.env_for(self.home), "XDG_CONFIG_HOME": str(self.conf),
                     "XDG_DATA_HOME": str(self.data), "PATH": f"{self.bin}:{os.environ['PATH']}",
                     "SYSTEMCTL_STATE": str(self.sstate), "SYSTEMCTL_LOG": str(self.slog),
                     "ORCA_CLI": str(self.bin / "orca"), "ORCA_STUB_STATE": str(self.ostate),
@@ -654,7 +655,7 @@ class HostInstallTests(Env):
     def audit(self, *args):
         script = subprocess.run(["sh", str(HOST_INSTALL), "--audit-script"], env=self.env, capture_output=True,
                                 text=True).stdout
-        return subprocess.run(["sh", "-s", "--", *args], input=script, env={**self.env, "HOME": str(self.box)},
+        return subprocess.run(["sh", "-s", "--", *args], input=script, env={**self.env, **testhome.env_for(self.box)},
                               capture_output=True, text=True)
 
     def rows(self):
@@ -714,7 +715,7 @@ class HostInstallTests(Env):
         self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port))  # says the port, listens on none
         holder = self.spawn("something-else", port=self.port)
         r = subprocess.run(["sh", "-s", "--", "0.2.0+bbbb", str(self.port), "prove"], input=audit,
-                           env={**self.env, "HOME": str(self.box)}, capture_output=True, text=True)
+                           env={**self.env, **testhome.env_for(self.box)}, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("does not own 127.0.0.1:" + str(self.port), r.stdout + r.stderr)
         del holder
@@ -731,21 +732,23 @@ class HostInstallTests(Env):
         audit = subprocess.run(["sh", str(HOST_INSTALL), "--audit-script"], env=self.env, capture_output=True,
                                text=True).stdout
         self.sstate.write_text(json.dumps({"shell": "/bin/oldsh"}))
-        r = subprocess.run(["sh", "-s", "--", "x", "0", "shell"], input=audit, env={**self.env, "HOME": str(self.box)},
+        r = subprocess.run(["sh", "-s", "--", "x", "0", "shell"], input=audit,
+                           env={**self.env, **testhome.env_for(self.box)},
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(["--user", "set-environment", f"SHELL={login}"], self.calls())
         self.assertIn(f"SHELL {login} (was /bin/oldsh)", r.stdout)
         n = len(self.calls())
         self.sstate.write_text(json.dumps({"shell": login}))
-        r = subprocess.run(["sh", "-s", "--", "x", "0", "shell"], input=audit, env={**self.env, "HOME": str(self.box)},
+        r = subprocess.run(["sh", "-s", "--", "x", "0", "shell"], input=audit,
+                           env={**self.env, **testhome.env_for(self.box)},
                            capture_output=True, text=True)
         self.assertEqual(r.stdout, "")
         self.assertFalse(any(c[1:2] == ["set-environment"] for c in self.calls()[n:]))
         server = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", "6769", shell="/bin/oldsh")
         for _ in range(2):  # review M3: said on every run while the running server has the old one
             r = subprocess.run(["sh", "-s", "--", "x", "0", "shell"], input=audit, capture_output=True, text=True,
-                               env={**self.env, "HOME": str(self.box)})
+                               env={**self.env, **testhome.env_for(self.box)})
             self.assertIn(f"restart needed: Orca's server (pid {server}) runs with SHELL=/bin/oldsh, the login shell "
                           f"is {login}", r.stdout)
             self.assertIn("systemctl --user restart orcad.service", r.stdout)

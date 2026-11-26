@@ -1,4 +1,5 @@
 """The native-orca adapter of scripts/orch: one marked AGENTS.md section from its template, added once, removed exactly."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import importlib.util
 import tempfile
 import unittest

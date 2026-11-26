@@ -1,5 +1,6 @@
 """core/agentsdoc.py: lane-control's generated coordination lives in AGENTS.lane-control.md, with exactly one pointer
 line in AGENTS.md (UP-5, lc-whv). A re-run replaces marked sections in place and never appends a second block."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import importlib.util
 import unittest
 from pathlib import Path

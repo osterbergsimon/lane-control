@@ -1,4 +1,5 @@
 """lane-heavy and lane-room against stubbed systemd and a fake /proc; only temp dirs, and no real load."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import os
 import re
 import shutil

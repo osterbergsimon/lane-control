@@ -1,4 +1,5 @@
 """The repo layout: the root marker, the root lookup (Python and bash), and the old script paths kept for machines."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import importlib.util
 import os
 import subprocess

@@ -1,4 +1,5 @@
 """Checks on the persona, skill and tier-table content that project-setup installs."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import getpass
 import os
 import re
@@ -577,7 +578,7 @@ class StaleClaimsKeyTests(unittest.TestCase):
             (d / "issues.json").write_text(issues)
             (d / "conf.sh").write_text(f'declare -A COORD_REPO=([p]="{d}/repo")\ndeclare -A COORD_TASK=([p]=t)\nCOORD_TAB=x\n')
             env = {"PATH": f"{d}/bin:" + os.environ["PATH"], "PLAYBOOK_CONFIG": str(d / "conf.sh"),
-                   "ISSUES": str(d / "issues.json"), "HOME": str(d)}
+                   "ISSUES": str(d / "issues.json"), **testhome.env_for(d)}
             return subprocess.run(["bash", str(ROOT / "scripts" / "stale-claims.sh")], env=env, capture_output=True,
                                   text=True).stdout.strip()
 
@@ -2591,7 +2592,8 @@ class PrivateNamesTests(unittest.TestCase):
         return privatenames.Names(entries, names.note)
 
     def test_no_tracked_file_carries_a_private_name(self):
-        names = self.names()
+        with testhome.real_home():  # opt-out, read only: this check is about this machine's own names
+            names = self.names()
         r = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True)
         if r.returncode:
             self.skipTest("not a git checkout, so there are no tracked files to list")
@@ -2619,7 +2621,7 @@ class PrivateNamesTests(unittest.TestCase):
         self.assertEqual(str(c.exception), "CI: this machine has no project names or private-names file to check")
         with tempfile.TemporaryDirectory() as d:  # no machine.conf, no store, no names file; the hostname alone is no check
             env = {k: v for k, v in os.environ.items() if k not in ("CI", "LANE_PRIVATE_NAMES")}
-            env.update(HOME=d, XDG_CONFIG_HOME=d, LANE_MACHINE_CONF=str(Path(d) / "none.conf"))
+            env.update(testhome.env_for(d), XDG_CONFIG_HOME=d, LANE_MACHINE_CONF=str(Path(d) / "none.conf"))
             with mock.patch.dict(os.environ, env, clear=True), mock.patch("socket.gethostname", return_value="ci-runner-0042"):
                 with self.assertRaises(unittest.SkipTest) as c:
                     self.names()

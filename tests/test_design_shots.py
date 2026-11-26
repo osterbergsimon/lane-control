@@ -1,6 +1,7 @@
 """core/scripts/design-shots: headless screenshots of a project's pages at phone and desktop width in both themes, and
 a before/after comparison (docs/superpowers/specs/2026-11-21-design-kit-design.md, section 7). Playwright is a stub
 that records its argv and writes a file, so no browser runs; one real-browser test runs when Playwright is found."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import os
 import signal

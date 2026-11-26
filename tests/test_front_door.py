@@ -4,6 +4,7 @@ the old names keep working and point a person, and only a person, at the new for
 
 The dispatch runs against a scratch tree whose old scripts are stubs that print what they were given; the help and the
 hints also run against the real scripts, in a scratch HOME."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import importlib.util
 import json
 import os
@@ -232,7 +233,7 @@ class Dispatch(unittest.TestCase):
         self.home = self.tmp / "home"
         self.home.mkdir()
         self.env = {k: v for k, v in os.environ.items() if k != F.ENV}
-        self.env.update(HOME=str(self.home), XDG_DATA_HOME=str(self.tmp / "data"))
+        self.env.update(testhome.env_for(self.home), XDG_DATA_HOME=str(self.tmp / "data"))
         self.cli = str(self.tree / "core" / "scripts" / "lane-control")
 
     def tearDown(self):
@@ -355,8 +356,7 @@ class OldNames(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
         self.env = {k: v for k, v in os.environ.items() if k != F.ENV}
-        self.env.update(HOME=str(self.home), XDG_DATA_HOME=str(self.home / "data"),
-                        XDG_CONFIG_HOME=str(self.home / ".config"), XDG_CACHE_HOME=str(self.home / ".cache"))
+        self.env.update(testhome.env_for(self.home), XDG_DATA_HOME=str(self.home / "data"))
 
     def tearDown(self):
         self._tmp.cleanup()

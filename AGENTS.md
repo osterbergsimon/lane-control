@@ -15,7 +15,10 @@ setup, notes, adapter, docs, scripts, personas, skills, templates). `scripts/orc
 ## Rules
 - The repo is **public**. No hostnames, IPs, keys, tokens, usernames of real machines or private paths in anything
   you commit; examples use `user@host`, `trial-vps`, `~/code/<project>`.
-- Never edit files outside this repo. Tests write only to their own temp dirs.
+- Never edit files outside this repo. Tests write only to their own temp dirs: each `tests/test_*.py` imports
+  `testhome` first (temp `HOME` and `XDG_*`), takes its own with `testhome.env_for(<temp dir>)`, and never runs a child
+  without `HOME` (it falls back to the real one). The suite fails when the real lane-control folders or `~/.agents`
+  change while it runs.
 - Scripts never run agents as root, never copy credentials (`auth.json`, `.credentials.json`, tokens) by hand, and
   never start privileged containers.
 - Beads (`bd`, prefix `lc`) lives in `~/code/lane-control-beads`; `.beads` here is a gitignored symlink. Never commit

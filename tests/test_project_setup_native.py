@@ -1,5 +1,6 @@
 """project-setup's native-Orca path (phase 3 of docs/superpowers/plans/2026-11-19-native-orca-setup.md) and
 project-pause on it, against the stub orca executable (tests/stubs/fake.py) in a temporary HOME."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import contextlib
 import io
 import json

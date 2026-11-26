@@ -3,6 +3,7 @@ call to merge a PR or to push to the project's integration branch while improve 
 project. Under node, called the way OpenCode 2.2.1 calls a plugin (probed live: ctx.tool.hook("execute.before", fn);
 throwing from it stops the call and the model sees the message). The opt-in live check at the end runs the real
 opencode2 against a fake model."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import os
 import shutil
@@ -74,7 +75,8 @@ class GuardTests(HomeTest):
         return self.oc.install_away_denies(self.checkout, integration, project)
 
     def run_guard(self, events, role="coordinator", cwd=None, **env):
-        e = clean_env(LANE_IMPROVE_FILE=str(self.improve), XDG_STATE_HOME=str(self.t / "state"), HOME=str(self.home), **env)
+        e = clean_env(**{**testhome.env_for(self.home), "LANE_IMPROVE_FILE": str(self.improve),
+                         "XDG_STATE_HOME": str(self.t / "state"), **env})
         if role:
             e["LANE_ROLE"] = role
         r = subprocess.run([NODE, str(self.driver), str(self.copy), json.dumps(events)], capture_output=True, text=True,

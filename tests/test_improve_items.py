@@ -1,4 +1,5 @@
 """The summary PR body lists the merged away items, read from git (lc-rjt)."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import re
 import subprocess
 import sys

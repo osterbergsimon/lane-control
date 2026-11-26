@@ -3,6 +3,7 @@ docs/superpowers/specs/2026-11-22-beads-handling-design.md).
 
 Real git in temp dirs; bd, gh are stubs on a temp PATH that log every call. HOME is a temp dir. Nothing here reaches a real
 beads workspace, GitHub or a real bd (that is tests/test_beads_roundtrip.py, opt-in)."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import os
 import shutil
 import stat
@@ -99,7 +100,7 @@ class BeadsCase(unittest.TestCase):
         self.remotes = self.tmp / "remotes"
         self.remotes.mkdir()
         path = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
-        patcher = mock.patch.dict(os.environ, {"PATH": path, "HOME": str(self.home), "BD_LOG": str(self.bd_log),
+        patcher = mock.patch.dict(os.environ, {"PATH": path, **testhome.env_for(self.home), "BD_LOG": str(self.bd_log),
                                              "GH_LOG": str(self.gh_log), "GH_REMOTES": str(self.remotes),
                                              "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.file://{self.remotes}/.insteadOf",
                                              "GIT_CONFIG_VALUE_0": "https://github.com/acme/",
@@ -897,7 +898,7 @@ class RestoreTests(BeadsCase):
         self.repo2.mkdir()
         git(self.repo2, "init", "-q", "-b", "main", ".")
         git(self.repo2, "remote", "add", "origin", "https://github.com/acme/widget.git")
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home2), "GH_EXISTS": "1"})
+        patcher = mock.patch.dict(os.environ, {**testhome.env_for(self.home2), "GH_EXISTS": "1"})
         patcher.start()
         self.addCleanup(patcher.stop)
         self.dest2 = self.home2 / "code" / "widget-beads"

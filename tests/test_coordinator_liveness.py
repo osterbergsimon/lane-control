@@ -1,6 +1,7 @@
 """Coordinator liveness from the field report (lc-l78): a standing session runs only when an agent process does
 (lc-l78.1), and each coordinator's folder carries a persona anchor (lc-l78.2). Stubs and a fake /proc
 (LANE_PROC_DIR) in a temporary HOME."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import os
 import re
