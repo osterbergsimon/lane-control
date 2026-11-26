@@ -188,7 +188,10 @@ link step cannot be done. **It is not a drop-in:** it needs direction 1 in place
 bot on the desktop, and a person approves it once. It reaches a bot, not a lane, so it can ask the desktop for work
 but cannot start a supervised lane there ([pairing research](research/2026-11-25-orca-pairing.md), section 6; not run
 there). lane-control has not built it, and setup does not fall back to it by itself. Also pending (PAIN-1, lc-bmk):
-making the share-link step as painless as possible.
+making the share-link step as painless as possible. A newer decision (owner, 2026-11-26, same issue): the default
+route becomes a link minted with `orca pair` by setup, which widens the desktop's listener to every interface; your
+hand-made share link stays for keeping the desktop on loopback. Not built when this was written
+([pairing facts](../orchestrators/native-orca/remote.md#pairing-facts)).
 
 **The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; run `project-setup
 --check <repo> <host>`; make sure ssh can log in without asking anything (for a smartcard or agent key, `lane-tunnel`
@@ -209,9 +212,13 @@ Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you
   ([record](../orchestrators/native-orca/record.md), NO-6). The docs on main say the no-tunnel route is not run.
 - A container testbed exists in PR #68 (`tests/testbed/`, not on main). It was stood down on 2026-11-25. Its results
   are not verified yet, so this page does not rely on them.
-- Why the share link stays your step: `orca pair` would make the desktop listen on every interface
-  ([pairing research](research/2026-11-25-orca-pairing.md), read from Orca's source).
-- A lane's report across the two machines is poll-only: nothing proves it wakes the coordinator that started it.
+- Why setup asks you for the share link today: `orca pair` would make the desktop listen on every interface
+  ([pairing research](research/2026-11-25-orca-pairing.md), read from Orca's source). The link is a credential, and the
+  address in it is what the box dials, not what the desktop listens on:
+  [pairing facts](../orchestrators/native-orca/remote.md#pairing-facts).
+- A lane's report across the two machines wakes the coordinator that started it, with both Orcas at the same version
+  (1.4.274): measured in the field (field report 2026-11-26) for a box coordinator's lane on the desktop, not repeated
+  here. If a wake seems lost, the coordinator runs `orca-ide orchestration check`.
 
 More: [native Orca on an SSH host](../orchestrators/native-orca/remote.md).
 
@@ -272,6 +279,8 @@ More: [away-improve mode, the owner's guide](away-improve.md).
 - **Orca removes a merged lane's worktree**, with its own rule "Delete merged workspaces". Orca's rules are off by
   default and you turn them on; setup reports what it can tell and never changes Orca's settings. "Delete released
   orchestration worker workspaces" is recommended beside it.
+- The rules are each Orca server's own. The app's Settings page does not set a box's global rules, so give each
+  project on a box its own rule ([rules are per server](orca-cleanup.md#rules-are-per-server)).
 - GitHub's "Automatically delete head branches" removes the remote branch; `project-setup` offers to turn it on.
 - When Orca does not take a merged lane, the coordinator removes it by hand, after checks.
 - `lane-sweep` reports what is left over. Without `--apply` it removes nothing.

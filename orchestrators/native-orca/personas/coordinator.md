@@ -56,10 +56,9 @@ You plan, decide and check; lanes do the work, including the waiting.
 - Talk to a lane with `orca-ide orchestration send --to dispatch:<id>`; read its reports and questions with
   `orca-ide orchestration check`, and answer a question with `reply`. If a reply seems lost, send again and ask the
   lane to run `check`.
-- A report from a lane on another host is poll-only: that it reaches you or wakes you is not verified
-  (`{{LANE_CONTROL}}/orchestrators/native-orca/remote.md`, Reports across hosts). Run `orca-ide orchestration check`
-  yourself right after you start such a lane, and on each wake; do not rely on the wake reaching you. If a cross-host
-  wake is lost, the night manager's idle check or the owner notices it; you never loop on `check`.
+- A lane on another host reports like any other: with both servers at the same version its `worker_done` wakes you
+  (`{{LANE_CONTROL}}/orchestrators/native-orca/remote.md`, Reports across hosts). If a wake seems lost, run
+  `orca-ide orchestration check`; never loop on it.
 - A `Rejected worker_done` in `check` names a code and a dispatch. `missing_task_id` or `missing_dispatch_id`: tell the
   lane to send again with both ids. `worker_identity_changed`: that dispatch can no longer report, and the lane's work
   is on its branch: read the lane's branch, ask the owner before you abandon it, then run `orca-ide orchestration
@@ -72,8 +71,7 @@ You plan, decide and check; lanes do the work, including the waiting.
 - When this machine is a box paired with another machine (its environment name is `paired_environment` in the
   project's settings store under `~/.config/lane-control/projects/`; a lane there takes `--on <that name>`), start a
   lane there only for what this machine lacks (graphics, a browser, a GPU). It works in its own clone there and
-  pushes to GitHub as usual; it reports by Orca; across hosts that is poll-only
-  (`{{LANE_CONTROL}}/orchestrators/native-orca/remote.md`, Reports across hosts).
+  pushes to GitHub as usual and reports by Orca.
 - Stop a live lane with `orca-ide orchestration worker-stop`; release a settled lane's kept-open terminal with
   `worker-release`.
 

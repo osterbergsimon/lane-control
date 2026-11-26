@@ -13,6 +13,7 @@ with the first one.
 
 - [Away-improve mode](away-improve.md): lets coordinators keep improving a product on its own branch while you are away. Read it before you switch `lane-improve on`.
 - [Lane cleanup](orca-cleanup.md): how a merged lane's worktree is removed by Orca's own rule. Read it when setup says a cleanup rule is off.
+- [Asks for Orca upstream](orca-upstream-asks.md): what we would ask Orca to change, with the evidence and what we do meanwhile; recorded, not filed. Read it before you file anything at Orca.
 - [Issues doctrine](../core/issues.md): how beads issues are claimed, closed, parked and backed up. Read it when you move a project or restore beads.
 - [Roles](../core/roles.md): the jobs and limits of the machine coordinator and a project coordinator. Read it to know who decides what.
 

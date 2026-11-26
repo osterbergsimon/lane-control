@@ -58,8 +58,9 @@ orca-ide orchestration worker-start --spec-file <brief> --worktree new-child --a
 
 - `<id>` is `claude` for Claude and `opencode` for OpenCode; `--effort` only for Claude.
 - Another host (`--on <environment>`): `--worktree new-top-level --repo <exact selector>` (Orca refuses `new-child`
-  and `current` there; an OpenCode lane there: below). Run `orca-ide orchestration check` right after, and on each
-  wake: the wake may not reach you.
+  and `current` there; an OpenCode lane there: below). A selector naming the project (`name:<project>`) resolves
+  where a `github:` one does not. With both servers at the same version its report wakes you; if a wake seems lost,
+  run `orca-ide orchestration check`.
 - A paired box (`paired_environment` in the project's settings store): only for what this machine lacks (graphics,
   a browser, a GPU).
 

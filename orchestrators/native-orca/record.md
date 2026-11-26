@@ -111,4 +111,6 @@ Run was touched. The Run cannot be deleted (`reset` is global), so its tasks wer
   and a second dispatch of the task reported and completed. Not tested: a real runtime restart (it would have
   restarted the owner's Orca), `worker-start --retry-of` (it starts an agent), and any second Orca server.
 - A `worker_done` from a lane on a paired server to a coordinator on the box, and whether it wakes an agent there:
-  still not run (needs a box with a signed-in agent and the owner's share link). `remote.md` says poll-only until it is.
+  still not run (needs a box with a signed-in agent and the owner's share link). `remote.md` said poll-only until it
+  was. 2026-11-26: a field report measured the wake on two servers at the same version; `remote.md` (Reports across
+  hosts) now says so. lane-control has not repeated it.
