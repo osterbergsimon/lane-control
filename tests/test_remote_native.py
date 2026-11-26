@@ -572,8 +572,9 @@ class DirectionTwoTests(Case):
         box_store = next((self.e.box / ".config" / "lane-control" / "projects").iterdir())
         self.assertEqual(json.loads((box_store / "settings.json").read_text())["paired_environment"], "deskbox")
         rec = json.loads((self.e.home / ".config" / "lane-control" / "hosts" / "box.json").read_text())
+        self.assertRegex(rec.pop("paired_at"), r"^\d{4}-\d\d-\d\d, at \d\d:\d\d$")  # for the "Runtime <date>" entry
         self.assertEqual(rec, {"host": "box", "environment": "box", "desktop_environment": "deskbox",
-                               "tunnel_port": self.port, "tunnel_remote_port": self.port})
+                               "tunnel_port": self.port, "tunnel_remote_port": self.port, "link": "by hand"})
         self.assertEqual(node[0]["endpoint"], f"ws://127.0.0.1:{self.port}")  # one port: the link as it was made
 
     def test_the_prompt_is_hidden(self):
@@ -1957,11 +1958,12 @@ class MintTests(Case):
     def test_remove_host_after_a_mint_names_the_entry_and_the_restart(self):
         rc, out = self.mint()
         self.assertEqual(rc, 0, out)
+        when = json.loads((self.e.home / ".config" / "lane-control" / "hosts" / "box.json").read_text())["paired_at"]
         r = subprocess.run([sys.executable, str(SETUP), "--remove-host", "box"], env=self.e.env, capture_output=True,
                            text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         flat_out = " ".join(r.stdout.split())
-        for s in ('"Runtime"', time.strftime("%Y-%m-%d"), "does not narrow the listener", "start it again"):
+        for s in ('"Runtime"', f"({when})", "does not narrow the listener", "start it again"):
             self.assertIn(s, flat_out, s)
 
     def test_no_listener_on_the_desktop_port_goes_to_the_hand_link(self):
