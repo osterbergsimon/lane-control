@@ -135,7 +135,7 @@ composer. [tested]
 
 ### Project: one command
 ```bash
-scripts/project-setup <git-url | /abs/dir> --orchestrator orca-cotal [--host user@host] [--name Shop] \
+scripts/lane-control project setup <git-url | /abs/dir> --orchestrator orca-cotal [--host user@host] [--name Shop] \
   [--coordinator claude/opus] [--permission-mode auto|bypassPermissions|default] \
   [--reviewer claude/opus] [--tiers file.tsv] [--port N] [--write-orca-yaml (leaves an uncommitted draft as orca.yaml)] [--trust-folder] [--no-start (opt-out of starting)] \
   [--private GLOB]...
@@ -284,10 +284,10 @@ stored list and never drops an entry; to remove one, edit `settings.json`. A ret
 pin are dropped from the store, said in the output. `--refresh` keeps each persona's own harness and model, takes the mode from the
 store, and fills in what the store lacks from the personas.
 
-`project-setup <dir> --show` prints the store (settings and the table's tiers) and writes nothing.
+`lane-control project show <dir>` prints the store (settings and the table's tiers) and writes nothing.
 
 **Migration.** A project set up before the store existed has `.cotal/lane-control.json` and `.cotal/lanes.tsv`. The next
-`project-setup` run on it, also `--refresh`, moves them once and prints `settings: moved ...`: the record's keys go into
+`lane-control project setup` run on it, also `--refresh`, moves them once and prints `settings: moved ...`: the record's keys go into
 `settings.json`, the table is copied byte for byte (an edited table is kept as it is) and the old files are removed; models
 and permission mode, which the old record never held, are read from the rendered personas. If the store already
 has a different table, it wins and the old file stays, with a warning. A store folder keyed on the folder name alone (the
@@ -296,7 +296,7 @@ what is not moved yet.
 
 ### Two repos, one coordinator: `--with`
 For two repos that belong together (an app and its plugins repo), run project-setup on the main repo and attach the
-other: `project-setup ~/code/<project> --with ~/code/<project>-plugins` (a git URL is cloned like the main repo;
+other: `lane-control project setup ~/code/<project> --with ~/code/<project>-plugins` (a git URL is cloned like the main repo;
 repeat the flag for more). There is still one space, one manager and one coordinator, rooted at the main repo. The
 attached repo gets the per-repo work (Orca registration, the stale-checkout refusal, the private-file deny, the adapted
 files and AGENTS.md section, orca.yaml, the owner's yes before any commit) and nothing else: no space, personas or
@@ -309,7 +309,7 @@ repo's own beads workspace; nothing moves between trackers.
 
 ### Refresh: after lane-control's personas, skill or tier defaults change
 ```bash
-scripts/project-setup <dir> --refresh [--name Shop]
+scripts/lane-control project refresh <dir> [--name Shop]
 ```
 For a project set up earlier. It re-renders the coordinator and reviewer
 personas in `.cotal/agents/`, each keeping the harness, model and permission mode it already has, and reinstalls the
@@ -323,7 +323,7 @@ written. Changing an agent's harness or model is not a refresh: `--coordinator` 
 
 ### Rest a project: leave it alone for a day or a week
 ```bash
-scripts/project-pause rest|wake|stop|start|status <project-dir | project-name>
+scripts/lane-control project rest|wake|stop|start|status <project-dir | project-name>
 ```
 `rest` is the normal way. It writes a marker `paused/<space>` in the window guard's state directory (next to
 `GUARD_STATE_FILE`) and stops no agent: the guard then sends nothing to that space, queues nothing and drops what was
@@ -331,7 +331,7 @@ waiting, so no "could not reach" notice reaches the machine coordinator, and the
 (the guard config is untouched). It refuses, naming them, while a lane or reviewer still runs in the space. `wake`
 removes the marker, and the guard sends the project the current weekly budget standing on its next poll (window orders
 missed while resting are not replayed). The owner says
-"resume" to the coordinator or machine coordinator, who runs `project-pause wake`. `rest` and `wake` call no
+"resume" to the coordinator or machine coordinator, who runs `lane-control project wake`. `rest` and `wake` call no
 `cotal stop` or spawn, so they work from inside an agent's shell.
 
 `stop` is for freeing memory: it does `rest`, and also stops the coordinator with `cotal stop` (broker and
@@ -406,8 +406,8 @@ cannot be delivered is not repeated while the episode lasts. The journal is the 
 Install, in this order, from the main checkout of lane-control (the unit runs the script where it finds it):
 1. Add `COORD_SPACE` to the config (`config.example.sh`): one line per project, with the project's space from
    `cotal space`. Remove nothing else; the Rove scripts still read `COORD_TASK`.
-2. Run `scripts/project-setup <project> --refresh` for each project, and restart its coordinator at a natural stop. Until
-   it restarts, a running coordinator treats the orders as information.
+2. Run `scripts/lane-control project refresh <project>` for each project, and restart its coordinator at a natural stop.
+   Until it restarts, a running coordinator treats the orders as information.
 3. `scripts/machine-coordinator-setup` (`--no-start` to look first; `--folder` for another place than
    `~/code/machine-coordinator`).
 4. Test the path once by hand: `cotal send -s <space> -t coordinator "machine coordinator: FYI test, no reply"`, and
@@ -431,7 +431,7 @@ Install, in this order, from the main checkout of lane-control (the unit runs th
 - The `cotal_spawn` requirements that run surfaced:
   - It needs an inline `persona` unless the name is a saved persona.
   - Handing role `lane` needs `role:lane` in the spawner's `capabilities`, which the personas carry.
-- `project-setup` from the workstation with `--host`:
+- `lane-control project setup` from the workstation with `--host`:
   - Both agents came up and loaded the skill, and the design lead reported ready to the coordinator by DM.
   - A re-run is all `exists`.
 - The coordinator refused a request that arrived as a DM from the CLI ("only your words in this tab instruct me"),

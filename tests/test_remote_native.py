@@ -2193,8 +2193,8 @@ class CliPartsTests(unittest.TestCase):
 class DocTests(unittest.TestCase):
     def test_remote_doc_covers_both_directions_removal_and_revoking(self):
         text = REMOTE_DOC.read_text()
-        for s in ("project-setup <repo> <host>", "orca-host-install", "Share this computer", "127.0.0.1",
-                  "--remove-host", "revoke", "lane-tunnel@", "paired_environment", "never"):
+        for s in ("lane-control project setup <repo> <host>", "orca-host-install", "Share this computer", "127.0.0.1",
+                  "lane-control project remove-host", "revoke", "lane-tunnel@", "paired_environment", "never"):
             self.assertIn(s, text, s)
 
     def test_remote_doc_covers_the_card_tunnel_and_its_failure(self):
@@ -2229,14 +2229,14 @@ class DocTests(unittest.TestCase):
         # PAIR-1 (lc-lxd): --check comes first. PAIN-1 (lc-bmk): orca pair widens the desktop, so the 127.0.0.1 hand
         # link stays, as the option; the mint is the default
         remote = " ".join(REMOTE_DOC.read_text().split())
-        for s in ("## Check first", "project-setup --check <repo> <host>", "changes nothing", "--pair-by-hand",
+        for s in ("## Check first", "lane-control project check <repo> <host>", "changes nothing", "--pair-by-hand",
                   "`orca pair`", "--address 127.0.0.1", "refusing to widen to all interfaces",
                   "docs/research/2026-11-25-orca-pairing.md", "Orca on your SSH hosts"):
             self.assertIn(s, remote, s)
         self.assertLess(remote.index("## Check first"), remote.index("## Direction 1"))
         guide = " ".join((ROOT / "docs" / "getting-started.md").read_text().split())
-        self.assertLess(guide.index("project-setup --check ~/code/<project> example-host"),
-                        guide.index("Then `project-setup ~/code/<project> example-host`"))
+        self.assertLess(guide.index("lane-control project check ~/code/<project> example-host"),
+                        guide.index("Then `lane-control project setup ~/code/<project> example-host`"))
         self.assertIn('"Share this computer", choosing 127.0.0.1', guide)
         research = ROOT / "docs" / "research" / "2026-11-25-orca-pairing.md"
         text = research.read_text()

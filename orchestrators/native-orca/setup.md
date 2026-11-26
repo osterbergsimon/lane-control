@@ -8,18 +8,19 @@ where we can"; what overlaps today: `docs/research/2026-11-25-orca-overlap.md`).
 ## Install
 - The Orca desktop app on the workstation (on Linux its CLI is `orca-ide`; plain `orca` may be another program).
   Agents run as a normal user, never root.
-- Always: beads (`bd`, bd 1.0.4 or newer: `machine-setup` checks it and says how to fix it, never installs it), `gh` (authenticated), `jq`, `git`, bash, and the agent harnesses you use (Claude Code),
-  signed in once as the user the agents run as.
+- Always: beads (`bd`, bd 1.0.4 or newer: `lane-control machine setup` checks it and says how to fix it, never installs
+  it), `gh` (authenticated), `jq`, `git`, bash, and the agent harnesses you use (Claude Code), signed in once as the
+  user the agents run as.
 - lane-control itself, installed once per machine: `scripts/lane-control install` from a checkout lays its last commit
-  at `~/.local/share/lane-control/<sha>/` with a `current` link (`project-setup` does it too when run from a
-  checkout; `core/README.md`, "The install"). Personas name `.../lane-control/current`, never the checkout.
+  at `~/.local/share/lane-control/<sha>/` with a `current` link (`lane-control project setup` does it too when run from
+  a checkout; `core/README.md`, "The install"). Personas name `.../lane-control/current`, never the checkout.
 - The machine caps: `~/.agents/bin/lane-heavy` and `lane-room` (links into `.../lane-control/current/core/scripts/`;
-  `project-setup` and `lane-control install` make them, with `lane-limits.sh`, `lane-tier`, `design-shots` and
-  `lane-control`).
-- The lane skill, `skills/native-orca-lanes` (gate, lane, messages, report shape, review, close): `project-setup`
-  installs it with the caps in `~/.agents/skills/native-orca-lanes` (with the lane brief as its `brief.md`), linked
-  into `~/.claude/skills` and `~/.config/opencode/skills`; `--refresh` puts back a changed or missing file. Orca's
-  own `orchestration` guide (`orca-ide skills get orchestration`) stays the command reference.
+  `lane-control project setup` and `lane-control install` make them, with `lane-limits.sh`, `lane-tier`, `design-shots`
+  and `lane-control`).
+- The lane skill, `skills/native-orca-lanes` (gate, lane, messages, report shape, review, close): `lane-control project
+  setup` installs it with the caps in `~/.agents/skills/native-orca-lanes` (with the lane brief as its `brief.md`),
+  linked into `~/.claude/skills` and `~/.config/opencode/skills`; `--refresh` puts back a changed or missing file.
+  Orca's own `orchestration` guide (`orca-ide skills get orchestration`) stays the command reference.
 - Check: `orca-ide orchestration --help` lists the commands below.
 
 ## A project
@@ -28,36 +29,36 @@ where we can"; what overlaps today: `docs/research/2026-11-25-orca-overlap.md`).
 how the coordinator works on Orca's orchestration, the heavy-work rule and where the handovers live. The project's own
 facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writes into a project").
 
-`project-setup` also keeps the coordinator findable and honest. The main checkout's `CLAUDE.local.md` gets a **persona
-anchor** (`core/anchor.py`): a session started there by hand is told to read the persona; workers and headless runs are
-told to ignore it. Other lines in the file are kept and it is never committed. Where the folder has an `AGENTS.md` and
-no `CLAUDE.md`, the anchor imports it, because Claude would otherwise stop reading it. `project-setup --check <repo>`
-says whether the persona and anchor are as setup writes them. Whether the coordinator **runs** is decided by its
-processes, never by a terminal's title or Orca's agent mark (both stay on an empty shell, as after a server restart).
-Three answers: running (left alone); `recorded but dead` (`project-pause start` clears the record and starts it; the
-old terminal is left open for you to close); and `cannot tell`, when an agent that may be it cannot be read or placed.
-After an Orca restore, a coordinator can run as `claude --resume <id>` in a sandbox whose environment lane-control
-cannot read: it is ruled out only when its command line names another session or Claude's transcript for that id is
-under other folders alone. `cannot tell` starts nothing, so there is never a second coordinator; if the terminal it
-names is an empty shell, close it and run again.
+`lane-control project setup` also keeps the coordinator findable and honest. The main checkout's `CLAUDE.local.md` gets
+a **persona anchor** (`core/anchor.py`): a session started there by hand is told to read the persona; workers and
+headless runs are told to ignore it. Other lines in the file are kept and it is never committed. Where the folder has an
+`AGENTS.md` and no `CLAUDE.md`, the anchor imports it, because Claude would otherwise stop reading it. `lane-control
+project check <repo>` says whether the persona and anchor are as setup writes them. Whether the coordinator **runs** is
+decided by its processes, never by a terminal's title or Orca's agent mark (both stay on an empty shell, as after a
+server restart). Three answers: running (left alone); `recorded but dead` (`lane-control project start` clears the
+record and starts it; the old terminal is left open for you to close); and `cannot tell`, when an agent that may be it
+cannot be read or placed. After an Orca restore, a coordinator can run as `claude --resume <id>` in a sandbox whose
+environment lane-control cannot read: it is ruled out only when its command line names another session or Claude's
+transcript for that id is under other folders alone. `cannot tell` starts nothing, so there is never a second
+coordinator; if the terminal it names is an empty shell, close it and run again.
 
 ## Beads
-Where a project's beads lives, its backup and its restore: `core/issues.md`, "Where beads lives". `project-setup` checks
-the layout, offers the move of a plain `.beads` folder or the restore on a new machine on your yes (a terminal), adds
-`bd prime` as the session hook next to the persona hook, and names a failing committed beads hook without editing it.
-`--beads-repo OWNER/NAME` overrides the beads repo's name and is kept in the settings store. On a box, setup says
-when `gh` needs a sign-in (a fine-grained token limited to the beads repos) and never handles the token.
+Where a project's beads lives, its backup and its restore: `core/issues.md`, "Where beads lives". `lane-control project
+setup` checks the layout, offers the move of a plain `.beads` folder or the restore on a new machine on your yes (a
+terminal), adds `bd prime` as the session hook next to the persona hook, and names a failing committed beads hook
+without editing it. `--beads-repo OWNER/NAME` overrides the beads repo's name and is kept in the settings store. On a
+box, setup says when `gh` needs a sign-in (a fine-grained token limited to the beads repos) and never handles the token.
 
 ## Lane cleanup
 A merged lane's worktree is removed by Orca's own cleanup rule "Delete merged workspaces", not by a script of ours
-(`docs/orca-cleanup.md`). `project-setup` and `machine-setup` read `orca-ide workspace cleanup preview` and say
-plainly when no rule is on or the project has cleanup off, with where to turn it on in Orca (Settings -> Workspace
-Cleanup -> Cleanup rules); they also report the recommended rule "Delete released orchestration worker workspaces"
-(lane-control lanes run as supervised workers; Orca removes a released worker's workspace only once Git finds its HEAD
-in the default branch or a merged review, so an unmerged lane's worktree stays), and say "cannot tell" when the preview
-shows no row it matched; they never change Orca's settings. `project-setup` also turns on GitHub's "Automatically
-delete head branches" in a terminal (recommended: Enter, y or yes turns it on, anything else leaves it off; without a
-terminal it only says so; a re-run says `exists`).
+(`docs/orca-cleanup.md`). `lane-control project setup` and `lane-control machine setup` read `orca-ide workspace cleanup
+preview` and say plainly when no rule is on or the project has cleanup off, with where to turn it on in Orca (Settings
+-> Workspace Cleanup -> Cleanup rules); they also report the recommended rule "Delete released orchestration worker
+workspaces" (lane-control lanes run as supervised workers; Orca removes a released worker's workspace only once Git
+finds its HEAD in the default branch or a merged review, so an unmerged lane's worktree stays), and say "cannot tell"
+when the preview shows no row it matched; they never change Orca's settings. `lane-control project setup` also turns on
+GitHub's "Automatically delete head branches" in a terminal (recommended: Enter, y or yes turns it on, anything else
+leaves it off; without a terminal it only says so; a re-run says `exists`).
 
 ## How a coordinator works
 - **Run and tasks:** the coordinator makes a run and its tasks (with dependencies), then starts every ready task
@@ -88,25 +89,25 @@ project and lane (`core/machine.md`); open a lane only when `~/.agents/bin/lane-
 its own heavy targets (a CI script, a make target) through `lane-heavy` so every caller gets the gate.
 
 ## An SSH host
-`core/scripts/project-setup <repo> <host>` sets a project up on an SSH box in two directions, each with its own
-tunnel, both started on this machine (`remote.md`; the picture:
-[how the parts fit](../../docs/how-it-fits.md#a-box-two-directions)):
+`core/scripts/lane-control project setup <repo> <host>` sets a project up on an SSH box in two directions, each with its
+own tunnel, both started on this machine (`remote.md`; the picture: [how the parts
+fit](../../docs/how-it-fits.md#a-box-two-directions)):
 - direction 1, this machine controls the box: `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair`,
   with no click and no pairing code from the owner;
-- direction 2, the box's coordinator starts lanes here: `lane-tunnel@<host>` (`ssh -R`), made by `project-setup`
-  before it sends the box its link to this machine's Orca: made with `orca pair` after the owner's yes, or the share
-  link the owner makes by hand (`--pair-by-hand`, which keeps this machine on loopback). `project-setup --remove-host
-  <host>` undoes this direction only.
+- direction 2, the box's coordinator starts lanes here: `lane-tunnel@<host>` (`ssh -R`), made by `lane-control project
+  setup` before it sends the box its link to this machine's Orca: made with `orca pair` after the owner's yes, or the
+  share link the owner makes by hand (`--pair-by-hand`, which keeps this machine on loopback). `lane-control project
+  remove-host <host>` undoes this direction only.
 
 ## OpenCode on a self-hosted LiteLLM gateway
 A self-hosted gateway with any models behind it is first class, and nothing is refused by model or harness (owner
 2026-11-24, `core/model-routing.md`, "Sandbox per tier"); each project's own tier table says which models it uses.
 0. A host set up before this change still has the old copies: `~/.agents/bin/lane-tier`, the lane skills and the
-   rendered personas there refuse an OpenCode tier until they are refreshed. Update the host's lane-control checkout
-   and install it (`git pull && scripts/lane-control install`), run `core/scripts/project-setup <repo> --refresh`
-   from it for each project (it links the lane tools, reinstalls the skills
-   and re-renders the personas), then restart the coordinator (`core/scripts/project-pause stop <repo>`, then `start <repo>`), so it
-   reads the new persona. The suggestion below warns while the installed lane-tier is not the checkout's.
+   rendered personas there refuse an OpenCode tier until they are refreshed. Update the host's lane-control checkout and
+   install it (`git pull && scripts/lane-control install`), run `core/scripts/lane-control project refresh <repo>` from
+   it for each project (it links the lane tools, reinstalls the skills and re-renders the personas), then restart the
+   coordinator (`core/scripts/lane-control project stop <repo>`, then `start <repo>`), so it reads the new persona. The
+   suggestion below warns while the installed lane-tier is not the checkout's.
 1. OpenCode's own config on the machine that runs the agents (`~/.config/opencode/opencode.json`) names the gateway
    as a provider, with the key as a reference to an environment variable, never the key itself:
    ```json
@@ -120,7 +121,7 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    worktree made first, with `orca-ide orchestration worker-start --worktree path:<that worktree> --agent opencode
    --model litellm/chat` (the `native-orca-lanes` skill has the commands and the checks); it needs the `opencode`
    command, 2.0.14 or newer.
-2. `core/scripts/project-setup <repo> --suggest-tiers litellm` reads the gateway's `/v1/models` and, where it answers
+2. `core/scripts/lane-control project setup <repo> --suggest-tiers litellm` reads the gateway's `/v1/models` and, where it answers
    (LiteLLM), `/model/info`, which gives the model behind each alias; it shows each alias with that model and a
    suggested table (swift, standard, deep from name hints; top `none`; rows `opencode/<provider>/<alias>`). It leaves
    out, and names, a model whose LiteLLM `model_info.mode` is not chat (an embedding model, a reranker) and, where
@@ -132,7 +133,7 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    given only: no redirect is followed and no proxy is used. In a terminal it asks before it writes the table to the project's settings store; on no,
    or without a terminal, nothing is written: edit the table it printed and pass it with `--tiers <file>`. A later
    setup run keeps the table.
-3. A machine without Claude: `core/scripts/machine-setup --machine-coordinator opencode/litellm/chat` (the
+3. A machine without Claude: `core/scripts/lane-control machine setup --machine-coordinator opencode/litellm/chat` (the
    automations follow the machine coordinator's harness; `--automation-provider opencode` says it outright). The
    four automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
    model to an OpenCode automation. With no usage feed (every budget's feed empty in the playbook config) no budget
@@ -200,9 +201,9 @@ OpenCode. Its docs also list cases where the launch environment wins (sessions s
 self-hosted runner), and variables a project's settings cannot set. That is why the same values also go in the shell
 files, and why `--check` looks at every place rather than at one.
 
-**The served-model check.** Before a model is written (`model-env`, `machine-setup`'s coordinator and automation
-models, `project-setup`'s role pins and tier table), the gateway it goes through is asked once for
-`<base>/v1/models`. **Nothing is written blindly:**
+**The served-model check.** Before a model is written (`model-env`, `lane-control machine setup`'s coordinator and
+automation models, `lane-control project setup`'s role pins and tier table), the gateway it goes through is asked once
+for `<base>/v1/models`. **Nothing is written blindly:**
 
 | The check says | Meaning | What happens |
 |---|---|---|
@@ -224,8 +225,8 @@ is not sent** (nothing is) and the check says `could not check`: to move to anot
 URL and its key in the shell. A shell with a key and no URL of its own sends it to the URL above, as Claude Code would.
 
 ## A machine
-`core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
-every step says `exists` on a re-run).
+`core/scripts/lane-control machine setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the
+details; every step says `exists` on a re-run).
 
 **No model is built in.** The machine coordinator's: `--machine-coordinator claude/<model>` (or
 `opencode/<provider>/<model>`), else `MACHINE_COORDINATOR=` in `machine.conf`, else what its persona already names,
@@ -237,23 +238,23 @@ automation's record names; `--automation-model <model> --replace-automation-mode
 `--model` in its extra arguments. Without a terminal and without a model it stops and says what to write;
 `machine.conf` is already there to write it in.
 
-- `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators
-  (`<name> <checkout>` each: the owner's list of whom the night manager may wake; Orca gives each one's harness and
-  session name, the single agent terminal in that checkout, and a harness and terminal title written after the checkout
-  override it), the runner repos it watches, night hours, idle and recheck minutes, and
-  how long `lane-away on` lasts. Fill it in by hand; no value from it goes in a repo. A machine set up before
-  `machine-setup` existed has no `machine.conf`: create it (run `machine-setup`, which writes it from the example, or
-  copy the example there by hand), since `lane-improve` and `night-precheck` need the file.
-- The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an
-  Orca terminal titled `machine coordinator` with its persona and hook, unless it runs already or that cannot be told
-  (above: the same proof). The folder's `CLAUDE.local.md` gets the same persona anchor, which the automations' sessions
-  there are told to ignore; `machine-setup --check` reads it. The folder may be your own git repo: git does not see
-  the file (listed in `.git/info/exclude` unless already ignored; a committed one is left alone).
+- `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators (`<name>
+  <checkout>` each: the owner's list of whom the night manager may wake; Orca gives each one's harness and session name,
+  the single agent terminal in that checkout, and a harness and terminal title written after the checkout override it),
+  the runner repos it watches, night hours, idle and recheck minutes, and how long `lane-away on` lasts. Fill it in by
+  hand; no value from it goes in a repo. A machine set up before `lane-control machine setup` existed has no
+  `machine.conf`: create it (run `lane-control machine setup`, which writes it from the example, or copy the example
+  there by hand), since `lane-control ratchet` and `night-precheck` need the file.
+- The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an Orca
+  terminal titled `machine coordinator` with its persona and hook, unless it runs already or that cannot be told (above:
+  the same proof). The folder's `CLAUDE.local.md` gets the same persona anchor, which the automations' sessions there
+  are told to ignore; `lane-control machine setup --check` reads it. The folder may be your own git repo: git does not
+  see the file (listed in `.git/info/exclude` unless already ignored; a committed one is left alone).
 - Four Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
   manager` hourly (`night-precheck`; the agent follows `night-manager.md`), `lane sweep` every 3 hours
   (`lane-sweep --precheck`, report only, waking its agent only for findings new since the last run) and `machine check` every 30 minutes (`machine-check`: a budget step,
   memory or runner state changed; it also keeps the `budget-stopped` marker for the CI limits) and `away watchdog` every 15
-  minutes (`away-watchdog`: while away-improve mode is on its precheck finds a stalled cycle, and its agent sends the
+  minutes (`away-watchdog`: while the ratchet (unattended improvement) is on its precheck finds a stalled cycle, and its agent sends the
   messages to that coordinator and the machine coordinator from its own terminal; [the watchdog](../../docs/away-improve.md#the-watchdog)).
 - The `ci-presence` user timer: the CI slice's CPU and memory follow presence (`lane-limits.sh`).
 - On a machine set up by hand before: automations named `night-manager` or `lane-sweep` and an older CI timer
@@ -267,11 +268,11 @@ The owner says they leave or return with `core/scripts/lane-away on|off|status` 
 A coordinator gets night check-ins only when it was started with `LANE_ROLE`/`LANE_PERSONA` (project-setup does
 this); one started by hand is named on the precheck's stderr instead.
 
-Away-improve mode (optional, off by default) is a separate switch from presence, the owner's own: `core/scripts/lane-improve
+The ratchet (optional, off by default) is a separate switch from presence, the owner's own: `lane-control ratchet
 on [--until HH:MM | --hours N | --until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]...
 [--unmetered] [--continue]` cuts an `away/<date>` branch for each project (at most one per project, ever; `--continue`
 carries on with it and cuts one for a project that has none, or the owner adopts or drops it first) and has each coordinator keep improving its product there until
-`lane-improve off`; the coordinator's `away-improve` skill (installed with the other lane skills) runs it, and
+`lane-control ratchet off`; the coordinator's `away-improve` skill (installed with the other lane skills) runs it, and
 `core/scripts/away-merge` is its only merge route. `lane-away on` (even `--until-back`), night and the budget never start it,
 and it does not make the owner count as away (`docs/superpowers/specs/2026-11-23-away-improve-design.md`). `IMPROVE_IDLE_MIN` in `machine.conf` (default 30) is the
 idle time after which the night manager nudges a coordinator that improve mode covers.

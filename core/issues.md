@@ -25,9 +25,9 @@ Owner-approved 2026-11-22. Goal: a project moves between machines without losing
   and never activates it: with the symlink layout nothing there matters, and the same setup in every beads repo is
   easier to check. The session hook is `bd prime` on SessionStart, in the checkout's uncommitted
   `.claude/settings.local.json`, owned by lane-control (`core/harnesses/claude/record.md`).
-- **Backup.** At every natural stop and every handover the coordinator runs, in the beads repo, `git push`, then
-  `bd dolt push` (memories live in the database, so the second is required). The night manager asks for the same
-  with its budget handover. A failed backup is reported to the owner, never retried silently. `project-setup` says
+- **Backup.** At every natural stop and every handover the coordinator runs, in the beads repo, `git push`, then `bd
+  dolt push` (memories live in the database, so the second is required). The night manager asks for the same with its
+  budget handover. A failed backup is reported to the owner, never retried silently. `lane-control project setup` says
   "beads has no off-machine copy" when a beads repo has no git remote or the database has no Dolt remote, and warns when
   the beads repo has commits not pushed. bd 1.0.4 cannot detect an unpushed Dolt database (it does not say whether the
   database is ahead of its remote), so only unpushed beads-repo git commits are checked; the Dolt half of a backup is
@@ -36,11 +36,11 @@ Owner-approved 2026-11-22. Goal: a project moves between machines without losing
   only (without one setup says what it would do): the private repo is created (its own yes), the folder copied in, the
   database checked to open the same from the new place, pushed (git and Dolt), and only then replaced by the link. The
   original folder is kept beside the repos, never deleted by setup.
-- **Restore on a new machine or a box.** With no beads in the checkout and the beads repo on GitHub, `project-setup`
-  (on a box, its own run there) clones it, links `.beads` and restores the database with `bd bootstrap --yes`, which
-  brings back issues and memories (`tests/test_beads_roundtrip.py`). It never creates a repo or a fresh database: a repo
-  that is not found, a `gh` that is not signed in or a config with no Dolt remote stops it with the reason. A box
-  signs in to GitHub itself, with a fine-grained token limited to the beads repos, put there by the owner.
+- **Restore on a new machine or a box.** With no beads in the checkout and the beads repo on GitHub, `lane-control
+  project setup` (on a box, its own run there) clones it, links `.beads` and restores the database with `bd bootstrap
+  --yes`, which brings back issues and memories (`tests/test_beads_roundtrip.py`). It never creates a repo or a fresh
+  database: a repo that is not found, a `gh` that is not signed in or a config with no Dolt remote stops it with the
+  reason. A box signs in to GitHub itself, with a fine-grained token limited to the beads repos, put there by the owner.
 - **One machine at a time.** Only one machine works on a project's beads at a time. Before a migration the old machine's
   last step is the backup above; two machines writing at once is not supported (no merge handling beyond what bd and
   Dolt do on pull).

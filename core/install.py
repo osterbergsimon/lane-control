@@ -298,7 +298,9 @@ def sh(script: str) -> str:
 def box_run(rel: str, args: str = "") -> str:
     """Run <rel> of the box's lane-control: its installed `current`, else a copy from before the install (the flat
     ~/.local/share/lane-control/<rel>), so --remove-host and --show still work on a box not refreshed yet."""
-    return sh(f'd={BOX_ROOT}; p="$d/current/{rel}"; [ -e "$p" ] || p="$d/{rel}"; exec "$p" {args}'.rstrip())
+    # LANE_CONTROL_FRONT_DOOR: this machine's script runs it, not a person, so no old-name hint (core/frontdoor.py)
+    return sh(f'export LANE_CONTROL_FRONT_DOOR=1; d={BOX_ROOT}; p="$d/current/{rel}"; [ -e "$p" ] || p="$d/{rel}"; '
+              f'exec "$p" {args}'.rstrip())
 
 
 def tree_count(tree: Path) -> int:

@@ -29,7 +29,20 @@ What it is not: not a CI system, not a substitute for human review on risky chan
 
 Each has a `record.md` (status, dated history, trial results, what would make us retest). `orchestrators/README.md` says how to add one; `orchestrators/checklist.md` is the one checklist every trial and retest uses; `orchestrators/switching.md` is the guide for moving a project.
 
-## The command
+## The front door
+Everything you run on a machine goes through one command, `lane-control` (`core/scripts/`; on PATH as in `docs/getting-started.md`, and in `~/.agents/bin` once installed). `lane-control help` lists it all on one screen:
+
+```bash
+lane-control project setup|check|refresh|show <repo> [<host>]   # a project, here or on a box
+lane-control project rest|wake|stop|start|status <project>      # its coordinator
+lane-control machine setup|check|changes                        # this machine (or a box with --host)
+lane-control ratchet on|off|status|...                          # the ratchet (unattended improvement), only on your word
+lane-control install|status|doctor|prune                        # the one versioned tree
+```
+
+The old names (`project-setup`, `project-pause`, `machine-setup`, `machine-check`, `lane-improve`) run the same scripts and keep working; run by hand they say their new form on one line of stderr.
+
+## The orchestrator command
 ```bash
 scripts/orch status  <project>                         # which orchestrator the project is on, and what of it is present
 scripts/orch setup   <project> --orchestrator <name>   # prepare the project for that orchestrator
@@ -44,7 +57,7 @@ Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, Python 3, and Cla
 ## The core
 The shared doctrine and scripts are in `core/` (`core/README.md`): roles, model routing, beads doctrine, the reliability log, machine checks, the config, and the machine caps every orchestrator uses: `lane-heavy` (the machine-wide gate for builds and full test suites), `lane-room` (the check before opening a lane), `lane-tier` (looks up a tier in a project's tier table) and `lane-limits.sh` (their shared limits; a machine's own in a copy of `limits.example.sh`). They are installed to `~/.agents/bin` and are reachable at their old paths under `scripts/`.
 
-Away-improve mode lets each project's coordinator keep improving its product on its own `away/<date>` branch while you are away, spending your usage, and keeps one draft PR for you to review (opened when the mode starts, its summary refreshed after every merge): it is off unless you switch it on with `lane-improve on`, and has optional caps (`--max-items`, `--stop-at`). The owner's guide is `docs/away-improve.md`.
+The ratchet lets each project's coordinator keep improving its product on its own `away/<date>` branch while you are away, spending your usage, and keeps one draft PR for you to review (opened when the mode starts, its summary refreshed after every merge): it is off unless you switch it on with `lane-control ratchet on`, and has optional caps (`--max-items`, `--stop-at`). The owner's guide is `docs/away-improve.md`.
 
 A merged lane's worktree is removed by Orca's own "Delete merged workspaces" cleanup rule, not by a script of ours; setup says when that rule is off and where to turn it on, and turns on GitHub's "Automatically delete head branches" (recommended; Enter means yes) (`docs/orca-cleanup.md`).
 
