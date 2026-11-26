@@ -299,12 +299,16 @@ harness, and the table is yours to edit.
 
 - **A model on a gateway you run: add `--trust-gateway`.** The onboarding agents then read the project folder itself,
   with nothing filtered. Before any agent runs you get a warning that says so plainly: the model sees every file in
-  the folder, ignored and private ones included (`.env` files, keys, `.git` with its remotes and history, what
-  `--private` names, what a link there points to), all of it goes to the gateway, and this is meant for a model on a
-  gateway you run. Then one question, `Run them in <project> itself, every file readable? [y/N]`; answer `y`. Without
-  a terminal the flag is the yes. A no runs nothing (exit 3). The flag is not kept: give it on each run that adapts.
-  The adapter still writes only its own files under `.lane-control/`: anything else it changes in the folder (a
-  `.git` file, another file, a link, a deletion) stops the run and is named, so you can put it back (`git status`).
+  the folder, ignored and private ones included (`.env` files, keys, the `.git` folder with its config and remote
+  URLs, what `--private` names, what a link there points to), all of it goes to the gateway, and this is meant for a
+  model on a gateway you run. Then one question, `Run them in <project> itself, every file readable? [y/N]`; answer
+  `y`. Without a terminal (stdin and stdout both; a `| tee log` counts as none) the flag is the yes. A no runs nothing
+  (exit 3). The flag is not kept: give it on each run that adapts. The adapter still writes only its own files under
+  `.lane-control/`: anything else that changes in the folder or in its `.git` (a config, a hook, another file, a
+  link, a deletion) stops setup at once, before any commit and before any other git command, with each path named.
+  Read those in an editor, not with git (a git command there could run what such a write set), and put back what you
+  did not write; the next run of `project-setup` on the project asks you about them first, and runs nothing until
+  you say yes (or they are back as they were).
 - **A hosted model you do not control: leave `--trust-gateway` out (the default).** Each agent works in a scratch
   copy of the project that holds only what it may see, described below.
 - **No usable model on this machine yet: `--skip-adapt`.**
@@ -314,9 +318,10 @@ harness, and the table is yours to edit.
     --coordinator opencode/litellm/chat --reviewer opencode/litellm/code
   ```
 
-  No onboarding agent runs: `adapt: skipped --skip-adapt: ...` says that `.lane-control/` and
-  `AGENTS.lane-control.md` are not written, and the rest runs as usual (Orca, the coordinator, which works without the
-  project's lane files). Once a model is at hand, adapt it: the command from step 2 with `--readapt` added.
+  No onboarding agent runs: `adapt: skipped --skip-adapt: ...` says that the project's own files are not written (no
+  `AGENTS.lane-control.md`; `.lane-control/` holds only the rendered personas), and the rest runs as usual (Orca, the
+  coordinator, whose first message says the project is not adapted yet). Once a model is at hand, adapt it: the
+  command from step 2 with `--readapt` added.
 
 **The scratch copy (without `--trust-gateway`).** Each onboarding agent runs as `opencode2 run` in a scratch copy of
 the project, with the same prompts, checks and review round as on Claude. The copy holds only what it may see: the

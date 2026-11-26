@@ -60,7 +60,10 @@ opencode/<provider>/<model>; only the harness a role uses must be on PATH). An O
 the run as LANE_GATEWAY_KEY), both kept per project (never the key; a new URL does not take the old key variable along
 unasked), under the run's own provider id lane-gateway, with OpenCode's config built from nothing; it works in a
 filtered scratch copy of the repo, or with --trust-gateway (a plain warning and one yes; for a model on a gateway the
-owner runs) in the repo itself, every file readable, its writes checked before and after. --skip-adapt runs no
+owner runs) in the repo itself, every file readable, its writes checked before and after (a refused one stops setup
+before any commit and any further git command, and the next run asks about it before its first git command). No git
+command this process runs runs a program the repo names (GitSafePopen: hooks, core.fsmonitor, filters, drivers off;
+ssh, credential and gpg programs the owner's global ones). --skip-adapt runs no
 onboarding agent (a machine with no usable model yet: adapt later with --readapt). They are committed, by explicit
 path, only on the owner's yes in a terminal; on no, or without a terminal, they stay uncommitted, no Orca step runs and it exits 3.
 The repo's visibility is read with gh (unknown when it cannot be); questions still open after the review are shown and
@@ -203,6 +206,107 @@ LANE_TOOLS = ("lane-limits.sh", "lane-heavy", "lane-room", "lane-tier", "design-
 
 class Fail(Exception):
     pass
+
+
+class Refusal(Exception):
+    """An onboarding agent wrote where it may not (copy_back, check_repo_writes). Not a Fail, so no handler that takes a
+    failed run in its stride (a fix-check review, the answers run) can swallow it: setup stops before any commit."""
+
+
+class RepoWrite(Refusal):
+    """A refused write that is in the repo already (--trust-gateway). From here on no git command runs in this process
+    (GitSafePopen), since one could run what the write set; the refusal is kept outside the repo (refusal_file)."""
+
+
+REFUSED: list = []  # the RepoWrite of this run, once there is one
+
+
+# --- every git command this process runs: none of the repo's own commands -------------------------------------------
+# A git command reads the repo's .git/config, hooks and attributes, and some of those run programs (core.fsmonitor at
+# `git status`, a hook at `git commit`, a filter at `git add`). Every git child of this process gets, by environment
+# (GIT_CONFIG_COUNT: the precedence of -c), settings that switch those off, and GIT_CONFIG_NOSYSTEM=1. Program settings
+# that a push needs (ssh, credential helpers, signing) keep the owner's global value, never the repo's.
+GIT_FIXED = (("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false"), ("protocol.ext.allow", "never"),
+             ("safe.bareRepository", "explicit"), ("gc.auto", "0"), ("maintenance.auto", "false"))
+GIT_PROGRAMS = (("core.sshCommand", "ssh"), ("core.askPass", ""), ("gpg.program", "gpg"),
+                ("gpg.openpgp.program", "gpg"), ("gpg.ssh.program", "ssh-keygen"), ("gpg.x509.program", "gpgsm"))
+# a repo's (or its worktree's, or an included file's) own driver and remote programs are made empty or git's own
+GIT_REPO_PROGRAMS = re.compile(r"(filter\..+\.(clean|smudge|process)|diff\..+\.(textconv|command)|diff\.external|"
+                               r"merge\..+\.driver|remote\..+\.(uploadpack|receivepack)|core\.alternaterefscommand|"
+                               r"core\.gitproxy)", re.I)
+GIT_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_PAGER": "cat", "GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
+_GLOBAL_GIT: dict = {}  # the owner's global value of each GIT_PROGRAMS key and credential.helper, read once
+
+
+def _real_popen():
+    return getattr(subprocess, "_lane_real_popen", subprocess.Popen)
+
+
+def _git_out(args: list, cwd=None) -> str:
+    """A git query of config only (no index, no hook, no filter), by the real Popen, with the fixed settings."""
+    env = {**os.environ, **GIT_ENV, **_config_env(list(GIT_FIXED))}
+    try:
+        p = _real_popen()(["git", *args], cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          stdin=subprocess.DEVNULL, text=True, errors="surrogateescape")
+        out, _ = p.communicate(timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return out if p.returncode == 0 else ""
+
+
+def _config_env(pairs: list) -> dict:
+    out = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for i, (k, v) in enumerate(pairs):
+        out[f"GIT_CONFIG_KEY_{i}"], out[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    return out
+
+
+def git_safe_env(cwd, args: list) -> dict:
+    """The environment a git command of this process runs with (see GIT_FIXED)."""
+    if not _GLOBAL_GIT:
+        for key, _ in GIT_PROGRAMS + (("credential.helper", None),):
+            _GLOBAL_GIT[key] = [v for v in _git_out(["config", "--global", "--get-all", key]).split("\n") if v]
+    pairs = list(GIT_FIXED)
+    if not (os.environ.get("GIT_SSH_COMMAND") or os.environ.get("GIT_SSH")):
+        pairs.append(("core.sshCommand", (_GLOBAL_GIT["core.sshCommand"] or ["ssh"])[-1]))
+    for key, default in GIT_PROGRAMS[1:]:
+        pairs.append((key, (_GLOBAL_GIT[key] or [default])[-1]))
+    pairs += [("credential.helper", "")] + [("credential.helper", v) for v in _GLOBAL_GIT["credential.helper"]]
+    where = cwd
+    if "-C" in args[:-1]:
+        where = Path(cwd or ".") / args[args.index("-C") + 1]
+    seen = _git_out(["config", "--show-scope", "--includes", "--name-only", "--get-regexp", "."], cwd=where)
+    for line in seen.splitlines():
+        scope, _, key = line.partition("\t")
+        if scope in ("local", "worktree") and GIT_REPO_PROGRAMS.fullmatch(key):
+            default = {"uploadpack": "git-upload-pack", "receivepack": "git-receive-pack"}.get(key.rsplit(".", 1)[-1], "")
+            pairs.append((key, default))
+    return {**GIT_ENV, **_config_env(pairs)}
+
+
+class GitSafePopen(_real_popen()):
+    """subprocess.Popen for this process: a git command gets git_safe_env, and none runs once a write was refused."""
+
+    def __init__(self, args, *rest, **kw):
+        argv = list(args) if isinstance(args, (list, tuple)) else None
+        if argv and os.path.basename(str(argv[0])) == "git":
+            if REFUSED:
+                raise REFUSED[0]
+            base = dict(os.environ if kw.get("env") is None else kw["env"])
+            given = []  # the caller's own GIT_CONFIG_COUNT pairs come first; ours, later, win
+            for i in range(int(base.get("GIT_CONFIG_COUNT", "0") or 0) if str(base.get("GIT_CONFIG_COUNT", "0")).isdigit() else 0):
+                given.append((base.get(f"GIT_CONFIG_KEY_{i}", ""), base.get(f"GIT_CONFIG_VALUE_{i}", "")))
+            safe = git_safe_env(kw.get("cwd"), argv[1:])
+            ours = [(safe[f"GIT_CONFIG_KEY_{i}"], safe[f"GIT_CONFIG_VALUE_{i}"]) for i in range(int(safe["GIT_CONFIG_COUNT"]))]
+            kw["env"] = {**base, **GIT_ENV, **_config_env(given + ours)}
+        super().__init__(args, *rest, **kw)
+
+
+def guard_git() -> None:
+    """From here on every git command of this process is a safe one (GitSafePopen): for the run of main()."""
+    if not hasattr(subprocess, "_lane_real_popen"):
+        subprocess._lane_real_popen = subprocess.Popen
+    subprocess.Popen = GitSafePopen
 
 
 class TimeLimit(Fail):
@@ -2172,7 +2276,7 @@ def copy_back(repo: Path, top: Path, before: dict, write: bool) -> None:
     bad = [n for n in changed if not write or n not in allowed or after.get(n) in (None, "link", "other")]
     if bad:
         who = "adapting agent" if write else "reviewer"
-        raise Fail(f"the OpenCode {who} changed {', '.join(bad[:5])}{' ...' if len(bad) > 5 else ''} in its copy of the "
+        raise Refusal(f"the OpenCode {who} changed {', '.join(bad[:5])}{' ...' if len(bad) > 5 else ''} in its copy of the "
                    f"project, where it may not write (the adapter writes only its template files in {ADAPTED}/): "
                    "nothing it wrote was copied back. Nothing was committed")
     for n in changed:  # all checked before anything is made or written
@@ -2180,12 +2284,12 @@ def copy_back(repo: Path, top: Path, before: dict, write: bool) -> None:
         for part in Path(n).parts:  # each folder on the way a real folder or not there yet; the file a plain one
             here = here / part
             if here.is_symlink() or (here.exists() and not (here.is_file() if here == repo / n else here.is_dir())):
-                raise Fail(f"{n}: {here.relative_to(repo)} in the repo is a link or not a "
+                raise Refusal(f"{n}: {here.relative_to(repo)} in the repo is a link or not a "
                            f"{'file' if here == repo / n else 'folder'}, so the OpenCode adapter's files were not copied "
                            "back. Nothing was committed")
         if n not in before and (repo / n).exists() and (repo / n) not in RENDERED:  # ignored or private; a rendered
             # persona is the exception: what the agent wrote there is its additions (move_role_files moves it)
-            raise Fail(f"{n} is in the repo but was left out of the OpenCode adapter's copy (ignored or private), so "
+            raise Refusal(f"{n} is in the repo but was left out of the OpenCode adapter's copy (ignored or private), so "
                        "its file was not copied over it, nor any other. Nothing was committed")
     temps = []
     try:  # every file written beside its place first, then all put in place; on an error none is left behind
@@ -2460,21 +2564,28 @@ def opencode_agent(repo: Path, model: str, write: bool):
 
 TRUST_GATEWAY = False  # --trust-gateway was given
 TRUSTED: set = set()  # repos whose OpenCode onboarding agents run in the repo itself: --trust-gateway, and the yes
-GIT_CHURN = {"index", "FETCH_HEAD", "ORIG_HEAD", "packed-refs"}  # rewritten by any git status or fetch: never a config
+# directly in a git dir: what git itself rewrites on any status, commit, fetch or checkout (also another worktree's
+# lane committing during a run): never a config, a hook or an info file
+GIT_CHURN_FILES = {"index", "HEAD", "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "MERGE_RR",
+                   "AUTO_MERGE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "COMMIT_EDITMSG", "TAG_EDITMSG",
+                   "packed-refs", "gc.pid", "gc.log", "shallow"}
+GIT_CHURN_DIRS = {"objects", "refs", "logs", "rebase-merge", "rebase-apply", "sequencer", "rr-cache", "lost-found",
+                  "lfs"}  # objects/info is kept: alternates there point git at other object stores
 
 
 def trust_warning(repo: Path, roles: list) -> str:
     return (f"\nWARNING (--trust-gateway): the OpenCode onboarding agents ({', '.join(roles)}) will run in {repo} "
             "itself, not in a filtered copy. The model will see every file in that folder: ignored and private ones "
-            "included (.env files, keys, the .git folder with its remotes and history, everything --private names), "
-            f"and what a link there points to. What it reads goes to the gateway, {GATEWAY.get('url')}, and from "
-            "there to whatever that gateway passes it on to. This is meant for a model on a gateway you run yourself. "
-            "Writes stay limited to the adapter's own files under .lane-control/; anything else it changes stops the "
-            "run. Without --trust-gateway the agents get a copy without the private files.")
+            "included (.env files, keys, the .git folder with its config and remote URLs, everything --private "
+            f"names), and what a link there points to. What it reads goes to the gateway, {GATEWAY.get('url')}, and "
+            "from there to whatever that gateway passes it on to. This is meant for a model on a gateway you run "
+            "yourself. Writes stay limited to the adapter's own files under .lane-control/; anything else it changes "
+            "stops the run before any commit. Without --trust-gateway the agents get a copy without the private files.")
 
 
 def confirm_trust(repo: Path, roles: list) -> bool:
-    """--trust-gateway: the warning, then one yes in a terminal; without a terminal the flag is the yes."""
+    """--trust-gateway: the warning, then one yes in a terminal (stdin and stdout both); without one the flag is the
+    yes."""
     if repo.resolve() in TRUSTED:
         return True
     print(trust_warning(repo, roles), flush=True)
@@ -2482,35 +2593,133 @@ def confirm_trust(repo: Path, roles: list) -> bool:
         if not owner_says_yes(f"Run them in {repo} itself, every file readable? [y/N] ", step="trust-gateway"):
             return False
     else:
-        say("trust-gateway", "yes", "--trust-gateway, with no terminal to ask in")
+        say("trust-gateway", "yes", "--trust-gateway, and no terminal (stdin and stdout) to ask in")
     TRUSTED.add(repo.resolve())
     return True
 
 
-def repo_state(repo: Path) -> dict:
-    """{path: what lstat says} of everything in the repo folder, .git and ignored files too, links never followed: a
-    file by kind, mode, size, mtime, ctime and inode (no write leaves all of them as they were), a folder by being
-    there. In .git, what git itself rewrites on any status or fetch (objects, refs, logs, the index, *.lock) is left
-    out: a config, a hook or an info file is not."""
+def git_dirs(repo: Path) -> list:
+    """The repo's git dir and common dir (a linked worktree's are outside its folder), asked of git before a run."""
+    r = run(["git", "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd=repo, check=False)
+    return list(dict.fromkeys(Path(l) for l in r.stdout.splitlines() if l.strip())) if r.returncode == 0 else []
+
+
+def is_git_dir(d: Path, known: set) -> bool:
+    return d in known or (os.path.isfile(d / "HEAD") and (os.path.isdir(d / "objects") or os.path.isfile(d / "commondir")))
+
+
+def file_state(f: Path, content: bool):
+    """What lstat says of one path (None: not there); a file's content hash too when `content` (git's own files)."""
+    try:
+        st = f.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if stat.S_ISDIR(st.st_mode):
+        return ("dir",)
+    kind = "link" if stat.S_ISLNK(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "other"
+    digest = None
+    if content and kind == "file":
+        try:
+            digest = hashlib.sha1(f.read_bytes()).hexdigest()
+        except OSError:
+            digest = "unreadable"
+    return (kind, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino, digest)
+
+
+def repo_state(repo: Path, dirs: list) -> dict:
+    """{path: file_state} of everything in the repo folder and in its git dirs outside it (a linked worktree's common
+    dir: its config and hooks), ignored files too, links never followed; a path in the repo by its name from the repo
+    root, one outside by its full path. Every file is seen by kind, mode, size, mtime, ctime and inode (no write leaves
+    all of them as they were), git's own files by their content too, a folder by being there. In each git dir (the
+    repo's, a nested repo's, a submodule's, another worktree's) only what git rewrites by itself is left out
+    (GIT_CHURN_FILES, GIT_CHURN_DIRS but objects/info, *.lock), and only directly in it."""
+    root = repo.resolve()
+    known = {Path(os.path.realpath(d)) for d in dirs}
     out = {}
-    for here, dirs, files in os.walk(repo):
-        for name in files + dirs:
-            f = Path(here) / name
-            rel = f.relative_to(repo).as_posix()
-            parts = rel.split("/")
-            if ".git" in parts and (set(parts) & {"objects", "refs", "logs"} or parts[-1] in GIT_CHURN
-                                    or parts[-1].endswith(".lock")):
-                continue
-            try:
-                st = f.lstat()
-            except FileNotFoundError:
-                continue
-            if stat.S_ISDIR(st.st_mode):
-                out[rel] = ("dir",)
-            else:
-                kind = "link" if stat.S_ISLNK(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "other"
-                out[rel] = (kind, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
-    return out
+
+    def key(f: Path) -> str:
+        return f.relative_to(root).as_posix() if f.is_relative_to(root) else str(f)
+
+    def walk(top: Path, in_git: bool):
+        for here, subdirs, files in os.walk(top):
+            here = Path(here)
+            gitdir = is_git_dir(here, known)
+            inside = in_git or gitdir or ".git" in here.relative_to(top).parts or here.name == ".git"
+            if gitdir:
+                subdirs[:] = [d for d in subdirs if d not in GIT_CHURN_DIRS or d == "objects"]
+                files = [n for n in files if n not in GIT_CHURN_FILES and not n.endswith(".lock")]
+            for name in files + subdirs:
+                f = here / name
+                if gitdir and name == "objects":
+                    out[key(f)] = file_state(f, False)
+                    continue
+                out[key(f)] = file_state(f, inside)
+            if gitdir and "objects" in subdirs:
+                subdirs.remove("objects")
+                info = here / "objects" / "info"
+                if info.is_dir() and not info.is_symlink():
+                    walk(info, True)
+
+    walk(root, False)
+    for d in known:
+        if not d.is_relative_to(root) and d.is_dir():
+            out[key(d)] = ("dir",)
+            walk(d, True)
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def refusal_file(repo: Path) -> Path:
+    """Where a --trust-gateway refusal of this repo is kept: outside the repo, so no write of the model's reaches it."""
+    return config_home() / "lane-control" / "refused" / f"{store_key(repo)}.json"
+
+
+def keep_refusal(repo: Path, paths: dict, unfinished: bool) -> None:
+    f = refusal_file(repo)
+    f.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    write_atomic(f, (json.dumps({"repo": str(repo.resolve()), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                 "unfinished": unfinished, "paths": paths}, indent=2) + "\n").encode(), 0o600)
+
+
+def refusal_gate(target: Path) -> "str | None":
+    """Before the first git command of a run: a --trust-gateway refusal kept for this repo (or a run that stopped before
+    its check) stops it, with each path named, until every refused path is back as it was before that run, or the
+    owner says in a terminal that they read them by hand. None: go on."""
+    try:
+        d = target.expanduser().resolve()
+    except OSError:
+        return None
+    f = next((refusal_file(p) for p in (d, *d.parents) if refusal_file(p).is_file()), None)
+    if f is None:
+        return None
+    try:
+        rec = json.loads(f.read_text())
+        paths, unfinished, repo, at = dict(rec["paths"]), bool(rec["unfinished"]), rec["repo"], rec["at"]
+    except (OSError, ValueError, KeyError, TypeError):
+        paths, unfinished, repo, at = {}, True, str(d), "an earlier run"
+    root = Path(repo)
+
+    def now(p: str):
+        st = file_state(root / p if not os.path.isabs(p) else Path(p), True)
+        return "absent" if st is None else "dir" if st == ("dir",) else f"sha1:{st[6]}" if st[6] else st[0]
+    left = sorted(p for p, want in paths.items() if now(p) != want)
+    if not left and not unfinished:
+        f.unlink(missing_ok=True)
+        say("trust-gateway", "cleared", f"what the run of {at} in {repo} was refused for is back as it was")
+        return None
+    why = ("a --trust-gateway run there stopped before its writes were checked" if unfinished else
+           "a --trust-gateway run there was refused for writes it may not make")
+    print(f"\n{repo}: {why} ({at}). Before any git command runs there (one could run what such a write set: a hook, "
+          "core.fsmonitor in .git/config), read these in an editor and put back what you did not write"
+          + (":" if left else ": .git/config, .git/config.worktree, .git/hooks/ and .git/info/, and the folder"),
+          flush=True)
+    for p in left:
+        print(f"  {p}", flush=True)
+    if has_terminal() and owner_says_yes("Have you read each of them by hand and put back what you did not write? "
+                                         "[y/N] ", step="trust-gateway"):
+        f.unlink(missing_ok=True)
+        return None
+    return (f"{why}: nothing ran and nothing was committed. Read the paths above by hand (not with a git command), then "
+            f"run again in a terminal and answer yes (the record: {f})")
 
 
 def check_write_paths(repo: Path) -> None:
@@ -2527,9 +2736,10 @@ def check_write_paths(repo: Path) -> None:
 
 
 def check_repo_writes(repo: Path, before: dict, after: dict, write: bool) -> None:
-    """After a --trust-gateway run: what changed in the repo must be the adapter's own files (adapter_names), plain
-    files, and the folders they are in; the reviewer changes nothing. Anything else (a .git or dot-name, another file,
-    a link, a deletion) stops the run, named. It is in the repo already: nothing is committed."""
+    """After a --trust-gateway run: what changed must be the adapter's own files (adapter_names), plain files, and the
+    folders they are in; the reviewer changes nothing. Anything else (in .git or a git dir outside the folder, a
+    dot-name, another file, a link, a deletion) is a RepoWrite: kept outside the repo with each path's state before
+    the run, and no git command runs after it, in this run or a later one, until the owner has looked."""
     allowed = adapter_names() if write else set()
     folders = {Path(n).parent.as_posix() for n in allowed} | {Path(n).parent.parent.as_posix() for n in allowed}
     bad = []
@@ -2541,28 +2751,42 @@ def check_repo_writes(repo: Path, before: dict, after: dict, write: bool) -> Non
             continue
         if was is None and now == ("dir",) and n in folders:
             continue
-        bad.append(n + (" (removed)" if now is None else " (a link)" if now[0] == "link" else ""))
-    if bad:
-        who = "adapting agent" if write else "reviewer"
-        raise Fail(f"the OpenCode {who} changed {', '.join(bad[:5])}{' ...' if len(bad) > 5 else ''} in the repo "
-                   f"(--trust-gateway), where it may not write (the adapter writes only its template files in "
-                   f"{ADAPTED}/). Nothing was committed; `git status` shows what changed: put it back by hand")
+        bad.append(n)
+    if not bad:
+        refusal_file(repo).unlink(missing_ok=True)
+        return
+    keep_refusal(repo, {n: "absent" if before.get(n) is None else "dir" if before[n] == ("dir",)
+                        else f"sha1:{before[n][6]}" if before[n][6] else "changed" for n in bad}, False)
+    shown = [n + (" (removed)" if after.get(n) is None else " (a link)" if after[n][0] == "link" else "") for n in bad]
+    who = "adapting agent" if write else "reviewer"
+    error = RepoWrite(
+        f"the OpenCode {who} changed {', '.join(shown[:8])}{' ...' if len(shown) > 8 else ''} in the repo "
+        f"(--trust-gateway), where it may not write (the adapter writes only its template files in {ADAPTED}/). "
+        "Setup stopped: nothing was committed and no git command ran after it. Read each of those by hand in an "
+        "editor (not with git: a git command there could run what such a write set) and put back what you did not "
+        "write; the next run asks you first. If another process wrote there during the run (a lane committing in "
+        "another worktree, an editor), run it again with the lanes stopped")
+    REFUSED.append(error)
+    raise error
 
 
 def run_opencode_in_repo(repo: Path, model: str, prompt: str, write: bool):
     """--trust-gateway: one OpenCode onboarding run in the repo itself, everything in it readable. The same run
     otherwise (opencode_agent: config from nothing, edit on the adapter's exact paths only); its writes are checked
-    by the repo's state before and after (check_repo_writes), also after a failed run."""
+    by the repo's state before and after (check_repo_writes), also after a failed or interrupted run. A record that a
+    run is under way is kept outside the repo first, so a run killed before its check is looked at too."""
     if write:
         check_write_paths(repo)
-    before = repo_state(repo)
+    dirs = git_dirs(repo)
+    before = repo_state(repo, dirs)
+    keep_refusal(repo, {}, True)
     try:
         with opencode_agent(repo, model, write) as (cmd, env):
             p = run(cmd, cwd=repo, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
-    except Fail:
-        check_repo_writes(repo, before, repo_state(repo), write)
+    except BaseException:
+        check_repo_writes(repo, before, repo_state(repo, dirs), write)
         raise
-    check_repo_writes(repo, before, repo_state(repo), write)
+    check_repo_writes(repo, before, repo_state(repo, dirs), write)
     return p
 
 
@@ -2707,7 +2931,7 @@ def move_role_files(repo: Path) -> None:
     """Native Orca: a role file an onboarding agent wrote at .lane-control/<role>.md (where the shared prompts put
     them) is that role's additions, so it moves to .lane-control/additions/. The rendered personas are set aside while
     the agents run (rendered_aside), so whatever is there now is the agent's."""
-    if ORCHESTRATOR != "native-orca":
+    if ORCHESTRATOR != "native-orca" or REFUSED:  # after a refused write no git command runs (B2)
         return
     for role in NATIVE_ROLES:
         f = repo / ADAPTED / f"{role}.md"
@@ -3331,8 +3555,9 @@ def refuse_private_onboarding(repo: Path) -> None:
 def skipped_adapt(repo: Path) -> None:
     """--skip-adapt on a project not onboarded yet: the route for a machine with no usable model, said as such."""
     if not onboarded(repo):
-        say("adapt", "skipped", f"--skip-adapt: no onboarding agent ran, so {ADAPTED}/ and {GENERATED} are not written "
-            "and the coordinator works without them. Adapt the project later, once a model is at hand: project-setup "
+        say("adapt", "skipped", f"--skip-adapt: no onboarding agent ran, so the project's own files are not written: "
+            f"no {GENERATED}, nothing under {ADAPTED}/ but the rendered personas (git-excluded), and the coordinator "
+            "is told the project is not adapted yet. Adapt it later, once a model is at hand: project-setup "
             f"{repo} --readapt (with --adapter and --adapt-reviewer)")
 
 
@@ -3478,6 +3703,9 @@ def resolve_attached(target: str, dest: Path) -> Path:
     d = Path(target).expanduser().resolve()
     if not d.is_dir():
         raise Fail(f"--with {target}: {d} is not a directory")
+    why = refusal_gate(d)  # before the first git command there (B3)
+    if why:
+        raise Fail(f"--with {target}: {why}")
     top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False)
     if top.returncode != 0:
         raise Fail(f"--with {target}: {d} is not a git repository (an attached repo must already be one)")
@@ -4172,6 +4400,10 @@ NATIVE_KICKOFF = {
     "coordinator": ("Read your persona, {persona}, then AGENTS.md and AGENTS.lane-control.md and `bd recall "
                     "handover-latest`; then tell the owner in one line that you are ready, and wait for them."),
 }
+NOT_ADAPTED = (" This project is not adapted to lane-control yet (it was set up with --skip-adapt): AGENTS.lane-control.md "
+               "and the project's files under .lane-control/ (all but the personas) do not exist, so do not look for "
+               "them; say so to the owner in that line, and that `project-setup {repo} --readapt` adapts it once a "
+               "model is at hand.")
 NATIVE_RESUME = ("You are back after a pause. Reread your persona, {persona}; then resume from `bd recall "
                  "{handover}`, `orca-ide orchestration run-current` and `orca-ide worktree list`, and tell the "
                  "owner in one line that you are back.")
@@ -4639,6 +4871,9 @@ def native_main(a, tiers: Path) -> int:
         global COORDINATOR_KICKOFF, LEFTOVER_DELIVERED
         persona = {r: repo / ADAPTED / f"{r}.md" for r in STANDING}
         COORDINATOR_KICKOFF = NATIVE_KICKOFF["coordinator"].format(persona=persona["coordinator"])
+        if not onboarded(repo):  # --skip-adapt: the files the persona names are not there yet (m2)
+            COORDINATOR_KICKOFF = NATIVE_KICKOFF["coordinator"].replace(
+                " and AGENTS.lane-control.md", "").format(persona=persona["coordinator"]) + NOT_ADAPTED.format(repo=repo)
         kickoffs = {"coordinator": coordinator_kickoff()}
         LEFTOVER_DELIVERED = start_standing(place, repo, project, pins, cfg["mode"], repo_id, kickoffs)
         print(f"summary: {project} · native Orca · orca repo {repo_id} · sessions "
@@ -5951,6 +6186,20 @@ def box_pairing(args: list) -> int:
 
 
 def main(argv=None) -> int:
+    """_main, with every git command made safe (guard_git) and a refused onboarding write stopping it all: no handler
+    on the way takes it for an ordinary failed run (Refusal is not a Fail)."""
+    guard_git()
+    REFUSED.clear()
+    try:
+        return _main(argv)
+    except Refusal as e:
+        print(f"project-setup: {e}", file=sys.stderr)
+        return 1
+    finally:  # in this process only for this run (tests call main() many times)
+        subprocess.Popen = subprocess._lane_real_popen
+
+
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(allow_abbrev=False, prog="project-setup", description=__doc__.split("\n\n")[0])
     ap.add_argument("target", nargs="?")
     ap.add_argument("host_pos", nargs="?", metavar="host",
@@ -6075,6 +6324,15 @@ def main(argv=None) -> int:
     global TRUST_GATEWAY
     TRUST_GATEWAY = a.trust_gateway
     TRUSTED.clear()
+    where = None
+    if a.target and not (a.host or a.host_pos):  # the folder the run's git commands go to: checked before the first
+        url = re.match(r"^(https?|ssh|git|file)://|^[\w.-]+@[\w.-]+:", a.target)
+        where = (Path(a.dest).expanduser() / slug(a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1]
+                                                                     .rsplit(":", 1)[-1])) if url else Path(a.target))
+    why = refusal_gate(where) if where is not None else None  # a refused --trust-gateway write (B3)
+    if why:
+        print(f"project-setup: {why}", file=sys.stderr)
+        return 1
     value_flags = {s for act in ap._actions if act.option_strings and act.nargs is None for s in act.option_strings}
 
     if os.geteuid() == 0:

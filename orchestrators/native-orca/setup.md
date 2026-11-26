@@ -147,18 +147,20 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
      opencode/litellm/deep --gateway-url http://127.0.0.1:4000/v1 --gateway-key-env LITELLM_API_KEY --trust-gateway`.
      The onboarding agents read the repo itself: no scratch copy, no private-path filtering. Before any agent runs it
      prints a warning that says what the model will see (every file in the folder, ignored and private ones included:
-     `.env` files, keys, `.git` with its remotes and history, what `--private` names, and what a link there points to;
+     `.env` files, keys, the `.git` folder with its config and remote URLs (in a linked worktree only its one-line
+     pointer: OpenCode refuses the shared folder outside it), what `--private` names, and what a link there points to;
      all of it goes to the gateway and on to whatever the gateway passes it to) and that this is meant for a model on a
-     gateway you run, then asks once, `Run them in <repo> itself, every file readable? [y/N]`; without a terminal the
-     flag is the yes. A no runs nothing and exits 3. `--trust-gateway` is not kept: give it on each run that should
+     gateway you run, then asks once, `Run them in <repo> itself, every file readable? [y/N]`; without a terminal
+     (stdin and stdout both, so `| tee log` is none) the flag is the yes. A no runs nothing and exits 3. `--trust-gateway` is not kept: give it on each run that should
      use it. It is refused with `--skip-adapt`, `--refresh`, `--show` and `--suggest-tiers`, and does nothing for
      Claude roles (it says so).
    - **A hosted model you do not control (the default).** The same command without `--trust-gateway`: each agent works
      in a filtered scratch copy, below.
    - **No usable model on this machine yet.** `core/scripts/project-setup <repo> --skip-adapt --coordinator
-     opencode/litellm/chat --reviewer opencode/litellm/deep`: no onboarding agent runs, so `.lane-control/` and
-     `AGENTS.lane-control.md` are not written (`adapt: skipped ...` says so), and the rest of the setup (Orca, the
-     coordinator) runs as usual; the coordinator works without the project's lane files. Adapt it later, once a model
+     opencode/litellm/chat --reviewer opencode/litellm/deep`: no onboarding agent runs, so the project's own files
+     are not written: no `AGENTS.lane-control.md`, and `.lane-control/` holds only the rendered personas
+     (git-excluded) (`adapt: skipped ...` says so). The rest of the setup (Orca, the coordinator) runs as usual; the
+     coordinator's first message says the project is not adapted yet and leaves `AGENTS.lane-control.md` out. Adapt it later, once a model
      is at hand: `core/scripts/project-setup <repo> --readapt --adapter ... --adapt-reviewer ...`, which runs the
      onboarding as a first setup would.
 
@@ -218,14 +220,39 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    (80 for the adapter, 60 for the reviewer) fails as a Claude run out of turns does, and so does one that exits 0
    with no answer and no tool call. `--refresh` runs no agent and needs no Claude either.
 
-   Writes, with `--trust-gateway`: the agent runs in the repo, so its writes are checked by the repo's state before
-   and after each run (every path, `.git` and ignored files included, links never followed; in `.git` only what git
-   rewrites on any status or fetch, objects, refs, logs, the index and lock files, is left out, so a config, hook or
-   info file counts). Only new or changed plain files at the adapter's paths, and the folders they are in, may
-   change; anything else (a `.git` or dot-name write, another file, a link, a deletion, any write by the reviewer)
-   stops the run with the paths named, also after a failed run. It is in the repo by then: nothing is committed, and
-   `git status` shows what to put back. Before the adapter runs, a link or a non-folder on the way to its files stops
-   it, so no write goes through a link out of the repo.
+   Git, in both routes and on Claude too: no git command setup runs (its own, its helpers') runs a program the repo
+   names. Every git child of the setup process gets, through `GIT_CONFIG_COUNT` (the precedence of `-c`),
+   `core.hooksPath=/dev/null`, `core.fsmonitor=false`, `protocol.ext.allow=never`, `safe.bareRepository=explicit` and
+   no automatic gc, plus `GIT_CONFIG_NOSYSTEM=1`, `GIT_PAGER=cat` and `GIT_EDITOR=true`; `core.sshCommand`,
+   `core.askPass`, the gpg programs and `credential.helper` are the owner's global values (or git's defaults), never
+   the repo's; and every filter (`clean`, `smudge`, `process`), diff driver (`textconv`, `command`, `diff.external`),
+   merge driver, `uploadpack`/`receivepack`, `core.alternateRefsCommand` and `core.gitProxy` that the repo's own config,
+   its worktree config or a file they include sets is made empty (a diff that needs one then fails, it does not run
+   it). So the repo's own hooks do not run at setup's commit and push either.
+
+   Writes, with `--trust-gateway`: the agent runs in the repo, so its writes are checked by the state before and
+   after each run of the repo folder and of its git dirs, asked of git before the run (a linked worktree's common dir,
+   with the shared config, hooks and the other worktrees' folders, is outside the folder), ignored files included and
+   links never followed; git's own files by their content too. Directly in each git dir (the repo's, a nested repo's,
+   a submodule's under `modules/`, another worktree's under `worktrees/`), and only there, what git rewrites by
+   itself is left out: `objects/` (but not `objects/info`, where alternates point git elsewhere), `refs/`, `logs/`,
+   `packed-refs`, `index`, `HEAD` and the other `*_HEAD`, `COMMIT_EDITMSG`, `*.lock` and the like, so a lane
+   committing in another worktree during the run is no refusal; a config, `config.worktree`, a hook or an info file
+   counts. Never seen: those left-out files (a branch made, say), a file made and removed again within the run, a
+   write outside the repo and its git dirs, and one through a link already there that leads out; only OpenCode's
+   rules stop those (they did in every live attempt, `write`, `edit` and `patch` alike). Only new or changed plain
+   files at the adapter's paths, and the folders they are in, may change. Anything else (a `.git` or dot-name write,
+   another file, a link, a deletion, any write by the reviewer), in any run (the adapter's, the fix rounds', the run
+   that applies your answers, every review), stops setup at once: before any commit and with no git command after it
+   in that run, not even its own cleanup, and with each path named, also after a failed or interrupted (Ctrl-C) run.
+   The refusal is kept outside the repo (`~/.config/lane-control/refused/<project>.json`, with each path's state
+   before the run), as is a mark that a run is under way, so one killed before its check counts too. The next
+   `project-setup` on that folder reads it before its first git command: when every path is back as it was it says so
+   and goes on; otherwise it lists them, says to read them in an editor (`.git/config`, `.git/hooks/` and the rest; a
+   git command there could run what they set, so not `git status`), and runs nothing until you say yes in a terminal.
+   Another process writing there during the run (a lane, an editor) shows the same way: run it with the lanes
+   stopped. Before the adapter runs, a link or a non-folder on the way to its files stops it, so no write goes through
+   a link out of the repo.
 
    The scratch copy, without `--trust-gateway` (`opencode_export`, mode 700, removed after the run). It is made its
    own empty git repo (no history, remote or hooks) before anything goes in, since OpenCode takes the nearest git
@@ -259,7 +286,10 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    past the given gateway; for the copy, every request is searched for a marker in each private file; the owner's
    config there turns formatters, LSP, an MCP server, a plugin and instructions on, and the project has prettier and a
    prettier config that would leave a marker): `LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p
-   test_project_setup_native.py -k OpenCodeOnboardingLiveTests`. It covers both routes, each with a negative control
+   test_project_setup_native.py -k OpenCodeOnboardingLiveTests`. It covers both routes (`write` and `edit`, and the
+   `patch` tool OpenCode offers a `gpt-*` model instead: a move onto a hook or AGENTS.md, a new hook, `.git/config` or
+   `.envrc`, a file outside, a delete, all refused by OpenCode's rules; the delete of an adapter path it lets through
+   stops the run), each with a negative control
    (the copy's filter switched off lets a marker through; the trusted run's edit rules widened let an `AGENTS.md`
    write land, and the before/after check stops it), the key under `OPENCODE_API_KEY` (and, as a control, handed over
    under that name: opencode.ai is asked) and the side model under built-in provider ids (and, as a control, under the

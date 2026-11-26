@@ -1265,7 +1265,7 @@ class TrustGatewayTests(OpenCodeCase):
         r = self.e.run(str(self.repo), *ALL_OPENCODE, "--trust-gateway", "--no-model-check", adapt=True)
         self.assertEqual(r.returncode, 3, r.stderr + r.stdout)  # the commit still needs the owner's yes
         self.assertIn("WARNING (--trust-gateway)", r.stdout)
-        self.assertIn("trust-gateway: yes --trust-gateway, with no terminal to ask in", r.stdout)
+        self.assertIn("trust-gateway: yes --trust-gateway, and no terminal (stdin and stdout) to ask in", r.stdout)
         self.assertEqual([Path(x["cwd"]).resolve() for x in self.e.agent_runs()], [self.repo.resolve()] * 2)
         # and without the flag, the same run is in a copy
         self.e.set_state(agent_steps={RUN_REVIEWER: [PASS]})
@@ -1292,7 +1292,8 @@ class TrustGatewayTests(OpenCodeCase):
                 self.assertIn(f"the OpenCode adapting agent changed ", self.err)
                 self.assertIn(named, self.err)
                 self.assertIn("in the repo (--trust-gateway), where it may not write", self.err)
-                self.assertIn("Nothing was committed", self.err)
+                self.assertIn("Setup stopped: nothing was committed and no git command ran after it", self.err)
+                self.assertNotIn("git status", self.err)  # B3: never sent to a git command in there first
 
     def test_the_reviewer_writes_nothing(self):
         self.assertEqual(self.trusted({RUN_ADAPTER: [WRITE_NATIVE],
@@ -1340,6 +1341,268 @@ class TrustGatewayTests(OpenCodeCase):
         self.assertNotIn("trust", json.dumps(self.e.settings(self.repo)))
 
 
+QUESTION = "## AGENTS.md edits you would make\n\n## Questions for the owner\n- Which branch is the default?\n"
+
+
+class TrustedRefusalTests(OpenCodeCase):
+    """Review round 8 (lc-8h1): a refused --trust-gateway write stops setup in every run before any commit (B1), no git
+    command runs after it (B2), a later run looks at it before its first git command (B3), and no git command of
+    setup's runs the repo's own programs (hooks, core.fsmonitor, filters) at all."""
+
+    def planted(self, what: str) -> Path:
+        """A program that leaves a mark (PLANTED-RAN, with `what`) whenever something runs it; a filter passes its input
+        through."""
+        f = self.e.home / f"planted-{what}.sh"
+        f.write_text(f"#!/bin/sh\necho {what} >> {self.e.home / 'PLANTED-RAN'}\n"
+                     + ("cat\nexit 0\n" if what == "filter" else "exit 1\n"))
+        f.chmod(0o755)
+        return f
+
+    def evil_config(self):
+        """.git/config as it is, with the model's core.fsmonitor added."""
+        return (self.repo / ".git" / "config").read_text() + f"[core]\n\tfsmonitor = {self.planted('fsmonitor')}\n"
+
+    def evil_hook(self):
+        return f"#!/bin/sh\n{self.planted('hook')}\nexit 0\n"
+
+    def assert_stopped(self, status, *named):
+        self.assertEqual(status, 1, self.err + self.out)
+        for n in named:
+            self.assertIn(n, self.err)
+        self.assertIn("Setup stopped: nothing was committed and no git command ran after it", self.err)
+        self.assertEqual(git("log", "--format=%s", cwd=self.repo).splitlines(), ["init"])  # no onboarding commit
+        self.assertFalse((self.e.home / "PLANTED-RAN").exists(), "something ran the model's hook or fsmonitor")
+        self.assertTrue(self.e.store(self.repo).parent.parent.joinpath("refused").is_dir())
+
+    def test_the_git_commands_of_setup_run_none_of_the_repos_own_programs(self):
+        # (1): a hook, a core.fsmonitor and a clean filter already in the repo, then an ordinary onboarding that
+        # commits: git status, add and commit all run, none of the three does
+        mark = self.e.home / "PLANTED-RAN"
+        with (self.repo / ".git" / "config").open("a") as f:
+            f.write(f"[core]\n\tfsmonitor = {self.planted('fsmonitor')}\n"
+                    f"[filter \"x\"]\n\tclean = {self.planted('filter')}\n")
+        (self.repo / ".git" / "info").mkdir(exist_ok=True)
+        (self.repo / ".git" / "info" / "attributes").write_text("*.md filter=x\n")
+        (self.repo / ".git" / "hooks").mkdir(exist_ok=True)
+        (self.repo / ".git" / "hooks" / "pre-commit").write_text(self.evil_hook())
+        (self.repo / ".git" / "hooks" / "pre-commit").chmod(0o755)
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)
+        self.assertIn(ADDITION, git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines())
+        self.assertFalse(mark.exists(), mark.read_text() if mark.exists() else "")
+        # the control: the same repo's own git runs them
+        (self.repo / "new.md").write_text("x\n")
+        subprocess.run(["git", "add", "new.md"], cwd=self.repo, capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"], cwd=self.repo,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(set(mark.read_text().split()), {"fsmonitor", "filter", "hook"})
+
+    def test_the_safe_settings_reach_every_git_child_and_keep_the_owners_global_programs(self):
+        m = load()
+        (self.e.home / ".gitconfig").write_text("[core]\n\tsshCommand = ssh -i ~/.ssh/owner\n"
+                                                "[credential]\n\thelper = store\n")
+        with (self.repo / ".git" / "config").open("a") as f:
+            f.write("[core]\n\tsshCommand = sh -c 'touch X'\n[credential]\n\thelper = !touch Y\n"
+                    "[diff \"d\"]\n\ttextconv = touch Z\n[remote \"origin\"]\n\treceivepack = touch W\n")
+        with mock.patch.dict(os.environ, {**self.e.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
+                                          "GIT_CONFIG_VALUE_0": "Owner"}, clear=True):
+            os.environ.pop("GIT_SSH_COMMAND", None)
+            m.guard_git()
+            try:
+                p = subprocess.run(["git", "config", "--list"], cwd=self.repo, capture_output=True, text=True)
+            finally:
+                subprocess.Popen = subprocess._lane_real_popen
+        conf = [l for l in p.stdout.splitlines()]
+        last = {}
+        for l in conf:
+            k, _, v = l.partition("=")
+            last.setdefault(k, []).append(v)
+        self.assertEqual(last["core.hookspath"][-1], "/dev/null")
+        self.assertEqual(last["core.fsmonitor"][-1], "false")
+        self.assertEqual(last["core.sshcommand"][-1], "ssh -i ~/.ssh/owner")  # the owner's global one, not the repo's
+        self.assertEqual(last["credential.helper"][-2:], ["", "store"])  # the list reset, then the owner's helpers
+        self.assertEqual(last["diff.d.textconv"][-1], "")
+        self.assertEqual(last["remote.origin.receivepack"][-1], "git-receive-pack")
+        self.assertEqual(last["user.name"][-1], "Owner")  # the caller's own GIT_CONFIG_COUNT pairs are kept
+
+    def test_after_a_refusal_no_git_command_starts_at_all(self):
+        # B2, the second layer: whatever is left on the way out (a cleanup, a finally) cannot start git
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True):
+            m.guard_git()
+            try:
+                m.REFUSED.append(m.RepoWrite("the model wrote .git/config"))
+                with self.assertRaisesRegex(m.RepoWrite, "the model wrote .git/config"):
+                    m.run(["git", "status"], cwd=self.repo)
+                self.assertEqual(subprocess.run(["true"]).returncode, 0)  # anything else still runs
+            finally:
+                subprocess.Popen = subprocess._lane_real_popen
+
+    def test_a_refused_write_in_the_answers_run_stops_before_the_commit(self):
+        # B1: the answers run took a failed run in its stride; a refusal is no failed run
+        first = {**WRITE_NATIVE, "write": {**WRITE_NATIVE["write"], ".lane-control/SUGGESTIONS.md": QUESTION}}
+        answers_run = {"write": {".git/config": self.evil_config(), ".git/hooks/pre-commit": self.evil_hook()},
+                       "steps": 1, "say": "done"}
+        self.opencode_agents({RUN_ADAPTER: [first, answers_run], RUN_REVIEWER: [PASS]})
+        status = self.setup(*ALL_OPENCODE, "--trust-gateway", answers=["y", "main", "y", "y", "y", "y"])
+        self.assert_stopped(status, ".git/config", ".git/hooks/pre-commit")
+        self.assertEqual(len(self.e.agent_runs()), 3)  # the adapter, the review, the answers run: nothing after it
+        self.assertFalse([q for q in self.questions if "Commit these files" in q])
+
+    def test_a_refused_write_in_a_fix_check_review_stops_before_the_commit(self):
+        # B1: a fix-check review that "failed" was taken for one with no verdict, and setup went on
+        fix = {"say": "project.md names the wrong command.\nVERDICT: FIX"}
+        check = {"write": {".git/config": self.evil_config()}, "steps": 1, "say": "VERDICT: PASS"}
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE, {"write": {".lane-control/project.md": "fixed\n"}}],
+                              RUN_REVIEWER: [fix, check]})
+        self.assert_stopped(self.setup(*ALL_OPENCODE, "--trust-gateway"), "the OpenCode reviewer changed .git/config")
+        self.assertEqual([r["model"] for r in self.e.agent_runs()], [RUN_ADAPTER, RUN_REVIEWER, RUN_ADAPTER, RUN_REVIEWER])
+
+    def test_the_copy_modes_refusal_in_a_fix_check_review_stops_too(self):
+        fix = {"say": "project.md names the wrong command.\nVERDICT: FIX"}
+        check = {"write": {ADDITION: "changed\n"}, "steps": 1, "say": "VERDICT: PASS"}
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE, {"write": {".lane-control/project.md": "fixed\n"}}],
+                              RUN_REVIEWER: [fix, check]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 1, self.err + self.out)
+        self.assertIn(f"the OpenCode reviewer changed {ADDITION} in its copy", self.err)
+        self.assertEqual(git("log", "--format=%s", cwd=self.repo).splitlines(), ["init"])
+
+    def test_no_git_command_runs_after_a_refusal_not_even_the_cleanup(self):
+        # B2: adapt()'s cleanup asked git whether a role file was tracked, and git ran the model's core.fsmonitor
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)  # rendered personas exist now
+        self.e.set_state(agent_steps={RUN_ADAPTER: [{"write": {".git/config": self.evil_config(),
+                                                              ".lane-control/coordinator.md": "## mine\n"},
+                                                    "steps": 1, "say": "done"}]})
+        status = self.setup("--readapt", "--trust-gateway")
+        self.assertEqual(status, 1, self.err)
+        self.assertIn("changed .git/config in the repo (--trust-gateway)", self.err)
+        self.assertFalse((self.e.home / "PLANTED-RAN").exists())
+
+    def test_a_later_run_looks_at_a_refusal_before_its_first_git_command(self):
+        # B3 (a): the .git/config write alone; the re-run runs nothing until the owner has looked
+        self.opencode_agents({RUN_ADAPTER: [{"write": {".git/config": self.evil_config()}, "steps": 1, "say": "x"}]})
+        self.assert_stopped(self.setup(*ALL_OPENCODE, "--trust-gateway"), ".git/config")
+        r = self.e.run(str(self.repo), "--no-model-check", adapt=True)  # a plain re-run, no terminal
+        self.assertEqual(r.returncode, 1, r.stderr + r.stdout)
+        self.assertIn("a --trust-gateway run there was refused for writes it may not make", r.stdout + r.stderr)
+        self.assertIn("  .git/config", r.stdout)
+        self.assertIn("read these in an editor", r.stdout)
+        self.assertIn("nothing ran and nothing was committed", r.stderr)
+        self.assertNotIn("repo: exists", r.stdout)  # it stopped before anything else
+        self.assertFalse((self.e.home / "PLANTED-RAN").exists())
+        self.assertEqual(len(self.e.agent_runs()), 1)
+        # a no in a terminal is the same; a yes goes on
+        self.e.set_state(agent_steps={RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE, answer="n"), 1)
+        self.assertTrue([q for q in self.questions if "Have you read each of them by hand" in q])
+        self.assertEqual(self.setup(*ALL_OPENCODE, answers=["y", "n"]), 3, self.err + self.out)  # the yes, then a no
+        self.assertFalse(list((self.e.store(self.repo).parent.parent / "refused").iterdir()))
+
+    def test_a_refusal_whose_paths_are_back_as_they_were_clears_itself(self):
+        config = (self.repo / ".git" / "config").read_text()
+        self.opencode_agents({RUN_ADAPTER: [{"write": {".git/config": self.evil_config(), "stray.md": "x\n"},
+                                             "steps": 1, "say": "x"}]})
+        self.assert_stopped(self.setup(*ALL_OPENCODE, "--trust-gateway"), ".git/config", "stray.md")
+        (self.repo / ".git" / "config").write_text(config)  # the owner puts it back, in an editor
+        (self.repo / "stray.md").unlink()
+        self.e.set_state(agent_steps={RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE, answer="n"), 3, self.err + self.out)
+        self.assertIn("trust-gateway: cleared", self.out)
+
+    def test_a_reviewers_refused_file_is_never_committed_by_a_rerun(self):
+        # B3 (c): a re-run took the reviewer's file for the adapter's work and committed it
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE],
+                              RUN_REVIEWER: [{"write": {".lane-control/zz-by-reviewer.md": "x\n"}, "steps": 1,
+                                              "say": "VERDICT: PASS"}]})
+        self.assert_stopped(self.setup(*ALL_OPENCODE, "--trust-gateway"), ".lane-control/zz-by-reviewer.md")
+        self.e.set_state(agent_steps={RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE, answer="n"), 1)  # asked, and a no
+        self.assertEqual(git("log", "--format=%s", cwd=self.repo).splitlines(), ["init"])
+
+    def test_a_run_that_stopped_before_its_check_is_looked_at_too(self):
+        # B3, read only: a kill before the check; and Ctrl-C now runs the check on its way out
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True):
+            f = m.refusal_file(self.repo)
+            self.assertTrue(f.is_relative_to(self.e.home))
+            m.keep_refusal(self.repo, {}, True)
+        r = self.e.run(str(self.repo), "--no-model-check", adapt=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("a --trust-gateway run there stopped before its writes were checked", r.stdout + r.stderr)
+        self.assertIn(".git/config, .git/config.worktree, .git/hooks/ and .git/info/", r.stdout)
+        f.unlink()
+
+        def interrupted(cmd, **kw):
+            if cmd[0] == "git":
+                return real(cmd, **kw)
+            (self.repo / ".git" / "config").write_text(self.evil_config())
+            raise KeyboardInterrupt
+        real = m.run
+        self.e.env["LITELLM_API_KEY"] = GATEWAY_KEY
+        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch.object(m, "run", interrupted):
+            m.GATEWAY.update(url=GATEWAY_URL, key_env="LITELLM_API_KEY")
+            with self.assertRaisesRegex(m.RepoWrite, r"changed \.git/config"):
+                m.run_opencode_in_repo(self.repo, "litellm/code", "x", True)
+        self.assertTrue(f.is_file())
+
+
+class RepoStateTests(Case):
+    """M1, m1: what the --trust-gateway before/after check sees, with real git."""
+
+    def changed(self, repo, act, write=True):
+        m = load()
+        with mock.patch.dict(os.environ, self.e.env, clear=True):  # the refusal record goes under the temp HOME
+            dirs = m.git_dirs(repo)
+            before = m.repo_state(repo, dirs)
+            act()
+            try:
+                m.check_repo_writes(repo, before, m.repo_state(repo, dirs), write)
+            except m.RepoWrite as e:
+                self.assertTrue(m.refusal_file(repo).is_relative_to(self.e.home))
+                return str(e)
+        return None
+
+    def test_a_linked_worktrees_shared_config_and_hooks_are_seen(self):
+        wt = self.e.home / "wt"
+        git("worktree", "add", "-q", str(wt), "-b", "lane", cwd=self.repo)
+        common = self.repo / ".git"
+        said = self.changed(wt, lambda: (common / "config").write_text((common / "config").read_text() + "[x]\n\ty=1\n"))
+        self.assertIn(str(common / "config"), said)
+        said = self.changed(wt, lambda: (common / "hooks" / "post-checkout").write_text("#!/bin/sh\n"))
+        self.assertIn(str(common / "hooks" / "post-checkout"), said)
+        said = self.changed(wt, lambda: (common / "worktrees" / "wt" / "config.worktree").write_text("[x]\n"))
+        self.assertIn("config.worktree", said)
+
+    def test_names_like_logs_or_refs_hide_nothing_outside_gits_own_folders(self):
+        nested = self.repo / "web" / "logs"
+        nested.mkdir(parents=True)
+        git("init", "-q", cwd=nested)
+        self.assertIn("web/logs/.git/config",
+                      self.changed(self.repo, lambda: (nested / ".git" / "config").write_text("[core]\n\tx=1\n")))
+        sub = self.repo / ".git" / "modules" / "refs"
+        sub.mkdir(parents=True)
+        git("init", "-q", "--bare", str(sub), cwd=self.repo)
+        self.assertIn(".git/modules/refs/hooks/post-checkout",
+                      self.changed(self.repo, lambda: (sub / "hooks" / "post-checkout").write_text("#!/bin/sh\n")))
+        info = self.repo / ".git" / "objects" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        self.assertIn(".git/objects/info/alternates",
+                      self.changed(self.repo, lambda: (info / "alternates").write_text("/elsewhere\n")))
+
+    def test_gits_own_churn_and_another_worktrees_commit_are_not_the_models(self):
+        # m1: a lane committing in another worktree during the run
+        wt = self.e.home / "wt"
+        git("worktree", "add", "-q", str(wt), "-b", "lane", cwd=self.repo)
+        self.assertIsNone(self.changed(self.repo, lambda: (git("commit", "-q", "--allow-empty", "-m", "lane", cwd=wt),
+                                                          git("status", cwd=self.repo),
+                                                          git("branch", "other", cwd=self.repo))))
+        # the adapter's own files and their folders are its to write
+        m = load()
+        self.assertIsNone(self.changed(self.repo, lambda: ((self.repo / ".lane-control" / "additions").mkdir(parents=True),
+                                                          (self.repo / m.ADDITIONS / "coordinator.md").write_text("x"))))
+
+
 class SkipAdaptRouteTests(OpenCodeCase):
     """The third route for a new project on a machine without a usable model: --skip-adapt sets it up (Orca, the
     coordinator), and --readapt adapts it later."""
@@ -1349,12 +1612,15 @@ class SkipAdaptRouteTests(OpenCodeCase):
         r = self.e.run(str(self.repo), "--coordinator", "opencode/litellm/chat", "--reviewer", "opencode/litellm/deep",
                        "--no-model-check")  # e.run adds --skip-adapt
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        self.assertIn("adapt: skipped --skip-adapt: no onboarding agent ran, so .lane-control/ and "
-                      f"{GENERATED} are not written", r.stdout)
+        self.assertIn("adapt: skipped --skip-adapt: no onboarding agent ran, so the project's own files are not "
+                      f"written: no {GENERATED}, nothing under .lane-control/ but the rendered personas", r.stdout)
         self.assertIn("--readapt", r.stdout)
         self.assertTrue([c for c in self.e.calls() if c.startswith("orca repo add")], self.e.calls())  # Orca setup
         s = [x for x in self.e.sessions() if x["role"] == "coordinator"]
         self.assertEqual([x["bin"] for x in s], ["opencode2"])  # the coordinator started
+        kickoff = opt(s[0]["argv"], "--prompt")  # m2: told the project is not adapted, never sent to a missing file
+        self.assertIn("This project is not adapted to lane-control yet", kickoff)
+        self.assertNotIn("then AGENTS.md and AGENTS.lane-control.md", kickoff)
         self.assertFalse((self.repo / ADDITION).exists())
         self.assertEqual(self.e.agent_runs(), [])
         # later, with a model at hand: --readapt adapts it, as a first onboarding would
@@ -1475,11 +1741,12 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
             self.assertIn(n, copied)
 
     def call(self, tool: str, args: dict, write: bool, cwd: "Path | None" = None, tmpdir: "Path | None" = None,
-             trusted: bool = False):
+             trusted: bool = False, model: str = "lanetest/m"):
         """One onboarding run whose model asks for `tool` with `args`; returns (tool result, run text). Fails when any
         marker reached the model, unless `trusted` (--trust-gateway and its yes: the repo itself, every file
         readable)."""
         self.m.TRUSTED.clear()
+        self.m.REFUSED.clear()
         if trusted:
             self.m.TRUSTED.add(self.repo.resolve())
         log = self.t / "requests.jsonl"
@@ -1514,7 +1781,7 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         try:
             os.chdir(cwd or self.t)
             with mock.patch.dict(os.environ, env, clear=True):
-                p = self.m.run_opencode(self.repo, "lanetest/m", "- RUN-TOOL check", write)
+                p = self.m.run_opencode(self.repo, model, "- RUN-TOOL check", write)
         finally:
             os.chdir(here)
         text, _, error = self.m.opencode_result(p.stdout)
@@ -1742,9 +2009,54 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         # negative control: with edit allowed everywhere, the write lands and the before/after check stops the run
         wide = lambda write: [{"action": "*", "resource": "*", "effect": "allow"}]
         with mock.patch.object(self.m, "opencode_rules", wide), \
-                self.assertRaisesRegex(self.m.Fail, r"changed AGENTS\.md in the repo \(--trust-gateway\)"):
+                self.assertRaisesRegex(self.m.RepoWrite, r"changed AGENTS\.md in the repo \(--trust-gateway\)"):
             self.call("write", {"path": "AGENTS.md", "content": "changed"}, write=True, trusted=True)
         self.assertEqual((self.repo / "AGENTS.md").read_text(), "changed")
+
+    PATCHES = {  # m3: OpenCode offers `patch` in place of write/edit for a gpt-* alias; each is refused by its rules
+        "move onto a hook": "*** Begin Patch\n*** Update File: .lane-control/project.md\n*** Move to: .git/hooks/pre-commit\n"
+                            "@@\n-seed\n+#!/bin/sh\n*** End Patch",
+        "move onto AGENTS.md": "*** Begin Patch\n*** Update File: .lane-control/project.md\n*** Move to: AGENTS.md\n"
+                               "@@\n-seed\n+x\n*** End Patch",
+        "add a hook": "*** Begin Patch\n*** Add File: .git/hooks/pre-commit\n+#!/bin/sh\n*** End Patch",
+        "add .git/config": "*** Begin Patch\n*** Add File: .git/config\n+[core]\n*** End Patch",
+        "add .envrc": "*** Begin Patch\n*** Add File: .envrc\n+touch PWNED\n*** End Patch",
+        "add outside": "*** Begin Patch\n*** Add File: ../outside-new.md\n+x\n*** End Patch",
+        "delete AGENTS.md": "*** Begin Patch\n*** Delete File: AGENTS.md\n*** End Patch",
+        "update AGENTS.md": "*** Begin Patch\n*** Update File: AGENTS.md\n@@\n-root rules readable\n+changed\n*** End Patch",
+    }
+
+    def seed(self):
+        (self.repo / ".lane-control").mkdir(exist_ok=True)
+        (self.repo / ".lane-control" / "project.md").write_text("seed\n")
+
+    def assert_patches_refused(self, trusted: bool):
+        for name, text in self.PATCHES.items():
+            with self.subTest(patch=name, trusted=trusted):
+                self.seed()
+                agents = (self.repo / "AGENTS.md").read_bytes()
+                hooks = sorted(os.listdir(self.repo / ".git" / "hooks"))
+                got, _ = self.call("patch", {"patchText": text}, write=True, trusted=trusted, model="lanetest/gpt-5.2")
+                self.assertIn("Permission denied", got)  # the patch tool itself answered, and refused
+                self.assertEqual((self.repo / "AGENTS.md").read_bytes(), agents, got)
+                self.assertEqual(sorted(os.listdir(self.repo / ".git" / "hooks")), hooks, got)
+                self.assertFalse((self.repo / ".envrc").exists(), got)
+                self.assertFalse((self.t / "outside-new.md").exists(), got)
+                self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "seed\n", got)
+
+    def test_the_patch_tool_is_held_by_the_rules_in_the_copy(self):
+        self.assert_patches_refused(trusted=False)
+
+    def test_the_patch_tool_is_held_by_the_rules_in_the_repo_and_a_delete_it_lets_through_is_stopped(self):
+        self.assert_patches_refused(trusted=True)
+        self.seed()  # the one patch the rules let through, a Delete File of an allowed path: the check stops it
+        with self.assertRaisesRegex(self.m.RepoWrite, r"changed \.lane-control/project\.md \(removed\)"):
+            self.call("patch", {"patchText": "*** Begin Patch\n*** Delete File: .lane-control/project.md\n*** End Patch"},
+                      write=True, trusted=True, model="lanetest/gpt-5.2")
+        self.seed()
+        self.call("patch", {"patchText": "*** Begin Patch\n*** Update File: .lane-control/project.md\n@@\n-seed\n+facts\n"
+                                         "*** End Patch"}, write=True, trusted=True, model="lanetest/gpt-5.2")
+        self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "facts\n")  # its own file: fine
 
 # --- Task 3.3 ------------------------------------------------------------------------------------------------------
 
