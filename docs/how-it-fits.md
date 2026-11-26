@@ -8,7 +8,7 @@ issue: not on main yet.
 ## Who does what
 
 ```
-YOU      talk to a coordinator in its Orca terminal; say "merge"; sign agents in; make the share link (box only)
+YOU      talk to a coordinator in its Orca terminal; say "merge"; sign agents in; say yes to a box's link (box only)
 
 AGENTS   machine coordinator   one per machine, optional   splits the budget, watches memory and load
          project coordinator   one per project             queues, briefs, opens lanes, reviews, merges on your word
@@ -27,8 +27,9 @@ BOX      optional. A coordinator that lives on the box can keep working while th
       tunnel   orca-tunnel-<host> (ssh -L), made by orca-host-install --pair
       you      no click in Orca, no pairing code
   direction 2: the box's coordinator starts lanes on the desktop
-      tunnel   lane-tunnel@<host> (ssh -R), made by project-setup after the share link
-      you      make the share link in Orca once per box and paste it at project-setup's hidden prompt
+      tunnel   lane-tunnel@<host> (ssh -R), made by project-setup before it sends the box its link
+      you      say yes once per box: setup makes the link with orca pair (the desktop then listens on every
+               interface); or --pair-by-hand: make the share link in Orca and paste it (keeps it on loopback)
 
 RUNNING  night manager       Orca automation    checks in on idle coordinators when you are away or it is night
          lane sweep          Orca automation    reports merged, parked, stuck and broken lanes
@@ -175,10 +176,10 @@ direction 2: the box's coordinator starts lanes on the desktop
 | What it is for | you watch and drive the box's coordinator and lanes in your Orca window | the box gets what it lacks (graphics, a browser, a GPU): its coordinator starts a lane on the desktop |
 | Server (is dialled) | the box's `orcad` | the desktop's Orca app |
 | Client (dials) | the desktop's Orca | the box's Orca |
-| Tunnel | `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair` | `lane-tunnel@<host>` (`ssh -R`), made by `project-setup` after the share link |
+| Tunnel | `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair` | `lane-tunnel@<host>` (`ssh -R`), made by `project-setup` before the link is sent |
 | systemd units | desktop: `orca-tunnel-<host>.service`; box: `orcad.service` when it has a user manager, else a detached process | desktop: `lane-tunnel@<host>.service` |
-| Who makes the pairing code | the box's `orcad`, by itself; `orca-host-install` reads it over ssh | **you**, in the desktop's Orca |
-| Who saves it | `orca-host-install` runs `orca environment add` on the desktop | `project-setup` sends it on ssh's stdin; the box runs `environment add --pairing-code -` |
+| Who makes the pairing code | the box's `orcad`, by itself; `orca-host-install` reads it over ssh | the desktop's Orca: `project-setup` runs `orca pair` after your yes; or **you**, by hand (`--pair-by-hand`) |
+| Who saves it | `orca-host-install` gives it to `orca environment add` on the desktop on stdin | `project-setup` sends it on ssh's stdin; the box runs `environment add --pairing-code -` |
 
 **Direction 1 is automatic.** `orchestrators/orca-cotal/scripts/orca-host-install <host> --pair` (`project-setup` runs
 it when the box's server does not answer yet) copies `orcad` and its Node runtime from the desktop's own Orca install,
@@ -188,36 +189,49 @@ the parked Orca + Cotal folder, but native Orca uses it. Without `--pair` it onl
 Orca's own Settings > SSH connect to reuse (useful where the box has no internet); that route makes no
 `orca-tunnel-<host>`.
 
-**Direction 2 needs one thing from you**, once per box: in the desktop's Orca, Settings > Servers > "Share this
-computer", choosing **127.0.0.1**, then paste that link at `project-setup`'s hidden prompt. Setup does the rest:
-`core/scripts/lane-tunnel` opens the `-R` tunnel, which makes the desktop's Orca port appear on the box's 127.0.0.1,
-and the box saves the desktop as an environment. Press Enter at the prompt, or pass `--no-desktop-lanes`, to skip
-direction 2. The two ends can use different ports (`--tunnel-remote-port` in `project-setup`, `--remote-port` in
-`lane-tunnel`). The link lets the box run commands as you on the desktop until you revoke it in the same Settings page.
+**Direction 2 needs one yes from you**, once per box. The owner decided (2026-11-25): "we do it with share link, with
+--on-client as fallback, but must make sure to make it as painless as possible for user", and on the field report's
+recipe (2026-11-26): "if we can handle automatically its much smoother for user". So by default `project-setup` makes
+the link itself: `orca pair --address 127.0.0.1:<box port> --rotate --json` on the desktop, held in memory, sent to the box on
+ssh's stdin, saved there by `environment add --pairing-code -` through `core/scripts/pairing-code-stdin.cjs`, then
+proved with the same reads `--check` makes. It passes `--rotate`, so the box never gets an unused link made earlier
+for someone else; that also ends every other unused access link of this Orca. Before it asks, it says what the link
+grants (the box can open terminals here, so it can run any command as you, and such a command can reach your screen;
+Orca itself will not drive the screen for it), what `--rotate` ends, that the desktop's Orca will then listen on
+**every network interface** (or that it already does), and how to revoke it: `--remove-host`, then the "Runtime"
+entry of that date in Settings > Servers. Revoking does not narrow the listener; restarting Orca does, when no other
+used network pairing remains. After, it prints the bind and the revoke steps.
+`core/scripts/lane-tunnel` opens the `-R` tunnel first, which makes the desktop's Orca port appear on the box's
+127.0.0.1, and the link names that address. A box already paired is not paired again; a box that has this desktop
+under an older name is reported with the remove-then-add steps (a box keeps one name per desktop).
 
-**The way, and the fallback.** The owner decided (2026-11-25): "we do it with share link, with --on-client as
-fallback, but must make sure to make it as painless as possible for user". So direction 2 is the share link and
-`lane-tunnel`. The documented fallback is the hand-off with `send --on-client` (Orca 1.4.272 or later), for when the
-link step cannot be done. **It is not a drop-in:** it needs direction 1 in place and the desktop connected, it mails a
-bot on the desktop, and a person approves it once. It reaches a bot, not a lane, so it can ask the desktop for work
-but cannot start a supervised lane there ([pairing research](research/2026-11-25-orca-pairing.md), section 6; not run
-there). lane-control has not built it, and setup does not fall back to it by itself. Also pending (PAIN-1, lc-bmk):
-making the share-link step as painless as possible. A newer decision (owner, 2026-11-26, same issue): the default
-route becomes a link minted with `orca pair` by setup, which widens the desktop's listener to every interface; your
-hand-made share link stays for keeping the desktop on loopback. Not built when this was written
-([pairing facts](../orchestrators/native-orca/remote.md#pairing-facts)).
+**The loopback option.** Answer no, or pass `--pair-by-hand`, to keep the desktop on 127.0.0.1: in the desktop's Orca,
+Settings > Servers > "Share this computer", choosing **127.0.0.1**, then paste that link at `project-setup`'s hidden
+prompt. Only the window makes a link that does not widen the listener. Press Enter at the prompt, or pass
+`--no-desktop-lanes`, to skip direction 2. The two ends can use different ports (`--tunnel-remote-port` in
+`project-setup`, `--remote-port` in `lane-tunnel`). Either link lets the box run commands as you on the desktop until
+you revoke it in the same Settings page.
+
+**The fallback.** When neither link can be made, setup says so and points to the hand-off with `send --on-client`
+(Orca 1.4.272 or later), documented in [remote.md](../orchestrators/native-orca/remote.md#the-fallback-send---on-client).
+**It is not a drop-in:** it needs direction 1 in place and the desktop connected, it mails a bot on the desktop, and a
+person approves it once. It reaches a bot, not a lane, so it can ask the desktop for work but cannot start a supervised
+lane there ([pairing research](research/2026-11-25-orca-pairing.md), section 6; not run there). lane-control has not
+built it, and setup does not fall back to it by itself. What each route grants, ends and leaves open:
+[pairing facts](../orchestrators/native-orca/remote.md#pairing-facts).
 
 **The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; run `project-setup
 --check <repo> <host>`; make sure ssh can log in without asking anything (for a smartcard or agent key, `lane-tunnel`
 has extra options; `orca-tunnel-<host>` has none); sign the agents in on the box; sign `gh` in there and let git use
-it, for beads; answer setup's yes/no questions. Removing: `project-setup --remove-host <host>` undoes direction 2
-only, prints how to drop direction 1, and you revoke the link.
+it, for beads; answer setup's yes/no questions, the link's among them. Removing: `project-setup --remove-host <host>`
+undoes direction 2 only, prints how to drop direction 1, and you revoke the link.
 
 **Is `lane-tunnel` still needed?** This is about how direction 2 is carried; direction 2 itself stays. The tunnel is
 not needed when the box can reach the desktop directly (same LAN or Tailscale) **and** you accept the desktop's Orca
 listening on every network interface, not only on the address you picked. It is needed when the desktop must stay on
 127.0.0.1 or only outbound ssh gets through.
-`project-setup` itself always sets the tunnel up: it refuses a link with any other address.
+`project-setup` itself always sets the tunnel up: the link it makes names 127.0.0.1, and it refuses a hand link
+with any other address.
 Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you-need-the-tunnel).
 
 **How far this is tested, and what is pending:**
@@ -226,8 +240,9 @@ Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you
   ([record](../orchestrators/native-orca/record.md), NO-6). The docs on main say the no-tunnel route is not run.
 - A container testbed exists in PR #68 (`tests/testbed/`, not on main). It was stood down on 2026-11-25. Its results
   are not verified yet, so this page does not rely on them.
-- Why setup asks you for the share link today: `orca pair` would make the desktop listen on every interface
-  ([pairing research](research/2026-11-25-orca-pairing.md), read from Orca's source). The link is a credential, and the
+- The link setup makes (`orca pair`) was measured working by a remote site on two servers at the same version (field
+  report, 2026-11-26); here it is tested with stubs only. That it makes the desktop listen on every interface is read
+  from Orca's source ([pairing research](research/2026-11-25-orca-pairing.md)). The link is a credential, and the
   address in it is what the box dials, not what the desktop listens on:
   [pairing facts](../orchestrators/native-orca/remote.md#pairing-facts).
 - A box coordinator's lane on the desktop wakes it with its report, with both Orcas at the same version (1.4.274):

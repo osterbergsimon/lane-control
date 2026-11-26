@@ -41,12 +41,12 @@ def arch_of(t):
 
 
 def make_slot(root: Path, name: str, mtime: float = None, extra: str = "", dotversion: str = None,
-              app: str = None) -> Path:
+              app: str = None, node_sha: str = NODE_SHA) -> Path:
     """dotversion: what the slot's .version says it is; app: the Orca app version in its out/package.json."""
     slot = root / name
     slot.mkdir(parents=True)
     (slot / "orcad.js").write_text(f"// fake orcad {name} {extra}\n")
-    (slot / ".runtime-node").write_text(NODE_SHA + "\n")
+    (slot / ".runtime-node").write_text(node_sha + "\n")
     if dotversion is not None:
         (slot / ".version").write_text(dotversion + "\n")
     if app is not None:
@@ -57,12 +57,12 @@ def make_slot(root: Path, name: str, mtime: float = None, extra: str = "", dotve
     return slot
 
 
-def make_node_archive(root: Path, a: str) -> None:
+def make_node_archive(root: Path, a: str, body: str = FAKE_NODE) -> None:
     arch_dir = root / "node" / "archives"
     arch_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(arch_dir / f"node-v0-linux-{a}.tar.gz", "w:gz") as tf:
         info = tarfile.TarInfo("node-v0-linux/bin/node")
-        data = FAKE_NODE.encode()
+        data = body.encode()
         info.size, info.mode = len(data), 0o755
         tf.addfile(info, io.BytesIO(data))
 
@@ -466,6 +466,113 @@ class NodeSearchTests(HostInstallCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("sha256", r.stderr)
         self.untouched()
+
+
+# --pair (lc-5zn): orcad's pairing code goes to this desktop's Orca CLI on stdin, through the preload, never in argv.
+ORCAD_NODE = """#!/bin/sh
+case "$1" in --version) echo v0.0.0; exit 0 ;; esac
+# orcad: its first stdout line is the readiness record with the pairing code (made from a seed, not kept in the env)
+printf '{"type":"orca_server_ready","pairing":{"url":"orca://pair?code=%s"}}\\n' \\
+  "$(printf '%s' "$STUB_ORCAD_SEED" | sha256sum | cut -c1-48)"
+"""
+ORCAD_NODE_SHA = hashlib.sha256(ORCAD_NODE.encode()).hexdigest()
+DESK_NODE = r"""#!/usr/bin/env python3
+import hashlib, json, os, sys
+args = sys.argv[1:]
+rec = {"argv": args}
+preload = None
+if args[:1] == ["--require"]:
+    preload, args = args[1], args[2:]
+args = args[1:]
+p = os.environ["DESK_STATE"]
+st = json.load(open(p)) if os.path.exists(p) else {"environments": []}
+def out(o, code=0):
+    json.dump(st, open(p, "w"))
+    with open(os.environ["DESK_STATE"] + ".argv", "a") as f:
+        f.write(json.dumps(rec) + "\n")
+    print(json.dumps(o))
+    sys.exit(code)
+def opt(n):
+    return args[args.index(n) + 1]
+if args[:2] == ["environment", "list"]:
+    out({"ok": True, "result": {"environments": [{"name": n} for n in st["environments"]]}})
+if args[:1] == ["status"]:
+    out({"ok": True, "result": {"runtime": {"state": "ready", "reachable": opt("--environment") in st["environments"]}}})
+if args[:2] == ["environment", "add"]:
+    if opt("--pairing-code") != "-" or not (preload and preload.endswith("pairing-code-stdin.cjs")):
+        out({"ok": False, "error": {"message": "the code came in argv"}}, 1)
+    rec["stdin_sha256"] = hashlib.sha256(sys.stdin.read().strip().encode()).hexdigest()
+    st["environments"].append(opt("--name"))
+    out({"ok": True, "result": {"environment": {"name": opt("--name")}}})
+if args[:2] == ["environment", "rm"]:
+    st["environments"].remove(opt("--environment"))
+    out({"ok": True, "result": {}})
+out({"ok": False, "error": {"message": "stub: " + " ".join(args)}}, 1)
+"""
+
+
+class PairTests(HostInstallCase):
+    def setUp(self):
+        super().setUp()
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        self.seed = os.urandom(8).hex()
+        self.code = "orca://pair?code=" + hashlib.sha256(self.seed.encode()).hexdigest()[:48]
+        make_node_archive(self.art, arch_of(self.target), ORCAD_NODE)
+        make_slot(self.art / self.target, "0.1.0+abc", node_sha=ORCAD_NODE_SHA)
+        # systemctl: no user manager on the box (orcad runs detached); here a started tunnel unit makes ss list it (here only)
+        (self.bin / "systemctl").write_text('#!/bin/sh\necho "$*" >> "$BOX.systemctl-log"\n'
+                                            'case "$*" in *show-environment*) exit 1 ;; *enable*|*restart*) '
+                                            ': > "$BOX.tunnel-up" ;; esac\nexit 0\n')
+        (self.bin / "ss").write_text('#!/bin/sh\n[ "$HOME" != "$BOX" ] && [ -f "$BOX.tunnel-up" ] && '
+                                     'echo "LISTEN 0 128 127.0.0.1:$STUB_PORT 0.0.0.0:*"\nexit 0\n')
+        (self.bin / "desk-node").write_text(DESK_NODE)
+        cli = self.tmp / "desk-cli" / "orca"
+        cli.parent.mkdir()
+        cli.write_text(f"#!/usr/bin/env sh\nexec '{self.bin}/desk-node' '{self.tmp}/desk-cli/cli.js' \"$@\"\n")
+        for f in (self.bin / "systemctl", self.bin / "ss", self.bin / "desk-node", cli):
+            f.chmod(0o755)
+        self.desk = self.tmp / "desk.json"
+        self.env.update(ORCA_CLI=str(cli), DESK_STATE=str(self.desk), STUB_PORT=str(self.port),
+                        STUB_ORCAD_SEED=self.seed)
+        self.env.pop("ORCA_CLI_COMMAND", None)
+
+    def calls(self):
+        f = Path(str(self.desk) + ".argv")
+        import json
+        return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+
+    def test_the_boxs_code_reaches_this_desktops_cli_on_stdin_and_nowhere_else(self):
+        r = self.install("--pair", "--port", str(self.port))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("paired box", r.stdout)
+        adds = [c for c in self.calls() if "stdin_sha256" in c]
+        self.assertEqual(len(adds), 1, self.calls())
+        self.assertEqual(adds[0]["stdin_sha256"], hashlib.sha256(self.code.encode()).hexdigest())
+        argv = adds[0]["argv"]
+        self.assertEqual(argv[0], "--require")
+        self.assertTrue(argv[1].endswith("core/scripts/pairing-code-stdin.cjs"), argv)
+        self.assertEqual(argv[argv.index("--pairing-code") + 1], "-")
+        self.assertNotIn(self.code, r.stdout + r.stderr)
+        code_part = self.code.split("code=", 1)[1]
+        for f in self.tmp.rglob("*"):  # every argv log (ssh, systemctl, the desktop CLI) and every file, but orcad's own
+            if f.is_file() and not f.is_symlink() and not f.name.startswith(".orcad-readiness-"):
+                self.assertNotIn(code_part.encode(), f.read_bytes(), f)
+
+    def test_a_second_run_is_already_paired_and_sends_no_code(self):
+        self.assertEqual(self.install("--pair", "--port", str(self.port)).returncode, 0)
+        r = self.install("--pair", "--port", str(self.port))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("already-paired box", r.stdout)
+        self.assertEqual(len([c for c in self.calls() if "stdin_sha256" in c]), 1)
+
+    def test_a_refused_code_is_an_error_that_does_not_repeat_it(self):
+        self.env["DESK_STATE"] = str(self.tmp / "no-such-dir" / "desk.json")  # the stub CLI then fails on every call
+        r = self.install("--pair", "--port", str(self.port))
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn(self.code.split("code=", 1)[1], r.stdout + r.stderr)
 
 
 class HelpTests(unittest.TestCase):
