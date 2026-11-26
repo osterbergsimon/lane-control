@@ -3,13 +3,27 @@
 manager, lane sweep and machine check automations, the presence-based CI limits and the usage feed check.
 
   machine-setup [--host H] [--folder DIR] [--machine-coordinator HARNESS/MODEL] [--permission-mode MODE]
-                [--automation-provider claude|opencode] [--trust-folder] [--no-start]
+                [--automation-provider claude|opencode] [--automation-model MODEL [--replace-automation-model]]
+                [--no-model-check] [--trust-folder] [--no-start]
 
 Runs as a normal user on the machine whose coordinators it watches; with --host it copies what it needs to H over
 SSH (~/.local/share/lane-control, as project-setup does) and runs there with the same arguments, so a box gets its own
 machine coordinator, night manager and sweep. Every step is skipped when already done and says `exists`; nothing is
 started twice. An existing machine.conf is never changed; an automation of ours is changed only to repair its
-precheck and prompt, and never from a lane worktree.
+precheck and prompt, and never from a lane worktree, or its model when --replace-automation-model asks for that.
+
+No model is built in. The machine coordinator's is --machine-coordinator, else MACHINE_COORDINATOR in machine.conf,
+else the one its persona already names (the last run's), else asked in a terminal; without a terminal the run stops
+(exit 2) with machine.conf written from the example, naming what to put in it, and nothing else made. The automations'
+is --automation-model, else AUTOMATION_MODEL in machine.conf; it is needed only to create a Claude automation. With
+neither, a new one takes the model the existing Claude automations' records agree on (and says so); where they name
+none, or differ, it is asked in a terminal, and without one none is created (exit 1). An existing automation keeps the
+model its own record names: with another one given it is named and left; only --replace-automation-model changes it,
+and then only the --model in its extra arguments. Before a new model is written, the gateway (ANTHROPIC_BASE_URL, or
+the OpenCode provider's baseURL) is asked what it serves (<base>/v1/models): one it does not list is not written, and
+one it could not confirm (no answer, a refused key, a bare alias, only a wildcard) is written only on your yes in a
+terminal (--trust-folder does not answer that); --no-model-check writes without the check. With a gateway it also
+says whether model-env, which sets the auto-mode classifier model explicitly, still has to be run.
 
 1. ~/.config/lane-control/machine.conf (LANE_MACHINE_CONF) from core/templates/machine.conf.example, mode 0600, if
    missing: fill in COORDINATORS and RUNNER_REPOS by hand.
@@ -20,12 +34,12 @@ precheck and prompt, and never from a lane worktree.
    rendered to <folder>/.lane-control/machine-coordinator.md, with <folder>/.lane-control/additions/
    machine-coordinator.md appended when that exists; the harness's persona hook is installed.
 4. Unless --no-start, the machine coordinator starts in an Orca terminal titled `machine coordinator` (skipped when a
-   terminal with that title exists): `env LANE_ROLE=machine-coordinator LANE_PERSONA=... claude --model sonnet
-   --permission-mode auto --name "machine coordinator"` (default claude/sonnet; Claude's --name keeps the session
+   terminal with that title exists): `env LANE_ROLE=machine-coordinator LANE_PERSONA=... claude --model <model>
+   --permission-mode auto --name "machine coordinator"` (Claude's --name keeps the session
    and terminal title, so peers find it by SendMessage). Claude's first-start folder question: --trust-folder answers
    yes; otherwise it is asked in a terminal, as project-setup does.
-5. Orca automations in that folder (fresh sessions, each precheck runs first and costs nothing; Claude Sonnet, or on a
-   machine without Claude --automation-provider opencode, the default when the machine coordinator runs on OpenCode:
+5. Orca automations in that folder (fresh sessions, each precheck runs first and costs nothing; Claude on the
+   automation model above, or on a machine without Claude --automation-provider opencode, the default when the machine coordinator runs on OpenCode:
    OpenCode v2 on OpenCode's own default model, since Orca takes no model or other extra arguments for it):
    `night manager` hourly at :37 (night-precheck), `lane sweep` every 3 hours (lane-sweep --precheck: new findings
    only, report only) and `machine check` every 30 minutes (machine-check: budget step, memory or runner state
@@ -64,6 +78,7 @@ import machineconf  # noqa: E402
 import beads  # noqa: E402
 import cleanup  # noqa: E402
 import install  # noqa: E402
+import modelenv  # noqa: E402
 
 ROLE = "machine-coordinator"
 TITLE = "machine coordinator"
@@ -82,7 +97,6 @@ def ask(question: str):
 NOTES_STUB = ("# Machine coordinator notes\n\n"
               "Private: owner decisions, caps, priorities. Never push this folder to a public remote.\n")
 FEED_MAX_AGE_MIN = 60
-AUTOMATION_MODEL = "sonnet"
 AUTOMATION_PROVIDERS = ("claude", "opencode")  # harness -> the agent id Orca starts: harnesses' ORCA_AGENT_ID
 
 
@@ -122,11 +136,129 @@ def harness_model(spec: str) -> tuple:
     harness, _, model = spec.partition("/")
     if harness not in harnesses.harnesses_names() or not model:
         raise SystemExit2(f"--machine-coordinator: expected claude/<model> or opencode/<model>, got {spec!r}")
-    return harness, model
+    return harness, check_model_name(model, "the machine coordinator's model")
 
 
 class SystemExit2(Exception):
     pass
+
+
+# --- models: none is built in (lc-l78.18) -----------------------------------------------------------------------------
+
+def how_to_name_models() -> str:
+    """Exactly what to write, and where: both at once, so a run without a terminal does not stop twice."""
+    return (f"there is no default. Write both in {machineconf.path()}:\n"
+            '  MACHINE_COORDINATOR="claude/<model>"    (or "opencode/<provider>/<model>")\n'
+            '  AUTOMATION_MODEL="<model>"              (for the automations, when Claude runs them)\n'
+            "or pass --machine-coordinator claude/<model> --automation-model <model>")
+
+
+def check_model_name(model: str, what: str) -> str:
+    """A model name goes into a start command and an automation's argument string: one word, no option, no quotes."""
+    if not modelenv.MODEL_VALUE.fullmatch(model) or modelenv.LOOKS_LIKE_KEY.search(model):
+        raise SystemExit2(f"{what}: not a model name (letters, digits and . _ - : / @ [ ] only)")
+    return model
+
+
+def conf_models() -> dict:
+    """MACHINE_COORDINATOR and AUTOMATION_MODEL as machine.conf sets them; {} without a readable one."""
+    if not machineconf.path().exists():
+        return {}
+    try:
+        conf = machineconf.load()
+    except machineconf.ConfError as e:
+        say("machine.conf", "warning", f"{e}; no model is read from it")  # said here: the run may stop for lack of one
+        return {}
+    return {k: conf.get(k, "").strip() for k in machineconf.MODELS if conf.get(k, "").strip()}
+
+
+def persona_pin(folder: Path) -> "str | None":
+    """harness/model from the machine coordinator's rendered persona: what the last run used."""
+    try:
+        text = (folder / ".lane-control" / f"{ROLE}.md").read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    head = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    found = [re.search(rf"^{k}: (\S+)$", head.group(1), re.M) for k in ("agent", "model")] if head else [None]
+    return "/".join(m.group(1) for m in found) if all(found) else None
+
+
+def ask_value(question: str) -> str:
+    """The owner's answer in a terminal; "" without one."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return ""
+    try:
+        return input(question).strip()
+    except EOFError:
+        return ""
+
+
+def coordinator_model(flag: "str | None", conf: dict, folder: Path) -> tuple:
+    """(harness, model, whether this run writes a new choice)."""
+    last = persona_pin(folder)
+    for spec, where in ((flag, "--machine-coordinator"), (conf.get("MACHINE_COORDINATOR"), "machine.conf"),
+                        (last, "the persona of the last run")):
+        if spec:
+            break
+    else:
+        spec, where = ask_value("Machine coordinator model, as claude/<model> or opencode/<provider>/<model> "
+                                "(no default): "), "your answer"
+        if not spec:
+            raise SystemExit2(f"no model for the machine coordinator: {how_to_name_models()}")
+    harness, model = harness_model(spec)
+    say("coordinator model", spec, f"(from {where})")
+    return harness, model, spec != last
+
+
+def served(label: str, harness: str, model: str, cache: dict, approved: set) -> "str | None":
+    """Asks the gateway before a model is written: None to go on, or why not (lc-l78.19). What it could not confirm
+    needs the owner's yes in a terminal."""
+    found = modelenv.check_models([(label, harness, model)], modelenv.view(os.environ), os.environ, cache)
+    for line in modelenv.check_lines(found):
+        print(line, flush=True)
+    terminal = sys.stdin.isatty() and sys.stdout.isatty()
+    return modelenv.gate(found, ask if terminal else None, approved)
+
+
+class Models:
+    """The automations' model for this run: what was given (flag, else machine.conf), whether to replace records'."""
+
+    def __init__(self, given: str = "", replace: bool = False, check: bool = True, cache: "dict | None" = None,
+                 approved: "set | None" = None):
+        self.given, self.replace, self.check = given, replace, check
+        self.cache = {} if cache is None else cache
+        self.approved = set() if approved is None else approved
+
+
+def args_words(text: str) -> list:
+    """The shell words of an extra-agent-args string with where each is, so one can be replaced and the rest kept."""
+    return list(re.finditer(r"""(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|[^\s"'\\])+""", text))
+
+
+def model_spans(text: str) -> list:
+    """[(start, end, model)] for each --model in an extra-agent-args string."""
+    words, out = args_words(text), []
+    for i, w in enumerate(words):
+        if w.group() == "--model" and i + 1 < len(words):
+            out.append((w.start(), words[i + 1].end(), words[i + 1].group().strip("\"'")))
+        elif w.group().startswith("--model="):
+            out.append((w.start(), w.end(), w.group()[len("--model="):].strip("\"'")))
+    return out
+
+
+def record_model(automation: dict) -> "str | None":
+    spans = model_spans(automation.get("extraAgentArgs") or "")
+    return spans[-1][2] if spans else None
+
+
+def with_model(text: str, model: str) -> str:
+    """The extra-agent-args string with its --model naming `model`; every other byte is kept."""
+    spans = model_spans(text)
+    if not spans:
+        return f"--model {model}" + (f" {text}" if text else "")
+    for start, end, _ in reversed(spans):
+        text = text[:start] + f"--model {model}" + text[end:]
+    return text
 
 
 # --- steps -----------------------------------------------------------------------------------------------------------
@@ -271,22 +403,79 @@ OLDER_AUTOMATIONS = {"night manager": ("night-manager",), "lane sweep": ("lane-s
 OLDER_CI_TIMERS = ("ci-cpu.timer", "ci-cpu-mode.timer")
 
 
-def automation_agent(provider: str) -> list:
+def automation_agent(provider: str, model: str) -> list:
     """The agent part of `automations create`: Claude with its model, or OpenCode v2 on its own default model (Orca
     1.4.268 allows extra agent args for Claude and not for OpenCode, lc-mrz)."""
     if provider == "claude":
-        return ["--provider", "claude", f"--extra-agent-args=--model {AUTOMATION_MODEL}"]
+        return ["--provider", "claude", f"--extra-agent-args=--model {model}"]
     return ["--provider", harnesses.load_harness(provider).ORCA_AGENT_ID]
 
 
-def automations_step(folder: Path, from_lane: bool = False, provider: str = "claude") -> int:
+def automation_model(models: Models, creating: bool, records: list) -> tuple:
+    """(model, why not): the model to create Claude automations with or to set on records, checked with the gateway.
+    records: our automations that exist. With none given, a new one takes the model their Claude records agree on, so
+    a machine that has them is not asked again; otherwise it is asked for."""
+    model = models.given
+    if not model and creating:
+        named = sorted({m for m in (record_model(a) for a in records if a.get("agentId") == "claude") if m})
+        if len(named) == 1:
+            model = named[0]
+            say("automation model", model, "(the one the existing automations' records name; --automation-model "
+                                           "picks another)")
+        else:
+            differ = f"the existing automations name different models ({', '.join(named)}). " if named else ""
+            model = ask_value(f"{differ}Model for the automations (a name `claude --model` takes; no default): ")
+            if not model:
+                return "", (f"no model for the new Claude automations: {differ}Pass --automation-model <model>, or set "
+                            f"AUTOMATION_MODEL= in {machineconf.path()}; there is no default. None was created")
+        try:
+            check_model_name(model, "the automation model")
+        except SystemExit2 as e:
+            return "", str(e)
+    if model and models.check:
+        why = served("automations", "claude", model, models.cache, models.approved)
+        if why:
+            return "", f"{why}. No automation was created and no automation's model was changed"
+    return model, None
+
+
+def model_step(name: str, record: dict, models: Models, model: str):
+    """An existing automation's model: its own record's, changed only when --replace-automation-model asks."""
+    agent, has = record.get("agentId"), record_model(record)
+    if agent and agent != "claude":
+        if models.replace:
+            say(name, "model left as it is", f"(automation {record['id']} runs on {agent}; Orca takes no model for it)")
+        return
+    if not models.replace:
+        other = (f"; {models.given} was given and not written: --replace-automation-model sets it"
+                 if models.given and models.given != has else "")
+        say(name, "model left as it is", f"(its record: {has or 'no --model in its extra arguments'}{other})")
+        return
+    if not model or has == model:
+        return
+    if agent != "claude" and not has:
+        return say(name, "model left as it is", f"(Orca does not say what agent automation {record['id']} runs)")
+    was = record.get("extraAgentArgs") or ""
+    orca("automations", "edit", record["id"], f"--extra-agent-args={with_model(was, model)}")
+    say(name, "model set", f"(automation {record['id']}: {model}; its model was {has or 'not named'})")
+
+
+def automations_step(folder: Path, from_lane: bool = False, provider: str = "claude",
+                     models: "Models | None" = None) -> int:
     """How many automations it created. The first create that Orca refuses stops the step before a second one: Orca
     checks the provider id before anything is sent, so a wrong id creates nothing (said as failed, the run goes on)."""
     created = 0
+    models = models or Models()
     have = {a.get("name"): a for a in orca("automations", "list").get("automations", []) or []}
+    creating = provider == "claude" and any(
+        name not in have and not any(o in have for o in OLDER_AUTOMATIONS[name]) for name, *_ in automation_specs())
+    ours = [have[name] for name, *_ in automation_specs() if name in have]
+    model, no_model = automation_model(models, creating, ours) if creating or models.replace else ("", None)
     for name, trigger, precheck, timeout, prompt in automation_specs():
         if name in have:
             a = have[name]
+            if not no_model:
+                model_step(name, a, models, model)
             pc = a.get("precheck") or {}
             if pc.get("command") == precheck and pc.get("timeoutSeconds") == timeout and a.get("prompt") == prompt:
                 say(name, "exists", "(automation)")
@@ -307,22 +496,42 @@ def automations_step(folder: Path, from_lane: bool = False, provider: str = "cla
             say(name, "found older", f"automation {o.get('name')!r} ({o['id']}) does this job; not adding a second. "
                                      f"To switch: orca-ide automations remove {o['id']}  then run machine-setup again")
             continue
+        if provider == "claude" and no_model:
+            continue  # said once, below; the others are still looked at
         try:
             orca("automations", "create", "--name", name, "--trigger", trigger, "--prompt", prompt,
-                 *automation_agent(provider), "--precheck", precheck,
+                 *automation_agent(provider, model), "--precheck", precheck,
                  "--precheck-timeout", str(timeout),
                  "--workspace", f"path:{folder}", "--workspace-mode", "existing", "--enabled")
         except Fail as e:
             if provider == "claude" or created:
                 raise
-            agent = automation_agent(provider)[1]
+            agent = automation_agent(provider, model)[1]
             raise AutomationFail(f"{e} (the agent id {agent} for OpenCode is unverified: it is read from Orca 1.4.268's "
                                  "own code, its agent catalog, not from a live create; no automation was created. "
                                  "Use the id `orca-ide automations create --help` or Orca's docs give for OpenCode v2, "
                                  "or --automation-provider claude)") from None
         created += 1
         say(name, "created", f"(automation, {trigger}, precheck {precheck})")
+    if no_model:
+        raise AutomationFail(no_model)
     return created
+
+
+def model_env_step():
+    """With a gateway, the auto-mode classifier model is to be set explicitly from the one source (lc-l78.20, .21)."""
+    try:
+        source = modelenv.read_source(os.environ)
+    except modelenv.SourceError as e:
+        return say("model env", "warning", str(e))
+    gateway = modelenv.is_gateway(modelenv.view(os.environ).get(modelenv.BASE))
+    if source is None and not gateway:
+        return
+    tool = shlex.quote(str(LC / "core" / "scripts" / "model-env"))
+    if gateway and modelenv.CLASSIFIER not in (source or {}):
+        return say("model env", "to do", f"(a gateway is in use and {modelenv.CLASSIFIER}, the auto-mode classifier "
+                                         f"model, is not set from one source: run {tool})")
+    say("model env", "exists", f"({modelenv.source_path()}; {tool} --check compares every place that sets a value)")
 
 
 class AutomationFail(Exception):
@@ -441,10 +650,15 @@ def main(argv) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host")
     ap.add_argument("--folder", default="~/machine-coordinator")
-    ap.add_argument("--machine-coordinator", default="claude/sonnet", metavar="HARNESS/MODEL")
+    ap.add_argument("--machine-coordinator", metavar="HARNESS/MODEL", help="no default (see above)")
     ap.add_argument("--permission-mode", default="auto")
     ap.add_argument("--automation-provider", choices=AUTOMATION_PROVIDERS,
                     help="the harness the three automations run on (default: the machine coordinator's)")
+    ap.add_argument("--automation-model", metavar="MODEL",
+                    help="the model new Claude automations are created with; no default")
+    ap.add_argument("--replace-automation-model", action="store_true",
+                    help="also set that model on the automations that already exist")
+    ap.add_argument("--no-model-check", action="store_true", help="do not ask the gateway what it serves")
     ap.add_argument("--trust-folder", action="store_true")
     ap.add_argument("--no-start", action="store_true")
     a = ap.parse_args(argv)
@@ -452,8 +666,11 @@ def main(argv) -> int:
         print("machine-setup: refusing to run as root; agents run as a normal user", file=sys.stderr)
         return 2
     try:
-        harness, model = harness_model(a.machine_coordinator)
-        harnesses.load_harness(harness).start_command(ROLE, Path("/x"), model, a.permission_mode)
+        if a.machine_coordinator is not None:
+            harness, model = harness_model(a.machine_coordinator)
+            harnesses.load_harness(harness).start_command(ROLE, Path("/x"), model, a.permission_mode)
+        if a.automation_model is not None:
+            check_model_name(a.automation_model, "--automation-model")
     except (SystemExit2, ValueError) as e:
         print(f"machine-setup: {e}", file=sys.stderr)
         return 2
@@ -479,8 +696,32 @@ def main(argv) -> int:
     warning = lane_worktree_warning(ROOT, installed=bool(u.sha))
     if warning:
         say("lane-control", "warning", warning)
-    try:
+    cache: dict = {}  # one /v1/models request per gateway in a run
+    approved: set = set()  # unconfirmed models the owner said yes to
+    try:  # first, so that a run that stops for want of a model leaves the file its message names
         machine_conf()
+    except OSError as e:
+        print(f"machine-setup: {e}", file=sys.stderr)
+        return 1
+    try:  # then the models: a run that cannot name them, or may not write them, makes nothing else
+        conf = conf_models()
+        given = a.automation_model or conf.get("AUTOMATION_MODEL", "")
+        if given:
+            check_model_name(given, "AUTOMATION_MODEL")
+        elif a.replace_automation_model:
+            raise SystemExit2("--replace-automation-model needs the model to set: pass --automation-model <model>, "
+                              f"or set AUTOMATION_MODEL= in {machineconf.path()}")
+        harness, model, new_choice = coordinator_model(a.machine_coordinator, conf, folder)
+        harnesses.load_harness(harness).start_command(ROLE, Path("/x"), model, a.permission_mode)
+    except (SystemExit2, ValueError) as e:
+        print(f"machine-setup: {e}", file=sys.stderr)
+        return 2
+    if new_choice and not a.no_model_check:
+        why = served("machine coordinator", harness, model, cache, approved)
+        if why:
+            print(f"machine-setup: {why}. No persona, session or automation was made or changed", file=sys.stderr)
+            return 1
+    try:
         usage_feed()
         bd_version_step()
         cleanup_step()
@@ -493,7 +734,9 @@ def main(argv) -> int:
         provider = a.automation_provider or harness
         failed = None
         try:
-            created = automations_step(folder, from_lane=bool(warning), provider=provider)
+            created = automations_step(folder, from_lane=bool(warning), provider=provider,
+                                       models=Models(given, a.replace_automation_model, not a.no_model_check, cache,
+                                                     approved))
         except AutomationFail as e:
             created, failed = 0, str(e)
             say("automations", "failed", failed)
@@ -503,6 +746,7 @@ def main(argv) -> int:
                 + (f", such as {model}, the machine coordinator's" if harness == "opencode" else "")
                 + "; without one OpenCode picks a model itself")
         timer_step()
+        model_env_step()
         if failed:
             print(f"machine-setup: the automations were not made: {failed}", file=sys.stderr)
             return 1
