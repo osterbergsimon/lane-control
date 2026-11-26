@@ -28,6 +28,15 @@ where we can"; what overlaps today: `docs/research/2026-11-25-orca-overlap.md`).
 how the coordinator works on Orca's orchestration, the heavy-work rule and where the handovers live. The project's own
 facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writes into a project").
 
+`project-setup` also keeps the coordinator findable and honest. The main checkout's `CLAUDE.local.md` gets a **persona
+anchor** (`core/anchor.py`): a session started there by hand is told to read the persona; workers and headless runs are
+told to ignore it. Other lines in the file are kept and it is never committed. Where the folder has an `AGENTS.md` and
+no `CLAUDE.md`, the anchor imports it, because Claude would otherwise stop reading it. `project-setup --check <repo>`
+says whether the persona and anchor are as setup writes them. Whether the coordinator **runs** is decided by a live
+agent process, never by a terminal's title or Orca's agent mark (both stay on an empty shell, as after a server
+restart): `project-pause start` says `recorded but dead`, clears the record and starts it. The old terminal is left
+open for you to close.
+
 ## Beads
 Where a project's beads lives, its backup and its restore: `core/issues.md`, "Where beads lives". `project-setup` checks
 the layout, offers the move of a plain `.beads` folder or the restore on a new machine on your yes (a terminal), adds
@@ -138,7 +147,8 @@ every step says `exists` on a re-run):
   `machine-setup` existed has no `machine.conf`: create it (run `machine-setup`, which writes it from the example, or
   copy the example there by hand), since `lane-improve` and `night-precheck` need the file.
 - The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an
-  Orca terminal titled `machine coordinator` with its persona and hook.
+  Orca terminal titled `machine coordinator` with its persona and hook. The folder's `CLAUDE.md` gets the same
+  persona anchor, which the automations' sessions there are told to ignore; `machine-setup --check` reads it.
 - Three Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
   manager` hourly (`night-precheck`; the agent follows `night-manager.md`), `lane sweep` every 3 hours
   (`lane-sweep --precheck`, report only, waking its agent only for findings new since the last run) and `machine check` every 30 minutes (`machine-check`: a budget step,
