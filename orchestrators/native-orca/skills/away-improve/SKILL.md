@@ -28,10 +28,22 @@ The design is `docs/superpowers/specs/2026-11-23-away-improve-design.md` in lane
   integration branch (main or develop) without the owner's word.
 
 ## 1. The cycle
-Run cycles back to back, each starting when the last item is merged: a lane's report wakes you, so you wait for nothing: never polling, never looping on `check` (the night manager's `improve` nudge is only a fallback for a lost wake).
+Run cycles back to back, each starting when the last item is merged: a lane's report wakes you, so you wait for nothing: never polling, never looping on `check` (the watchdog's and the night manager's nudges are only a fallback for a lost wake, section 1a).
+
+**Record every step** with `lane-improve cycle <your project> --phase <phase> ...` (in `core/scripts/` of the lane-control
+checkout your persona names), **before** you start its lane and again with `--dispatch <id>` once it has one:
+`--phase queued` for a queued lane (step 1), `--phase scout`, `--phase build --item "<title>" --worktree <path>
+[--budget-min <minutes>]`, `--pr <n>` once it has a PR, `--phase review --round <n> --worker <reviewer's id>` for each
+review round (a reviewer, or any other worker for this cycle, is `--worker`: never `--dispatch`), `--phase merge` before
+`away-merge`. A new queued, scout or build lane gets its deadline then (default 240 minutes). Run it from your own
+terminal: it records your Orca address (`$ORCA_TERMINAL_HANDLE`), which is where the watchdog writes to. `away-merge`
+closes the cycle itself; an item you park (section 1a) you close with `--close parked --findings-file <path>`.
+**On start or resume** run `lane-improve cycle <your project>` and `orchestration worker-list` first: if a lane is
+recorded out, or a live worker is on its worktree, carry on with it; never start a second lane for the same step.
 
 Before each cycle: `lane-improve status` still says `improve: on`, its end has not passed and the line for your project
-does not say `cap reached` (the owner may have set a cap: `--max-items` and `--stop-at`, section 3); `<lane-control>/core/scripts/budget-state --project <your project>` shows a step below no-new-work (unmetered: `budget-state --project` prints
+does not say `cap reached` (the owner may have set a cap: `--max-items`, `--stop-at` and `--max-hours`, section 3;
+`lane-improve cycle --phase scout` refuses a new cycle once one is reached); `<lane-control>/core/scripts/budget-state --project <your project>` shows a step below no-new-work (unmetered: `budget-state --project` prints
 `unmetered` when the feed gives no reading, which is not a stop, and there are no budget steps for improve work, but
 `lane-room` and `lane-heavy` still apply); `~/.agents/bin/lane-room` exits 0. Otherwise
 stop (section 3).
@@ -71,8 +83,28 @@ stop (section 3).
    it: only the owner decides. A refusal is a finding: fix what it names, never around it. Never use `gh pr merge`, a merge by hand or a push to the integration branch (your session has deny rules, or on OpenCode a guard plugin, for the first and last: a backstop, not a wall. `git -C <repo> push ...`, `feature:main`
    refspecs, `gh api` and a lane's own shell go past them, and a lane's worktree has no rules at all. The real
    guards are `away-merge`, your persona's rule and branch protection where the repo has it.)
+   Pass `--metric "<before -> after>"` when the item moved something you can measure (tests, a size, a time); it goes
+   into the ledger.
 7. **Next cycle at once.** Close the lane (its worktree is clean and merged), then start the next cycle from the
    top. Do not wait for the night manager, the owner or a timer.
+
+## 1a. Watchdog and recovery
+The `away watchdog` automation checks your cycle every 15 minutes from outside and writes to the address you recorded.
+It merges nothing and changes no lane; its message carries the evidence (item, PR, phase, round, what Orca says of the
+worker, the idle time, the deadline).
+- **A nudge** (nothing live, nothing merged or recorded for 45 minutes): run `lane-improve cycle <your project>`, act on
+  the lane that reported, or start the next cycle (not after a cap, `off` or the end time: then only the lane still out).
+- **A deadline** (the lane is past its budget): if Orca shows a worker live and working, ask it where it stands and
+  record a new budget (`--budget-min`). **One worker per worktree:** start a fresh worker on the same worktree and PR
+  (`worker-start --worktree path:<its worktree>`, the brief naming the issue, the PR and what is left; record it with
+  `--phase build --dispatch <new id>`) only once `orchestration worker-list` shows every worker on that worktree settled
+  or stopped. Stopping a live one is the owner's word. While it is unknown, or a worker waits, never reuse the
+  worktree: ask the worker, ask the owner, or park the item: write its findings to a file outside the project and run
+  `lane-improve cycle <your project> --close parked --findings-file <path>`. Then the next cycle.
+- A terminal that exists, a port that answers or a worker Orca cannot speak for is not proof that a lane is working.
+- Do not reply: the message comes from an automation run that has ended. The watchdog backs off by itself (the wait
+  doubles, never beyond the lane's budget), sends nothing at the budget's stop step or while the project is paused, and
+  tells the machine coordinator when it stays stalled.
 
 ## 2. The log: in PRs and merge commits
 There is no log file on the away branch. Each item's entry is in its build lane's PR body, under the headings What, Why,
@@ -93,13 +125,14 @@ Stop starting cycles at: the end time or `lane-improve off`; no-new-work on a me
 from there only push, handover and the wrap-up below); nothing within the limits left to do; the deny rules or
 `away-merge` refusing for a reason only the owner can settle (tell the owner). At push-and-handover or beyond, push
 what the branch has and write the handover. When you stop because nothing within the limits is left, run
-`lane-improve rest <your project>` so the night manager stops nudging you every half hour: it quiets the nudges for
+`lane-improve rest <your project>` so the night manager and the watchdog stop nudging you: it quiets the nudges for
 12 h (or until the owner switches the mode on or off again) and then one nudge looks for new work. A coordinator waiting
 on a long lane need do nothing: its nudges back off by themselves (30, 60, 120 minutes, at most 8 h).
 
 **Caps (optional, off unless the owner gave them).** `--max-items N` stops new cycles after N merges through `away-merge`
 in this period (its own record, not the PRs' text); `--stop-at <weekly %>` stops them once `budget-state --project` gives weekly at
-or above it. `lane-improve status` shows `items 4/10` and `weekly 66/70` for your project and says `cap reached` when one is hit. A cap
+or above it; `--max-hours H` once H hours have passed since the period started (an `--unmetered` period with no end has 12 by
+default). `lane-improve status` shows `items 4/10`, `weekly 66/70` and `hours 3.5/12` for your project and says `cap reached` when one is hit. A cap
 works like the end time, for your project alone: the lane that is running finishes and merges through `away-merge` (with `--max-items`
 the Nth merge is the last: `away-merge` refuses a further one, so the lane you start must be the one that brings it to N), you start no
 new cycle, and you wrap up as below (steps 1 to 3), then run `lane-improve drained <your project>`, which with the mode still on

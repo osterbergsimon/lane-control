@@ -120,7 +120,7 @@ named here. Models are named by the gateway's aliases, such as `chat` and `code`
    ```
 
    The alias `chat` is then `litellm/chat` in OpenCode. The `"model"` line matters: Orca passes no model to an
-   OpenCode automation, so the three machine automations (night manager, lane sweep, machine check) run on whatever
+   OpenCode automation, so the four machine automations (night manager, lane sweep, machine check, away watchdog) run on whatever
    OpenCode's default is. Without that line OpenCode picks a model itself, and on a machine that has only the gateway
    it may pick one that does not exist.
 
@@ -152,8 +152,8 @@ named here. Models are named by the gateway's aliases, such as `chat` and `code`
 
 ## 3. Set up the machine
 
-Once per machine. It makes the machine coordinator and three small automations (night manager, lane sweep, machine
-check), and checks the usage feed.
+Once per machine. It makes the machine coordinator and four small automations (night manager, lane sweep, machine
+check, away watchdog), and checks the usage feed.
 
 Claude on this machine:
 
@@ -538,8 +538,8 @@ or park it. Never stop a live lane without your word.
 - **A running lane:** ask its coordinator. It stops a live lane only on your word, and puts the issue back to open.
 - **Away modes:** `lane-away off` says you are back. `lane-improve off` ends away-improve mode; what is running drains
   first ([docs/away-improve.md](away-improve.md)).
-- **The machine coordinator and the automations:** close the `machine coordinator` terminal in Orca. The three
+- **The machine coordinator and the automations:** close the `machine coordinator` terminal in Orca. The four
   automations wake coordinators at night, so remove them to stop that: `orca-ide automations list`, then
-  `orca-ide automations remove <id>` for `night manager`, `lane sweep` and `machine check`. Running `machine-setup`
+  `orca-ide automations remove <id>` for `night manager`, `lane sweep`, `machine check` and `away watchdog`. Running `machine-setup`
   again makes them again. The CI limits follow presence through a user timer: `systemctl --user disable --now
   ci-presence.timer`.

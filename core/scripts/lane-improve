@@ -5,7 +5,8 @@
 # (limits, check-ins); this says what the machine may spend its time on. Neither starts the other.
 #
 #   lane-improve on [--until HH:MM|--hours N|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."]
-#                   [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]
+#                   [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--max-hours H]
+#                   [--continue] [--yes]
 #       Switches the mode on, and it is the ONLY way it turns on: plain `lane-away on`, night, "goodnight", a changed budget
 #       never do, and an agent runs it only on the owner's own explicit request for the improve (away-improve) mode.
 #       Prints what it turned on, and without a terminal (Claude Code's `!` prefix has none) refuses unless --yes. End: a time, or until you run
@@ -22,11 +23,14 @@
 #       branch (title "away: <date> (<project>)", body built from the branch's merge commits plus the coordinator's summary) and
 #       records its number in improve.json; when gh cannot (or the start commit could not be made), away-merge opens it after the
 #       first merge (a warning says so).
-#       Caps, both off unless given, both ending a project's cycles like the end time (the running lane finishes and merges,
+#       Caps, off unless given, each ending a project's cycles like the end time (the running lane finishes and merges,
 #       then it wraps up and runs `drained`; the mode stays on for the others): --max-items N: no new cycle after N away-merges
 #       in this period (away-merge's own record); --stop-at <weekly %>: none once `budget-state --project` gives weekly at or
-#       above it (metered only: refused with --unmetered, or at or above the project's ceiling). A --continue re-run changes
-#       them only when given; `none` drops one. `status` shows "items 4/10" and "weekly 66/70" per project. --max-items is
+#       above it (metered only: refused with --unmetered, or at or above the project's ceiling); --max-hours H: none once H
+#       hours of wall clock have passed since the period started (any budget; --unmetered takes the budget steps away, never
+#       the wall clock, so an --unmetered period with no end gets --max-hours 12 unless given: `--max-hours none` drops it,
+#       and the end time of --until/--hours bounds it instead). A --continue re-run changes
+#       them only when given; `none` drops one. `status` shows "items 4/10", "weekly 66/70" and "hours 3.5/12" per project. --max-items is
 #       also a hard stop in away-merge (the Nth merge is the last); a wrapped-up project resumes only when named again with
 #       its cap raised (`on --continue --project <name> --max-items <more>`). The period's record (improve-period.json) fails
 #       closed if it is lost or unreadable (merges refused, `status` says why): `on --continue` makes it again.
@@ -47,13 +51,28 @@
 #       --summary-file sets the short summary the coordinator writes (a file kept outside the project, at most 8000
 #       characters; later refreshes keep it); without it the summary already in the PR stays. It edits no file in the project.
 #       It stays a draft and is never merged by an agent; only the owner merges it.
-#   lane-improve status
-#       off, on (what runs, its limits, its projects and branches), or draining (what is left to wrap up).
+#   lane-improve cycle <project> [--phase queued|scout|build|review|merge|idle] [--item "<title>"] [--pr N] [--round N]
+#                    [--dispatch <ctx_id>] [--worker <ctx_id>] [--worktree <path>] [--budget-min M]
+#                    [--address <term_|run:|dispatch:>] [--json]
+#   lane-improve cycle <project> --close merged|parked [--findings-file <path>] [--metric "<text>"]
+#       The cycle's state, kept per project in improve-cycle.json beside the improve file: the coordinator records each step
+#       (phase, item, PR, review round, the lane's dispatch and worktree) and reads it back on resume (no flags: prints it),
+#       so a restart mid-cycle neither loses the phase nor starts a second lane. A new queued, scout or build lane gets its
+#       deadline now: --budget-min (default 240) minutes; --worker records another dispatch working for the cycle (its
+#       reviewer), watched as live but never a new lane. A new scout (a new cycle) is refused once a cap is reached or the
+#       period drains; an unmetered period with no end keeps a --max-hours bound on every re-run unless `--max-hours none`. The address is the coordinator's own Orca terminal
+#       ($ORCA_TERMINAL_HANDLE, recorded by itself; --address overrides), which away-watchdog sends to. --close ends the
+#       cycle into the ledger, improve-ledger.jsonl (item, PR, merge sha, metric, rounds, parked findings): away-merge
+#       closes it `merged` itself; a parked item needs --findings-file.
+#   lane-improve status [--json]
+#       off, on (what runs, its limits, its projects and branches, each cycle), or draining (what is left to wrap up).
+#       --json: one line per project, {"project", "improve": on|wrapped|draining|off, "item", "phase", "round", "pr",
+#       "deadline", "deadline_passed", "last_activity_age_min", "cap", "branch"}.
 # Exit: 0, 1 refused or nothing to do, 2 usage.
 set -u
 self=$(readlink -f "$0")
 case ${1:-} in
-  on | off | drained | status | rest | pr) exec python3 "${self%/*}/../improve.py" "$@" ;;
+  on | off | drained | status | rest | pr | cycle) exec python3 "${self%/*}/../improve.py" "$@" ;;
   -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self" ;;
-  *) echo "usage: lane-improve on [options]|off|drained <project>|rest <project>|pr <project> [--summary-file <path>]|status" >&2; exit 2 ;;
+  *) echo "usage: lane-improve on [options]|off|drained <project>|rest <project>|pr <project> [--summary-file <path>]|cycle <project> [options]|status [--json]" >&2; exit 2 ;;
 esac

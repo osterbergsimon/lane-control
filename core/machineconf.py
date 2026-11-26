@@ -21,9 +21,9 @@ HERE = Path(__file__).resolve().parent
 LANE_LIMITS = HERE / "scripts" / "lane-limits.sh"
 EXAMPLE = HERE / "templates" / "machine.conf.example"
 NUMBERS = {"NIGHT_START": 23, "NIGHT_END": 7, "IDLE_MIN": 45, "RECHECK_MIN": 120, "AWAY_HOURS": 14,
-           "IMPROVE_IDLE_MIN": 30}
+           "IMPROVE_IDLE_MIN": 30, "WATCHDOG_MIN": 45, "WATCHDOG_ESCALATE_MIN": 120}
 MODELS = ("MACHINE_COORDINATOR", "AUTOMATION_MODEL")  # machine-setup's models; there is no default (lc-l78.18)
-KEYS = ("COORDINATORS", "RUNNER_REPOS", *MODELS, *NUMBERS)
+KEYS = ("COORDINATORS", "RUNNER_REPOS", "MACHINE_COORDINATOR_TO", "MACHINE_COORDINATOR_FOLDER", *MODELS, *NUMBERS)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 

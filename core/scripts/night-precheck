@@ -7,8 +7,9 @@ else = skip the run, which costs nothing.
                                    DUE <name> improve idle=<n>min  improve mode is on for it and it has been idle
                                                                  IMPROVE_IDLE_MIN (30): resume its cycle
                                    DUE <name> wrapup idle=<n>min waited=<h>h  the period ended, no `lane-improve drained` yet
-                                   DUE <name> wrapup idle=<n>min cap=<items|weekly>:<n>/<max>  a cap of the mode (--max-items,
-                                                                 --stop-at) is reached, no `lane-improve drained` yet
+                                   DUE <name> wrapup idle=<n>min cap=<items|weekly|hours>:<n>/<max>  a cap of the mode
+                                                                 (--max-items, --stop-at, --max-hours) is reached, no
+                                                                 `lane-improve drained` yet
                                    OFFLINE <runner,...> repo=<r> self-hosted runners not online
                                    BUDGET push-and-handover (<why>) check-ins ask only to push and hand over
                                    BUDGET unknown (<why>) ...    no budget reading: no check-ins (said once a night)

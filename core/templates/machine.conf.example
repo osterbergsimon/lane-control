@@ -40,5 +40,15 @@ RECHECK_MIN=120
 # check-in to resume its cycle: a fallback for a lost wake, day or night. A coordinator that stays idle is nudged
 # less often (the wait doubles, at most 8 h); after the mode ends, one that has not wrapped up gets `DUE <name> wrapup`.
 IMPROVE_IDLE_MIN=30
+# away-watchdog (the `away watchdog` automation, every 15 minutes, while improve mode is on): a project with no live lane
+# worker and nothing merged or recorded for WATCHDOG_MIN minutes gets a message with the evidence (item, PR, idle time);
+# the wait doubles while it stays so, never beyond the lane's own budget. Past WATCHDOG_ESCALATE_MIN the machine
+# coordinator is told too. Addresses are explicit Orca addresses, never a terminal title.
+WATCHDOG_MIN=45
+WATCHDOG_ESCALATE_MIN=120
+# The machine coordinator's Orca address for the watchdog (term_<id>, run:<id> or dispatch:<id>). Empty: the single agent
+# terminal whose folder is MACHINE_COORDINATOR_FOLDER (default ~/machine-coordinator, machine-setup's --folder).
+MACHINE_COORDINATOR_TO=""
+MACHINE_COORDINATOR_FOLDER=""
 # `lane-away on` counts for this many hours (`lane-away on --until-back` has no limit).
 AWAY_HOURS=14

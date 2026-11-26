@@ -47,6 +47,7 @@ setup; "library" is only read by other scripts. A **parked** script belongs to a
 | Script | What it does | Run by | Doc |
 |---|---|---|---|
 | `core/scripts/away-merge` | the only merge into a project's `away/<date>` branch, after its checks | coordinator | [away-improve](../docs/away-improve.md) |
+| `core/scripts/away-watchdog` | watches each away-improve cycle: tells a stalled coordinator, with the evidence, then the machine coordinator; a daily summary; merges and changes nothing | automation | [away-improve](../docs/away-improve.md#the-watchdog) |
 | `core/scripts/budget-state` | prints each metered budget's step now | coordinator, owner, automation | [budget steps](model-routing.md#budget-thresholds-per-metered-budget-ceiling--the-owners-weekly-percent) |
 | `core/scripts/ci-presence` | sets CI's CPU and memory limits by whether you are there | automation | [machine caps](machine.md#machine-caps) |
 | `core/scripts/design-shots` | screenshots of a UI at two widths in both themes, and a before/after page | lane | [design kit](../docs/superpowers/specs/2026-11-21-design-kit-design.md) |

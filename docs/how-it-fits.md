@@ -14,7 +14,7 @@ AGENTS   machine coordinator   one per machine, optional   splits the budget, wa
          project coordinator   one per project             queues, briefs, opens lanes, reviews, merges on your word
          lane                  one per issue               own worktree and branch, ends in a pull request
 
-SETUP    machine-setup   once per machine   machine coordinator, 3 automations, CI limits timer
+SETUP    machine-setup   once per machine   machine coordinator, 4 automations, CI limits timer
          project-setup   once per project   lane tools, skills, personas, tier table, coordinator (--refresh updates)
 
 LANE     lane-room   may another lane open?        lane-tier     which model does this tier use?
@@ -34,6 +34,7 @@ BOX      optional. A coordinator that lives on the box can keep working while th
 RUNNING  night manager       Orca automation    checks in on idle coordinators when you are away or it is night
          lane sweep          Orca automation    reports merged, parked, stuck and broken lanes
          machine check       Orca automation    tells the machine coordinator when budget, memory or runners change
+         away watchdog       Orca automation    tells a stalled away-improve coordinator, then the machine coordinator
          ci-presence         systemd timer      sets CI's CPU and memory limits by whether you are there
          orca-tunnel-<host>  systemd (desktop)  carries direction 1
          lane-tunnel@<host>  systemd (desktop)  carries direction 2
@@ -123,7 +124,7 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
 ## Setup
 
 - **`machine-setup`** (once per machine; `--host <host>` runs it on a box): writes `machine.conf` (you fill in the
-  projects), checks the usage feed, starts the machine coordinator, creates the three automations, reports Orca's
+  projects), checks the usage feed, starts the machine coordinator, creates the four automations, reports Orca's
   cleanup rules and installs the `ci-presence` timer.
 - **`project-setup <project>`** (once per project): onboards the repo (an adapting agent and a reviewer write the lane
   files; committed only on your yes), installs the main checkout's newer last commit as the machine's tree (as `lane-control
@@ -261,7 +262,7 @@ More: [native Orca on an SSH host](../orchestrators/native-orca/remote.md).
 
 ## Automations
 
-`machine-setup` creates three **Orca automations** in the machine coordinator's folder. Each first runs a **precheck**,
+`machine-setup` creates four **Orca automations** in the machine coordinator's folder. Each first runs a **precheck**,
 a plain script that spends no model tokens; an agent starts only when the precheck finds something.
 
 | Automation | Runs | Precheck | What its agent does | Why Orca 1.4.274 does not make it unnecessary |
@@ -269,6 +270,7 @@ a plain script that spends no model tokens; an agent starts only when the preche
 | `night manager` | hourly | `night-precheck` | sends a check-in to each coordinator that is due: idle while you are away or it is night (and, day or night, one that away-improve mode covers); passes on offline CI runners | no Orca built-in wakes an idle coordinator, or checks budget steps or runners |
 | `lane sweep` | every 3 hours | `lane-sweep --precheck` (new findings only) | sends each new finding to that lane's coordinator; removes nothing | Orca tells a coordinator about its supervised workers; the sweep also sees lane worktrees with no live worker |
 | `machine check` | every 30 minutes | `machine-check` | passes changes (budget step, memory, runners, a coordinator Orca cannot find) to the machine coordinator | Orca has no budget steps, no runner state and no "memory low" warning |
+| `away watchdog` | every 15 minutes | `away-watchdog` (finds a stalled away-improve cycle and writes the messages, with their evidence, to an outbox; a daily summary) | sends them with `away-watchdog --send` from its own terminal (a precheck has none), to the coordinator, then the machine coordinator; puts what reached nobody in front of you | Orca's worker notices (silent 10 min, idle 60 min, exited) go to the coordinator, which is the one that may be stuck; the schedule is Orca's own |
 
 They are already Orca automations, so there is nothing of ours to move onto that feature. The reasons come from the
 [overlap audit](research/2026-11-25-orca-overlap.md), rows 8 to 12 and 18. It read Orca's help, guides, release notes
@@ -307,7 +309,8 @@ More: [budget steps](../core/model-routing.md#budget-thresholds-per-metered-budg
 
 Off unless **you** switch it on (`lane-improve on`). Each chosen project's coordinator then keeps improving its product
 on one `away/<date>` branch, merging there only through `away-merge`, and keeps one draft pull request for you. Nothing
-reaches the main line without your word. `lane-improve off` ends it; running work finishes first.
+reaches the main line without your word. `lane-improve off` ends it; running work finishes first. The `away watchdog` automation watches each cycle from outside
+and tells a stalled coordinator, with the evidence, then the machine coordinator; it merges and changes nothing.
 
 More: [away-improve mode, the owner's guide](away-improve.md).
 
