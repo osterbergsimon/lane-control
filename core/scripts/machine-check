@@ -172,4 +172,12 @@ def main(argv) -> int:
 
 
 if __name__ == "__main__":
+    try:  # run by a person under its old name: one line with its lane-control form (core/frontdoor.py)
+        import importlib.util as _iu
+        _fd = _iu.spec_from_file_location("lc_frontdoor", Path(__file__).resolve().parents[1] / "frontdoor.py")
+        _m = _iu.module_from_spec(_fd)
+        _fd.loader.exec_module(_m)
+        _m.hint("machine-check", sys.argv[1:])
+    except Exception:  # never fails the command
+        pass
     sys.exit(main(sys.argv[1:]))

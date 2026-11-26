@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""lane-control: the one versioned lane-control tree on this machine (core/install.py).
+"""lane-control: the one front door (core/frontdoor.py) and the one versioned lane-control tree on this machine
+(core/install.py).
 
+  lane-control project|machine|improve <verb> ...
+        runs the script that form names (project-setup, project-pause, machine-setup, machine-check, lane-improve) with
+        the arguments it puts first and every other argument unchanged; `lane-control help` lists them all.
   lane-control install [--version <sha|tag|branch>] [--from <checkout>]
         lay the whole tree of that commit (default: the checkout's HEAD) at
         ${XDG_DATA_HOME:-~/.local/share}/lane-control/<sha>/, switch `current` to it by rename and link the lane tools
@@ -26,7 +30,7 @@
         install lock). With no valid `current` it removes nothing. A flat copy from before the versioned install is
         named in a note, never removed.
 
-After an install, run `project-setup --refresh <project>` for each project: its personas and skills are rendered
+After an install, run `lane-control project refresh <project>` for each project: its personas and skills are rendered
 from the tree, and the project records the sha it was set up with."""
 import argparse
 import importlib.util
@@ -49,6 +53,7 @@ def _load(name, rel):
 
 I = _load("lc_install", "core/install.py")
 H = _load("lc_boxhealth", "core/boxhealth.py")
+F = _load("lc_frontdoor", "core/frontdoor.py")
 OURS = ("night manager", "lane sweep", "machine check")  # machine-setup's automations: it repairs their paths
 
 
@@ -314,7 +319,54 @@ def cmd_prune(a) -> int:
     return 0
 
 
+INSTALL_HELP = (("install [--version <sha|tag|branch>] [--from <checkout>]", "lay a commit's tree, switch current to it"),
+                ("status", "the current sha against the checkout's"),
+                ("doctor [--json] [--no-ssh]", "what is out of date here and on each box, and what to run"),
+                ("prune [--apply]", "remove trees nothing uses or names (a dry run without --apply)"))
+
+
+def help_screen() -> str:
+    """Everything on one screen, grouped."""
+    out = ["lane-control: one front door for lane-control on this machine", ""]
+    for g, what in F.GROUPS.items():
+        out.append(what[0].upper() + what[1:])
+        out += [f"  {f'lane-control {g} {v} {usage}'.rstrip():<58} {line}"
+                for (gg, v), (_, _, usage, line) in F.ROUTES.items() if gg == g]
+    out.append("The install (one versioned tree per machine and per box)")
+    out += [f"  {'lane-control ' + usage:<58} {line}" for usage, line in INSTALL_HELP]
+    out += ["", "lane-control <group> --help: the script each form runs. lane-control <group> <verb> --help: all its "
+            "options.", "The old names (" + ", ".join(F.OLD) + ") keep working and run the same scripts."]
+    return "\n".join(out)
+
+
+def front_door(argv: list) -> int:
+    """`lane-control <group> <verb> ...`: exec the script it names, with its first arguments and the rest unchanged."""
+    group = argv[0]
+    if argv[1:2] in ([], ["-h"], ["--help"], ["help"]):
+        print(F.group_help(group), file=sys.stdout if argv[1:] else sys.stderr)
+        return 0 if argv[1:] else 2
+    r = F.route(argv)
+    if r is None:
+        print(f"lane-control: no form `lane-control {group} {argv[1]}`\n" + F.group_help(group), file=sys.stderr)
+        return 2
+    script, args = r
+    path = Path(__file__).resolve().parent / script  # this tree's own script, as its old name would run it
+    sys.stdout.flush()
+    os.execve(str(path), [str(path), *args], {**os.environ, F.ENV: "1"})
+    return 127  # not reached
+
+
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] in ([], ["-h"], ["--help"], ["help"]):
+        if argv[1:2] and argv[1] in F.GROUPS:
+            return front_door([argv[1], "--help"])
+        if argv[1:2] and argv[1] not in F.GROUPS:
+            return main([argv[1], "--help"])
+        print(help_screen(), file=sys.stdout if argv else sys.stderr)
+        return 0 if argv else 2
+    if argv[0] in F.GROUPS:
+        return front_door(argv)
     ap = argparse.ArgumentParser(prog="lane-control", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
