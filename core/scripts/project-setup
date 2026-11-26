@@ -6,13 +6,14 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
                 [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE] [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
+                [--gateway-url URL] [--gateway-key-env NAME] [--trust-gateway]
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
                 [--no-desktop-lanes] [--pair-by-hand] [--no-machine-setup] [--orca-port N]
                 [--orca-from DIR | --orca-bundle TAR] [--orca-version V]
                 [--tunnel-auth-sock PATH] [--tunnel-ssh PATH] [--tunnel-no-enable] [--tunnel-remote-port N]
   project-setup --remove-host <host>
   project-setup --check <dir> | <git-url|dir> <host>
-  project-setup <dir> --suggest-tiers <provider> [--gateway URL] [--gateway-key-env NAME]
+  project-setup <dir> --suggest-tiers <provider> [--gateway-url URL] [--gateway-key-env NAME]
 
 Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
 adapting agent and a reviewer, committed only on the owner's yes; the role files go to .lane-control/additions/ and
@@ -54,8 +55,14 @@ re-run reports `exists` for each.
 
 Before the Orca steps, a headless adapting agent writes the project's files into .lane-control/ and a reviewer on
 another model checks them (--adapter, --adapt-reviewer: `claude -p` for claude/<model>, `opencode2 run` for
-opencode/<provider>/<model>; only the harness a role uses must be on PATH). They are committed, by explicit path, only
-on the owner's yes in a terminal; on no, or without a terminal, they stay uncommitted, no Orca step runs and it exits 3.
+opencode/<provider>/<model>; only the harness a role uses must be on PATH). An OpenCode one reaches its gateway only by
+--gateway-url (written out plainly, not a known vendor's API) and --gateway-key-env NAME (the key's variable, handed to
+the run as LANE_GATEWAY_KEY), both kept per project (never the key; a new URL does not take the old key variable along
+unasked), under the run's own provider id lane-gateway, with OpenCode's config built from nothing; it works in a
+filtered scratch copy of the repo, or with --trust-gateway (a plain warning and one yes; for a model on a gateway the
+owner runs) in the repo itself, every file readable, its writes checked before and after. --skip-adapt runs no
+onboarding agent (a machine with no usable model yet: adapt later with --readapt). They are committed, by explicit
+path, only on the owner's yes in a terminal; on no, or without a terminal, they stay uncommitted, no Orca step runs and it exits 3.
 The repo's visibility is read with gh (unknown when it cannot be); questions still open after the review are shown and
 may be answered before the file list (one more adapter run, not reviewed). After that commit it asks once more, in a
 terminal: to commit a drafted orca.yaml (from the lockfiles; Orca reads its setup script from the worktree) and to push
@@ -88,9 +95,10 @@ asked or said.
 
 --suggest-tiers <provider> suggests that table from an OpenAI-compatible gateway (a self-hosted LiteLLM, say): GET
 <base>/v1/models, and <base>/model/info where it answers (LiteLLM: the model behind each alias). Each row is
-opencode/<provider>/<alias>, <provider> being the gateway's provider id in OpenCode's config. The base URL is --gateway,
-else that provider's options.baseURL in OpenCode's own config; the key only an environment variable: --gateway-key-env,
-else the {env:NAME} its options.apiKey names. OpenCode's auth files are never read; the key is never printed, logged,
+opencode/<provider>/<alias>, <provider> being the gateway's provider id in OpenCode's config. The base URL is
+--gateway-url (the onboarding agents' flag; --gateway is its old name), else the project's stored gateway, else that
+provider's options.baseURL in OpenCode's own config; the key only an environment variable, the one that goes with that
+URL: --gateway-key-env, else the stored gateway's, else the {env:NAME} its options.apiKey names. OpenCode's auth files are never read; the key is never printed, logged,
 stored or put in an argv (core/tiersuggest.py). It shows the suggestion with each alias's model and asks, in a terminal,
 whether to write it as the project's lanes.tsv; nothing else runs, and on no (or no terminal) nothing is written and
 it exits 3: edit the table shown and pass it with --tiers.
@@ -2267,42 +2275,94 @@ def opencode_rules(write: bool) -> list:
 
 
 GATEWAY: dict = {}  # the OpenCode onboarding agents' gateway: {"url", "key_env"}; set by resolve_settings
-VENDOR_HOSTS = re.compile(r"(^|\.)(openai\.com|anthropic\.com|openai\.azure\.com|googleapis\.com|mistral\.ai|"
-                          r"groq\.com|deepseek\.com|x\.ai|openrouter\.ai|together\.xyz|fireworks\.ai|amazonaws\.com|"
-                          r"cohere\.(ai|com)|perplexity\.ai|opencode\.ai)$")
+RUN_PROVIDER = "lane-gateway"  # the provider id of every onboarding run: no OpenCode built-in is keyed by it (m27)
+RUN_KEY_ENV = "LANE_GATEWAY_KEY"  # the only name the key has in a run: lane-control's, never one OpenCode reads (B15)
+# Known vendors' public APIs, by name: refused as an onboarding gateway. It does not prove a host is self-hosted.
+VENDOR_HOSTS = re.compile(
+    r"(^|\.)(openai\.com|anthropic\.com|claude\.ai|openai\.azure\.com|services\.ai\.azure\.com|"
+    r"cognitiveservices\.azure\.com|inference\.ai\.azure\.com|googleapis\.com|mistral\.ai|groq\.com|deepseek\.com|"
+    r"x\.ai|openrouter\.ai|together\.xyz|together\.ai|fireworks\.ai|amazonaws\.com|cohere\.(ai|com)|perplexity\.ai|"
+    r"opencode\.ai|github\.ai|githubcopilot\.com|nvidia\.com|cerebras\.ai|deepinfra\.com|huggingface\.co|"
+    r"vercel\.sh|cloudflare\.com|moonshot\.(ai|cn)|aliyuncs\.com|z\.ai|bigmodel\.cn|sambanova\.ai|replicate\.com|"
+    r"ollama\.com|novita\.ai|hyperbolic\.xyz|baseten\.co|friendli\.ai|ai21\.com|voyageai\.com|minimax(i)?\.(io|chat)|"
+    r"anyscale\.com|lambdalabs\.com|lambda\.ai|nebius\.(ai|com)|siliconflow\.(cn|com)|inference\.net|chutes\.ai|"
+    r"featherless\.ai|scaleway\.ai|venice\.ai)$")
+# A gateway URL as it is written, and nothing a URL parser could read another way (M11): http(s), a host of ASCII
+# letters, digits, . _ - (an IDN as punycode) or a bracketed IPv6, an optional port, a plain path; no %, backslash,
+# user, query or fragment.
+GATEWAY_URL = re.compile(r"(?P<scheme>https?)://(?P<host>[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(?::(?P<port>[0-9]{1,5}))?"
+                         r"(?P<path>/[A-Za-z0-9._~!$&'()*+,;=:/-]*)?")
+KEY_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def gateway_refusal(url, key_env) -> "str | None":
-    """Why --gateway-url / --gateway-key-env cannot be used, or None. The URL must be complete and written out: http(s),
-    a host, no {env:}/{file:} or other braces, no user:password, and no vendor's public API (the gateway is the
-    owner's own). The key is only ever the NAME of a variable."""
-    from urllib.parse import urlsplit
+def gateway_url_refusal(url) -> "str | None":
+    """Why `url` cannot be an onboarding agent's gateway, or None. It must be complete and written out (GATEWAY_URL),
+    and not a known vendor's public API (VENDOR_HOSTS, matched without a trailing dot and in lower case)."""
     if not isinstance(url, str) or not url:
         return "no --gateway-url"
-    if set("{}") & set(url) or any(c.isspace() for c in url):
-        return f"--gateway-url {url!r} must be a complete http(s) URL written out (no {{env:...}})"
-    try:
-        u = urlsplit(url)
-        host = u.hostname or ""
-        u.port  # a bad port raises
-    except ValueError:
-        return f"--gateway-url {url!r} is not a URL"
-    if u.scheme not in ("http", "https") or not host or set("{}") & set(url) or any(c.isspace() for c in url):
-        return f"--gateway-url {url!r} must be a complete http(s) URL written out (no {{env:...}})"
-    if "@" in u.netloc:
+    shown = url if url.isascii() and url.isprintable() else ascii(url)
+    authority = url.partition("://")[2].split("/", 1)[0]
+    if "@" in authority:
         return "--gateway-url must not carry a user or password: pass the key with --gateway-key-env NAME"
-    if VENDOR_HOSTS.search(host.lower()):
-        return f"--gateway-url {url!r} is a vendor's public API, not a self-hosted gateway"
-    if key_env is not None and not (isinstance(key_env, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key_env)):
-        return f"--gateway-key-env takes the NAME of an environment variable, got {key_env!r}"
+    if set("?#") & set(url):
+        return ("--gateway-url must be the gateway's base URL, with no query or fragment (not shown: a key may be in "
+                "it; a key goes in --gateway-key-env NAME)")
+    u = GATEWAY_URL.fullmatch(url)
+    if not u or "{" in url:
+        return (f"--gateway-url {shown} must be a complete http(s) URL written out (no {{env:...}}): a host of ASCII "
+                "letters, digits, . _ - (an IDN as punycode) or [IPv6], an optional port and a plain path, with no %, "
+                "backslash or other character a URL parser could read another way")
+    host = u["host"].lower().rstrip(".")
+    from urllib.parse import urlsplit
+    try:  # and Python's parser reads the same host (the shape above leaves it nothing else to read)
+        same = (urlsplit(url).hostname or "").rstrip(".") == host.strip("[]")
+    except ValueError:
+        same = False
+    if not same or not host or (not host.startswith("[") and "" in host.split(".")) or \
+            (u["port"] is not None and not 0 < int(u["port"]) < 65536):
+        return f"--gateway-url {shown} is not a URL"
+    if VENDOR_HOSTS.search(host):
+        return f"--gateway-url {shown} is a vendor's public API, not a self-hosted gateway"
     return None
 
 
+def gateway_key_refusal(key_env) -> "str | None":
+    """Why `key_env` cannot name the gateway key's variable, or None ("" and None: no key). Never echoes it: it may
+    be a key pasted where its name goes (m26)."""
+    if key_env is None or key_env == "":
+        return None
+    if not (isinstance(key_env, str) and KEY_NAME.fullmatch(key_env)):
+        return ("--gateway-key-env takes the NAME of an environment variable (letters, digits and _), never the key "
+                "itself; what was given is not shown")
+    return None
+
+
+def gateway_refusal(url, key_env) -> "str | None":
+    """Why --gateway-url / --gateway-key-env cannot be used, or None (gateway_url_refusal, gateway_key_refusal)."""
+    return gateway_url_refusal(url) or gateway_key_refusal(key_env)
+
+
+def gateway_said() -> str:
+    """The gateway line said before the first OpenCode onboarding agent: where its prompts go and which key with them."""
+    url, key = GATEWAY.get("url"), GATEWAY.get("key_env")
+    plain = urlsplit_host(url)
+    note = ("; plain http: for loopback or a network you trust" if url.startswith("http://")
+            and plain not in ("localhost", "127.0.0.1", "[::1]") and not plain.startswith("127.") else "")
+    return f"{url}, " + (f"key from ${key}" if key else "no key") + note
+
+
+def urlsplit_host(url: str) -> str:
+    u = GATEWAY_URL.fullmatch(url or "")
+    return u["host"].lower().rstrip(".") if u else ""
+
+
 def gateway_provider(model: str) -> tuple:
-    """(provider id, its block for the run's config, the variables the run needs) for `<provider>/<alias>`, written
-    from GATEWAY alone: npm @ai-sdk/openai-compatible, options.baseURL the given URL, options.apiKey "{env:NAME}" when
-    a key variable is given, models {alias: {}}. Nothing comes from any OpenCode config file. Extra headers are not
-    supported yet (bd lc-5cr)."""
+    """(the run's model, its provider block, the run's key variable) for `<provider>/<alias>`, written from GATEWAY
+    alone: provider id RUN_PROVIDER whatever <provider> is (no OpenCode built-in for a provider id applies), npm
+    @ai-sdk/openai-compatible, options.baseURL the given URL, options.apiKey "{env:LANE_GATEWAY_KEY}" when a key
+    variable is given, models {alias: {}}. The key reaches the run under RUN_KEY_ENV only, never under the owner's
+    name (OPENCODE_API_KEY would go to opencode.ai). Nothing comes from any OpenCode config file. Extra headers are
+    not supported yet (bd lc-5cr)."""
     why = gateway_refusal(GATEWAY.get("url"), GATEWAY.get("key_env"))
     if why:
         raise Fail(f"{why}: an OpenCode onboarding agent ({model}) reaches its gateway only by the URL given to "
@@ -2317,8 +2377,8 @@ def gateway_provider(model: str) -> tuple:
         raise Fail(f"the gateway key's environment variable {key_env} (--gateway-key-env) is not set here. Nothing was "
                    "committed")
     block = {"npm": "@ai-sdk/openai-compatible", "name": provider, "models": {alias: {}},
-             "options": {"baseURL": GATEWAY["url"], **({"apiKey": "{env:" + key_env + "}"} if key_env else {})}}
-    return provider, block, [key_env] if key_env else []
+             "options": {"baseURL": GATEWAY["url"], **({"apiKey": "{env:" + RUN_KEY_ENV + "}"} if key_env else {})}}
+    return f"{RUN_PROVIDER}/{alias}", block, ({RUN_KEY_ENV: os.environ[key_env]} if key_env else {})
 
 
 SYSTEM_CONFIG = {"linux": "/etc/opencode", "darwin": "/Library/Application Support/opencode"}  # OpenCode 2.2.1's own
@@ -2364,24 +2424,26 @@ def opencode_agent(repo: Path, model: str, write: bool):
     OpenCode starts from nothing: HOME and the XDG folders are a scratch folder of their own (removed after), so no
     config, plugin, agent, formatter, MCP server, auth or session of the owner's, nor the project's
     (OPENCODE_DISABLE_PROJECT_CONFIG) nor Claude Code's (OPENCODE_DISABLE_CLAUDE_CODE), is loaded, and the session is
-    kept in that folder, not the owner's store. Its one config file holds only the adapter's provider block
-    (gateway_provider: the given gateway URL, the key by its variable's name, never the key), formatter, lsp and MCP
-    off, and the run's
-    agent, whose name is new each run (lane-onboard-<random>), with opencode_rules and steps MAX_TURNS plus OpenCode's
-    forced last answer. The environment is PATH, locale, TLS and proxy settings (KEEP_ENV) and the key's variable;
-    nothing else of this one (no LANE_ROLE, no OPENCODE_*). The prompt goes on stdin (an argument that starts with -
-    would be read as a flag); --standalone runs a private server started in the run's folder."""
+    kept in that folder, not the owner's store. Its one config file holds only the run's provider block
+    (gateway_provider: the given gateway URL under the provider id lane-gateway, the key as {env:LANE_GATEWAY_KEY},
+    never the key), formatter, lsp, MCP and plugins off, and the run's agent, whose name is new each run
+    (lane-onboard-<random>), with opencode_rules and steps MAX_TURNS plus OpenCode's forced last answer; OpenCode's
+    title agent is pinned to the same model, so no side request names another (m27). The environment is PATH,
+    locale, TLS and proxy settings (KEEP_ENV) and LANE_GATEWAY_KEY; nothing else of this one (no LANE_ROLE, no
+    OPENCODE_*, not the owner's key variable). The prompt goes on stdin (an argument that starts with - would be read
+    as a flag); --standalone runs a private server started in the run's folder."""
     refuse_system_config()
-    provider, block, key_envs = gateway_provider(model)
+    run_model, block, key_env = gateway_provider(model)
     name = f"lane-onboard-{secrets.token_hex(6)}"
-    conf = {"provider": {provider: block}, "formatter": False, "lsp": False, "mcp": {}, "instructions": [],
-            "autoupdate": False, "share": "disabled",
-            "agents": {name: {"mode": "primary", "model": model, "steps": MAX_TURNS[write] + 1,
-                              "permissions": opencode_rules(write)}}}
+    conf = {"provider": {RUN_PROVIDER: block}, "formatter": False, "lsp": False, "mcp": {}, "plugin": [],
+            "instructions": [], "autoupdate": False, "share": "disabled",
+            "agents": {name: {"mode": "primary", "model": run_model, "steps": MAX_TURNS[write] + 1,
+                              "permissions": opencode_rules(write)},
+                       "title": {"model": run_model}}}
     home = scratch_dir(repo, "lane-onboard-home-")
     try:
         env = {k: v for k, v in os.environ.items() if KEEP_ENV.fullmatch(k)}
-        env.update({n: os.environ[n] for n in key_envs})
+        env.update(key_env)
         for var, sub in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
                          ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")):
             (home / sub).mkdir()
@@ -2390,15 +2452,126 @@ def opencode_agent(repo: Path, model: str, write: bool):
         (home / "config" / "opencode" / "opencode.json").write_text(json.dumps(conf))
         env.update(OPENCODE_DISABLE_PROJECT_CONFIG="1", OPENCODE_DISABLE_CLAUDE_CODE="1",
                    OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_MODELS_FETCH="1")  # no model catalog fetched
-        yield ([BINARIES["opencode"], "run", "--standalone", "--model", model, "--agent", name, "--format", "json"],
-               env)
+        yield ([BINARIES["opencode"], "run", "--standalone", "--model", run_model, "--agent", name, "--format",
+                "json"], env)
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
 
+TRUST_GATEWAY = False  # --trust-gateway was given
+TRUSTED: set = set()  # repos whose OpenCode onboarding agents run in the repo itself: --trust-gateway, and the yes
+GIT_CHURN = {"index", "FETCH_HEAD", "ORIG_HEAD", "packed-refs"}  # rewritten by any git status or fetch: never a config
+
+
+def trust_warning(repo: Path, roles: list) -> str:
+    return (f"\nWARNING (--trust-gateway): the OpenCode onboarding agents ({', '.join(roles)}) will run in {repo} "
+            "itself, not in a filtered copy. The model will see every file in that folder: ignored and private ones "
+            "included (.env files, keys, the .git folder with its remotes and history, everything --private names), "
+            f"and what a link there points to. What it reads goes to the gateway, {GATEWAY.get('url')}, and from "
+            "there to whatever that gateway passes it on to. This is meant for a model on a gateway you run yourself. "
+            "Writes stay limited to the adapter's own files under .lane-control/; anything else it changes stops the "
+            "run. Without --trust-gateway the agents get a copy without the private files.")
+
+
+def confirm_trust(repo: Path, roles: list) -> bool:
+    """--trust-gateway: the warning, then one yes in a terminal; without a terminal the flag is the yes."""
+    if repo.resolve() in TRUSTED:
+        return True
+    print(trust_warning(repo, roles), flush=True)
+    if has_terminal():
+        if not owner_says_yes(f"Run them in {repo} itself, every file readable? [y/N] ", step="trust-gateway"):
+            return False
+    else:
+        say("trust-gateway", "yes", "--trust-gateway, with no terminal to ask in")
+    TRUSTED.add(repo.resolve())
+    return True
+
+
+def repo_state(repo: Path) -> dict:
+    """{path: what lstat says} of everything in the repo folder, .git and ignored files too, links never followed: a
+    file by kind, mode, size, mtime, ctime and inode (no write leaves all of them as they were), a folder by being
+    there. In .git, what git itself rewrites on any status or fetch (objects, refs, logs, the index, *.lock) is left
+    out: a config, a hook or an info file is not."""
+    out = {}
+    for here, dirs, files in os.walk(repo):
+        for name in files + dirs:
+            f = Path(here) / name
+            rel = f.relative_to(repo).as_posix()
+            parts = rel.split("/")
+            if ".git" in parts and (set(parts) & {"objects", "refs", "logs"} or parts[-1] in GIT_CHURN
+                                    or parts[-1].endswith(".lock")):
+                continue
+            try:
+                st = f.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                out[rel] = ("dir",)
+            else:
+                kind = "link" if stat.S_ISLNK(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "other"
+                out[rel] = (kind, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+    return out
+
+
+def check_write_paths(repo: Path) -> None:
+    """Before a --trust-gateway adapter run: each folder on the way to the adapter's files a real folder or not there
+    yet, each file a plain one or not there, so no write can go through a link out of the repo."""
+    for n in sorted(adapter_names()):
+        here = repo
+        for part in Path(n).parts:
+            here = here / part
+            if here.is_symlink() or (here.exists() and not (here.is_file() if here == repo / n else here.is_dir())):
+                raise Fail(f"{n}: {here.relative_to(repo)} in the repo is a link or not a "
+                           f"{'file' if here == repo / n else 'folder'}, so the OpenCode adapter cannot run in the repo "
+                           "itself (--trust-gateway). Nothing was committed")
+
+
+def check_repo_writes(repo: Path, before: dict, after: dict, write: bool) -> None:
+    """After a --trust-gateway run: what changed in the repo must be the adapter's own files (adapter_names), plain
+    files, and the folders they are in; the reviewer changes nothing. Anything else (a .git or dot-name, another file,
+    a link, a deletion) stops the run, named. It is in the repo already: nothing is committed."""
+    allowed = adapter_names() if write else set()
+    folders = {Path(n).parent.as_posix() for n in allowed} | {Path(n).parent.parent.as_posix() for n in allowed}
+    bad = []
+    for n in sorted(set(before) | set(after)):
+        was, now = before.get(n), after.get(n)
+        if was == now:
+            continue
+        if now is not None and now[0] == "file" and n in allowed and (was is None or was[0] == "file"):
+            continue
+        if was is None and now == ("dir",) and n in folders:
+            continue
+        bad.append(n + (" (removed)" if now is None else " (a link)" if now[0] == "link" else ""))
+    if bad:
+        who = "adapting agent" if write else "reviewer"
+        raise Fail(f"the OpenCode {who} changed {', '.join(bad[:5])}{' ...' if len(bad) > 5 else ''} in the repo "
+                   f"(--trust-gateway), where it may not write (the adapter writes only its template files in "
+                   f"{ADAPTED}/). Nothing was committed; `git status` shows what changed: put it back by hand")
+
+
+def run_opencode_in_repo(repo: Path, model: str, prompt: str, write: bool):
+    """--trust-gateway: one OpenCode onboarding run in the repo itself, everything in it readable. The same run
+    otherwise (opencode_agent: config from nothing, edit on the adapter's exact paths only); its writes are checked
+    by the repo's state before and after (check_repo_writes), also after a failed run."""
+    if write:
+        check_write_paths(repo)
+    before = repo_state(repo)
+    try:
+        with opencode_agent(repo, model, write) as (cmd, env):
+            p = run(cmd, cwd=repo, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
+    except Fail:
+        check_repo_writes(repo, before, repo_state(repo), write)
+        raise
+    check_repo_writes(repo, before, repo_state(repo), write)
+    return p
+
+
 def run_opencode(repo: Path, model: str, prompt: str, write: bool):
     """One OpenCode onboarding run in a scratch copy of the repo (opencode_export), then copy_back, only after a run
-    that succeeded: a failed, empty or cut-off run brings nothing back (run_agent says why)."""
+    that succeeded: a failed, empty or cut-off run brings nothing back (run_agent says why). With --trust-gateway
+    and the owner's yes, in the repo itself (run_opencode_in_repo)."""
+    if repo.resolve() in TRUSTED:
+        return run_opencode_in_repo(repo, model, prompt, write)
     with opencode_export(repo) as (top, before):
         with opencode_agent(repo, model, write) as (cmd, env):
             p = run(cmd, cwd=top, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
@@ -2459,7 +2632,7 @@ def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
         shown = (stderr or p.stdout.strip()).splitlines()
     if failed or out_of_turns:
         # the adapter may have left half-written files; a plain re-run would review them as if they were complete
-        left = ((" Nothing it wrote was copied back." if opencode else
+        left = ((" Nothing it wrote was copied back." if opencode and repo.resolve() not in TRUSTED else
                  f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or put {ADAPTED}/ back as "
                  f"committed (`git status {ADAPTED}` shows what changed)") if write else "")
         if out_of_turns:
@@ -3155,6 +3328,14 @@ def refuse_private_onboarding(repo: Path) -> None:
                        f"glob (the settings store keeps it: {store_dir(repo) / 'settings.json'}). Nothing was changed")
 
 
+def skipped_adapt(repo: Path) -> None:
+    """--skip-adapt on a project not onboarded yet: the route for a machine with no usable model, said as such."""
+    if not onboarded(repo):
+        say("adapt", "skipped", f"--skip-adapt: no onboarding agent ran, so {ADAPTED}/ and {GENERATED} are not written "
+            "and the coordinator works without them. Adapt the project later, once a model is at hand: project-setup "
+            f"{repo} --readapt (with --adapter and --adapt-reviewer)")
+
+
 def onboard_from(role: str) -> str:
     """Said beside a run's model: where it came from, so a run that falls back to the default says so."""
     src = ONBOARD_FROM.get(role)
@@ -3178,6 +3359,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
                     "pass opencode/<provider>/<model> to onboard on OpenCode)") if fell else ""
             raise Fail(("claude not on PATH, but the onboarding agents use it" if h == "claude" else
                         f"{BINARIES[h]} not on PATH, but the onboarding agents run on {h}") + hint)
+    on_opencode = [f"{h}/{m}" for h, m in (adapter, reviewer) if h == "opencode"]
     for h, m in (adapter, reviewer):  # before any agent: each OpenCode role's provider, and no system config
         if h == "opencode":
             refuse_system_config()
@@ -3191,6 +3373,14 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     # Before the agent starts, so nothing in .cotal/ can pass for its work; committed with its files.
     if ORCHESTRATOR == "orca-cotal":
         say("gitignore", ignore_cotal(repo), ".cotal/")
+    if on_opencode:  # where the prompts go, and which key with them (M9), before the first agent
+        say("gateway", "using", gateway_said())
+        if TRUST_GATEWAY and not confirm_trust(repo, on_opencode):
+            say("adapt", "stopped", "no --trust-gateway yes: no agent ran, nothing was committed. Run again without "
+                "--trust-gateway for a filtered copy")
+            return False
+    elif TRUST_GATEWAY:
+        say("trust-gateway", "unused", "no onboarding agent runs on OpenCode")
     before = snapshot(repo)
     visibility = repo_visibility(repo)
     say("visibility", visibility, "from the git host" if visibility != "unknown" else "gh could not say; the adapter treats it as public")
@@ -3420,15 +3610,14 @@ def resolve_settings(repo: Path, a) -> dict:
         if flag or stored.get(role):  # what the owner gave once is kept; the defaults are never written
             kept[role] = spec
         ONBOARD_FROM[role] = "flag" if flag else "settings store" if stored.get(role) else "default"
-    stored_gw = st.get("gateway") if isinstance(st.get("gateway"), dict) else {}
-    gateway = {"url": a.gateway_url or stored_gw.get("url"),
-               "key_env": a.gateway_key_env if a.gateway_key_env is not None else stored_gw.get("key_env")}
-    if a.gateway_url or a.gateway_key_env is not None:  # given: checked now and kept (never the key)
-        why = gateway_refusal(gateway["url"], gateway["key_env"])
-        if why:
-            raise Refused(why)
+    gateway, gateway_given = resolve_gateway(st, a)
     GATEWAY.clear()
     GATEWAY.update(gateway)
+    if onboarding["adapter"][0] == onboarding["adapt-reviewer"][0] == "opencode" and \
+            onboarding["adapter"][1].partition("/")[2] == onboarding["adapt-reviewer"][1].partition("/")[2]:
+        raise Refused(f"--adapter and --adapt-reviewer must be different models, both are "
+                      f"{onboarding['adapter'][1].partition('/')[2]} at the one gateway (an onboarding run's model is "
+                      "the part after the provider id)")
     if onboarding["adapter"][1] == onboarding["adapt-reviewer"][1]:
         raise Refused(f"--adapter and --adapt-reviewer must be different models, both are {onboarding['adapter'][1]} "
                       f"(the store's models.adapter and models.adapt-reviewer count too)")
@@ -3436,7 +3625,7 @@ def resolve_settings(repo: Path, a) -> dict:
                "private": private, "orchestrator": ORCHESTRATOR}
     if not persona_modes:
         changes["permission_mode"] = mode
-    if a.gateway_url or a.gateway_key_env is not None:
+    if gateway_given:
         changes["gateway"] = {k: v for k, v in gateway.items() if v}
     if a.name:
         changes["name"] = a.name
@@ -3449,6 +3638,39 @@ def resolve_settings(repo: Path, a) -> dict:
     settings(repo, **changes)
     return {"pins": pins, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name"),
             "onboarding": onboarding}
+
+
+def resolve_gateway(st: dict, a) -> tuple:
+    """({"url", "key_env"} this run's OpenCode onboarding agents use, whether a flag gave it: then it is stored). The URL
+    and its key variable are one setting (M9): a --gateway-url other than the stored one never takes the stored key
+    variable along unless the owner says yes in a terminal or names it with --gateway-key-env; otherwise it is
+    dropped, and said. --gateway-key-env '' is no key. A key variable is stored only once it is set here (m26): a
+    key pasted where its name goes is then refused without being shown or kept."""
+    stored = st.get("gateway") if isinstance(st.get("gateway"), dict) else {}
+    old_url, old_key = stored.get("url"), stored.get("key_env")
+    given = bool(a.gateway_url) or a.gateway_key_env is not None
+    url = a.gateway_url or old_url
+    if a.gateway_key_env is not None:
+        key = a.gateway_key_env or None
+    elif a.gateway_url and old_url and a.gateway_url != old_url and old_key:
+        question = (f"The stored gateway key variable ${old_key} was for {old_url}. Send its key to {a.gateway_url} "
+                    "too? [y/N] ")
+        if has_terminal() and owner_says_yes(question, step="gateway"):
+            key = old_key
+        else:
+            key = None
+            say("gateway", "key dropped", f"${old_key} was for {old_url}; pass --gateway-key-env {old_key} to send it "
+                f"to {a.gateway_url}")
+    else:
+        key = old_key
+    if given:  # checked now and kept (never the key)
+        why = gateway_refusal(url, key)
+        if why:
+            raise Refused(why)
+        if a.gateway_key_env and not os.environ.get(a.gateway_key_env):
+            raise Refused("the variable --gateway-key-env names is not set here, so it was not stored (its name is not "
+                          "shown, in case a key was pasted there): set it, or pass the variable's name, not the key")
+    return {"url": url, "key_env": key}, given
 
 
 def which_orchestrator(flag, repo, default: str = None) -> str:
@@ -3478,10 +3700,6 @@ def suggest_tiers(a) -> int:
         print(f"project-setup: --suggest-tiers takes OpenCode's provider id (such as litellm), got {provider!r}",
               file=sys.stderr)
         return 2
-    if a.gateway_key_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", a.gateway_key_env):
-        print("project-setup: --gateway-key-env takes the NAME of an environment variable (letters, digits and _), "
-              "never the key itself", file=sys.stderr)  # not echoed: it may be a key pasted by mistake
-        return 2
     try:
         d = Path(a.target).expanduser().resolve()
         top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
@@ -3489,27 +3707,42 @@ def suggest_tiers(a) -> int:
             raise Fail(f"{d} is not an existing git repository; --suggest-tiers needs the project's checkout")
         repo = Path(top.stdout.strip())
         oc = TS.opencode_provider(provider)
+        st = settings(repo) if (store_dir(repo) / "settings.json").is_file() else {}
     except (Fail, TS.GatewayError) as e:
         print(f"project-setup: {e}", file=sys.stderr)
         return 1
+    # one gateway for onboarding and the suggestion (M10): --gateway-url, else the project's stored gateway, else
+    # OpenCode's config for the provider; a key variable goes only with the URL it was given for
+    stored = st.get("gateway") if isinstance(st.get("gateway"), dict) else {}
     where = oc["where"]
-    base, key_env = a.gateway or oc["base"], a.gateway_key_env or oc["key_env"]
-    if not key_env and oc["literal_key"]:
-        print(f"project-setup: OpenCode's config ({where}) has the apiKey of {provider} written in it, which is never "
-              "used: write it as \"{env:NAME}\" and set NAME in the environment, or pass --gateway-key-env NAME",
-              file=sys.stderr)
-        return 2
+    base = a.gateway_url or stored.get("url") or oc["base"]
+    if a.gateway_key_env is not None:
+        key_env, key_from = a.gateway_key_env or None, "--gateway-key-env"
+    elif stored.get("url") and base == stored["url"]:
+        key_env, key_from = stored.get("key_env"), "the project's stored gateway"
+    elif oc["base"] and base == oc["base"]:
+        if not oc["key_env"] and oc["literal_key"]:
+            print(f"project-setup: OpenCode's config ({where}) has the apiKey of {provider} written in it, which is "
+                  "never used: write it as \"{env:NAME}\" and set NAME in the environment, or pass --gateway-key-env "
+                  "NAME", file=sys.stderr)
+            return 2
+        key_env, key_from = oc["key_env"], f"{where}, which names it"
+    else:
+        key_env, key_from = None, ""
     if not base:
-        print(f"project-setup: no gateway URL for {provider}: pass --gateway <base URL>, or give the provider "
+        print(f"project-setup: no gateway URL for {provider}: pass --gateway-url <base URL>, or give the provider "
               "options.baseURL in OpenCode's config", file=sys.stderr)
         return 2
     key = None
     if key_env:
         key = os.environ.get(key_env)
         if not key:
-            print(f"project-setup: the gateway key's environment variable {key_env} is not set"
-                  + (f" ({where} names it)" if where and not a.gateway_key_env else ""), file=sys.stderr)
+            print("project-setup: the gateway key's environment variable "
+                  + (f"{key_env} is not set ({key_from})" if key_from != "--gateway-key-env" else
+                     "--gateway-key-env names is not set (its name is not shown, in case a key was pasted there)"),
+                  file=sys.stderr)
             return 2
+    say("gateway", "using", f"{base}, " + (f"key from ${key_env}" if key else "no key"))
     try:
         found = TS.fetch_models(base, key)
         models, left_out = TS.usable(found, provider, oc["models"])
@@ -4373,6 +4606,8 @@ def native_main(a, tiers: Path) -> int:
             REVIEW_RULES = NATIVE_REVIEW_NOTE + REVIEW_RULES
             CHECK_RULES = NATIVE_REVIEW_NOTE + CHECK_RULES
         adapter, adapt_reviewer = cfg["onboarding"]["adapter"], cfg["onboarding"]["adapt-reviewer"]
+        if a.skip_adapt:
+            skipped_adapt(repo)
         if not a.skip_adapt:
             refuse_tracked(repo, NATIVE_ROLES)
             with rendered_aside(repo):
@@ -5789,16 +6024,22 @@ def main(argv=None) -> int:
     ap.add_argument("--suggest-tiers", metavar="PROVIDER",
                     help="suggest the project's tier table from a gateway's model list, rows opencode/PROVIDER/<alias> "
                          "(PROVIDER: the gateway's provider id in OpenCode's config); writes it only on the owner's yes")
-    ap.add_argument("--gateway", metavar="URL",
-                    help="with --suggest-tiers: the gateway's base URL (default: OpenCode's config for PROVIDER)")
-    ap.add_argument("--gateway-key-env", metavar="NAME",
-                    help="the environment variable that holds the gateway key: for --suggest-tiers (default: the "
-                         "{env:NAME} OpenCode's config names), and for OpenCode onboarding agents with --gateway-url "
-                         "(kept per project); the key itself is never an argument")
     ap.add_argument("--gateway-url", metavar="URL",
-                    help="the self-hosted gateway an OpenCode --adapter or --adapt-reviewer reaches (a complete http(s) "
-                         "URL, e.g. http://127.0.0.1:4000/v1); its model is the <model> of opencode/<provider>/<model>. "
-                         "Kept per project. Required for an OpenCode onboarding agent")
+                    help="the self-hosted gateway: the one an OpenCode --adapter or --adapt-reviewer reaches (a "
+                         "complete http(s) URL written out, e.g. http://127.0.0.1:4000/v1; its model is the <model> of "
+                         "opencode/<provider>/<model>; kept per project, required for an OpenCode onboarding agent), "
+                         "and the one --suggest-tiers reads (default: the project's stored gateway, else PROVIDER's "
+                         "baseURL in OpenCode's config)")
+    ap.add_argument("--gateway", dest="gateway_url", help=argparse.SUPPRESS)  # the old --suggest-tiers name
+    ap.add_argument("--gateway-key-env", metavar="NAME",
+                    help="the environment variable that holds the gateway key, for the gateway --gateway-url gives "
+                         "(kept per project with it; '' for none; a new --gateway-url does not take a stored one along "
+                         "unless you say yes); the key itself is never an argument")
+    ap.add_argument("--trust-gateway", action="store_true",
+                    help="run the OpenCode onboarding agents in the repo itself, with no filtered copy: the model sees "
+                         "every file in the folder, ignored and private ones included. For a model on a gateway you "
+                         "run; asks once in a terminal (without one, the flag is the yes). Writes stay limited to the "
+                         "adapter's own files. Not kept")
     ap.add_argument("--beads-repo", metavar="OWNER/NAME",
                     help="the private GitHub repo that holds this project's beads (default: the project's origin owner "
                          "and `<repo name>-beads`). Kept in the settings store")
@@ -5824,11 +6065,16 @@ def main(argv=None) -> int:
     again.add_argument("--show", action="store_true",
                        help="print the project's settings store (settings.json, lanes.tsv) and stop; "
                             "writes nothing")
-    again.add_argument("--skip-adapt", action="store_true", help="only the Orca setup: no adapting agent, no commit")
+    again.add_argument("--skip-adapt", action="store_true",
+                       help="only the Orca setup: no adapting agent, no commit. The route for a new project on a "
+                            "machine with no usable model yet: adapt it later with --readapt")
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--box-pairing"]:  # on a box, from this machine's host run (direction 2)
         return box_pairing(argv[1:])
     a = ap.parse_args(argv)
+    global TRUST_GATEWAY
+    TRUST_GATEWAY = a.trust_gateway
+    TRUSTED.clear()
     value_flags = {s for act in ap._actions if act.option_strings and act.nargs is None for s in act.option_strings}
 
     if os.geteuid() == 0:
@@ -5862,15 +6108,16 @@ def main(argv=None) -> int:
         print(f"project-setup: two hosts given ({a.host_pos} and --host {a.host}); give one", file=sys.stderr)
         return 2
     host = a.host or a.host_pos
-    if a.gateway and a.suggest_tiers is None:
-        print("project-setup: --gateway goes with --suggest-tiers (an OpenCode onboarding agent's is --gateway-url)",
-              file=sys.stderr)
+    why = (gateway_url_refusal(a.gateway_url) if a.gateway_url is not None else None) \
+        or gateway_key_refusal(a.gateway_key_env)
+    if why:
+        print(f"project-setup: {why}", file=sys.stderr)
         return 2
-    if a.gateway_url is not None:
-        why = gateway_refusal(a.gateway_url, a.gateway_key_env)
-        if why:
-            print(f"project-setup: {why}", file=sys.stderr)
-            return 2
+    if a.trust_gateway and (a.skip_adapt or a.refresh or a.show or a.suggest_tiers is not None):
+        print("project-setup: --trust-gateway is for the OpenCode onboarding agents, and no onboarding agent runs with "
+              + ("--skip-adapt" if a.skip_adapt else "--refresh" if a.refresh else "--show" if a.show
+                 else "--suggest-tiers"), file=sys.stderr)
+        return 2
     if a.suggest_tiers is not None:
         if host:
             print("project-setup: --suggest-tiers runs where the project is: run it on the host", file=sys.stderr)
@@ -6062,6 +6309,8 @@ def main(argv=None) -> int:
         if "claude" in needed and not a.no_start:
             ensure_claude_trust(repo, record=a.trust_folder)
         project = cfg["name"] or repo.name
+        if a.skip_adapt:
+            skipped_adapt(repo)
         if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt):
             return STOPPED
         if not a.skip_adapt:  # also on a re-run: a declined or failed push is offered again

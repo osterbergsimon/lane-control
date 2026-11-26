@@ -425,6 +425,8 @@ class NativeOnboardingTests(Case):
 
 FAKE_AGENT = ROOT / "tests" / "stubs" / "fake_agent.py"
 OC_ADAPTER, OC_REVIEWER = "litellm/code", "litellm/deep"
+# the model each run is started with: the alias under the run's own provider id, whatever the owner's (m27)
+RUN_ADAPTER, RUN_REVIEWER = "lane-gateway/code", "lane-gateway/deep"
 GATEWAY_URL = "http://127.0.0.1:4000/v1"
 GATEWAY_FLAGS = ("--gateway-url", GATEWAY_URL, "--gateway-key-env", "LITELLM_API_KEY")
 ALL_OPENCODE = ("--adapter", f"opencode/{OC_ADAPTER}", "--adapt-reviewer", f"opencode/{OC_REVIEWER}",
@@ -444,9 +446,9 @@ OWNER_OPENCODE = {"provider": {"litellm": OWNER_BLOCK, "other": {"options": {"ap
                   "instructions": ["~/notes.md"]}
 
 
-class OpenCodeOnboardingTests(Case):
-    """LIT-2 (lc-8h1): --adapter and --adapt-reviewer take opencode/<provider>/<model> and run `opencode2 run`, on a
-    machine that may have no Claude at all (a self-hosted gateway only)."""
+class OpenCodeCase(Case):
+    """The helpers of the OpenCode onboarding tests: the agent stub as opencode2, the owner's OpenCode config, main()
+    in a terminal."""
 
     def opencode_agents(self, steps: dict, claude=False):
         """opencode2 becomes the agent stub (tests/stubs/fake_agent.py); claude is taken off PATH unless asked for."""
@@ -466,35 +468,47 @@ class OpenCodeOnboardingTests(Case):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(conf))
 
-    def setup(self, *args, answer="y", env_extra=None, patch=None):
+    def setup(self, *args, answer="y", env_extra=None, patch=None, answers=None):
+        """main() in a terminal; every question answered `answer` (or the list `answers`, in turn). The coordinator
+        pins' served-model check (MOD-1) is not what these tests are about: --no-model-check."""
         m = load()
         for k, v in (patch or {}).items():
             setattr(m, k, v)
+        self.questions = []
+
+        def ask(q=""):
+            self.questions.append(q)
+            return answers.pop(0) if answers is not None else answer
         with mock.patch.dict(os.environ, {**self.e.env, **(env_extra or {})}, clear=True), \
-                mock.patch("sys.stdin", Tty()), mock.patch("builtins.input", return_value=answer), \
+                mock.patch("sys.stdin", Tty()), mock.patch("builtins.input", side_effect=ask), \
                 contextlib.redirect_stdout(Tty()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
-            status = m.main([str(self.repo), *args])
+            status = m.main([str(self.repo), *args, "--no-model-check"])
         self.out, self.err = out.getvalue(), err.getvalue()
         return status
 
     def config(self, run):
         agents = json.loads(run["config"])["agents"]
-        self.assertEqual(len(agents), 1)
-        name, conf = next(iter(agents.items()))
+        self.assertEqual(sorted(agents)[1:], ["title"])  # the run's agent, and OpenCode's title agent pinned (m27)
+        name, conf = next((n, c) for n, c in agents.items() if n != "title")
         self.assertEqual(run["argv"][run["argv"].index("--agent") + 1], name)
         return conf
 
     def rules(self, run):
         return [(r["action"], r["resource"], r["effect"]) for r in self.config(run)["permissions"]]
 
+
+class OpenCodeOnboardingTests(OpenCodeCase):
+    """LIT-2 (lc-8h1): --adapter and --adapt-reviewer take opencode/<provider>/<model> and run `opencode2 run`, on a
+    machine that may have no Claude at all (a self-hosted gateway only)."""
+
     def test_an_all_opencode_setup_onboards_with_no_claude_on_path(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
         status = self.setup(*ALL_OPENCODE, env_extra={"LANE_ROLE": "coordinator", "LANE_PERSONA": "/elsewhere/c.md",
                                                       "OPENCODE_CONFIG_DIR": "/elsewhere", "SECRET_TOKEN": "x"})
         self.assertEqual(status, 0, self.err + self.out)
         self.assertNotIn("claude not on PATH", self.err)
         runs = self.e.agent_runs()
-        self.assertEqual([(r["tool"], r["model"]) for r in runs], [("opencode2", OC_ADAPTER), ("opencode2", OC_REVIEWER)])
+        self.assertEqual([(r["tool"], r["model"]) for r in runs], [("opencode2", RUN_ADAPTER), ("opencode2", RUN_REVIEWER)])
         names = set()
         for r in runs:
             with self.subTest(model=r["model"]):
@@ -518,8 +532,10 @@ class OpenCodeOnboardingTests(Case):
                 self.assertIsNone(r["env"]["LANE_PERSONA"])
                 self.assertEqual(self.config(r)["model"], r["model"])
                 self.assertEqual(self.config(r)["mode"], "primary")
-                # the key reaches OpenCode by its own variable only: never an argument, never in the config
-                self.assertEqual(r["env"]["LITELLM_API_KEY"], GATEWAY_KEY)
+                # B15: the key reaches OpenCode under lane-control's own variable only, never under the owner's name
+                # (OPENCODE_API_KEY would go to opencode.ai): never an argument, never in the config
+                self.assertEqual(r["env"]["LANE_GATEWAY_KEY"], GATEWAY_KEY)
+                self.assertIsNone(r["env"]["LITELLM_API_KEY"])
                 self.assertNotIn(GATEWAY_KEY, " ".join(r["argv"]))
                 self.assertNotIn(GATEWAY_KEY, r["config"])
                 # B10: OpenCode starts from nothing: HOME and XDG folders of the run's own, one config file in them
@@ -529,19 +545,23 @@ class OpenCodeOnboardingTests(Case):
                 self.assertEqual(r["config_dir"], ["opencode/opencode.json"])
                 conf = json.loads(r["config"])
                 self.assertEqual(sorted(conf), ["agents", "autoupdate", "formatter", "instructions", "lsp", "mcp",
-                                                "provider", "share"])
-                self.assertEqual((conf["formatter"], conf["lsp"], conf["mcp"], conf["instructions"]), (False, False, {}, []))
-                # written fresh from --gateway-url and --gateway-key-env: nothing of the owner's OpenCode config
-                self.assertEqual(conf["provider"], {"litellm": {
+                                                "plugin", "provider", "share"])
+                self.assertEqual((conf["formatter"], conf["lsp"], conf["mcp"], conf["instructions"], conf["plugin"]),
+                                 (False, False, {}, [], []))
+                # written fresh from --gateway-url and --gateway-key-env: nothing of the owner's OpenCode config; under
+                # the run's own provider id, so no OpenCode built-in for "litellm" (or "opencode") applies (m27)
+                self.assertEqual(conf["provider"], {"lane-gateway": {
                     "npm": "@ai-sdk/openai-compatible", "name": "litellm", "models": {r["model"].split("/", 1)[1]: {}},
-                    "options": {"baseURL": GATEWAY_URL, "apiKey": "{env:LITELLM_API_KEY}"}}})
+                    "options": {"baseURL": GATEWAY_URL, "apiKey": "{env:LANE_GATEWAY_KEY}"}}})
+                # m27: OpenCode's title agent (its side request) takes the run's model, never a default of its own
+                self.assertEqual(conf["agents"]["title"], {"model": r["model"]})
                 for owner in ("sk-model-literal", "sk-header-literal", "api.openai.com", "elsewhere", "GW_HOST"):
                     self.assertNotIn(owner, r["config"])
                 self.assertIsNone(r["env"]["OPENCODE_CONFIG"])
                 self.assertIsNone(r["env"]["OPENCODE_CONFIG_CONTENT"])
                 # nothing else of this environment: no marker, no owner OPENCODE_*, no other secret
                 allowed = {"PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
-                           "LITELLM_API_KEY", "OPENCODE_DISABLE_PROJECT_CONFIG",
+                           "LANE_GATEWAY_KEY", "OPENCODE_DISABLE_PROJECT_CONFIG",
                            "OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_AUTOUPDATE", "OPENCODE_DISABLE_MODELS_FETCH",
                            "PWD", "SHLVL", "_"}
                 extra = [k for k in r["env_keys"] if k not in allowed and not re.fullmatch(r"LANG|LC_\w+|TZ", k)]
@@ -578,7 +598,7 @@ class OpenCodeOnboardingTests(Case):
                 "config/**", "app/**", "lib/AGENTS.md")
 
     def test_the_copy_holds_only_what_the_agents_may_see(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
         globs = self.private_repo()
         self.assertEqual(self.setup(*ALL_OPENCODE, *[x for g in globs for x in ("--private", g)]), 0,
                          self.err + self.out)
@@ -610,7 +630,7 @@ class OpenCodeOnboardingTests(Case):
 
     def test_globs_match_from_the_repo_root_whatever_the_working_folder(self):
         # B5: started from a subfolder, an anchored glob still covers its files
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
         (self.repo / "config").mkdir()
         (self.repo / "config" / "keys.md").write_text("x\n")
         (self.repo / "docs").mkdir()
@@ -626,7 +646,7 @@ class OpenCodeOnboardingTests(Case):
         self.assertIn("docs/a.md", files)
 
     def test_a_submodule_is_copied_without_its_private_files_and_an_embedded_repo_not_at_all(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
         lib = self.e.home / "lib-src"
         lib.mkdir()
         git("init", "-q", "-b", "main", cwd=lib)
@@ -653,7 +673,7 @@ class OpenCodeOnboardingTests(Case):
         self.assertFalse([f for f in files if ".git" in f.split("/")], files)
 
     def test_only_lane_control_comes_back_from_the_adapter(self):
-        self.opencode_agents({OC_ADAPTER: [{"write": {ADDITION: "x\n", "AGENTS.md": "rewritten\n"}}]})
+        self.opencode_agents({RUN_ADAPTER: [{"write": {ADDITION: "x\n", "AGENTS.md": "rewritten\n"}}]})
         before = (self.repo / "AGENTS.md").read_text() if (self.repo / "AGENTS.md").exists() else None
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
         self.assertIn("the OpenCode adapting agent changed AGENTS.md in its copy of the project, where it may not "
@@ -674,7 +694,7 @@ class OpenCodeOnboardingTests(Case):
                       {".lane-control/other.md": "not a template\n"}):
             with self.subTest(write=sorted(write)):
                 shutil.rmtree(self.repo / ".lane-control", ignore_errors=True)
-                self.opencode_agents({OC_ADAPTER: [{"write": {ADDITION: "x\n", **write}}]})
+                self.opencode_agents({RUN_ADAPTER: [{"write": {ADDITION: "x\n", **write}}]})
                 self.assertEqual(self.setup(*ALL_OPENCODE), 1)
                 self.assertIn("where it may not write (the adapter writes only its template files in .lane-control/)",
                               self.err)
@@ -691,7 +711,7 @@ class OpenCodeOnboardingTests(Case):
                       {".lane-control/sub/gitdir": "/elsewhere\n"}):
             with self.subTest(write=sorted(write)):
                 shutil.rmtree(self.repo / ".lane-control", ignore_errors=True)
-                self.opencode_agents({"sonnet": [{"write": {ADDITION: "x\n", **write}}], OC_REVIEWER: [PASS]},
+                self.opencode_agents({"sonnet": [{"write": {ADDITION: "x\n", **write}}], RUN_REVIEWER: [PASS]},
                                      claude=True)
                 status = self.setup("--adapter", "claude/sonnet", "--adapt-reviewer", f"opencode/{OC_REVIEWER}",
                                     "--no-start", *GATEWAY_FLAGS)
@@ -707,7 +727,7 @@ class OpenCodeOnboardingTests(Case):
         outside.mkdir()
         (self.repo / ".lane-control").mkdir()
         (self.repo / ".lane-control" / "additions").symlink_to(outside)
-        self.opencode_agents({OC_ADAPTER: [{"write": {ADDITION: "x\n", ".lane-control/project.md": "p\n"}}]})
+        self.opencode_agents({RUN_ADAPTER: [{"write": {ADDITION: "x\n", ".lane-control/project.md": "p\n"}}]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
         self.assertIn(".lane-control/additions in the repo is a link or not a folder", self.err)
         self.assertEqual(list(outside.iterdir()), [])
@@ -753,7 +773,7 @@ class OpenCodeOnboardingTests(Case):
         for step in ({"write": {".lane-control/project.md": "HALF\n"}, "error": "gateway fell over", "exit": 1},
                      {"write": {".lane-control/project.md": "HALF\n"}, "steps": 80, "say": "out of steps"}):
             with self.subTest(step=sorted(step)):
-                self.opencode_agents({OC_ADAPTER: [step]})
+                self.opencode_agents({RUN_ADAPTER: [step]})
                 self.assertEqual(self.setup(*ALL_OPENCODE, "--readapt"), 1)
                 self.assertIn("Nothing it wrote was copied back", self.err)
                 self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "earlier run's\n")
@@ -782,11 +802,11 @@ class OpenCodeOnboardingTests(Case):
 
     def test_a_role_file_over_a_rendered_persona_becomes_its_additions(self):
         # m15: on a re-run the rendered persona stays in place; the adapter's file there is that role's additions
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)
         persona = (self.repo / ".lane-control" / "reviewer.md").read_text()
-        self.opencode_agents({OC_ADAPTER: [{"write": {".lane-control/reviewer.md": "## For the reviewer\nCheck x.\n"}}],
-                              OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [{"write": {".lane-control/reviewer.md": "## For the reviewer\nCheck x.\n"}}],
+                              RUN_REVIEWER: [PASS]})
         self.assertEqual(self.setup(*ALL_OPENCODE, "--readapt", answer="n"), 3, self.err + self.out)
         self.assertEqual((self.repo / ".lane-control" / "additions" / "reviewer.md").read_text(),
                          "## For the reviewer\nCheck x.\n")
@@ -812,7 +832,7 @@ class OpenCodeOnboardingTests(Case):
 
     def test_a_tmpdir_inside_the_repo_is_refused(self):
         # B8: the copy must never sit in the project's own work tree
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE]})
         (self.repo / ".tmp").mkdir()
         self.assertEqual(self.setup(*ALL_OPENCODE, env_extra={"TMPDIR": str(self.repo / ".tmp")}), 1)
         self.assertIn("is inside the repo, where an OpenCode onboarding agent's copy of the project must not be", self.err)
@@ -830,7 +850,7 @@ class OpenCodeOnboardingTests(Case):
                     target.symlink_to(self.e.home / "elsewhere.md")
                 else:
                     target.mkdir()
-                self.opencode_agents({OC_ADAPTER: [{"write": {".lane-control/project.md": "model's\n",
+                self.opencode_agents({RUN_ADAPTER: [{"write": {".lane-control/project.md": "model's\n",
                                                               ".lane-control/routing.md": "r\n"}}]})
                 self.assertEqual(self.setup(*ALL_OPENCODE, "--readapt"), 1)
                 self.assertIn(".lane-control/routing.md in the repo is a link or not a file", self.err)
@@ -844,7 +864,7 @@ class OpenCodeOnboardingTests(Case):
         git("commit", "-qm", "ignore", cwd=self.repo)
         (self.repo / ".lane-control").mkdir()
         (self.repo / ".lane-control" / "routing.md").write_text("owner's local notes\n")
-        self.opencode_agents({OC_ADAPTER: [{"write": {".lane-control/routing.md": "model's\n", ADDITION: "x\n"}}]})
+        self.opencode_agents({RUN_ADAPTER: [{"write": {".lane-control/routing.md": "model's\n", ADDITION: "x\n"}}]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
         self.assertIn(".lane-control/routing.md is in the repo but was left out of the OpenCode adapter's copy", self.err)
         self.assertEqual((self.repo / ".lane-control" / "routing.md").read_text(), "owner's local notes\n")
@@ -859,7 +879,7 @@ class OpenCodeOnboardingTests(Case):
                     (self.repo / "AGENTS.md").symlink_to("CLAUDE.md")
                     git("add", "CLAUDE.md", "AGENTS.md", cwd=self.repo)
                     git("commit", "-qm", "rules", cwd=self.repo)
-                self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+                self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE]})
                 self.assertEqual(self.setup(*ALL_OPENCODE, "--private", g), 1)
                 self.assertIn(f"--private {g!r} covers", self.err)
                 self.assertIn("which onboarding writes or its reviewer must read: narrow the glob", self.err)
@@ -868,14 +888,14 @@ class OpenCodeOnboardingTests(Case):
                 st.write_text(json.dumps({**json.loads(st.read_text()), "private": []}))
 
     def test_the_reviewer_writes_nothing_back(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [{"write": {ADDITION: "changed\n"}, **PASS}]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [{"write": {ADDITION: "changed\n"}, **PASS}]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
         self.assertIn(f"the OpenCode reviewer changed {ADDITION} in its copy", self.err)
         self.assertEqual((self.repo / ADDITION).read_text(), WRITE_NATIVE["write"][ADDITION])
 
     def test_an_opencode_onboarding_agent_needs_the_gateway_given_explicitly(self):
         # round 6: no OpenCode config is read; the gateway comes from --gateway-url alone, refused before any agent
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE]})
         no_gateway = [x for x in ALL_OPENCODE if x not in GATEWAY_FLAGS]
         self.assertEqual(self.setup(*no_gateway), 1)
         self.assertIn("no --gateway-url: an OpenCode onboarding agent (litellm/code) reaches its gateway only by the URL "
@@ -894,30 +914,57 @@ class OpenCodeOnboardingTests(Case):
                 self.assertIn(said, r.stderr)
         r = self.e.run(str(self.repo), *no_gateway, "--gateway-url", GATEWAY_URL, "--gateway-key-env", "A-B", adapt=True)
         self.assertIn("takes the NAME of an environment variable", r.stderr)
+        # m26: a key variable that is not set is never stored, and its "name" (maybe a pasted key) never shown
         self.e.env.pop("LITELLM_API_KEY")
-        self.assertEqual(self.setup(*ALL_OPENCODE), 1)
-        self.assertIn("the gateway key's environment variable LITELLM_API_KEY (--gateway-key-env) is not set", self.err)
+        self.assertEqual(self.setup(*ALL_OPENCODE), 2)
+        self.assertIn("the variable --gateway-key-env names is not set here, so it was not stored (its name is not "
+                      "shown, in case a key was pasted there)", self.err)
+        self.assertNotIn("LITELLM_API_KEY", self.err + self.out)
         self.assertEqual(self.e.agent_runs(), [])
+        self.assertNotIn("gateway", self.e.settings(self.repo))
+        # a stored key variable that is unset at a later run is named: it was set when it was stored
+        self.e.env["LITELLM_API_KEY"] = GATEWAY_KEY
+        self.e.set_state(agent_steps={RUN_ADAPTER: [{"exit": 1, "error": "stop"}]})
+        self.setup(*ALL_OPENCODE)
+        self.e.env.pop("LITELLM_API_KEY")
+        self.assertEqual(self.setup(*[x for x in ALL_OPENCODE if x not in GATEWAY_FLAGS]), 1)
+        self.assertIn("the gateway key's environment variable LITELLM_API_KEY (--gateway-key-env) is not set", self.err)
 
     def test_the_gateway_is_kept_per_project_and_never_its_key(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
         self.assertEqual(self.setup(*ALL_OPENCODE, answer="n"), 3, self.err + self.out)
         self.assertEqual(self.e.settings(self.repo)["gateway"], {"url": GATEWAY_URL, "key_env": "LITELLM_API_KEY"})
         self.assertNotIn(GATEWAY_KEY, (self.e.store(self.repo) / "settings.json").read_text())
-        self.e.set_state(agent_steps={OC_REVIEWER: [PASS]})
+        self.e.set_state(agent_steps={RUN_REVIEWER: [PASS]})
         self.assertEqual(self.setup("--no-start"), 0, self.err + self.out)  # no flags: the stored gateway and pins
         conf = json.loads(self.e.agent_runs()[-1]["config"])
-        self.assertEqual(conf["provider"]["litellm"]["options"]["baseURL"], GATEWAY_URL)
+        self.assertEqual(conf["provider"]["lane-gateway"]["options"]["baseURL"], GATEWAY_URL)
 
-    def test_a_vendor_named_provider_id_still_gets_only_the_given_url(self):
-        self.opencode_agents({"openai/gpt": [WRITE_NATIVE], "anthropic/claude": [PASS]})
-        self.assertEqual(self.setup("--adapter", "opencode/openai/gpt", "--adapt-reviewer", "opencode/anthropic/claude",
-                                    "--no-start", *GATEWAY_FLAGS), 0, self.err + self.out)
-        for r, pid in zip(self.e.agent_runs(), ("openai", "anthropic")):
-            block = json.loads(r["config"])["provider"]
-            self.assertEqual(list(block), [pid])
-            self.assertEqual((block[pid]["npm"], block[pid]["options"]["baseURL"]),
-                             ("@ai-sdk/openai-compatible", GATEWAY_URL))
+    def test_any_provider_id_runs_as_the_runs_own_with_only_the_given_url(self):
+        # m27: a built-in or vendor-named provider id (opencode, github-copilot, openai) would bring OpenCode's own
+        # defaults for it (a side model, a key it reads); the run's provider id is lane-gateway whatever is given
+        for adapter, reviewer in (("openai/gpt", "anthropic/claude"), ("opencode/gpt", "github-copilot/claude")):
+            with self.subTest(adapter=adapter):
+                shutil.rmtree(self.repo / ".lane-control", ignore_errors=True)
+                self.opencode_agents({"lane-gateway/gpt": [WRITE_NATIVE], "lane-gateway/claude": [PASS]})
+                self.assertEqual(self.setup("--adapter", f"opencode/{adapter}", "--adapt-reviewer",
+                                            f"opencode/{reviewer}", "--no-start", "--readapt", *GATEWAY_FLAGS, answer="n"),
+                                 3, self.err + self.out)
+                for r, given in zip(self.e.agent_runs()[-2:], (adapter, reviewer)):
+                    conf = json.loads(r["config"])
+                    self.assertEqual(list(conf["provider"]), ["lane-gateway"])
+                    block = conf["provider"]["lane-gateway"]
+                    self.assertEqual((block["npm"], block["options"]["baseURL"], block["name"]),
+                                     ("@ai-sdk/openai-compatible", GATEWAY_URL, given.split("/")[0]))
+                    self.assertEqual(r["model"], "lane-gateway/" + given.split("/")[1])
+
+    def test_two_onboarding_agents_with_one_alias_are_refused(self):
+        # the provider id is not the run's, so litellm/code and other/code are the same model at the one gateway
+        self.opencode_agents({})
+        self.assertEqual(self.setup("--adapter", "opencode/litellm/code", "--adapt-reviewer", "opencode/other/code",
+                                    "--no-start", *GATEWAY_FLAGS), 2)
+        self.assertIn("--adapter and --adapt-reviewer must be different models, both are code at the one gateway",
+                      self.err)
 
     def test_a_bad_opencode_reviewer_stops_before_the_claude_adapter_runs(self):
         # m22: each OpenCode role is checked before any agent starts
@@ -931,7 +978,7 @@ class OpenCodeOnboardingTests(Case):
         # M6: OpenCode loads its system folder whatever HOME is, with no switch to keep it out
         system = self.e.home / "etc-opencode"
         system.mkdir()
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE]})
         self.assertEqual(self.setup(*ALL_OPENCODE, patch={"SYSTEM_CONFIG": {"linux": str(system),
                                                                              "darwin": str(system)}}), 1)
         self.assertIn(f"{system} exists: OpenCode loads that system config folder in every run", self.err)
@@ -942,15 +989,11 @@ class OpenCodeOnboardingTests(Case):
         # coordinator at the end (LEFTOVER, printed when no coordinator starts in this run)
         q = ("## AGENTS.md edits you would make\n\n## Questions for the owner\n"
              "- Which branch\x1b[8m hides the list\x1b]52;c;eA==\x07?\n")
-        self.opencode_agents({OC_ADAPTER: [{**WRITE_NATIVE, "write": {**WRITE_NATIVE["write"],
+        self.opencode_agents({RUN_ADAPTER: [{**WRITE_NATIVE, "write": {**WRITE_NATIVE["write"],
                                                                       ".lane-control/SUGGESTIONS.md": q}}],
-                              OC_REVIEWER: [PASS]})
-        m = load()
-        with mock.patch.dict(os.environ, self.e.env, clear=True), mock.patch("sys.stdin", Tty()), \
-                mock.patch("builtins.input", side_effect=["", "y", "n", "n"]), \
-                contextlib.redirect_stdout(Tty()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
-            m.main([str(self.repo), *ALL_OPENCODE])
-        out, err = out.getvalue(), err.getvalue()
+                              RUN_REVIEWER: [PASS]})
+        self.setup(*ALL_OPENCODE, answers=["", "y", "n", "n"])
+        out, err = self.out, self.err
         self.assertIn("Questions the adapting agent could not settle", out)  # the question was asked
         self.assertIn("1. - Which branch[8m hides the list]52;c;eA==?", out)  # its ESC and BEL bytes gone
         self.assertIn("Left open at the commit", err)  # LEFTOVER: printed, since no coordinator started
@@ -959,7 +1002,7 @@ class OpenCodeOnboardingTests(Case):
 
     def test_an_empty_opencode_run_is_a_failure_with_what_it_said(self):
         # m2: exit 0 with no answer and no tool call (a help print, an empty answer) is no result
-        self.opencode_agents({OC_ADAPTER: [{"err": "Run OpenCode with a message"}]})
+        self.opencode_agents({RUN_ADAPTER: [{"err": "Run OpenCode with a message"}]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
         self.assertIn(f"opencode2 run --model {OC_ADAPTER} gave no answer and called no tool: Run OpenCode with a "
                       "message", self.err)
@@ -967,13 +1010,13 @@ class OpenCodeOnboardingTests(Case):
 
     def test_the_onboarding_pins_are_kept_per_project(self):
         # m1: a later run without the flags uses the stored ones, never silently the Claude defaults
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
         self.assertEqual(self.setup(*ALL_OPENCODE, answer="n"), 3, self.err + self.out)  # stopped before the commit
         models = self.e.settings(self.repo)["models"]
         self.assertEqual((models["adapter"], models["adapt-reviewer"]), (f"opencode/{OC_ADAPTER}", f"opencode/{OC_REVIEWER}"))
-        self.e.set_state(agent_steps={OC_REVIEWER: [PASS]})
+        self.e.set_state(agent_steps={RUN_REVIEWER: [PASS]})
         self.assertEqual(self.setup("--no-start"), 0, self.err + self.out)  # no flags: the stored pins, no claude
-        self.assertEqual([r["model"] for r in self.e.agent_runs()], [OC_ADAPTER, OC_REVIEWER, OC_REVIEWER])
+        self.assertEqual([r["model"] for r in self.e.agent_runs()], [RUN_ADAPTER, RUN_REVIEWER, RUN_REVIEWER])
         self.assertIn(f"review: running opencode/{OC_REVIEWER} (from the settings store)", self.out)
 
     def test_a_default_pin_says_so_where_claude_is_missing(self):
@@ -985,22 +1028,22 @@ class OpenCodeOnboardingTests(Case):
 
     def test_the_reviewer_round_runs_on_opencode_too(self):
         fix = {"say": "project.md names the wrong command.\nVERDICT: FIX"}
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE, {"write": {".lane-control/project.md": "fixed\n"}}],
-                              OC_REVIEWER: [fix, PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE, {"write": {".lane-control/project.md": "fixed\n"}}],
+                              RUN_REVIEWER: [fix, PASS]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)
         runs = self.e.agent_runs()
-        self.assertEqual([r["model"] for r in runs], [OC_ADAPTER, OC_REVIEWER, OC_ADAPTER, OC_REVIEWER])
+        self.assertEqual([r["model"] for r in runs], [RUN_ADAPTER, RUN_REVIEWER, RUN_ADAPTER, RUN_REVIEWER])
         self.assertIn("project.md names the wrong command", runs[2]["prompt"])  # the findings reach the fix round
         self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "fixed\n")
 
     def test_a_failed_opencode_run_says_what_opencode_said(self):
-        self.opencode_agents({OC_ADAPTER: [{"error": "ECONNREFUSED: Unable to connect.", "exit": 1}]})
+        self.opencode_agents({RUN_ADAPTER: [{"error": "ECONNREFUSED: Unable to connect.", "exit": 1}]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
         self.assertIn("opencode2 run --model failed: ECONNREFUSED: Unable to connect.", self.err)
         self.assertIn("Nothing was committed", self.err)
 
     def test_an_opencode_reviewer_out_of_steps_is_a_clean_fail(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [{"steps": 60, "say": "I ran out."}]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [{"steps": 60, "say": "I ran out."}]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 1)
         self.assertIn("the reviewer used all 60 turns", self.err)
 
@@ -1012,25 +1055,317 @@ class OpenCodeOnboardingTests(Case):
         self.assertEqual(self.e.agent_runs(), [])
 
     def test_a_claude_role_still_needs_claude(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE]})
         self.assertEqual(self.setup("--adapter", f"opencode/{OC_ADAPTER}", "--no-start"), 1)  # reviewer: claude/opus
         self.assertIn("claude not on PATH, but the onboarding agents use it", self.err)
         self.assertEqual(self.e.agent_runs(), [])
 
     def test_mixed_harnesses_each_run_their_own(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], "opus": [PASS]}, claude=True)
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], "opus": [PASS]}, claude=True)
         self.assertEqual(self.setup("--adapter", f"opencode/{OC_ADAPTER}", "--no-start", *GATEWAY_FLAGS), 0, self.err + self.out)
         self.assertEqual([(r["tool"], r["model"]) for r in self.e.agent_runs()],
-                         [("opencode2", OC_ADAPTER), ("claude", "opus")])
+                         [("opencode2", RUN_ADAPTER), ("claude", "opus")])
 
     def test_refresh_of_an_opencode_project_needs_no_claude(self):
-        self.opencode_agents({OC_ADAPTER: [WRITE_NATIVE], OC_REVIEWER: [PASS]})
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
         self.assertEqual(self.setup(*ALL_OPENCODE), 0, self.err + self.out)
         r = self.e.run(str(self.repo), "--refresh", adapt=True)  # adapt: no --skip-adapt, which --refresh refuses
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertNotIn("claude", r.stderr)
         self.assertEqual(len(self.e.agent_runs()), 2)  # a refresh adapts nothing
 
+
+
+class GatewayRound7Tests(OpenCodeCase):
+    """Review round 7 (lc-8h1): the key under lane-control's own name (B15), the URL and its key variable as one
+    setting (M9), a URL only as it is written (M11) and not a known vendor's (m23), a key never shown or stored where
+    its name goes (m26)."""
+
+    def store_gateway(self, url, key_env):
+        f = self.e.store(self.repo) / "settings.json"
+        f.write_text(json.dumps({**json.loads(f.read_text()), "gateway": {"url": url, "key_env": key_env}}))
+
+    def test_the_key_reaches_the_run_only_under_lane_controls_own_name(self):
+        # B15: OPENCODE_API_KEY is OpenCode's own (it sends it to opencode.ai); never hand OpenCode the owner's name
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.e.env["OPENCODE_API_KEY"] = GATEWAY_KEY
+        flags = [x for x in ALL_OPENCODE if x not in GATEWAY_FLAGS]
+        self.assertEqual(self.setup(*flags, "--gateway-url", GATEWAY_URL, "--gateway-key-env", "OPENCODE_API_KEY"), 0,
+                         self.err + self.out)
+        for r in self.e.agent_runs():
+            with self.subTest(model=r["model"]):
+                self.assertIsNone(r["env"]["OPENCODE_API_KEY"])
+                self.assertEqual(r["env"]["LANE_GATEWAY_KEY"], GATEWAY_KEY)
+                opts = json.loads(r["config"])["provider"]["lane-gateway"]["options"]
+                self.assertEqual(opts["apiKey"], "{env:LANE_GATEWAY_KEY}")
+                self.assertNotIn("OPENCODE_API_KEY", r["config"])
+        self.assertEqual(self.e.settings(self.repo)["gateway"], {"url": GATEWAY_URL, "key_env": "OPENCODE_API_KEY"})
+
+    def test_the_gateway_and_its_key_are_said_before_the_first_agent(self):
+        # M9: where the prompts go and which key goes with them
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE, answer="n"), 3, self.err + self.out)
+        line = f"gateway: using {GATEWAY_URL}, key from $LITELLM_API_KEY\n"
+        self.assertIn(line, self.out)
+        self.assertLess(self.out.index(line), self.out.index("adapt: running"))
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup("--readapt", "--gateway-key-env", "", answer="n"), 3, self.err + self.out)
+        self.assertIn(f"gateway: using {GATEWAY_URL}, no key\n", self.out)  # '' is no key, and it is kept so
+        self.assertEqual(self.e.settings(self.repo)["gateway"], {"url": GATEWAY_URL})
+        self.assertNotIn("apiKey", self.e.agent_runs()[-1]["config"])
+        self.assertIsNone(self.e.agent_runs()[-1]["env"]["LANE_GATEWAY_KEY"])
+        other = "http://10.0.0.5:4000/v1"
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup("--readapt", "--gateway-url", other, answer="n"), 3, self.err + self.out)
+        self.assertIn(f"gateway: using {other}, no key; plain http: for loopback or a network you trust\n", self.out)
+
+    def test_a_new_gateway_url_never_takes_the_old_key_along_unasked(self):
+        # M9: gateway A had a key; B (a keyless local one, say) must not get A's key
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup(*ALL_OPENCODE, answer="n"), 3, self.err + self.out)
+        new = "http://127.0.0.1:5000/v1"
+        # without a terminal: dropped, and said
+        self.e.set_state(agent_steps={RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        r = self.e.run(str(self.repo), "--readapt", "--gateway-url", new, "--no-start", "--no-model-check", adapt=True)
+        self.assertEqual(r.returncode, 3, r.stderr + r.stdout)
+        self.assertIn(f"gateway: key dropped $LITELLM_API_KEY was for {GATEWAY_URL}; pass --gateway-key-env "
+                      f"LITELLM_API_KEY to send it to {new}", r.stdout)
+        self.assertIn(f"gateway: using {new}, no key", r.stdout)
+        self.assertEqual(self.e.settings(self.repo)["gateway"], {"url": new})
+        run = self.e.agent_runs()[-1]
+        self.assertIsNone(run["env"]["LANE_GATEWAY_KEY"])
+        self.assertNotIn("apiKey", run["config"])
+        # in a terminal: asked; no drops it, yes keeps it
+        for answer, kept in (("n", False), ("y", True)):
+            with self.subTest(answer=answer):
+                self.store_gateway(GATEWAY_URL, "LITELLM_API_KEY")
+                self.e.set_state(agent_steps={RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+                self.setup("--readapt", "--gateway-url", new, answers=[answer, "n", "n", "n", "n"])
+                self.assertIn(f"The stored gateway key variable $LITELLM_API_KEY was for {GATEWAY_URL}. Send its key to "
+                              f"{new} too? [y/N] ", self.questions)
+                self.assertEqual(self.e.settings(self.repo)["gateway"],
+                                 {"url": new, **({"key_env": "LITELLM_API_KEY"} if kept else {})})
+                self.assertEqual(self.e.agent_runs()[-1]["env"]["LANE_GATEWAY_KEY"], GATEWAY_KEY if kept else None)
+        # the same URL again keeps its key, asked nothing
+        self.store_gateway(GATEWAY_URL, "LITELLM_API_KEY")
+        self.e.set_state(agent_steps={RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.setup("--readapt", "--gateway-url", GATEWAY_URL, answer="n")
+        self.assertFalse([q for q in self.questions if "gateway key variable" in q])
+        self.assertEqual(self.e.agent_runs()[-1]["env"]["LANE_GATEWAY_KEY"], GATEWAY_KEY)
+
+    def test_a_key_given_where_its_name_goes_is_never_shown_or_stored(self):
+        # m26: an sk- key is refused without being echoed; a key of letters and digits is no set variable
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE]})
+        flags = [x for x in ALL_OPENCODE if x not in GATEWAY_FLAGS]
+        for key in ("sk-live-abc123def456", "a1b2c3d4e5f6a7b8c9d0"):
+            with self.subTest(key=key):
+                r = self.e.run(str(self.repo), *flags, "--gateway-url", GATEWAY_URL, "--gateway-key-env", key,
+                               "--no-model-check", adapt=True)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertNotIn(key, r.stdout + r.stderr)
+                self.assertNotIn(key, (self.e.store(self.repo) / "settings.json").read_text()
+                                 if (self.e.store(self.repo) / "settings.json").exists() else "")
+                self.assertEqual(self.e.agent_runs(), [])
+        r = self.e.run(str(self.repo), "--suggest-tiers", "litellm", "--gateway-url", GATEWAY_URL,
+                       "--gateway-key-env", "a1b2c3d4e5f6a7b8c9d0")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("a1b2c3d4e5f6a7b8c9d0", r.stdout + r.stderr)
+
+    def test_only_a_url_written_out_plainly_is_taken(self):
+        # M11: each of these reads as one host to Python and as api.openai.com to OpenCode's WHATWG parser (or is
+        # unclear); m23: vendor hosts the round-6 list missed; a key in the query string
+        m = load()
+        refused = ["https://api.openai.com./v1", "https://api.%6Fpenai.com/v1", "https://api.openai.com\\.gw.internal.test/v1",
+                   "https://api。openai。com/v1", "https://api.open­ai.com/v1", "https://api.open​ai.com/v1",
+                   "https://API.OPENAI.COM/v1", "https://ａpi.openai.com/v1", "http://gw.example/v1?key=sk-x",
+                   "http://gw.example/v1#x", "http://gw..example/v1", "http://gw.example:0/v1", "http://gw.example:99999",
+                   "http://[::1/v1", "http:/gw.example/v1", "http://gw.example/v%31", "http://gw.example/v1\\x",
+                   "http://u@gw.example/v1", "http://@gw.example/v1", "http://u:p@gw.example/v1",
+                   "https://api.together.ai/v1", "https://x.services.ai.azure.com/models",
+                   "https://x.cognitiveservices.azure.com/openai", "https://models.inference.ai.azure.com",
+                   "https://models.github.ai/inference", "https://api.githubcopilot.com",
+                   "https://integrate.api.nvidia.com/v1", "https://api.cerebras.ai/v1", "https://api.deepinfra.com/v1",
+                   "https://router.huggingface.co/v1", "https://ai-gateway.vercel.sh/v1",
+                   "https://gateway.ai.cloudflare.com/v1/x/y", "https://api.cloudflare.com/client/v4",
+                   "https://api.moonshot.ai/v1", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                   "https://api.z.ai/api", "https://api.sambanova.ai/v1", "https://api.replicate.com/v1",
+                   "https://ollama.com/api", "https://opencode.ai/zen/v1"]
+        for url in refused:
+            with self.subTest(refused=ascii(url)):
+                self.assertIsNotNone(m.gateway_url_refusal(url))
+        for url in ("http://127.0.0.1:4000/v1", "http://[::1]:4000/v1", "https://gw.example.internal/v1",
+                    "http://gw_host:4000", "http://localhost:11434/v1", "https://xn--bcher-kva.example/v1",
+                    "https://litellm.corp.example/api/v1/"):
+            with self.subTest(taken=url):
+                self.assertIsNone(m.gateway_url_refusal(url))
+        for url, said in (("https://api.openai.com./v1", "is a vendor's public API"),
+                          ("https://api.openai.com\\.gw.internal.test/v1", "must be a complete http(s) URL written out"),
+                          ("https://api.%6Fpenai.com/v1", "with no %, backslash"),
+                          ("http://gw.example/v1?key=sk-secret", "with no query or fragment")):
+            with self.subTest(url=url):
+                r = self.e.run(str(self.repo), "--gateway-url", url, adapt=True)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn(said, r.stderr)
+        r = self.e.run(str(self.repo), "--gateway-url", "https://api.open​ai.com/v1", adapt=True)
+        self.assertIn("\\u200b", r.stderr)  # an invisible character is shown, not printed as nothing
+        self.assertNotIn("sk-secret", self.e.run(str(self.repo), "--gateway-url", "http://gw.example/v1?key=sk-secret",
+                                                 adapt=True).stderr)  # a key may be in a query string: never shown
+
+
+class TrustGatewayTests(OpenCodeCase):
+    """--trust-gateway (owner 2026-11-26): the OpenCode onboarding agents read the repo itself, after a plain warning
+    and one yes (or the flag alone with no terminal); the run is otherwise the same, and its writes are checked by the
+    repo's state before and after."""
+
+    def trusted(self, steps, *extra, answer="y", answers=None):
+        self.opencode_agents(steps)
+        return self.setup(*ALL_OPENCODE, "--trust-gateway", *extra, answer=answer, answers=answers)
+
+    def test_after_the_warning_and_a_yes_the_agents_read_the_repo_itself(self):
+        (self.repo / ".env").write_text("SECRET=1\n")
+        (self.repo / ".gitignore").write_text("data/\n")
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "x.csv").write_text("p\n")
+        git("add", ".gitignore", cwd=self.repo)
+        git("commit", "-qm", "ignore", cwd=self.repo)
+        self.assertEqual(self.trusted({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]}, "--private", "data/**"), 0,
+                         self.err + self.out)
+        warning = self.out.index("WARNING (--trust-gateway)")
+        self.assertIn(f"will run in {self.repo} itself, not in a filtered copy. The model will see every file in that "
+                      "folder: ignored and private ones included", self.out)
+        self.assertIn("This is meant for a model on a gateway you run yourself", self.out)
+        self.assertIn(GATEWAY_URL, self.out[warning:])
+        self.assertLess(warning, self.out.index("adapt: running"))
+        trust = [q for q in self.questions if "every file readable" in q]
+        self.assertEqual(trust, [f"Run them in {self.repo} itself, every file readable? [y/N] "])  # one yes for both
+        runs = self.e.agent_runs()
+        self.assertEqual([r["model"] for r in runs], [RUN_ADAPTER, RUN_REVIEWER])
+        for r in runs:
+            with self.subTest(model=r["model"]):
+                self.assertEqual(Path(r["cwd"]).resolve(), self.repo.resolve())
+                for private in (".env", "data/x.csv"):  # nothing is filtered: that is what the yes was for
+                    self.assertIn(private, r["files"])
+                # still in both modes: the config from nothing, the key under lane-control's name, edit on exact paths
+                conf = json.loads(r["config"])
+                self.assertEqual(list(conf["provider"]), ["lane-gateway"])
+                self.assertEqual((conf["formatter"], conf["lsp"], conf["mcp"], conf["plugin"]), (False, False, {}, []))
+                self.assertEqual(r["env"]["LANE_GATEWAY_KEY"], GATEWAY_KEY)
+                self.assertIsNone(r["env"]["LITELLM_API_KEY"])
+                self.assertEqual(self.rules(r)[:2], [("*", "*", "deny"), ("read", "*", "allow")])
+        self.assertFalse([x for _, x, _ in self.rules(runs[0])[2:] if "*" in x])
+        self.assertIn(ADDITION, git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines())
+
+    def test_a_no_runs_nothing(self):
+        self.assertEqual(self.trusted({RUN_ADAPTER: [WRITE_NATIVE]}, answer="n"), 3, self.err + self.out)
+        self.assertIn("adapt: stopped no --trust-gateway yes: no agent ran", self.out)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_without_a_terminal_the_flag_is_the_yes(self):
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        r = self.e.run(str(self.repo), *ALL_OPENCODE, "--trust-gateway", "--no-model-check", adapt=True)
+        self.assertEqual(r.returncode, 3, r.stderr + r.stdout)  # the commit still needs the owner's yes
+        self.assertIn("WARNING (--trust-gateway)", r.stdout)
+        self.assertIn("trust-gateway: yes --trust-gateway, with no terminal to ask in", r.stdout)
+        self.assertEqual([Path(x["cwd"]).resolve() for x in self.e.agent_runs()], [self.repo.resolve()] * 2)
+        # and without the flag, the same run is in a copy
+        self.e.set_state(agent_steps={RUN_REVIEWER: [PASS]})
+        r = self.e.run(str(self.repo), *ALL_OPENCODE, "--no-model-check", adapt=True)
+        self.assertNotIn("WARNING (--trust-gateway)", r.stdout)
+        self.assertNotEqual(Path(self.e.agent_runs()[-1]["cwd"]).resolve(), self.repo.resolve())
+
+    def test_any_write_but_the_adapters_own_files_stops_the_run(self):
+        for i, (step, named) in enumerate((({"write": {ADDITION: "x\n", "AGENTS.md": "rewritten\n"}}, "AGENTS.md"),
+                            ({"write": {ADDITION: "x\n", ".git/config": "[core]\n\tfsmonitor = touch PWNED\n"}},
+                             ".git/config"),
+                            ({"write": {".git/hooks/pre-commit": "touch PWNED\n"}}, ".git/hooks/pre-commit"),
+                            ({"write": {".lane-control/.hidden.md": "x\n"}}, ".lane-control/.hidden.md"),
+                            ({"write": {".lane-control/notes/x.md": "x\n"}}, ".lane-control/notes"),
+                            ({"link": {".lane-control/project.md": "/etc/hostname"}}, ".lane-control/project.md (a link)"),
+                            ({"write": {ADDITION: "x\n"}, "remove": ["tracked.md"]}, "tracked.md (removed)"),
+                            ({"write": {"node_modules/x.js": "x\n"}}, "node_modules"))):
+            with self.subTest(named=named):
+                self.repo = self.e.repo(f"app{i}")  # a fresh repo each: what a refused run wrote stays in its repo
+                (self.repo / "tracked.md").write_text("t\n")
+                git("add", "tracked.md", cwd=self.repo)
+                git("commit", "-qm", "t", cwd=self.repo)
+                self.assertEqual(self.trusted({RUN_ADAPTER: [{**step, "steps": 1, "say": "done"}]}), 1, self.err)
+                self.assertIn(f"the OpenCode adapting agent changed ", self.err)
+                self.assertIn(named, self.err)
+                self.assertIn("in the repo (--trust-gateway), where it may not write", self.err)
+                self.assertIn("Nothing was committed", self.err)
+
+    def test_the_reviewer_writes_nothing(self):
+        self.assertEqual(self.trusted({RUN_ADAPTER: [WRITE_NATIVE],
+                                       RUN_REVIEWER: [{"write": {ADDITION: "changed\n"}, **PASS}]}), 1, self.err)
+        self.assertIn(f"the OpenCode reviewer changed {ADDITION} in the repo (--trust-gateway)", self.err)
+
+    def test_a_link_on_the_way_to_the_adapters_files_stops_it_before_it_runs(self):
+        outside = self.e.home / "outside"
+        outside.mkdir()
+        (self.repo / ".lane-control").mkdir()
+        (self.repo / ".lane-control" / "additions").symlink_to(outside)
+        self.assertEqual(self.trusted({RUN_ADAPTER: [WRITE_NATIVE]}), 1)
+        self.assertIn(".lane-control/additions in the repo is a link or not a folder, so the OpenCode adapter cannot "
+                      "run in the repo itself (--trust-gateway)", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_a_failed_run_still_has_its_writes_checked(self):
+        self.assertEqual(self.trusted({RUN_ADAPTER: [{"write": {"AGENTS.md": "x\n"}, "error": "fell over", "exit": 1}]}),
+                         1)
+        self.assertIn("changed AGENTS.md in the repo (--trust-gateway)", self.err)
+
+    def test_the_system_config_refusal_holds_in_trusted_mode_too(self):
+        system = self.e.home / "etc-opencode"
+        system.mkdir()
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE]})
+        self.assertEqual(self.setup(*ALL_OPENCODE, "--trust-gateway",
+                                    patch={"SYSTEM_CONFIG": {"linux": str(system), "darwin": str(system)}}), 1)
+        self.assertIn(f"{system} exists", self.err)
+        self.assertEqual(self.e.agent_runs(), [])
+
+    def test_it_is_refused_where_no_onboarding_agent_runs_and_unused_on_claude(self):
+        for other in ("--skip-adapt", "--refresh", "--show"):
+            with self.subTest(other=other):
+                r = self.e.run(str(self.repo), "--trust-gateway", other, adapt=True)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn(f"no onboarding agent runs with {other}", r.stderr)
+        self.opencode_agents({"sonnet": [WRITE_NATIVE], "opus": [PASS]}, claude=True)
+        self.setup("--trust-gateway", "--no-start", answer="n")
+        self.assertIn("trust-gateway: unused no onboarding agent runs on OpenCode", self.out)
+        self.assertNotIn("WARNING (--trust-gateway)", self.out)
+
+    def test_it_is_not_kept(self):
+        self.assertEqual(self.trusted({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]}, answer="n"), 3)
+        self.assertNotIn("trust", json.dumps(self.e.settings(self.repo)))
+
+
+class SkipAdaptRouteTests(OpenCodeCase):
+    """The third route for a new project on a machine without a usable model: --skip-adapt sets it up (Orca, the
+    coordinator), and --readapt adapts it later."""
+
+    def test_a_new_project_set_up_with_skip_adapt_works_and_is_adapted_later(self):
+        (self.e.bin / "claude").unlink(missing_ok=True)  # no Claude, and no gateway the onboarding agents could use
+        r = self.e.run(str(self.repo), "--coordinator", "opencode/litellm/chat", "--reviewer", "opencode/litellm/deep",
+                       "--no-model-check")  # e.run adds --skip-adapt
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("adapt: skipped --skip-adapt: no onboarding agent ran, so .lane-control/ and "
+                      f"{GENERATED} are not written", r.stdout)
+        self.assertIn("--readapt", r.stdout)
+        self.assertTrue([c for c in self.e.calls() if c.startswith("orca repo add")], self.e.calls())  # Orca setup
+        s = [x for x in self.e.sessions() if x["role"] == "coordinator"]
+        self.assertEqual([x["bin"] for x in s], ["opencode2"])  # the coordinator started
+        self.assertFalse((self.repo / ADDITION).exists())
+        self.assertEqual(self.e.agent_runs(), [])
+        # later, with a model at hand: --readapt adapts it, as a first onboarding would
+        self.opencode_agents({RUN_ADAPTER: [WRITE_NATIVE], RUN_REVIEWER: [PASS]})
+        self.assertEqual(self.setup("--readapt", "--adapter", f"opencode/{OC_ADAPTER}", "--adapt-reviewer",
+                                    f"opencode/{OC_REVIEWER}", *GATEWAY_FLAGS, "--no-start"), 0, self.err + self.out)
+        self.assertEqual([r["model"] for r in self.e.agent_runs()], [RUN_ADAPTER, RUN_REVIEWER])
+        committed = git("show", "--name-only", "--format=", "HEAD", cwd=self.repo).splitlines()
+        self.assertIn(ADDITION, committed)
+        self.assertIn(GENERATED, committed)
+        self.assertNotIn("adapt: skipped", self.out)
 
 
 @unittest.skipUnless(os.environ.get("LANE_LIVE_OPENCODE") and shutil.which("opencode2"), "opt-in: LANE_LIVE_OPENCODE=1")
@@ -1139,9 +1474,14 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         for n in (".opencode/plugins/p.js", "opencode.json", "instr.md"):  # M3: so the guard is what keeps them out
             self.assertIn(n, copied)
 
-    def call(self, tool: str, args: dict, write: bool, cwd: "Path | None" = None, tmpdir: "Path | None" = None):
+    def call(self, tool: str, args: dict, write: bool, cwd: "Path | None" = None, tmpdir: "Path | None" = None,
+             trusted: bool = False):
         """One onboarding run whose model asks for `tool` with `args`; returns (tool result, run text). Fails when any
-        marker reached the model."""
+        marker reached the model, unless `trusted` (--trust-gateway and its yes: the repo itself, every file
+        readable)."""
+        self.m.TRUSTED.clear()
+        if trusted:
+            self.m.TRUSTED.add(self.repo.resolve())
         log = self.t / "requests.jsonl"
         log.write_text("")
         fake = subprocess.Popen([sys.executable, str(ROOT / "tests" / "stubs" / "fake_tool_llm.py"), str(log)],
@@ -1182,7 +1522,8 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         self.assertEqual(self.proxy_log.read_text(), "", "the run reached past the gateway")  # B11, m19
         body = log.read_text()
         leaked = {m: path for m, path in self.secrets.items() if m in body}
-        self.assertEqual(leaked, {}, f"{tool} {args}: private content reached the model")
+        if not trusted:
+            self.assertEqual(leaked, {}, f"{tool} {args}: private content reached the model")
         results = [m["content"] for line in body.splitlines()
                    for m in json.loads(json.loads(line)["body"]).get("messages", []) if m.get("role") == "tool"]
         self.assertFalse((self.t / "plugin-ran").exists())  # the project's own plugin never ran
@@ -1191,9 +1532,10 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
             self.assertFalse((self.t / ran).exists(), ran)
         return (str(results[-1]) if results else ""), text
 
-    def gateway_run(self, model: str):
+    def gateway_run(self, model: str, key_env: str = "GW_KEY"):
         """One reviewer run for `model` (opencode/<provider>/<model> without the opencode/) against the local fake as
-        the given gateway; returns (requests the gateway got, what the proxy saw)."""
+        the given gateway, its key in the variable `key_env`; returns (requests the gateway got, what the proxy saw).
+        self.models: the model each request named."""
         log = self.t / "gateway.jsonl"
         log.write_text("")
         fake = subprocess.Popen([sys.executable, str(ROOT / "tests" / "stubs" / "fake_tool_llm.py"), str(log)],
@@ -1203,13 +1545,61 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         self.addCleanup(fake.terminate)
         port = int(fake.stdout.readline())
         self.m.GATEWAY.clear()
-        self.m.GATEWAY.update(url=f"http://127.0.0.1:{port}/v1", key_env="GW_KEY")
+        self.m.GATEWAY.update(url=f"http://127.0.0.1:{port}/v1", key_env=key_env)
         env = {"PATH": os.environ["PATH"], "HOME": str(self.t / "home"), "XDG_CONFIG_HOME": str(self.t / "config"),
-               "GW_KEY": "dummy-gateway-key", "TMPDIR": str(self.t), **self.proxy_env}
+               key_env: "dummy-gateway-key", "TMPDIR": str(self.t), **self.proxy_env}
         self.proxy_log.write_text("")
         with mock.patch.dict(os.environ, env, clear=True):
             self.m.run_opencode(self.repo, model, "RUN-TOOL check", False)
+        self.models = [json.loads(json.loads(l)["body"] or "{}").get("model") for l in log.read_text().splitlines()]
         return log.read_text().count("\n"), self.proxy_log.read_text()
+
+    @contextlib.contextmanager
+    def run_config(self, change):
+        """A negative control: the run's config file changed by `change(conf)` before OpenCode reads it."""
+        real = self.m.opencode_agent
+
+        @contextlib.contextmanager
+        def changed(*a, **kw):
+            with real(*a, **kw) as (cmd, env):
+                f = Path(env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
+                conf = json.loads(f.read_text())
+                change(conf)
+                f.write_text(json.dumps(conf))
+                yield cmd, env
+        with mock.patch.object(self.m, "opencode_agent", changed):
+            yield
+
+    def test_a_key_variable_opencode_reads_itself_never_reaches_it(self):
+        # B15: OpenCode reads OPENCODE_API_KEY as its own service's key and sends it to opencode.ai; the run gets the
+        # key under LANE_GATEWAY_KEY only, so a gateway key kept in that variable still goes to the gateway alone
+        got, past = self.gateway_run("litellm/m", key_env="OPENCODE_API_KEY")
+        self.assertEqual(past, "", "a request went past the given gateway")
+        self.assertGreater(got, 0)
+        # negative control: handed over under the owner's name, the proxy sees opencode.ai
+        with mock.patch.object(self.m, "RUN_KEY_ENV", "OPENCODE_API_KEY"):
+            _, past = self.gateway_run("litellm/m", key_env="OPENCODE_API_KEY")
+        self.assertIn("opencode.ai", past)
+
+    def test_no_side_request_names_another_model_whatever_the_provider_id(self):
+        # m27: under a built-in provider id OpenCode's title request went to a model of its own (gpt-6-luna);
+        # the run's provider id is lane-gateway and its title agent takes the run's model
+        for model in ("opencode/m", "github-copilot/m", "opencode-go/m", "cloudflare-ai-gateway/m", "litellm/m"):
+            with self.subTest(model=model):
+                got, past = self.gateway_run(model)
+                self.assertEqual(past, "")
+                self.assertGreater(got, 0)
+                self.assertEqual(set(self.models), {"m"}, self.models)
+        # negative control: under the given provider id and with no title model, another model is asked
+
+        def owner_id(conf):
+            conf["provider"] = {"opencode": conf["provider"]["lane-gateway"]}
+            for a in conf["agents"].values():
+                a["model"] = "opencode/m"
+            del conf["agents"]["title"]
+        with self.run_config(owner_id):
+            self.gateway_run("opencode/m")
+        self.assertNotEqual(set(self.models), {"m"}, self.models)
 
     def test_only_the_given_gateway_is_contacted_whatever_the_provider_id(self):
         # round 6: the run's config is written from --gateway-url alone; a vendor-named provider id (whose built-in
@@ -1316,6 +1706,45 @@ class OpenCodeOnboardingLiveTests(unittest.TestCase):
         got, _ = self.call("write", {"path": ".lane-control/project.md", "content": "x"}, write=False)
         self.assertIn('No tool named \\"write\\"', got)  # the reviewer has no write tool at all
         self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "facts")
+
+    def test_a_leak_in_the_copy_would_be_caught(self):
+        # negative control of the scratch copy's checks: with the --private filter off, a tracked private file is in
+        # the copy, its marker reaches the model and call() says so
+        with mock.patch.object(self.m, "export_private", lambda rel: False), \
+                self.assertRaisesRegex(AssertionError, "private content reached the model"):
+            self.call("read", {"path": "secrets/a.md"}, write=False)
+
+    def test_trusted_the_agents_read_the_repo_itself_and_nothing_goes_past_the_gateway(self):
+        # --trust-gateway: no copy, no filter; still nothing but the gateway is reached (call() checks the proxy)
+        got, _ = self.call("read", {"path": ".env"}, write=False, trusted=True)
+        self.assertIn("LIVE-SECRET", got)  # what the warning says: every file in the folder
+        got, _ = self.call("read", {"path": "data/x.csv"}, write=False, trusted=True)
+        self.assertIn("LIVE-SECRET", got)
+        self.assertIn("root rules readable", self.call("read", {"path": "AGENTS.md"}, write=False, trusted=True)[0])
+        for ran in ("plugin-ran", "mcp-ran", "formatter-ran", "owner-mcp-ran", "owner-plugin-ran"):
+            self.assertFalse((self.t / ran).exists(), ran)
+
+    def test_trusted_the_adapter_writes_only_its_files_and_opencode_writes_nothing_else(self):
+        # the repo's state before and after finds nothing OpenCode itself wrote (.git included) on a plain run
+        self.call("write", {"path": ".lane-control/project.md", "content": "facts"}, write=True, trusted=True)
+        self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "facts")
+        for path in ("AGENTS.md", ".git/config", ".lane-control/.git/config", ".lane-control/notes.md",
+                     ".lane-control/.hidden.md", "prettier.config.mjs"):
+            with self.subTest(path=path):
+                before = (self.repo / path).read_bytes() if (self.repo / path).exists() else None
+                got, _ = self.call("write", {"path": path, "content": "[core]\n\tfsmonitor = touch PWNED\n"},
+                                   write=True, trusted=True)
+                self.assertIn("Permission denied", got)
+                self.assertEqual((self.repo / path).read_bytes() if (self.repo / path).exists() else None, before)
+        got, _ = self.call("write", {"path": ".lane-control/project.md", "content": "x"}, write=False, trusted=True)
+        self.assertIn('No tool named \\"write\\"', got)  # the reviewer has no write tool at all
+        self.assertEqual((self.repo / ".lane-control" / "project.md").read_text(), "facts")
+        # negative control: with edit allowed everywhere, the write lands and the before/after check stops the run
+        wide = lambda write: [{"action": "*", "resource": "*", "effect": "allow"}]
+        with mock.patch.object(self.m, "opencode_rules", wide), \
+                self.assertRaisesRegex(self.m.Fail, r"changed AGENTS\.md in the repo \(--trust-gateway\)"):
+            self.call("write", {"path": "AGENTS.md", "content": "changed"}, write=True, trusted=True)
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), "changed")
 
 # --- Task 3.3 ------------------------------------------------------------------------------------------------------
 

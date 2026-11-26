@@ -2130,13 +2130,14 @@ class OnboardingTests(unittest.TestCase):
     def test_onboarding_agents_run_on_opencode_too(self):
         # Owner 2026-11-24 (LIT-2): nothing is refused by harness; an OpenCode role runs `opencode2 run`.
         # an OpenCode adapter's files come back from its copy only at its template paths (copy_back)
-        self.e.script_agents(**{"x/y": [{"write": {".lane-control/project.md": "facts\n"}}], "opus": [PASS]})
+        # the run's model is the alias under the run's own provider id (lane-gateway), whatever the given one is
+        self.e.script_agents(**{"lane-gateway/y": [{"write": {".lane-control/project.md": "facts\n"}}], "opus": [PASS]})
         (self.e.bin / "opencode2").symlink_to(FAKE_AGENT)
         r = self.e.run(str(self.repo), "--adapter", "opencode/x/y", "--gateway-url", "http://127.0.0.1:4000/v1",
                        "--gateway-key-env", "X_KEY", adapt=True, env_extra={"X_KEY": "k"})
         self.assertEqual(r.returncode, 3, r.stderr)  # no terminal for the yes: stopped before the commit
         self.assertNotIn("claude/<model>", r.stderr)
-        self.assertEqual([(a["tool"], a["model"]) for a in self.e.agent_runs()], [("opencode2", "x/y"), ("claude", "opus")])
+        self.assertEqual([(a["tool"], a["model"]) for a in self.e.agent_runs()], [("opencode2", "lane-gateway/y"), ("claude", "opus")])
 
     # --- .gitignore ------------------------------------------------------------------------------------------
     def test_gitignore_is_listed_and_committed_before_the_agent_runs(self):

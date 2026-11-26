@@ -38,8 +38,9 @@ full list is in [the native Orca setup](../orchestrators/native-orca/setup.md).
 
 **Onboarding runs on Claude or OpenCode.** The agents that adapt a project's files and review them run on Claude
 (`claude -p`) by default, or on OpenCode when you pass OpenCode models for them (`--adapter`, `--adapt-reviewer`).
-A machine needs only the engine its roles use, so a machine with only OpenCode can set up a new project. Step 4B has
-the details.
+A machine needs only the engine its roles use, so a machine with only OpenCode can set up a new project, and one with
+no usable model yet can set it up without onboarding (`--skip-adapt`) and adapt it later. Step 4B has the three
+routes.
 
 ## 2. Get lane-control, its tools and your engine config
 
@@ -278,30 +279,66 @@ harness, and the table is yours to edit.
    A later run keeps the table you accepted. `--adapter` and `--adapt-reviewer` are the onboarding agents: the
    adapting agent and its reviewer, which must be different models. Without them they are Claude (`claude/sonnet` and
    `claude/opus`), and a machine without Claude then stops with `claude not on PATH, but the onboarding agents use it`.
-   An OpenCode onboarding agent reaches the gateway only by what you give here: `--gateway-url`, the gateway's complete
-   URL written out (no `{env:...}`, not a vendor's public API), and `--gateway-key-env`, the name of the variable that
-   holds its key (leave it out for a gateway with no key). The model is the part after the provider in
+   An OpenCode onboarding agent reaches the gateway only by what you give here: `--gateway-url`, the gateway's base
+   URL written out plainly (`http(s)://<host>`, a host of letters, digits, `.`, `_`, `-` or `[IPv6]`, a port, a path; no
+   `{env:...}`, `%`, backslash, user, query or fragment), and `--gateway-key-env`, the name of the variable that
+   holds its key (leave it out, or give `''`, for a gateway with no key). The model is the part after the provider in
    `opencode/<provider>/<model>`, as the gateway names it. Both are kept for the project (never the key), so a later
-   run needs them only to change them. A gateway that needs extra headers is not supported yet.
+   run needs them only to change them; a new `--gateway-url` does not take the old key variable along unless you name
+   it again or say yes when asked. You should see `gateway: using http://127.0.0.1:4000/v1, key from
+   $LITELLM_API_KEY` before the first agent: check it is your gateway. Known vendors' APIs are refused by name, but
+   that does not prove a host is yours, and the gateway must not redirect (OpenCode would send the prompt on). A
+   gateway that needs extra headers is not supported yet. `--suggest-tiers` takes the same `--gateway-url` and
+   `--gateway-key-env`, and without them uses the gateway stored here.
 
-**Onboarding on OpenCode.** On a project not onboarded yet, each onboarding agent runs as `opencode2 run` in a scratch
-copy of the project, with the same prompts, checks and review round as on Claude. The copy holds only what it may see:
-the tracked files (and onboarding's own new files under `.lane-control/`), minus `.env*` files and everything your
+   If not: `the variable --gateway-key-env names is not set here` means it is not set in this shell (its name is not
+   printed, in case a key was pasted there; nothing was stored). `is a vendor's public API` or `must be a complete
+   http(s) URL written out` names the URL to fix.
+
+**Three routes for a new project.** Pick one by where the model runs:
+
+- **A model on a gateway you run: add `--trust-gateway`.** The onboarding agents then read the project folder itself,
+  with nothing filtered. Before any agent runs you get a warning that says so plainly: the model sees every file in
+  the folder, ignored and private ones included (`.env` files, keys, `.git` with its remotes and history, what
+  `--private` names, what a link there points to), all of it goes to the gateway, and this is meant for a model on a
+  gateway you run. Then one question, `Run them in <project> itself, every file readable? [y/N]`; answer `y`. Without
+  a terminal the flag is the yes. A no runs nothing (exit 3). The flag is not kept: give it on each run that adapts.
+  The adapter still writes only its own files under `.lane-control/`: anything else it changes in the folder (a
+  `.git` file, another file, a link, a deletion) stops the run and is named, so you can put it back (`git status`).
+- **A hosted model you do not control: leave `--trust-gateway` out (the default).** Each agent works in a scratch
+  copy of the project that holds only what it may see, described below.
+- **No usable model on this machine yet: `--skip-adapt`.**
+
+  ```bash
+  project-setup ~/code/<project> --skip-adapt \
+    --coordinator opencode/litellm/chat --reviewer opencode/litellm/code
+  ```
+
+  No onboarding agent runs: `adapt: skipped --skip-adapt: ...` says that `.lane-control/` and
+  `AGENTS.lane-control.md` are not written, and the rest runs as usual (Orca, the coordinator, which works without the
+  project's lane files). Once a model is at hand, adapt it: the command from step 2 with `--readapt` added.
+
+**The scratch copy (without `--trust-gateway`).** Each onboarding agent runs as `opencode2 run` in a scratch copy of
+the project, with the same prompts, checks and review round as on Claude. The copy holds only what it may see: the
+tracked files (and onboarding's own new files under `.lane-control/`), minus `.env*` files and everything your
 `--private` globs cover (a POSIX class like `[[:digit:]]` anywhere in it and a `./` or `//` spelling are refused, with
 the way to write it; a glob may not cover AGENTS.md or onboarding's own files). The copy is its own empty git repo, so
 no repo around your temporary folder is read either; a TMPDIR inside the project is refused. It has no `.git`, no
 ignored file and no symlink: a link to a file that is in the copy, like `AGENTS.md -> CLAUDE.md`, comes as that file's
 content, and every other link is left out. So OpenCode never sees a private file, including an `AGENTS.md` it would
-attach by itself. In the copy the agent has `read` alone (no shell, grep, glob or web), and only the adapter writes,
-only its template files under `.lane-control/`. Only those come back to the repo; anything else it changed (a `.git`, a
-dot-name, another file) stops the run, and nothing is copied. OpenCode starts from nothing for the run: none of your
-OpenCode config is read (nor its plugins, formatters or MCP servers, nor the project's); its one provider is written
-from `--gateway-url` and `--gateway-key-env` alone. An `/etc/opencode` folder (OpenCode loads it whatever its HOME)
-stops it too. The two flags are kept in the project's settings store once given, so a later run or `--readapt` without
-them uses the same models; a run that uses a default says so beside the model (`adapt: running claude/sonnet (the
-default: ...)`). An onboarded project (its `.lane-control/` files and `AGENTS.lane-control.md` committed on the default
-branch) says `adapt: exists .lane-control/ is committed` and runs no onboarding agent, so the flags make no difference
-there. The details, and how it differs from Claude's run, are in [the native Orca
+attach by itself. Only the adapter's template files under `.lane-control/` come back to the repo; anything else it
+changed (a `.git`, a dot-name, another file) stops the run, and nothing is copied.
+
+**In both OpenCode routes** the agent has `read` alone (no shell, grep, glob or web), and only the adapter writes, only
+its template files under `.lane-control/`. OpenCode starts from nothing for the run: none of your OpenCode config is
+read (nor its plugins, formatters or MCP servers, nor the project's); its one provider is written from `--gateway-url`
+and `--gateway-key-env` alone, under a provider id of its own (`lane-gateway`), and the key reaches it only as
+`LANE_GATEWAY_KEY`, never under your variable's name. An `/etc/opencode` folder (OpenCode loads it whatever its HOME)
+stops it too. `--adapter` and `--adapt-reviewer` are kept in the project's settings store once given, so a later run
+or `--readapt` without them uses the same models; a run that uses a default says so beside the model (`adapt: running
+claude/sonnet (the default: ...)`). An onboarded project (its `.lane-control/` files and `AGENTS.lane-control.md`
+committed on the default branch) says `adapt: exists .lane-control/ is committed` and runs no onboarding agent, so
+these flags make no difference there. The details, and how it differs from Claude's run, are in [the native Orca
 setup](../orchestrators/native-orca/setup.md), "OpenCode on a self-hosted LiteLLM gateway".
 
 ### What the setup does, and what you should see

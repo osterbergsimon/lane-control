@@ -5,7 +5,8 @@ Invoked through a symlink named claude, opencode or opencode2. Appends `<tool> -
 `<tool> run --model <model>` (OpenCode) to $STUB_LOG and one JSON line (tool, argv, prompt, the files in .lane-control,
 cwd, and for OpenCode the environment, the config and the files it got) to $STUB_LOG.agents. Claude takes the prompt as its last
 argument, OpenCode on stdin. Each call takes the next step queued for its model of $STUB_STATE (key agent_steps):
-{"write": {path: text}, "commit": message, "say": stdout text, "err": stderr text, "exit": code}. For OpenCode the
+{"write": {path: text}, "link": {path: target}, "remove": [path], "commit": message, "say": stdout text,
+"err": stderr text, "exit": code}. For OpenCode the
 output is `--format json` events: "say" is one text event; "steps": n adds n tool-call steps before it (default: 1
 when the step writes, else 0); "error": message adds an error event.
 """
@@ -42,7 +43,7 @@ row = {"tool": tool, "model": model, "argv": args, "prompt": prompt, "cwd": os.g
 if opencode:
     row["env"] = {k: os.environ.get(k) for k in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
                                                  "OPENCODE_DISABLE_PROJECT_CONFIG", "LANE_ROLE", "LANE_PERSONA",
-                                                 "LITELLM_API_KEY")}
+                                                 "LITELLM_API_KEY", "LANE_GATEWAY_KEY", "OPENCODE_API_KEY")}
     # the config as OpenCode reads it: the file OPENCODE_CONFIG names (project-setup's memfd), else the variable
     xdg = Path(os.environ.get("XDG_CONFIG_HOME", "/nonexistent")) / "opencode" / "opencode.json"
     row["config"] = (Path(os.environ["OPENCODE_CONFIG"]).read_text() if os.environ.get("OPENCODE_CONFIG")
@@ -70,6 +71,11 @@ with open(os.environ["STUB_LOG"] + ".agents", "a") as log:
 for path, text in step.get("write", {}).items():
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(text)
+for path, target in step.get("link", {}).items():
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).symlink_to(target)
+for path in step.get("remove", []):
+    Path(path).unlink()
 if "commit" in step:
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", step["commit"]], check=True)
 if "err" in step:
