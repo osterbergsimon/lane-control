@@ -279,7 +279,7 @@ class ImproveOnTests(ImproveTest):
         self.assertEqual(r.returncode, 0, r.stderr)
         st = self.state()
         self.assertEqual(set(st), {"started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration",
-                                   "prs", "stop_at", "max_items", "max_hours"})
+                                   "prs", "stop_at", "max_items", "max_hours", "max_hours_off"})
         self.assertEqual(st["integration"], {"blog": "main", "shop": "main"})
         self.assertEqual(st["end"], "until-back")
         self.assertEqual(st["limits"], "nothing that needs db migrations")
