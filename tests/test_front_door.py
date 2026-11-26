@@ -236,7 +236,13 @@ class Dispatch(unittest.TestCase):
         for g in F.GROUPS:
             for argv in ([g, "--help"], [g, "help"], ["help", g]):
                 r = self.run_([cli, *argv])
-                self.assertEqual(r.returncode, 0, argv)
+                one = {s for (gg, _), (s, *_) in F.ROUTES.items() if gg == g}
+                if len(one) == 1:  # improve: the listing, then the one script's own whole help (its exit status)
+                    self.assertEqual(r.returncode, 7, argv)
+                    got = json.loads(r.stdout.splitlines()[-1])
+                    self.assertEqual((got["script"], got["args"]), (one.pop(), ["--help"]))
+                else:
+                    self.assertEqual(r.returncode, 0, argv)
                 for (gg, v), (script, first, *_) in F.ROUTES.items():
                     if gg == g:
                         self.assertIn(f"lane-control {g} {v}", r.stdout)
@@ -275,8 +281,9 @@ class OldNames(unittest.TestCase):
             r = subprocess.run(argv, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=60)
             return r.returncode, r.stdout, r.stderr
         master, slave = pty.openpty()
+        out_file = tempfile.TemporaryFile()  # not a pipe: a full pipe would block the script while stderr is read
         try:
-            p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=slave, stdin=subprocess.DEVNULL, env=env)
+            p = subprocess.Popen(argv, stdout=out_file, stderr=slave, stdin=subprocess.DEVNULL, env=env)
             os.close(slave)
             err = b""
             while True:
@@ -287,12 +294,12 @@ class OldNames(unittest.TestCase):
                 if not chunk:
                     break
                 err += chunk
-            out = p.stdout.read().decode()
-            p.stdout.close()
             p.wait(timeout=60)
-            return p.returncode, out, err.decode().replace("\r\n", "\n")
+            out_file.seek(0)
+            return p.returncode, out_file.read().decode(), err.decode().replace("\r\n", "\n")
         finally:
             os.close(master)
+            out_file.close()
 
     CASES = (("project-setup", ["--help"], "`lane-control project setup --help`"),
              ("project-pause", [], "`lane-control project rest|wake|stop|start|status <project>`"),

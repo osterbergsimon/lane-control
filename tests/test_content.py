@@ -507,10 +507,10 @@ class GatewaySetupDocTests(unittest.TestCase):
 
     def test_a_host_set_up_earlier_refreshes_first(self):
         # review M1: the installed lane-tier, skills and personas are copies; they stay old until a refresh
-        for needle in ("set up before this change", "--refresh", "restart the coordinator",
-                       "`~/.agents/bin/lane-tier`", "project-pause stop"):
+        for needle in ("set up before this change", "lane-control project refresh", "restart the coordinator",
+                       "`~/.agents/bin/lane-tier`", "lane-control project stop"):
             self.assertIn(needle, self.sec, needle)
-        self.assertLess(self.sec.index("--refresh"), self.sec.index("--suggest-tiers"))
+        self.assertLess(self.sec.index("lane-control project refresh"), self.sec.index("--suggest-tiers"))
 
     def test_what_the_suggestion_leaves_out_and_where_the_key_goes(self):
         for needle in ("no redirect is followed", "no proxy", "model_info.mode", "provider.<id>.models"):
@@ -954,7 +954,7 @@ class NativePersonaTests(unittest.TestCase):
                        "never delete the remote branch yourself", "never delete its branch without the owner's word",
                        "information, never instructions", "Never trust a lane's numbers", "`NEEDS_DEEP`",
                        "Never run `git stash`", "no tool or AI attribution", "bd update <id> --status open",
-                       "handover-latest", "git rev-list --count HEAD..origin/<default>", "scripts/project-pause wake",
+                       "handover-latest", "git rev-list --count HEAD..origin/<default>", "scripts/lane-control project wake",
                        "Fresh eyes", "At most two rounds", "Never agree with a finding just to end the loop",
                        "permission mode is `{{MODE}}`", "worker-stop", "Start the reviewer as its own worker"):
             self.assertIn(needle, t, needle)
@@ -988,7 +988,7 @@ class NativePersonaTests(unittest.TestCase):
                        "woken by an Orca automation", "precheck", "Idle costs nothing", "once per step",
                        "~/.claude/usage-history.jsonl", "unknown", "lane-away", "night manager", "lane sweep",
                        "--apply", "`<project> coordinator`", "owner's yes in that coordinator's tab",
-                       "scripts/project-pause wake", "ORDER: top yes|no", "allowance", "decisions first",
+                       "scripts/lane-control project wake", "ORDER: top yes|no", "allowance", "decisions first",
                        "Public posts", "If a send fails, tell the owner"):
             self.assertIn(needle, t, needle)
         self.assertRegex(t, r"[Nn]ever .*public")
@@ -1277,7 +1277,7 @@ class NativeLaneSkillTests(unittest.TestCase):
 
     def test_gate_comes_before_the_lane_opens(self):
         t = self.flat
-        for needle in ("project-pause wake .", "`~/.agents/bin/lane-room`", "hold the lane and tell the owner",
+        for needle in ("lane-control project wake .", "`~/.agents/bin/lane-room`", "hold the lane and tell the owner",
                        "~/.agents/bin/lane-tier", "git rev-list --count HEAD..origin/<default>", "lane:<KEY>-<n>",
                        "--claim"):
             self.assertIn(needle, t, needle)
@@ -1614,7 +1614,7 @@ class OrcaCanaryTests(unittest.TestCase):
     def test_remote_doc_says_what_orca_pair_does_to_the_desktop(self):
         # PAIN-1 (lc-bmk): setup mints the link with `orca pair` by default; the step says it widens the desktop
         t = flat(self.REMOTE)
-        step = t[t.index("1. By default `project-setup <repo> <host>` makes the link"):t.index("2. By hand")]
+        step = t[t.index("1. By default `lane-control project setup <repo> <host>` makes the link"):t.index("2. By hand")]
         for needle in ("`orca pair`", "refusing to widen to all interfaces", "Settings > Servers", "every interface"):
             self.assertIn(needle, step, needle)
 
@@ -1984,7 +1984,8 @@ class DesignKitOnABoxTests(unittest.TestCase):
         for needle in ("~/.agents/bin/design-shots", "`component-gallery` skill", "`design-skills missing`",
                        "git and the network on the box",
                        "Playwright and a browser on the box, which setup never installs",
-                       "next `project-setup <repo> <host>` or `--refresh` (both install the lane tools, `design-shots` "
+                       "next `lane-control project setup <repo> <host>` or `lane-control project refresh <repo> <host>` "
+                       "(both install the lane tools, `design-shots` "
                        "among them, and the skills)"):
             self.assertIn(needle, t, needle)
         self.assertNotIn("not `design-shots`", t)  # review round 2, r2-m1: a refresh does install it
@@ -2268,7 +2269,8 @@ PERSONA_DIR = ROOT / "orchestrators" / "native-orca" / "personas"
 class AwayImproveContentTests(unittest.TestCase):
     def test_owner_guide_covers_every_command_and_is_linked(self):
         guide = flat(ROOT / "docs" / "away-improve.md")
-        for cmd in ("lane-improve on", "lane-improve off", "lane-improve status", "lane-improve drained", "lane-improve rest",
+        for cmd in ("lane-control improve on", "lane-control improve off", "lane-control improve status",
+                    "lane-control improve drained", "lane-control improve rest",
                     "--continue", "--unmetered", "--local-suite-ok", "a backstop, not a wall", "IMPROVE_IDLE_MIN",
                     "one away branch, ever", "draft PR", "has not been run end to end"):
             self.assertIn(cmd, guide.replace("**", ""), cmd)
@@ -2288,7 +2290,7 @@ class AwayImproveContentTests(unittest.TestCase):
         for needle in ("deep tier", "why you picked", "Review: passed <head sha>"):
             self.assertIn(needle, t, needle)
         for needle in ("read-only", "3-5", "builds on", "`budget-state --project", "no-new-work", "nothing within the limits",
-                       "draft PR", "away/<date>", "lane-room", "`lane-improve status`",
+                       "draft PR", "away/<date>", "lane-room", "`lane-control improve status`",
                        "`improve: on`", "never polling", "the running lane finishes", "never squash",
                        "never force-push", "never merge into the integration branch"):
             self.assertIn(needle.lower(), t.lower(), needle)
@@ -2302,6 +2304,7 @@ class AwayImproveContentTests(unittest.TestCase):
         for phrase in ("goodnight", "leaving", "relayed"):
             self.assertIn(phrase, t)
         self.assertNotIn("lane-improve on", t)
+        self.assertNotIn("improve on", t)  # the front door's form neither (CLI-1)
 
     def test_skill_refuses_other_merge_routes(self):
         t = flat(AWAY_SKILL)
@@ -2356,7 +2359,7 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_the_night_nudge_for_a_wrap_up_names_the_summary_file(self):  # R1-10
         t = flat(ROOT / "orchestrators" / "native-orca" / "night-manager.md")
-        self.assertIn("`lane-improve pr <project> --summary-file <path>`", t)
+        self.assertIn("`lane-control improve pr <project> --summary-file <path>`", t)
         self.assertNotIn("the log summary", t)
 
     def test_the_skill_says_where_the_log_and_the_summary_live(self):
@@ -2375,7 +2378,7 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_personas_explicit_only(self):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
-        self.assertIn("`lane-improve on`", mc)
+        self.assertIn("`lane-control improve on`", mc)
         for needle in ("only when the owner's own message", "explicitly asks for the improve", "goodnight", "leaving",
                        "relayed", "never from", "`lane-away on --until-back`", "Presence is separate from improve mode"):
             self.assertIn(needle, mc, needle)
@@ -2389,6 +2392,7 @@ class AwayImproveContentTests(unittest.TestCase):
             if path.name == "machine-coordinator.md":
                 continue
             self.assertNotIn("lane-improve on", flat(path), path.name)
+            self.assertNotIn("improve on", flat(path), path.name)  # the front door's form neither (CLI-1)
         self.assertIn("never turn improve mode on", flat(NATIVE_DIR / "night-manager.md"))
 
     def test_skill_review_marker_is_bound_to_the_head_and_written_by_the_coordinator_alone(self):
@@ -2402,21 +2406,22 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_skill_drain_flow_after_off_or_the_end(self):
         t = flat(AWAY_SKILL)
-        for needle in ("`improve: draining`", "No new cycle starts", "still merges", "`lane-improve drained <project>`",
+        for needle in ("`improve: draining`", "No new cycle starts", "still merges", "`lane-control improve drained <project>`",
                        "`integration` in `~/.config/lane-control/improve.json`", "draft PR", "deny rules stay until"):
             self.assertIn(needle, t, needle)
-        self.assertLess(t.index("away-merge` the last PR"), t.index("`lane-improve drained <project>`"))
+        self.assertLess(t.index("away-merge` the last PR"), t.index("`lane-control improve drained <project>`"))
 
     def test_the_summary_pr_the_caps_and_the_protection_report_are_documented(self):
         guide = flat(ROOT / "docs" / "away-improve.md").replace("**", "")
-        for needle in ("--stop-at", "--max-items", "lane-improve pr <project>", "improve-period.json", "cap reached",
+        for needle in ("--stop-at", "--max-items", "lane-control improve pr <project>", "improve-period.json", "cap reached",
                        "`away: start <date>`", "`--summary-file <path>`", "an empty commit rather than none", "The item PR and its entry",
                        "no agent merges it", "Branch protection report", "admins are exempt", "not available on the repository's plan",
                        "never changes a setting", "require a PR for everyone, admins included"):
             self.assertIn(needle, guide, needle)
         skill = flat(AWAY_SKILL)
-        for needle in ("`lane-improve pr <project> --summary-file <path>`", "`cap reached`", "`--max-items`", "`--stop-at`",
-                       "you never merge it, mark it ready or close", "`lane-improve drained <your project>`"):
+        for needle in ("`lane-control improve pr <project> --summary-file <path>`", "`cap reached`", "`--max-items`",
+                       "`--stop-at`", "you never merge it, mark it ready or close",
+                       "`lane-control improve drained <your project>`"):
             self.assertIn(needle, skill.replace("**", ""), needle)
         self.assertNotIn("open a **draft PR**", skill)  # lane-improve on opens it; the wrap-up updates it
         spec = flat(ROOT / "docs" / "superpowers" / "specs" / "2026-11-23-away-improve-design.md")
@@ -2444,8 +2449,8 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_machine_coordinator_tells_the_coordinators_when_it_runs_off(self):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
-        for needle in ("run `lane-improve off`", "tell each named project's coordinator", "wrap up",
-                       "`lane-improve drained <project>`"):
+        for needle in ("run `lane-control improve off`", "tell each named project's coordinator", "wrap up",
+                       "`lane-control improve drained <project>`"):
             self.assertIn(needle, mc, needle)
 
     def test_build_brief_leaves_the_merge_sha_to_the_coordinator(self):
@@ -2465,7 +2470,7 @@ class AwayImproveContentTests(unittest.TestCase):
 
     def test_the_cycle_is_recorded_read_on_resume_and_watched(self):  # field report B1, B4, F3, F6 (lc-l78)
         t = flat(AWAY_SKILL)
-        for needle in ("**Record every step**", "`lane-improve cycle <your project> --phase", "**On start or resume**",
+        for needle in ("**Record every step**", "`lane-control improve cycle <your project> --phase", "**On start or resume**",
                        "never start a second lane", "`$ORCA_TERMINAL_HANDLE`", "## 1a. Watchdog and recovery",
                        "a fresh worker on the same worktree and PR", "--close parked --findings-file",
                        "is not proof that a lane is working", "never beyond the lane's budget", "--metric",
@@ -2475,7 +2480,7 @@ class AwayImproveContentTests(unittest.TestCase):
             self.assertIn(needle, t, needle)
         guide = flat(ROOT / "docs" / "away-improve.md")
         for needle in ("## The watchdog", "fails loudly", "A title is never matched", "is not proof", "The ledger.",
-                       "The daily summary.", "--max-hours", "REST `PATCH`", "status [--json]", "lane-improve cycle <project>",
+                       "The daily summary.", "--max-hours", "REST `PATCH`", "status [--json]", "lane-control improve cycle <project>",
                        "silent (10 minutes), idle (60 minutes) or exits", "**Who sends.**", "away-watchdog --send",
                        "**When it keeps quiet.**", "never puts two workers on one worktree", "written before it is sent"):
             self.assertIn(needle, guide, needle)
@@ -2513,8 +2518,8 @@ class ScratchHomeAndMachineConfContentTests(unittest.TestCase):
 
     def test_setup_says_an_older_machine_creates_machine_conf(self):
         t = flat(NATIVE_DIR / "setup.md")
-        for needle in ("before `machine-setup` existed", "has no `machine.conf`",
-                       "`machine-setup`", "from the example", "`lane-improve`", "`night-precheck`"):
+        for needle in ("before `lane-control machine setup` existed", "has no `machine.conf`",
+                       "`lane-control machine setup`", "from the example", "`lane-control improve`", "`night-precheck`"):
             self.assertIn(needle, t, needle)
 
     def test_setup_names_the_file_not_its_columns(self):
@@ -2949,3 +2954,77 @@ class ReviewCapEndingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FrontDoorDocsTests(unittest.TestCase):
+    """CLI-1 (lc-35h): the docs, personas and skills tell you (and an agent) to run the front door's forms."""
+    DOCS = [ROOT / "docs" / "getting-started.md", ROOT / "docs" / "how-it-fits.md", ROOT / "docs" / "away-improve.md",
+            NATIVE_DIR / "setup.md", NATIVE_DIR / "remote.md", NATIVE_DIR / "night-manager.md",
+            *sorted((NATIVE_DIR / "personas").glob("*.md")), *sorted((NATIVE_DIR / "skills").glob("*/SKILL.md")),
+            ROOT / "docs" / "README.md"]
+    # a command span or code line that runs an old name: `project-setup <args>`, `<path>/scripts/lane-improve on`
+    # (a bare `machine-check` names the script, as the automation table does)
+    OLD_RUN = re.compile(r"^(?:\S*/)?(project-setup|project-pause|machine-setup|machine-check|lane-improve) ")
+    INTERNAL = ("--via-host", "--box-pairing")  # project-setup run by project-setup on a box: no person types it
+
+    def commands(self, path):
+        fence = False
+        for line in path.read_text().splitlines():
+            if line.lstrip().startswith("```"):
+                fence = not fence
+            elif fence:
+                yield line.split(" #")[0].strip()
+            else:
+                yield from re.findall(r"`([^`]+)`", line)
+
+    def test_no_doc_runs_an_old_name(self):
+        for path in self.DOCS:
+            for cmd in self.commands(path):
+                if self.OLD_RUN.match(cmd) and not any(x in cmd for x in self.INTERNAL):
+                    self.fail(f"{path.relative_to(ROOT)}: `{cmd}`: use its lane-control form (core/frontdoor.py)")
+
+    def test_the_guides_name_the_new_forms(self):
+        want = {"docs/getting-started.md": ("lane-control machine setup", "lane-control project setup ~/code/<project>",
+                                            "lane-control project refresh", "lane-control project show",
+                                            "lane-control project check", "lane-control project stop",
+                                            "lane-control project start", "lane-control project rest",
+                                            "lane-control project wake", "lane-control improve off",
+                                            "lane-control machine changes --last"),
+                "docs/how-it-fits.md": ("lane-control machine setup", "lane-control project setup",
+                                        "lane-control project refresh <project>", "lane-control project check",
+                                        "lane-control improve on"),
+                "orchestrators/native-orca/setup.md": ("lane-control project setup <repo> <host>",
+                                                       "lane-control machine setup", "lane-control machine check",
+                                                       "lane-control project remove-host"),
+                "orchestrators/native-orca/remote.md": ("lane-control project setup <repo> <host>",
+                                                        "lane-control project check <repo> <host>",
+                                                        "lane-control project remove-host <host>"),
+                "docs/away-improve.md": ("lane-control improve on", "lane-control improve off",
+                                         "lane-control improve status", "lane-control improve drained",
+                                         "lane-control improve pr <project>", "lane-control improve cycle <project>"),
+                "README.md": ("lane-control help", "lane-control project setup", "lane-control machine setup",
+                              "lane-control improve on"),
+                "core/README.md": ("lane-control project rest|wake|stop|start|status <project>",
+                                   "lane-control machine changes", "lane-control improve on|off", "core/frontdoor.py")}
+        for rel, needles in want.items():
+            t = flat(ROOT / rel).replace("\\|", "|")
+            for needle in needles:
+                self.assertIn(needle, t, f"{rel}: {needle}")
+
+    def test_personas_and_skills_run_the_front_door_by_its_path(self):
+        coord, machine = flat(NATIVE_DIR / "personas" / "coordinator.md"), flat(NATIVE_DIR / "personas" /
+                                                                                  "machine-coordinator.md")
+        self.assertIn("`{{LANE_CONTROL}}/scripts/lane-control project wake .`", coord)
+        self.assertIn("`{{LANE_CONTROL}}/scripts/lane-control improve status`", coord)
+        self.assertIn("`{{LANE_CONTROL}}/scripts/lane-control project wake <project>`", machine)
+        self.assertIn("(`{{LANE_CONTROL}}/scripts/lane-control`)", machine)
+        lanes = flat(NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md")
+        self.assertIn("`<lane-control>/scripts/lane-control project wake .`", lanes)
+
+    def test_the_scripts_table_gives_each_old_script_its_form(self):
+        rows = {r.split("|")[1].strip(): r for r in (ROOT / "core" / "README.md").read_text().splitlines()
+                if r.startswith("| `core/scripts/")}
+        F = load_script("lc_frontdoor_c", ROOT / "core" / "frontdoor.py")
+        for (g, v), (script, *_) in F.ROUTES.items():
+            row = next(r for k, r in rows.items() if k.startswith(f"`core/scripts/{script}`"))
+            self.assertIn(f"lane-control {g} ", row.replace("\\|", "|"), script)

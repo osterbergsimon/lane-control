@@ -344,8 +344,12 @@ def front_door(argv: list) -> int:
     group = argv[0]
     if argv[1:2] in ([], ["-h"], ["--help"], ["help"]):
         print(F.group_help(group), file=sys.stdout if argv[1:] else sys.stderr)
-        return 0 if argv[1:] else 2
-    r = F.route(argv)
+        one = {s for (g, _), (s, *_) in F.ROUTES.items() if g == group}
+        if not argv[1:] or len(one) != 1:
+            return 0 if argv[1:] else 2
+        r = (one.pop(), ["--help"])  # a group of one script (improve): its own whole help follows
+    else:
+        r = F.route(argv)
     if r is None:
         print(f"lane-control: no form `lane-control {group} {argv[1]}`\n" + F.group_help(group), file=sys.stderr)
         return 2

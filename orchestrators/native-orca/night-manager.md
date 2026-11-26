@@ -13,7 +13,7 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    a fallback for a lost wake, not a cycle driver (a coordinator that stays idle is nudged less often: the wait
    doubles, up to 8 h, and a coordinator that has nothing left within its limits can ask for quiet). A
    `DUE <name> wrapup idle=<n>min waited=<h>h` line means the period has ended and that coordinator has not yet
-   wrapped up (its draft PR and `lane-improve drained`). A `DUE <name> wrapup idle=<n>min
+   wrapped up (its draft PR and `lane-control improve drained`). A `DUE <name> wrapup idle=<n>min
    cap=<items|weekly|hours>:<n>/<max>` line means the owner's cap for that project (`--max-items`, `--stop-at`, `--max-hours`) is reached: it
    wraps up like an ended period, while the mode goes on for the others. An `UNFOUND <name> (<why>)` line means Orca has no single
    agent terminal in that coordinator's checkout (none, several, or Orca not answering): nobody can be checked in on
@@ -43,7 +43,7 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    again for the idle time. You never turn improve mode on or off and never decide what it works on.
    For a `DUE <name> wrapup` line send: "night manager: For the coordinator of <checkout> (<name>); if you are not it, ignore this and reply nothing. The improve period has ended and you have not wrapped up (<h>
    h ago). Finish as the away-improve skill says (section 3): last PR through away-merge, the summary written
-   (`lane-improve pr <project> --summary-file <path>`), the summary and that PR's link to the owner, then `lane-improve drained <project>`. If you are waiting on a lane, reply
+   (`lane-control improve pr <project> --summary-file <path>`), the summary and that PR's link to the owner, then `lane-control improve drained <project>`. If you are waiting on a lane, reply
    'waiting' in one line." For a `cap=` line say "the cap (<cap>) is reached" in place of the hours. Then run `<lc>/core/scripts/night-precheck --checked <name> wrapup`.
    When `waited` is 12 or more, add that line to what you tell the machine coordinator once: the owner should know.
 4. **Runners and coordinators not found.** Send each `OFFLINE` line and each `UNFOUND` line to the machine coordinator. Never restart a runner yourself.

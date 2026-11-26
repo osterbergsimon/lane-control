@@ -11,7 +11,7 @@ with the first one.
 
 ## Running projects
 
-- [Away-improve mode](away-improve.md): lets coordinators keep improving a product on its own branch while you are away. Read it before you switch `lane-improve on`.
+- [Away-improve mode](away-improve.md): lets coordinators keep improving a product on its own branch while you are away. Read it before you switch `lane-control improve on`.
 - [Lane cleanup](orca-cleanup.md): how a merged lane's worktree is removed by Orca's own rule. Read it when setup says a cleanup rule is off.
 - [Asks for Orca upstream](orca-upstream-asks.md): what we would ask Orca to change, with the evidence and what we do meanwhile; recorded, not filed. Read it before you file anything at Orca.
 - [Issues doctrine](../core/issues.md): how beads issues are claimed, closed, parked and backed up. Read it when you move a project or restore beads.
@@ -21,7 +21,7 @@ with the first one.
 
 - [Machine notes](../core/machine.md): what is specific to a machine, and a checklist for a new box. Read it when you add a machine.
 - [native Orca: setup](../orchestrators/native-orca/setup.md): installing and running native Orca, machine and project setup, and OpenCode on a self-hosted gateway. Read it when the guide says "see the setup".
-- [native Orca on an SSH host](../orchestrators/native-orca/remote.md): setting up a project on a box and letting it run lanes on your desktop. Read it before you use `project-setup <repo> <host>`.
+- [native Orca on an SSH host](../orchestrators/native-orca/remote.md): setting up a project on a box and letting it run lanes on your desktop. Read it before you use `lane-control project setup <repo> <host>`.
 - [The night manager](../orchestrators/native-orca/night-manager.md): what the hourly night automation does and what it will not do. Read it when you leave a machine on overnight.
 
 ## Models and tiers
