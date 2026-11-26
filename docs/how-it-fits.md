@@ -141,12 +141,13 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
 - Both say `exists` for what is already done, so running them again is safe.
 - **`lane-control coordinator start <project>`** (or `machine`; `--on <host>` runs it on a box): starts a coordinator
   only when the live check says it is not running. `cannot tell` starts nothing and says what it found; `--force` is
-  your way past that when you can tell what the check cannot (it asks once, and the project's settings store records
-  that you forced it), never past a coordinator that runs. `lane-control coordinator restart <project>` asks the
-  running one for its handover by Orca message, then stops and starts it; `status` says which state it is in.
-- **`lane-control lane new <project> <issue>`** (`--tier`, `--note`): one Orca message to the project's running
-  coordinator asking for a lane for that issue. The coordinator gates, briefs, reviews and merges it as for any lane
-  you ask for in its terminal; nothing is started directly. `lane-control lane list <project>` (and `lane status`)
+  your way past that when you can tell what the check cannot (a person only: it refuses when an agent may run it; it
+  asks once, and the project's settings store records how it was confirmed), never past a coordinator that runs.
+  `lane-control coordinator restart <project>` asks the running one by Orca message to get ready, and closes and
+  starts it only on its own `ready to stop <code>` reply; `status` says which state it is in.
+- **`lane-control lane new <project> <issue>`** (`--tier`, `--note`; a person only): one Orca message to the
+  project's running coordinator, a request for a lane for that issue. It is no approval: the coordinator asks you in
+  its terminal, then gates, briefs, reviews and merges it as any lane; nothing is started directly. `lane-control lane list <project>` (and `lane status`)
   reads Orca's worker list: lane, issue, PR, CI, idle time.
 - **`lane-control project check <repo> <host>`**: run it before a box setup. It lists every prerequisite, says what is
   missing or could not be checked, and changes nothing. A listening port is not proof: it also checks each tunnel

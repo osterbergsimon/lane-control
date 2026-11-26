@@ -356,9 +356,12 @@ recorded session. It first asks the live check whether the coordinator runs, and
   1, so there is never a second coordinator. Look at the terminal it names: if the coordinator runs there, nothing is
   to do; if it is an empty shell, close it and run start again. If you can tell it is not running and the check cannot,
   `lane-control coordinator start <project> --force` shows what the check found (the terminal and the process it
-  could not place), asks you once, starts it, and records in the project's settings store (`forced_starts`) that you
-  forced it. Without a terminal, `--force --yes`. `--force` never starts a second one beside a coordinator that is
-  proven to run: that is `lane-control coordinator restart <project>`.
+  could not place), asks you once, starts it, and records in the project's settings store (`forced_starts`) how it
+  was confirmed, from which terminal, and whether it started. `--force --yes` skips the question. Both are for a
+  person at a terminal: they refuse when an agent may run them (an agent's marker such as `CLAUDECODE`, no terminal,
+  an agent among the parent processes, or a terminal Orca marks as a worker's or an agent's), so run them in a plain
+  Orca terminal, not through an agent. `--force` never starts a second one beside a coordinator that is proven to
+  run: that is `lane-control coordinator restart <project>`.
 
 `lane-control coordinator status <project>` says which of these it is, and `lane-control coordinator start machine`
 (and `status machine`) does the same for the machine coordinator. On a box, add `--on <host>`: it runs the box's own
@@ -379,18 +382,21 @@ You should see the coordinator check the gate (the issue, the tier from your pat
 and current checkout), then open a lane and say in one line which lanes run. If it holds the lane, it tells you
 why. The usual reasons are no room (`lane-room`), a budget step, or a checkout that is behind or on another branch.
 
-From any Orca terminal, without switching to the coordinator's: `lane-control lane new <project> <issue id> [--tier
-swift|standard|deep] [--note "<one line for the brief>"]`. It sends the running coordinator one Orca message asking
-for a lane for that issue; the coordinator gates, briefs, reviews and merges it as for any lane you ask for, and
-answers in its own terminal with the lane's key or why it holds it (the command prints which terminal). It sends
-nothing when the coordinator is not running, and never starts a lane itself.
+From a plain Orca terminal, without switching to the coordinator's: `lane-control lane new <project> <issue id>
+[--tier swift|standard|deep] [--note "<one line for the brief>"]`. It sends the running coordinator one Orca message:
+a request from `lane-control lane new` for a lane for that issue. That is no approval (an agent could send the same
+words), so the coordinator asks you in its own terminal first (the command prints which), then gates, briefs,
+reviews and merges it as any lane. It sends nothing when the coordinator is not running or cannot be tied exactly
+to its terminal and Run, refuses when an agent may run it (as `--force` does), and never starts a lane itself.
 
 ## 6. Watch a lane, its report, review and merge
 
 You do not need to poll. The lane's report wakes the coordinator, and the coordinator tells you.
 `lane-control lane list <project>` shows each lane in Orca's worker list, one line each: lane, issue, PR, CI and how
-long its terminal has been quiet; `lane-control lane status <project>` shows each in full (worker, task, liveness,
-branch).
+long its terminal has been quiet. The worker shown is the lane's own (the current dispatch of the chain that began it),
+never its reviewer. The issue comes from the PR title's `(<id>)`, or before there is a PR from the lane brief's `(bd
+<id>)`; `PR ?` means GitHub could not be asked. `lane-control lane status <project>` shows each in full (worker,
+task, liveness, branch, and any reviewer on it, named as such).
 
 - In Orca, a new worktree appears under the project. Its card carries a comment `<KEY> <tier> <harness>/<model>: <one line>`.
 - The lane works, merges `origin/<base>` into its branch (never rebase), runs the project's checks and opens a PR.
@@ -568,9 +574,11 @@ or park it. Never stop a live lane without your word.
 
 - **One project's coordinator:** `lane-control project stop ~/code/<project>` (it hands over, then closes the terminal;
   it refuses while a lane or reviewer runs). To start it again fresh at once, `lane-control coordinator restart
-  <project>`: it asks the coordinator by Orca message to back up and write its handover, waits for it (`--wait`,
-  default 10 minutes), then stops and starts it, saying what happened at each step. Like stop, it refuses while a lane
-  runs and runs from an Orca terminal. `lane-control project rest ~/code/<project>` stops no agent: it only makes
+  <project>`: it sends the coordinator an order with a one-time code, and the coordinator finishes what is in hand,
+  writes its handover, backs up and, as its last step, replies `ready to stop <code>` (or `not now: <why>`, for
+  example during a merge). Only that reply closes it; then it is started again. No reply within `--wait` (default 10
+  minutes) closes and starts nothing and sends `carry on`. Each step is said. Like stop, it refuses while a lane of
+  its Run runs (here or on a box) and runs from an Orca terminal. `lane-control project rest ~/code/<project>` stops no agent: it only makes
   the night manager skip the project, and `lane-control project wake ~/code/<project>` undoes it.
 - **A running lane:** ask its coordinator. It stops a live lane only on your word, and puts the issue back to open.
 - **Away modes:** `lane-away off` says you are back. `lane-control ratchet off` ends the ratchet (unattended

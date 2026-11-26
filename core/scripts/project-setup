@@ -3651,11 +3651,12 @@ def wait_run(repo: Path, role: str, timeout: float = None):
 
 
 def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, checkout: Path, project: str,
-                  kickoff: str, resume: "str | None" = None, force: bool = False) -> bool:
+                  kickoff: str, resume: "str | None" = None, force: str = "") -> bool:
     """One standing session in its own Orca terminal; True when started now, False when its agent already runs, None
     when that cannot be told: nothing is started and nothing changed. A record or a terminal with no live agent is said
-    (`recorded but dead`), cleared, and the session started. force (the owner's --force, confirmed by forced_start):
-    started also when it cannot be told, the doubt recorded in the settings store; never when it runs.
+    (`recorded but dead`), cleared, and the session started. force (--force, how forced_start had it confirmed):
+    started also when it cannot be told, recorded in the settings store once its terminal exists (or the failure);
+    never when it runs.
     Nothing is ever typed into a terminal: the first message is the start command's own prompt."""
     title = session_title(role, project)
     state = session_state(place, title, stored_handle(repo, role), role, repo)
@@ -3669,16 +3670,21 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
     for old_rec in (run_record(repo, role), Path(f"{run_record(repo, role)}.err"),
                     Path(f"{run_record(repo, role)}.tmp")):
         old_rec.unlink(missing_ok=True)
-    if state.doubt:  # forced: what the check could not place stays open; the record is the new session's
-        record_forced(repo, role, state)
-        clear_session_record(repo, role)
-        say(f"session {role}", "forced", f"{title}: the owner started it although the check cannot tell "
-            f"({state.doubt}); recorded in the settings store (forced_starts)")
-    else:
+    if not state.doubt:
         drop_dead_session(repo, role, title, state.found)  # an earlier start's Run and terminal are never kept
-    made = place.jrun("terminal", "create", "--worktree", f"path:{checkout}", "--title", title,
-                      "--command", f"sh {shlex.quote(str(f))}")
+    try:
+        made = place.jrun("terminal", "create", "--worktree", f"path:{checkout}", "--title", title,
+                          "--command", f"sh {shlex.quote(str(f))}")
+    except Fail as e:
+        if state.doubt:  # the forced start did not happen: said so in the record, and the old record is kept
+            record_forced(repo, role, state, force, f"failed: {e}"[:300])
+        raise
     handle = ((made.get("result") or {}).get("terminal") or {}).get("handle") if isinstance(made, dict) else None
+    if state.doubt:  # forced, and its terminal exists: what the check could not place stays open
+        clear_session_record(repo, role)
+        record_forced(repo, role, state, force, f"started in {handle or 'a terminal Orca named no handle for'}")
+        say(f"session {role}", "forced", f"{title}: started although the check cannot tell ({state.doubt}), "
+            f"confirmed by {force}; recorded in the settings store (forced_starts)")
     if handle:
         settings(repo, terminals={**(settings(repo).get("terminals") or {}), role: handle})
     say(f"session {role}", "created", f"{'/'.join(pin)} in {checkout} ({title}" + (", resumed)" if resume else ")"))
@@ -3710,7 +3716,7 @@ def recorded_session(checkout: Path, role: str, harness: str):
 
 
 def start_standing(place: Place, repo: Path, project: str, pins: dict, mode: str, repo_id: str,
-                   kickoffs: dict, resume: bool = False, force: bool = False) -> bool:
+                   kickoffs: dict, resume: bool = False, force: str = "") -> bool:
     """The coordinator. True when it was started now, None when it cannot be told whether one runs. resume: it continues its recorded session, when there is one."""
     def sid(checkout, role):
         return recorded_session(checkout, role, pins[role][0]) if resume else None
@@ -3740,17 +3746,80 @@ def found_text(state: Session) -> str:
     return "; ".join(rows) + (f"; {proc}" if proc else "")
 
 
-def record_forced(repo: Path, role: str, state: Session) -> None:
-    """The settings store keeps each forced start: when, that the owner forced it, and what the check found."""
+def record_forced(repo: Path, role: str, state: Session, how: str, outcome: str) -> None:
+    """The settings store keeps each forced start: when, how it was confirmed (`--yes`, or a `y` typed in a
+    terminal), from which terminal, what the check found, and what came of it (started, or failed). It never
+    claims who typed it: a person check (agent_caller) refused agents before."""
     st = settings(repo)
-    row = {"role": role, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "by": "owner (--force)",
+    row = {"role": role, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "confirmed": how,
+           "from_terminal": os.environ.get("ORCA_TERMINAL_HANDLE") or "none", "outcome": outcome,
            "doubt": state.doubt, "terminals": [t.get("handle") for t in state.found], "found": found_text(state)}
     settings(repo, forced_starts=[*(st.get("forced_starts") or []), row][-20:])
 
 
-def forced_start(place: Place, repo: Path, project: str, yes: bool) -> bool:
-    """--force: whether to start the coordinator despite `cannot tell`. Refused (Fail) while it is proven to run;
-    False when the check can tell (no force needed); True on the owner's yes, asked once in a terminal (or --yes)."""
+AGENT_ENV = ("LANE_ROLE", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "OPENCODE", "OPENCODE_PID", "CODEX_SANDBOX")
+
+
+def parent_agent(proc: str = "/proc", pid: "int | None" = None) -> str:
+    """Why an agent is among this process's parents (its pid and program), '' when none is; fail closed: a process
+    tree that cannot be read is a reason too. Always the real /proc: no variable of the caller's points it elsewhere."""
+    pid = os.getppid() if pid is None else pid
+    for _ in range(64):
+        if pid <= 1:
+            return ""
+        try:
+            argv = [a.decode(errors="replace") for a in (Path(proc) / str(pid) / "cmdline").read_bytes().split(b"\0")
+                    if a]
+            status = (Path(proc) / str(pid) / "status").read_text()
+        except OSError as e:
+            return f"its parent process {pid} cannot be read ({type(e).__name__}), so it cannot tell a person runs it"
+        if is_agent(argv):
+            return f"its parent process {pid} is an agent ({os.path.basename(argv[0])})"
+        m = re.search(r"^PPid:\s*(\d+)", status, re.M)
+        if not m:
+            return f"process {pid} names no parent, so it cannot tell a person runs it"
+        pid = int(m.group(1))
+    return "the process tree is deeper than 64, so it cannot tell a person runs it"
+
+
+def agent_caller(place: "Place | None" = None, env=None, tty: "bool | None" = None, proc: str = "/proc",
+                 pid: "int | None" = None) -> str:
+    """'' when a person runs this; else why not. For what only a person may do (lane new, --force): an agent's
+    marker in the environment, no terminal on stdin, an agent among the parent processes, or (with `place`) Orca
+    naming the calling terminal a worker's or marking it an agent's. Every signal counts and doubt refuses: none
+    alone is proof, and environment variables can be dropped."""
+    env = os.environ if env is None else env
+    marks = [k for k in AGENT_ENV if env.get(k)]
+    if marks:
+        return f"it runs in an agent's session ({', '.join(marks)} set)"
+    if not (sys.stdin.isatty() if tty is None else tty):
+        return "it has no terminal on stdin (a script, an automation or an agent's tool runs it)"
+    why = parent_agent(proc, pid)
+    if why or place is None:
+        return why
+    me = env.get("ORCA_TERMINAL_HANDLE")
+    if not me:
+        return ""
+    try:
+        rows = place.jrun("terminal", "list")["result"]["terminals"]
+        workers = (place.jrun("orchestration", "worker-list", "--limit", "100").get("result") or {}).get("workers")
+    except (Fail, KeyError, TypeError) as e:
+        return f"Orca's terminal or worker list could not be read ({e}), so it cannot tell a person runs it"
+    if any(isinstance(w, dict) and me in (w.get("terminal"), w.get("agentTerminalHandle")) for w in workers or []):
+        return f"its terminal {me} is a worker's in Orca's worker list"
+    if any(t.get("handle") == me and t.get("agentIdentity") for t in rows):
+        return (f"Orca marks its terminal {me} as an agent's ({next(t for t in rows if t.get('handle') == me)['agentIdentity']}):"
+                " run it in a plain terminal")
+    return ""
+
+
+def forced_start(place: Place, repo: Path, project: str, yes: bool) -> str:
+    """--force: whether to start the coordinator despite `cannot tell`. Refused (Fail) for an agent (agent_caller) and
+    while it is proven to run; '' when the check can tell (no force needed); else how it was confirmed: `--yes`, or
+    a `y` typed at the one question in a terminal."""
+    who = agent_caller(place)
+    if who:
+        raise Fail(f"--force is for a person at a terminal, and {who}. Nothing was started")
     title = session_title("coordinator", project)
     state = session_state(place, title, stored_handle(repo, "coordinator"), "coordinator", repo)
     if state.live:
@@ -3758,18 +3827,18 @@ def forced_start(place: Place, repo: Path, project: str, yes: bool) -> bool:
                    "it again, use lane-control coordinator restart. Nothing was started")
     if not state.doubt:
         say("force", "not needed", f"the check can tell: {title} does not run, so it starts as usual")
-        return False
+        return ""
     print(f"{title}: cannot tell if it runs: {state.doubt}.\n  found: {found_text(state)}", flush=True)
     if yes:
-        say("force", "yes", "(--yes)")
-        return True
+        say("force", "yes", "(--yes: not asked)")
+        return "--yes"
     if not has_terminal():
-        raise Fail("--force asks you once in a terminal, and there is none here: run it in a terminal, or add --yes "
-                   "when you know it is needed. Nothing was started")
+        raise Fail("--force asks you once in a terminal, and there is none here: run it in a terminal (--yes skips "
+                   "the question, in a terminal too). Nothing was started")
     if not owner_says_yes(f"If it runs there, a second {title} would start beside it. Start one anyway? [y/N] ",
                           "force"):
         raise Fail("not forced: nothing was started")
-    return True
+    return "y typed in a terminal"
 
 
 def native_project(repo: Path, name: str = "") -> dict:
@@ -3876,7 +3945,7 @@ def resume_standing(repo: Path, force: bool = False, yes: bool = False) -> int:
     native_preflight({pins["coordinator"][0]}, LOCAL)
     kickoffs = {r: NATIVE_RESUME.format(persona=repo / ADAPTED / f"{r}.md", handover=HANDOVERS[r]) for r in STANDING}
     place = Place()
-    force = force and forced_start(place, repo, p["project"], yes)
+    force = forced_start(place, repo, p["project"], yes) if force else ""
     if start_standing(place, repo, p["project"], pins, p["mode"], orca_repo(repo, place), kickoffs,
                       resume=True, force=force) is None:
         print("project-pause: start could not tell whether the coordinator runs (above): nothing was started and the "

@@ -189,9 +189,12 @@ def orca():
         out({"ok": True, "result": {"terminals": state["terminals"]}})
     if cmd == "terminal close":
         state["terminals"] = [t for t in state["terminals"] if t["handle"] != opt("--terminal")]
-        end_processes(opt("--terminal"))
+        if not state.get("close_keeps_processes"):  # an agent still exiting after its terminal closed
+            end_processes(opt("--terminal"))
         out({"ok": True, "result": {}})
     if cmd == "terminal create":
+        if state.get("create_fails"):
+            out({"ok": False, "error": {"message": "stub: terminal create failed"}}, 1)
         t = {"handle": f"term_{sum(t['handle'].startswith('term_') for t in state['terminals']) + 1}", "title": opt("--title", "shell"),
              "worktreePath": opt("--worktree").split(":", 1)[1]}
         state["terminals"].append(t)
@@ -214,7 +217,8 @@ def orca():
     if cmd == "orchestration run-create":
         if state.get("run_create_fails"):
             out({"ok": False, "error": {"message": "stub: run-create failed"}}, 1)
-        run = {"runId": f"run_{len(state.setdefault('runs', [])) + 1:012x}", "objective": opt("--objective")}
+        run = {"runId": f"run_{len(state.setdefault('runs', [])) + 1:012x}", "objective": opt("--objective"),
+               "coordinator_handle": os.environ.get("ORCA_TERMINAL_HANDLE")}  # --full shows it; Orca binds the maker
         state["runs"].append(run)
         out({"ok": True, "result": {**run, "next": []}})  # Orca 1.4.250's concise shape
     if cmd == "orchestration run-list":  # pages as Orca 1.4.250: --limit at most 100, then --cursor nextCursor
@@ -226,18 +230,40 @@ def orca():
         if start + limit < len(rows):
             page["nextCursor"] = str(start + limit)
         out({"ok": True, "result": page})
-    if cmd == "orchestration worker-list":  # Orca's concise rows, newest first, paged by --cursor (state "workers")
+    if cmd == "orchestration worker-list":  # Orca's rows, newest first, paged by --cursor (state "workers")
         limit, start = int(opt("--limit", "100")), int(opt("--cursor", "0"))
-        rows = state.get("workers", [])
+        rows = [w for w in state.get("workers", []) if not opt("--run") or w.get("runId") in (None, opt("--run"))]
+        if state.get("worker_list_fails"):
+            out({"ok": False, "error": {"message": "stub: worker-list failed"}}, 1)
         page = {"workers": rows[start:start + limit], "scope": {"source": state.get("worker_scope", "all")}}
         if start + limit < len(rows):
             page["nextCursor"] = str(start + limit)
         out({"ok": True, "result": page})
     if cmd == "orchestration send":
-        state.setdefault("sent", []).append({"to": opt("--to"), "subject": opt("--subject"), "body": opt("--body")})
+        sent = state.setdefault("sent", [])
+        mid = f"msg_{len(sent) + 1}"
+        frm = opt("--from") or os.environ.get("ORCA_TERMINAL_HANDLE")
+        sent.append({"id": mid, "to": opt("--to"), "from": frm, "subject": opt("--subject"), "body": opt("--body"),
+                     "thread_id": mid})
         for key, text in (state.get("handover_on_send") or {}).items():  # sessions write their handovers when asked
             Path(os.environ["HOME"], key).write_text(text)  # (the tests' bd stub reads $HOME/<key>)
-        out({"ok": True, "result": {"message": {"id": f"msg_{len(state['sent'])}"}}})
+        import re
+        for needle, answer in (state.get("replies") or {}).items():  # the coordinator answers with `reply`
+            if needle in (opt("--subject") or ""):
+                code = re.search(r"restart ([0-9a-f]+)", opt("--subject") or "")
+                sent.append({"id": f"msg_{len(sent) + 1}", "to": frm, "from": state.get("reply_from") or opt("--to"),
+                             "subject": "Re: " + opt("--subject"), "thread_id": mid,
+                             "body": answer.replace("{code}", code.group(1) if code else "")})
+                if state.get("workers_on_reply") is not None:  # a lane started while the coordinator got ready
+                    state["workers"] = state["workers_on_reply"]
+        out({"ok": True, "result": {"message": {"id": mid}}})
+    if cmd == "orchestration inbox":  # a mailbox, read without marking (Orca's --full row fields)
+        rows = [{"id": m["id"], "thread_id": m.get("thread_id"), "from_handle": m.get("from"), "to_handle": m["to"],
+                 "subject": m["subject"], "body": m["body"], "sequence": i}
+                for i, m in enumerate(state.get("sent", [])) if m["to"] == opt("--terminal")]
+        out({"ok": True, "result": {"messages": rows, "count": len(rows)}})
+    if cmd == "orchestration task-list":  # --full rows of one Run (state "tasks")
+        out({"ok": True, "result": [x for x in state.get("tasks", []) if x.get("run_id") == opt("--run")]})
     out({"ok": False, "error": {"message": f"stub: unhandled orca {args}"}}, 9)
 
 

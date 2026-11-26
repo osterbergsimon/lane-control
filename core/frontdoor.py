@@ -37,11 +37,11 @@ ROUTES = {
     ("coordinator", "start"): ("lane-spawn", ["coordinator", "start"], "<project>|machine [--force]",
                                "start it unless it runs"),
     ("coordinator", "restart"): ("lane-spawn", ["coordinator", "restart"], "<project> [--wait S]",
-                                 "handover, then stop and start"),
+                                 "stop, start on its own ready reply"),
     ("coordinator", "status"): ("lane-spawn", ["coordinator", "status"], "<project>|machine",
                                 "running, dead or cannot tell"),
     ("lane", "new"): ("lane-spawn", ["lane", "new"], "<project> <issue> [--tier T] [--note N]",
-                      "ask its coordinator for a lane"),
+                      "send its coordinator a request"),
     ("lane", "list"): ("lane-spawn", ["lane", "list"], "<project>", "lane, issue, PR, CI, idle time"),
     ("lane", "status"): ("lane-spawn", ["lane", "status"], "<project>", "each lane in full"),
     ("machine", "setup"): ("machine-setup", [], "[--host <host>] [--check]", "set it up once; --check reads only"),
@@ -78,8 +78,8 @@ and waiting for it. Refuses, naming them, while a lane or reviewer runs. Runs pr
     ("project", "start"): """Starts the project's missing standing agents, each resuming its recorded session.
 Runs project-pause start <project>.
 
-  --force   start it although the live check cannot tell (asks once; lane-control coordinator start)
-  --yes     with --force, without a terminal""",
+  --force   start it although the live check cannot tell (asks once; a person at a terminal only)
+  --yes     with --force: do not ask""",
     ("project", "status"): """Says whether its coordinator runs, rests or is paused, and what else runs.
 Runs project-pause status <project>.""",
     ("project", "remove-host"): """Undoes a box's desktop lanes (direction 2): the box forgets this machine's Orca

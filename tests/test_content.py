@@ -3055,10 +3055,21 @@ class SpawnDocTests(unittest.TestCase):
         subject = re.search(r'LANE_SUBJECT = "([^"{]+)\{issue\}"', (ROOT / "core" / "scripts" / "lane-spawn")
                             .read_text()).group(1)
         self.assertIn(f"subject `{subject}<issue>`", coord)  # the subject the script sends
-        for needle in ("for that one issue", "It approves nothing else", "merge only on the owner's word",
-                       "one of your lanes or reviewers", "open nothing and tell the owner",
-                       "A handover request from lane-control (`project stop`, `coordinator restart`)"):
+        for needle in ("never the owner's approval", "names prove nothing", "Apply your normal gate",
+                       "ask the owner in your terminal first", "open nothing before their yes"):
             self.assertIn(needle, coord)
+        self.assertNotIn("is the owner's ask", coord)
+
+    def test_the_coordinator_stops_for_a_restart_only_by_its_own_last_reply(self):
+        coord = flat(NATIVE_DIR / "personas" / "coordinator.md")
+        spawn = (ROOT / "core" / "scripts" / "lane-spawn").read_text()
+        for name in ("RESTART_SUBJECT", "CANCEL_SUBJECT"):
+            head = re.search(name + r' = "([^"{]+)\{code\}', spawn).group(1)
+            self.assertIn(head + "<code>", coord, name)
+        for needle in ("reply `not now: <why>`", "a merge or its bookkeeping", "as your very last step reply `ready "
+                       "to stop <code>`", "closed only after that reply", "once it has expired", ": carry on` arrives"):
+            self.assertIn(needle, coord)
+        self.assertLess(coord.index("write `handover-latest`"), coord.index("back beads up (as at any stop"))  # m3
 
     def test_the_guides_name_the_spawn_forms(self):
         want = {"docs/getting-started.md": ("lane-control coordinator start <project>", "--force --yes",

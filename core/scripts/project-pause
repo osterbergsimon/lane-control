@@ -33,10 +33,12 @@ new Run; the older ones stay in Orca and are never used again. Nothing is typed 
   project-pause stop <project> [--wait SECONDS] [--no-handover]
   project-pause start <project> [--force [--yes]]
 
---force (native Orca, start only; the owner's way out when they can tell what the check cannot): under `cannot tell`
-it shows what the check found (the terminals and the process it could not place), asks once in a terminal (without
-one: --force --yes) and starts the coordinator, recording in the settings store (forced_starts) that the owner forced
-it. It never overrides a coordinator proven to run: that is a restart (lane-control coordinator restart).
+--force (native Orca, start only; a person's way out when they can tell what the check cannot): under `cannot tell`
+it shows what the check found (the terminals and the process it could not place), asks once (--yes: not asked) and
+starts the coordinator, recording in the settings store (forced_starts) how it was confirmed, from which terminal and
+whether it started. It refuses when an agent may run it (project-setup's agent_caller: an agent's marker, no terminal,
+an agent parent, a worker's terminal) and never overrides a coordinator proven to run: that is a restart
+(lane-control coordinator restart).
 
 A paused project keeps its space in the window guard's COORD_SPACE; the guard config is not touched. stop leaves a
 marker, <guard state dir>/paused/<space>, that makes the guard send nothing to that space; start removes it. Reruns are
@@ -67,11 +69,13 @@ HANDOVER_BODY = ("The owner is pausing this project. Refresh your beads memory `
                  "working. Your terminal is closed once the new handover is there.")
 
 
-def handover(repo: Path, key: str) -> str:
+def handover(repo: Path, key: str) -> "str | None":
+    """The handover memory's text; None when it cannot be read (bd failed or timed out), which is never a change."""
     try:
-        return ps.run(["bd", "recall", key], cwd=repo, check=False, timeout=30).stdout
+        r = ps.run(["bd", "recall", key], cwd=repo, check=False, timeout=30)
     except ps.Fail:
-        return ""
+        return None
+    return r.stdout if r.returncode == 0 else None
 
 
 def run_by_name(place, title: str, old: set):
@@ -180,13 +184,18 @@ def native(cmd: str, repo: Path, wait: float, ask: bool, force: bool = False, ye
                 "nothing is typed into a session's terminal. Then run project-pause stop --no-handover. Nothing was "
                 "changed")
         before = {role: handover(repo, HANDOVER_KEYS[role]) for role in live}
+        unread = [r for r, text in before.items() if text is None]
+        if unread:  # a failed read must never pass for the old handover, so nothing is asked
+            raise ps.Fail("`bd recall` failed for " + ", ".join(HANDOVER_KEYS[r] for r in unread) + ", so a new "
+                          "handover could not be told from the old one. Nothing was changed; run project-pause stop "
+                          "again")
         for role, rid in runs.items():
             place.jrun("orchestration", "send", "--to", f"run:{rid}", "--subject", HANDOVER_SUBJECT,
                        "--body", HANDOVER_BODY.format(key=HANDOVER_KEYS[role]))
             ps.say(f"handover {role}", "asked", f"run:{rid} ({HANDOVER_KEYS[role]})")
         end = time.time() + wait
         while True:
-            waiting = [r for r in live if handover(repo, HANDOVER_KEYS[r]) == before[r]]
+            waiting = [r for r in live if handover(repo, HANDOVER_KEYS[r]) in (None, "", before[r])]
             if not waiting:
                 break
             if time.time() >= end:
