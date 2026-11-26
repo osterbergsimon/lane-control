@@ -31,6 +31,7 @@ orchestrator to another; everything that does depend on one is in `orchestrators
 | `lcroot.py` | finds the lane-control checkout by its marker file, `.lane-control-root` |
 | `install.py` | the versioned install: lays a commit's tree, switches `current`, links the lane tools, the box copy, doctor and prune |
 | `boxhealth.py` | what a listening port does not prove, read-only: a tunnel unit's state, restart counter and socket owner, one Orca server runtime per host, the user manager's SHELL, lane-control paths in Orca's automations; used by `lane-control doctor` and `project-setup --check` |
+| `anchor.py` | the persona anchor: the few lines in a coordinator folder's `CLAUDE.local.md` (written by `machine-setup` and `project-setup`, kept out of git) that send a session started by hand to its persona; both setups' `--check` reads it |
 | `agentsdoc.py` | where generated coordination goes in a project: `AGENTS.lane-control.md` and AGENTS.md's one pointer line (`orchestrators/README.md`) |
 
 Why shared: roles, routing, budgets, the heavy-work gate, beads and the reliability log are how we work, whatever

@@ -52,7 +52,10 @@ stop (section 3).
    `away-build-brief.md`, filled in with the item, why picked, the owner's limits verbatim and the deny paths. The lane writes its
    log entry in its PR body (section 2); you edit no file yourself. A frontend lane also gets `frontend-brief.md`.
 5. **Review.** A reviewer on a different model, as for any lane, who also checks the owner's limits, duplication and
-   that a big change justifies itself, as well as correctness. At most two rounds. After the reviewer's clean round
+   that a big change justifies itself, as well as correctness. At most two rounds. A review not clean after the second
+   round ends as `native-orca-lanes`, section 6, says (issues, the PR parked with the findings quoted, the lane closed):
+   write no `Review: passed` comment, have the item listed as parked in your summary, never pick it again this period,
+   and start the next cycle (step 7) without waiting for the owner. After the reviewer's clean round
    you write `Review: passed <head sha>` on its own line in a comment (`gh pr comment <n> --body "Review: passed
    $(gh pr view <n> --json headRefOid -q .headRefOid)"`): a comment, never the PR body, naming the head commit the
    reviewer saw, and a push after the review needs a new one. `away-merge` accepts only that comment, by the gh login

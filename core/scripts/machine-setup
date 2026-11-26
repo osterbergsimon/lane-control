@@ -5,6 +5,7 @@ manager, lane sweep and machine check automations, the presence-based CI limits 
   machine-setup [--host H] [--folder DIR] [--machine-coordinator HARNESS/MODEL] [--permission-mode MODE]
                 [--automation-provider claude|opencode] [--automation-model MODEL [--replace-automation-model]]
                 [--no-model-check] [--trust-folder] [--no-start]
+  machine-setup --check [--folder DIR]
 
 Runs as a normal user on the machine whose coordinators it watches; with --host it copies what it needs to H over
 SSH (~/.local/share/lane-control, as project-setup does) and runs there with the same arguments, so a box gets its own
@@ -32,9 +33,15 @@ says whether model-env, which sets the auto-mode classifier model explicitly, st
 3. The machine coordinator's private folder (--folder, default ~/machine-coordinator; never push it to a public
    remote) with notes.md, added to Orca as a folder project. Its persona (orchestrators/native-orca/personas/) is
    rendered to <folder>/.lane-control/machine-coordinator.md, with <folder>/.lane-control/additions/
-   machine-coordinator.md appended when that exists; the harness's persona hook is installed.
-4. Unless --no-start, the machine coordinator starts in an Orca terminal titled `machine coordinator` (skipped when a
-   terminal with that title exists): `env LANE_ROLE=machine-coordinator LANE_PERSONA=... claude --model <model>
+   machine-coordinator.md appended when that exists; the harness's persona hook is installed. <folder>/CLAUDE.local.md
+   gets a persona anchor (core/anchor.py): a few lines that tell a session the owner started by hand there to read
+   the persona, and an automation's or worker's session to ignore them. The rest of that file is kept. Where the folder
+   is in a git repo, git does not see the file: it is listed in .git/info/exclude unless already ignored; a committed
+   one, or one a .gitignore rule would still show, is not written.
+4. Unless --no-start, the machine coordinator starts in an Orca terminal titled `machine coordinator`. It is skipped
+   when its agent is proven to run (project-setup's session_state, never the title alone: a titled terminal with no
+   agent is `recorded but dead` and a new one starts) and when that cannot be told (`cannot tell`). It starts as
+   `env LANE_ROLE=machine-coordinator LANE_PERSONA=... claude --model <model>
    --permission-mode auto --name "machine coordinator"` (Claude's --name keeps the session
    and terminal title, so peers find it by SendMessage). Claude's first-start folder question: --trust-folder answers
    yes; otherwise it is asked in a terminal, as project-setup does.
@@ -55,7 +62,8 @@ says whether model-env, which sets the auto-mode classifier model explicitly, st
 7. The ci-presence user timer (every 15 minutes and at boot), if systemd --user works; otherwise a warning and the
    CI limits stay the slice unit's own. An older timer that sets the CI slice (ci-cpu) is reported with the command
    to stop it, and ci-presence is not installed beside it.
-Exit: 0 done (warnings included); 1 a step failed; 2 usage or an unknown harness.
+--check only reads: whether --folder has the rendered persona and the anchor as setup writes it (exit 1 if not).
+Exit: 0 done (warnings included); 1 a step failed, or --check found something; 2 usage or an unknown harness.
 """
 import argparse
 import importlib.machinery
@@ -75,6 +83,7 @@ ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT / "core"))
 import harnesses  # noqa: E402
 import machineconf  # noqa: E402
+import anchor  # noqa: E402
 import beads  # noqa: E402
 import cleanup  # noqa: E402
 import install  # noqa: E402
@@ -363,12 +372,54 @@ def persona_step(harness: str, model: str, folder: Path) -> Path:
     return dest
 
 
+def anchor_block(folder: Path) -> str:
+    return anchor.machine_block(folder, folder / ".lane-control" / f"{ROLE}.md", TITLE, anchor.imports_for(folder))
+
+
+def anchor_step(folder: Path):
+    """The folder's persona anchor (core/anchor.py): a session started by hand there is told to read the persona."""
+    f = folder / anchor.FILE
+    try:
+        ignored = anchor.hide(f)  # first, so git never sees it: the folder may be the owner's own repo
+        state = anchor.apply(f, anchor_block(folder))
+    except (anchor.AnchorError, OSError) as e:
+        return say("persona anchor", "skipped", f"({e})")
+    say("persona anchor", state, str(f) + (f" (git does not see it: ignored by {ignored})" if ignored else ""))
+
+
+def check(folder: Path) -> int:
+    """--check: the machine coordinator's persona and its anchor. Reads only. 0 when both are there and as setup
+    writes them, 1 otherwise."""
+    persona = folder / ".lane-control" / f"{ROLE}.md"
+    has = persona.is_file()
+    say("check persona", "ok" if has else "missing", f"({persona})" if has else f"(no {persona}: run machine-setup)")
+    f = folder / anchor.FILE
+    try:
+        state, why = anchor.check(f, anchor_block(folder)), ""
+    except anchor.AnchorError as e:
+        state, why = "stale", str(e)
+    say("check persona anchor", state, f"({f})" if state == "ok" else f"({why or f}: run machine-setup)")
+    ok = has and state == "ok"
+    say("check", "ok" if ok else "missing", "(nothing was changed)")
+    return 0 if ok else 1
+
+
 def start_step(harness: str, model: str, mode: str, folder: Path, persona: Path, trust: bool):
-    terms = orca("terminal", "list").get("terminals", []) or []
-    if any(t.get("title") == TITLE for t in terms):
-        return say(TITLE, "exists", "(a terminal with that title is open; not started again)")
+    ps = project_setup()  # its liveness proof: a terminal with the title is none (lc-l78.32)
+    ps.ORCA = machineconf.orca_cli()
+    try:
+        state = ps.session_state(ps.Place(), TITLE, None, ROLE, folder)
+    except ps.Fail as e:
+        raise Fail(str(e)) from None
+    if state.live:
+        return say(TITLE, "exists", "(its agent runs; not started again)")
+    if state.doubt:
+        return say(TITLE, "cannot tell", "(" + ps.cannot_tell(TITLE, state, "run machine-setup again") + ")")
+    if state.found:
+        close = "; ".join(f"orca-ide terminal close --terminal {t.get('handle')}" for t in state.found)
+        say(TITLE, "recorded but dead", f"(a terminal with that title and no live agent; it is left open, and if it is "
+                                        f"an empty shell close it: {close})")
     if harness == "claude":
-        ps = project_setup()
         try:
             ps.ensure_claude_trust(folder, record=trust)
         except ps.Fail as e:
@@ -661,6 +712,8 @@ def main(argv) -> int:
     ap.add_argument("--no-model-check", action="store_true", help="do not ask the gateway what it serves")
     ap.add_argument("--trust-folder", action="store_true")
     ap.add_argument("--no-start", action="store_true")
+    ap.add_argument("--check", action="store_true",
+                    help="say whether the machine coordinator's persona and its anchor are in --folder; changes nothing")
     a = ap.parse_args(argv)
     if os.geteuid() == 0:
         print("machine-setup: refusing to run as root; agents run as a normal user", file=sys.stderr)
@@ -674,6 +727,12 @@ def main(argv) -> int:
     except (SystemExit2, ValueError) as e:
         print(f"machine-setup: {e}", file=sys.stderr)
         return 2
+    if a.check:
+        if a.host:
+            print("machine-setup: --check reads this machine only; for a box's anchors run project-setup --check "
+                  "<repo> <host>", file=sys.stderr)
+            return 2
+        return check(Path(os.path.expanduser(a.folder)).resolve())
     if a.host:
         return on_host(a.host, argv)
     folder = Path(os.path.expanduser(a.folder)).resolve()
@@ -727,6 +786,7 @@ def main(argv) -> int:
         cleanup_step()
         folder_step(folder)
         persona = persona_step(harness, model, folder)
+        anchor_step(folder)
         if a.no_start:
             say(TITLE, "skipped", "(--no-start)")
         else:

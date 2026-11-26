@@ -12,8 +12,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fake_proc import keep_running  # noqa: E402
+
 tool = Path(sys.argv[0]).name
 args = sys.argv[1:]
+if "-p" not in args:  # a started session, not a headless run: it stays running
+    keep_running(tool)
 model = args[args.index("--model") + 1]
 state_path = Path(os.environ["STUB_STATE"])
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
