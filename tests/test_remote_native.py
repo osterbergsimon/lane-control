@@ -171,12 +171,34 @@ def start(u):
     env = dict(l.split("=", 1) for l in open(os.path.join(conf, "lane-control", "tunnels", name + ".env")).read().splitlines() if "=" in l)
     p = subprocess.Popen([sys.executable, "-c", "import socket,sys,time\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
                           "s.bind((sys.argv[2],int(sys.argv[1])))\ns.listen()\ntime.sleep(120)", env.get("REMOTE_PORT") or env["PORT"],
-                          "0.0.0.0" if os.environ.get("STUB_TUNNEL_EXPOSED") else "127.0.0.1"],
+                          "0.0.0.0" if os.environ.get("STUB_TUNNEL_EXPOSED") else "127.0.0.1", "-o", "ControlPath=none"],
                          start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
     open(pidfile(u) + (".impostor" if impostor else ""), "w").write(str(p.pid))
 def enabled(u):
     return os.path.join(os.environ["HOME"], "enabled-" + u)
+if args[1:2] == ["show-environment"] and os.environ.get("STUB_MANAGER_SHELL"):
+    print("PATH=/usr/bin\nSHELL=" + os.environ["STUB_MANAGER_SHELL"])
+if args[1:2] == ["show"] and units:  # BOX-1: what --check and doctor read of a tunnel unit
+    u = units[0]
+    try:
+        pid = int(open(pidfile(u)).read())
+    except (OSError, ValueError):
+        pid = 0
+    n = int(os.environ.get("STUB_NRESTARTS") or 0)
+    if os.environ.get("STUB_TUNNEL_CLIMBS"):  # each look finds it restarted again
+        c = os.path.join(os.environ["HOME"], "show-count")
+        k = int(open(c).read()) if os.path.exists(c) else 0
+        open(c, "w").write(str(k + 1))
+        n += k
+    state = ("active", "running") if pid else ("inactive", "dead")
+    print("LoadState=loaded\nActiveState=%s\nSubState=%s\nMainPID=%d\nNRestarts=%d" % (state + (pid, n)))  # systemd's order
+    sys.exit(0)
+if args[1:2] == ["show"] and any(a.startswith("orca-tunnel-") for a in args):  # direction 1's unit (BOX-1)
+    pid = int(os.environ.get("STUB_ORCA_TUNNEL_PID") or 0)
+    state = ("active", "running") if pid else ("inactive", "dead")
+    print("LoadState=loaded\nActiveState=%s\nSubState=%s\nMainPID=%d\nNRestarts=0" % (state + (pid,)))
+    sys.exit(0)
 for u in units:
     if "is-enabled" in args:
         sys.exit(0 if os.path.exists(enabled(u)) else 1)
@@ -278,7 +300,7 @@ class RemoteEnv(NativeEnv):
             (cli / n).chmod(0o700)
         self.env.update(STUB_BOX=str(self.box), STUB_ORCA=str(self.bin / "orca"), LANE_ORCA_HOST_INSTALL=str(self.bin / "orca-host-install"),
                         LANE_MACHINE_SETUP=str(self.bin / "machine-setup"), LANE_PAIR_WAIT="0",
-                        LANE_TUNNEL_WAIT="3", LANE_TUNNEL_SETTLE="0")
+                        LANE_TUNNEL_WAIT="3", LANE_TUNNEL_SETTLE="0", LANE_CHECK_SETTLE="0")
         (self.home / "tmp").mkdir()
         self.env["TMPDIR"] = str(self.home / "tmp")  # a temp file a child writes is inside what the tests scan
         self.env.pop("ORCA_CLI", None)

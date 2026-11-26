@@ -30,6 +30,7 @@ orchestrator to another; everything that does depend on one is in `orchestrators
 | `templates/machine.conf.example`, `ci-presence.service`, `ci-presence.timer` | the machine config's example and the ci-presence user units |
 | `lcroot.py` | finds the lane-control checkout by its marker file, `.lane-control-root` |
 | `install.py` | the versioned install: lays a commit's tree, switches `current`, links the lane tools, the box copy, doctor and prune |
+| `boxhealth.py` | what a listening port does not prove, read-only: a tunnel unit's state, restart counter and socket owner, one Orca server runtime per host, the user manager's SHELL, lane-control paths in Orca's automations; used by `lane-control doctor` and `project-setup --check` |
 | `anchor.py` | the persona anchor: the few lines in a coordinator folder's `CLAUDE.local.md` (written by `machine-setup` and `project-setup`, kept out of git) that send a session started by hand to its persona; both setups' `--check` reads it |
 | `agentsdoc.py` | where generated coordination goes in a project: `AGENTS.lane-control.md` and AGENTS.md's one pointer line (`orchestrators/README.md`) |
 
@@ -50,7 +51,7 @@ setup; "library" is only read by other scripts. A **parked** script belongs to a
 | `core/scripts/budget-state` | prints each metered budget's step now | coordinator, owner, automation | [budget steps](model-routing.md#budget-thresholds-per-metered-budget-ceiling--the-owners-weekly-percent) |
 | `core/scripts/ci-presence` | sets CI's CPU and memory limits by whether you are there | automation | [machine caps](machine.md#machine-caps) |
 | `core/scripts/design-shots` | screenshots of a UI at two widths in both themes, and a before/after page | lane | [design kit](../docs/superpowers/specs/2026-11-21-design-kit-design.md) |
-| `core/scripts/lane-control`, `scripts/lane-control` | installs one versioned lane-control tree per machine (`install`, `status`, `doctor`, `prune`) | owner, setup | [the install](#the-install-one-versioned-tree-per-machine-and-per-box) |
+| `core/scripts/lane-control`, `scripts/lane-control` | installs one versioned lane-control tree per machine (`install`, `status`, `doctor`, `prune`); `doctor` also reads each tunnel unit (state, restart counter, socket owner), the Orca server runtimes, the SHELL on a box and the paths in Orca's automations, and `prune` names a flat install's leftovers | owner, setup | [the install](#the-install-one-versioned-tree-per-machine-and-per-box) |
 | `core/scripts/lane-away` | tells the machine you are away or back | owner, coordinator (the machine one, on your word) | [a machine](../orchestrators/native-orca/setup.md#a-machine) |
 | `core/scripts/lane-heavy`, `scripts/lane-heavy` | runs a build or full test suite under the machine-wide limit | lane, coordinator | [machine caps](machine.md#machine-caps) |
 | `core/scripts/lane-idle` | says how long a marked session has been idle, or waits for it | owner, coordinator | [session record](harnesses/session-record.md) |
@@ -59,7 +60,7 @@ setup; "library" is only read by other scripts. A **parked** script belongs to a
 | `core/scripts/lane-room`, `scripts/lane-room` | says whether there is room to open another lane | coordinator | [machine caps](machine.md#machine-caps) |
 | `core/scripts/lane-sweep` | reports merged, parked, stuck and broken lanes; removes some only with `--apply` | automation, owner | [lane cleanup](../docs/orca-cleanup.md) |
 | `core/scripts/lane-tier`, `scripts/lane-tier` | looks a tier up in a project's tier table | coordinator, setup | [model routing](model-routing.md#tiers) |
-| `core/scripts/lane-tunnel` | `lane-tunnel@<host>` (`ssh -R`, direction 2): starts, stops and checks the box's way back to the desktop | setup, owner | [direction 2](../orchestrators/native-orca/remote.md#direction-2-the-boxs-coordinator-runs-lanes-here) |
+| `core/scripts/lane-tunnel` | `lane-tunnel@<host>` (`ssh -R`, direction 2): starts, stops and checks the box's way back to the desktop; its ssh never multiplexes (`ControlPath=none`), and it runs through a link | setup, owner | [direction 2](../orchestrators/native-orca/remote.md#direction-2-the-boxs-coordinator-runs-lanes-here) |
 | `core/scripts/lib.sh`, `scripts/lib.sh` | the config and budget helpers `budget-state` and the watch scripts share | library | [config example](config.example.sh) |
 | `core/scripts/machine-check` | finds changes in budget step, memory, runners and coordinators | automation | [a machine](../orchestrators/native-orca/setup.md#a-machine) |
 | `core/scripts/machine-setup` | sets a machine up once, here or on a box | owner, setup | [a machine](../orchestrators/native-orca/setup.md#a-machine) |
@@ -73,7 +74,7 @@ setup; "library" is only read by other scripts. A **parked** script belongs to a
 | `core/scripts/window-guard.sh`, `scripts/window-guard.sh` | **parked** (sends through Cotal): sends budget-window and low-memory orders | automation | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
 | `core/scripts/window-guard-install`, `scripts/window-guard-install` | **parked** (with the window guard): installs it as a systemd user service | owner | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
 | `core/orch.py`, `scripts/orch` | the `orch` command: a project's orchestrator status, setup, strip and switch | owner | [switching](../orchestrators/switching.md) |
-| `orchestrators/orca-cotal/scripts/orca-host-install`, `scripts/orca-host-install` | puts Orca's server on a box; with `--pair` makes `orca-tunnel-<host>` (`ssh -L`, direction 1) and pairs it. **In use** by native Orca, though it sits in a parked folder | setup, owner | [direction 1](../orchestrators/native-orca/remote.md#direction-1-this-machine-drives-the-box) |
+| `orchestrators/orca-cotal/scripts/orca-host-install`, `scripts/orca-host-install` | puts Orca's server on a box; with `--pair` makes `orca-tunnel-<host>` (`ssh -L`, direction 1, `ControlPath=none`), stops an older build's server processes, proves one runtime and pairs it; `--tunnel` restores only that unit. **In use** by native Orca, though it sits in a parked folder | setup, owner | [direction 1](../orchestrators/native-orca/remote.md#direction-1-this-machine-drives-the-box) |
 | `orchestrators/orca-cotal/scripts/cotal-agent`, `scripts/cotal-agent` | **parked** (Orca + Cotal): runs OpenCode as a Cotal agent in this terminal | setup, coordinator | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
 | `orchestrators/orca-cotal/scripts/machine-coordinator-setup`, `scripts/machine-coordinator-setup` | **parked** (Orca + Cotal): creates its machine coordinator | owner | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |
 | `orchestrators/orca-cotal/scripts/orca-cotal-task`, `scripts/orca-cotal-task` | **parked** (Orca + Cotal): makes an Orca task for a Cotal agent | coordinator | [Orca + Cotal](../orchestrators/orca-cotal/docs/orca.md) |

@@ -453,6 +453,23 @@ def named_by(tree: Path, files: list):
     return None
 
 
+def flat_leftovers(root: Path = None) -> list:
+    """The names in the data root that the install did not put there: a flat copy from before the versioned install
+    (core/, scripts/, ... laid straight in it). prune leaves them; the box's box_run falls back to them until the box
+    is refreshed."""
+    root = root or data_root()
+    try:
+        names = sorted(p.name for p in root.iterdir())
+    except OSError:
+        return []
+    return [n for n in names if n not in ("current", SOURCE, ".lock", MARK) and not SHA_RE.fullmatch(n)
+            and not (n.startswith(".") and n.endswith(".tmp"))]
+
+
+FLAT_NOTE = ("note: {root} also holds {names} from before the versioned install (the flat layout): prune leaves them; "
+             "once lane-control doctor names nothing that uses them (and each box is refreshed), remove them by hand")
+
+
 def prune_plan(root: Path = None) -> list:
     """(name, "keep"|"remove", why) for each tree in the data root, and for leftovers of an install that was stopped.
     Kept: current, a tree a running process uses, a tree any hook, persona, unit or link names. With no valid

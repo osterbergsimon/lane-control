@@ -23,7 +23,9 @@ while [ $# -gt 0 ]; do
 done
 shift
 echo "$*" >> "$BOX.ssh-log"
-HOME=$BOX exec sh -c "$*"
+printf '%s\0' "$*" >> "$BOX.ssh-cmds"  # one record per command, a multi-line script whole
+# the box's login shell runs the command, as sshd does: sh, or fish with BOX_LOGIN_SHELL (its files in the box's HOME)
+HOME=$BOX XDG_CONFIG_HOME=$BOX/.config XDG_DATA_HOME=$BOX/.local/share exec "${BOX_LOGIN_SHELL:-sh}" -c "$*"
 """
 FAKE_NODE = "#!/bin/sh\necho v0.0.0\n"
 NODE_SHA = hashlib.sha256(FAKE_NODE.encode()).hexdigest()
@@ -474,6 +476,10 @@ case "$1" in --version) echo v0.0.0; exit 0 ;; esac
 # orcad: its first stdout line is the readiness record with the pairing code (made from a seed, not kept in the env)
 printf '{"type":"orca_server_ready","pairing":{"url":"orca://pair?code=%s"}}\\n' \\
   "$(printf '%s' "$STUB_ORCAD_SEED" | sha256sum | cut -c1-48)"
+# then it serves: stays up as node with orcad's argv, owning 127.0.0.1:<port> (BOX-1: one runtime is proven by that)
+exec python3 -c 'import os, sys
+hold = "import os, socket, sys, time\\nport = int(sys.argv[sys.argv.index(\\"--port\\") + 1])\\ns = socket.socket()\\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\\ns.bind((\\"127.0.0.1\\", port))\\ns.listen()\\nopen(os.environ[\\"BOX\\"] + \\".orcad-pid\\", \\"w\\").write(str(os.getpid()))\\ntime.sleep(120)\\n"
+os.execv(sys.executable, [sys.argv[1], "-c", hold] + sys.argv[2:])' "$0" "$@"
 """
 ORCAD_NODE_SHA = hashlib.sha256(ORCAD_NODE.encode()).hexdigest()
 DESK_NODE = r"""#!/usr/bin/env python3
@@ -523,9 +529,14 @@ class PairTests(HostInstallCase):
         make_node_archive(self.art, arch_of(self.target), ORCAD_NODE)
         make_slot(self.art / self.target, "0.1.0+abc", node_sha=ORCAD_NODE_SHA)
         # systemctl: no user manager on the box (orcad runs detached); here a started tunnel unit makes ss list it (here only)
+        # show: the tunnel unit runs, and its MainPID is the process that owns the port (the box and this desktop are
+        # one machine here, so that is the fake orcad; BOX-1 proves the tunnel by its owner, read by name)
         (self.bin / "systemctl").write_text('#!/bin/sh\necho "$*" >> "$BOX.systemctl-log"\n'
                                             'case "$*" in *show-environment*) exit 1 ;; *enable*|*restart*) '
-                                            ': > "$BOX.tunnel-up" ;; esac\nexit 0\n')
+                                            ': > "$BOX.tunnel-up" ;;\n'
+                                            '  *"show orca-tunnel-"*) printf "ActiveState=active\\nSubState=running\\n'
+                                            'MainPID=%s\\nNRestarts=0\\n" "$(cat "$BOX.orcad-pid" 2>/dev/null || '
+                                            'echo 0)" ;; esac\nexit 0\n')
         (self.bin / "ss").write_text('#!/bin/sh\n[ "$HOME" != "$BOX" ] && [ -f "$BOX.tunnel-up" ] && '
                                      'echo "LISTEN 0 128 127.0.0.1:$STUB_PORT 0.0.0.0:*"\nexit 0\n')
         (self.bin / "desk-node").write_text(DESK_NODE)
@@ -536,7 +547,18 @@ class PairTests(HostInstallCase):
             f.chmod(0o755)
         self.desk = self.tmp / "desk.json"
         self.env.update(ORCA_CLI=str(cli), DESK_STATE=str(self.desk), STUB_PORT=str(self.port),
-                        STUB_ORCAD_SEED=self.seed)
+                        STUB_ORCAD_SEED=self.seed, LANE_CHECK_SETTLE="0", LANE_TUNNEL_WAIT="5")
+        self.addCleanup(self.stop_orcad)
+
+    def stop_orcad(self):
+        """The fake orcad --pair started detached on the 'box' (this machine)."""
+        import signal
+        for d in Path("/proc").glob("[0-9]*"):
+            try:
+                if str(self.box) + "/.orca-remote/" in (d / "cmdline").read_bytes().decode(errors="replace"):
+                    os.kill(int(d.name), signal.SIGTERM)
+            except (OSError, ValueError):
+                continue
         self.env.pop("ORCA_CLI_COMMAND", None)
 
     def calls(self):
@@ -573,6 +595,37 @@ class PairTests(HostInstallCase):
         r = self.install("--pair", "--port", str(self.port))
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertNotIn(self.code.split("code=", 1)[1], r.stdout + r.stderr)
+
+
+@unittest.skipUnless(shutil.which("fish"), "fish is not installed")
+class FishBoxTests(HostInstallCase):
+    """lc-tuh (BOX-1 review M5): every command orca-host-install sends is `sh -c '<script>'`, so a box whose login shell
+    is fish installs, starts and pairs as one with sh does."""
+
+    def setUp(self):
+        super().setUp()
+        self.env["BOX_LOGIN_SHELL"] = shutil.which("fish")
+
+    def test_a_fish_box_installs_and_every_command_is_sh_c(self):
+        (slot,) = self.slots("0.1.0+aaaa")
+        r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [f"installed orcad-0.1.0+aaaa - from {slot}"])
+        self.assertTrue((self.on_box("0.1.0+aaaa") / ".install-complete").is_file())
+        cmds = [c for c in (self.tmp / "box.ssh-cmds").read_text().split("\0") if c]
+        self.assertTrue(cmds)
+        for c in cmds:
+            self.assertTrue(c.startswith("sh -c '"), c)
+        self.assertEqual(self.install().stdout.splitlines(), [f"exists orcad-0.1.0+aaaa - from {slot}"])
+
+
+@unittest.skipUnless(shutil.which("fish"), "fish is not installed")
+class FishPairTests(PairTests):
+    """The --pair runs above with fish as the box's login shell (lc-tuh)."""
+
+    def setUp(self):
+        super().setUp()
+        self.env["BOX_LOGIN_SHELL"] = shutil.which("fish")
 
 
 class HelpTests(unittest.TestCase):
