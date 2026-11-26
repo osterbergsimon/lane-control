@@ -40,6 +40,9 @@ with open(os.environ["STUB_LOG"], "a") as log:
 with open(os.path.join(home, "sessions.log"), "a") as f:
     f.write(json.dumps({"bin": name, "argv": sys.argv[1:], "role": os.environ.get("LANE_ROLE"),
                         "persona": os.environ.get("LANE_PERSONA"), "cwd": os.getcwd()}) + "\\n")
+sys.path.insert(0, os.environ["STUB_DIR"])
+from fake_proc import keep_running
+keep_running(name)  # it stays in the fake /proc, unless the test says the agent exits
 """
 
 
@@ -63,7 +66,13 @@ class NativeEnv(Env):
         self.env["XDG_STATE_HOME"] = str(self.home / ".local" / "state")
         self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
         self.env.pop("CLAUDE_CONFIG_DIR", None)
+        self.env.pop("ORCA_CLAUDE_CONFIG_DIR", None)  # transcripts are looked for under the temp HOME alone
         self.env["ORCA_TERMINAL_HANDLE"] = "term_owner"  # project-pause runs in one of Orca's terminals
+        self.env.pop("LANE_ROLE", None)
+        self.proc = self.home / "proc"  # the running agents, as /proc shows them (LANE_PROC_DIR)
+        self.proc.mkdir()
+        self.env["LANE_PROC_DIR"] = str(self.proc)
+        self.env["STUB_DIR"] = str(ROOT / "tests" / "stubs")
 
     def run(self, *args, adapt=False, env_extra=None, script=SETUP):
         args = [*args, *([] if adapt else ["--skip-adapt"])]
@@ -520,6 +529,11 @@ class StartTests(Case):
     def test_a_running_session_is_not_started_twice(self):
         self.e.set_state(terminals=[{"handle": "term_9", "title": "✳ app coordinator",
                                      "worktreePath": str(self.repo), "agentIdentity": "claude"}])
+        agent = self.e.proc / "4001"  # its agent runs: the title and Orca's mark alone are not enough (lc-l78.1)
+        agent.mkdir()
+        (agent / "cmdline").write_bytes(b"claude\0")
+        (agent / "environ").write_bytes(b"LANE_ROLE=coordinator\0")
+        (agent / "cwd").symlink_to(self.repo)
         r = self.e.run(str(self.repo), "--no-design-lead")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.e.creates(), [])
@@ -1583,6 +1597,8 @@ class Round2Tests(Case):
                              env={**self.e.env, "LANE_ROLE": role})
         self.addCleanup(p.wait)
         self.addCleanup(p.kill)
+        # its real /proc entry, and only the ones a test started: never this machine's other agents
+        (self.e.proc / str(p.pid)).symlink_to(f"/proc/{p.pid}")
         return p
 
     def test_a_live_agent_process_counts_without_agent_identity(self):

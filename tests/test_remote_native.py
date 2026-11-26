@@ -1025,11 +1025,44 @@ class CheckTests(Case):
         self.assertIn("check desktop listener: warn", r.stdout)
         self.assertIn("A 127.0.0.1 link does not change it", r.stdout)
 
-    def test_check_needs_a_host_and_a_target_setup_would_take(self):
+    def box_app(self):
+        d = self.e.box / "code" / "app"
+        return d if d.is_dir() else self.e.box_repo()
+
+    def test_the_boxs_persona_anchors_are_listed(self):  # lc-l78.2
+        repo = self.box_app()
+        machine = self.e.box / "machine-coordinator"
+        r = self.check(target=str(repo))
+        self.assertIn("check project anchor on box: to do", r.stdout)
+        self.assertIn("check machine anchor on box: to do", r.stdout)
+        for folder, persona, anchor in ((repo, "coordinator.md", "CLAUDE.local.md"),
+                                        (machine, "machine-coordinator.md", "CLAUDE.local.md")):
+            (folder / ".lane-control").mkdir(parents=True)
+            (folder / ".lane-control" / persona).write_text("persona\n")
+        r = self.check(target=str(repo))  # a persona without its anchor: set up before the anchor
+        self.assertIn("check project anchor on box: to do (a persona but no anchor", r.stdout)
+        for folder, anchor in ((repo, "CLAUDE.local.md"), (machine, "CLAUDE.local.md")):
+            (folder / anchor).write_text("<!-- lane-control:persona-anchor begin -->\n"
+                                         "<!-- lane-control:persona-anchor end -->\n")
+        before = self.snapshot()
+        r = self.check(target=str(repo))
+        self.assertIn("check project anchor on box: ok", r.stdout)
+        self.assertIn("check machine anchor on box: ok", r.stdout)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_url_target_finds_the_boxs_clone_by_its_name(self):
+        repo = self.box_app()
+        (repo / ".lane-control").mkdir()
+        (repo / ".lane-control" / "coordinator.md").write_text("persona\n")
+        r = self.check(target="https://github.com/acme/app.git")
+        self.assertIn("check project anchor on box: to do (a persona but no anchor", r.stdout)
+
+    def test_check_without_a_host_checks_this_machine_and_a_target_setup_would_take(self):
         r = subprocess.run([sys.executable, str(SETUP), "--check", str(self.repo)], env=self.e.env,
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("--check takes a repo and a host", r.stderr)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("check persona: missing", r.stdout)
+        self.assertEqual(self.e.jlines(".ssh"), [])
         r = self.check(target="not/absolute")
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("absolute (or ~/) path on the host", r.stderr)

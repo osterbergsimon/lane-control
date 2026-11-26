@@ -2863,5 +2863,59 @@ class HowItFitsTests(unittest.TestCase):
             self.assertEqual(len(script_rows(root)[0]), 4)
 
 
+LANE_SKILL = ROOT / "orchestrators" / "native-orca" / "skills" / "native-orca-lanes" / "SKILL.md"
+
+
+class AnswerChannelTests(unittest.TestCase):
+    """lc-l78.3: a coordinator asked from a peer's side answered in its own terminal, and nothing reached the asker."""
+
+    NEEDLES = ("an answer written only in your own terminal reaches nobody",
+               "orca-ide orchestration reply --id <msg_id> --body", "<msg_id> <type> from <address>",
+               "the asker's own Run or dispatch", "`Reply:` line", "`send --to run:<id>`",
+               "`send --to dispatch:ctx_<id>`", "`<cross-session-message from=", "that `from` as `to`",
+               "orca-ide orchestration run-list", "tell the owner your answer reached nobody",
+               "Ask a peer by message too, never by typing or pasting into its terminal")
+
+    def test_the_lane_skill_says_how_a_peer_is_answered_at_the_address_its_message_carries(self):
+        t = flat(LANE_SKILL)
+        self.assertIn("### Answering a peer, and asking one", LANE_SKILL.read_text())
+        for needle in self.NEEDLES:
+            self.assertIn(needle, t, needle)
+
+    def test_the_personas_link_the_one_copy_and_keep_the_two_rules(self):
+        for path in (NATIVE / "coordinator.md", NATIVE / "machine-coordinator.md"):
+            t = flat(path)
+            for needle in ("an answer written only in your own terminal reaches nobody",
+                           "never by typing or pasting into its terminal", "Answering a peer, and asking one",
+                           "orchestrators/native-orca/skills/native-orca-lanes/SKILL.md"
+                           if path.name == "machine-coordinator.md" else "`native-orca-lanes` skill"):
+                self.assertIn(needle, t, (path.name, needle))
+            self.assertNotIn("reply --id <msg_id> --body", t, path.name)  # one copy: it would drift
+            self.assertNotIn("<cross-session-message", t, path.name)
+
+
+class ReviewCapEndingTests(unittest.TestCase):
+    """lc-l78.5: a reviewer that still said no at round 2 left the lane idle."""
+
+    def test_the_two_round_cap_ends_in_issues_a_parked_pr_a_closed_cycle_and_a_message(self):
+        for path in (NATIVE / "coordinator.md", LANE_SKILL):
+            t = flat(path)
+            for needle in ("At most two rounds", "in the same turn", "never end in silence",
+                           "Each unresolved finding becomes an issue", "`bd search` first",
+                           "gh pr ready <n> --undo", "Parked after review round 2", "word for word",
+                           "never quote a secret or private data", "stop the reviewer", "release the lane's worker",
+                           "label `parked`", "Resume (<date>)", "no free slot resumes it", "Tell the owner",
+                           "with your recommendation"):
+                self.assertIn(needle, t, (path.name, needle))
+            self.assertNotIn("after that, or when the lane disputes a finding, the owner decides", t, path.name)
+            self.assertIn("lane disputes", t, path.name)
+
+    def test_away_improve_closes_the_cycle_too(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "skills" / "away-improve" / "SKILL.md")
+        for needle in ("not clean after the second round", "write no `Review: passed` comment", "`native-orca-lanes`, section 6",
+                       "listed as parked in your summary", "start the next cycle", "never pick it again"):
+            self.assertIn(needle, t, needle)
+
+
 if __name__ == "__main__":
     unittest.main()

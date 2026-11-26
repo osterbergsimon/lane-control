@@ -7,6 +7,7 @@ $STUB_STATE (created with defaults on first use). Only the calls project-setup m
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -68,6 +69,20 @@ def stub_offer(seed, n, addr):
 
 def opt(name, default=None):
     return args[args.index(name) + 1] if name in args else default
+
+
+def end_processes(handle):
+    """A closed terminal's processes end: the fake /proc entries the session stub made in it (LANE_PROC_DIR)."""
+    proc = os.environ.get("LANE_PROC_DIR")
+    if not proc or not Path(proc).is_dir():
+        return
+    for d in Path(proc).iterdir():
+        try:
+            env = (d / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue  # an entry a test made unreadable
+        if f"ORCA_TERMINAL_HANDLE={handle}".encode() in env:
+            shutil.rmtree(d)
 
 
 def orca():
@@ -173,6 +188,7 @@ def orca():
         out({"ok": True, "result": {"terminals": state["terminals"]}})
     if cmd == "terminal close":
         state["terminals"] = [t for t in state["terminals"] if t["handle"] != opt("--terminal")]
+        end_processes(opt("--terminal"))
         out({"ok": True, "result": {}})
     if cmd == "terminal create":
         t = {"handle": f"term_{sum(t['handle'].startswith('term_') for t in state['terminals']) + 1}", "title": opt("--title", "shell"),
@@ -183,7 +199,8 @@ def orca():
             # Like Orca: the command runs in the new terminal's shell (here at once, to its end). It may call this
             # stub itself, so the state is written first and read back after.
             state_path.write_text(json.dumps(state))
-            subprocess.run(["sh", "-c", command], cwd=t["worktreePath"])
+            subprocess.run(["sh", "-c", command], cwd=t["worktreePath"],
+                           env={**os.environ, "ORCA_TERMINAL_HANDLE": t["handle"]})  # as Orca sets it
             state.clear()
             state.update(json.loads(state_path.read_text()))
             for x in state["terminals"]:
