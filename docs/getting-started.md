@@ -62,6 +62,12 @@ last commit in `~/.local/share/lane-control/<sha>/` with a `current` link, and l
 them. Personas and hooks name `.../lane-control/current`, never this checkout. (`lane-control project setup`, step 4,
 also installs when nothing is installed yet and says `lane-control: installed <sha>`.)
 
+`lane-control` is the one command you run from here on; `lane-control help` lists everything it does on one screen.
+Each `lane-control project|machine|improve ...` form runs a script of the tree that `lane-control` is in: the one on
+your PATH above is this checkout's, so a setup from it installs the checkout's last commit first, as the scripts always
+did; `~/.agents/bin/lane-control` runs the installed tree's. The old names (`project-setup`, `project-pause`,
+`machine-setup`, `machine-check`, `lane-improve`) still work and say their new form when you type them.
+
 If not: `lane-room: command not found` means the PATH line did not take effect in this shell. `lane-room` exiting
 non-zero says why: memory or load is too high, or the lane count is reached. That is a real answer, not a fault.
 
