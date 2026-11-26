@@ -375,7 +375,8 @@ You do not need to poll. The lane's report wakes the coordinator, and the coordi
 - `NEEDS_STANDARD` or `NEEDS_DEEP` means the lane stopped instead of guessing. The coordinator reopens it one tier up.
 - The coordinator does not trust the numbers. It reads the diff and reruns the fast checks. When the project's risk rules
   call for it, or whenever you ask, a reviewer on a different model reviews the exact commit. Its findings come back as
-  `### <ID> [blocker|major|minor|nit] <title>`, and the lane fixes every blocker and major one (two rounds at most).
+  `### <ID> [blocker|major|minor|nit] <title>`, and the lane fixes every blocker and major one (two rounds at most; if the second still holds one, the findings
+  become issues, the PR is parked with them quoted and you are asked what to do).
 - Read the PR yourself: `gh pr view <n> --web`, or ask the coordinator for its summary.
 
 If a report does not come: ask the coordinator, in its terminal, what the lane waits for. A lane that cannot report

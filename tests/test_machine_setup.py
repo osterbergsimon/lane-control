@@ -1538,12 +1538,141 @@ class MachineSetupTests(MachineSetupBase):
                 self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
                 self.assertNotIn("refused", r.stderr)
 
+    def shell_terminal(self):
+        self.orca({"terminals": [{"handle": "term_1", "title": "machine coordinator", "worktreePath": str(self.folder),
+                                  "agentIdentity": "claude"}]})
+
+    def agent_process(self, pid, argv, env):
+        d = self.proc / str(pid)
+        d.mkdir()
+        (d / "cmdline").write_bytes(b"".join(a.encode() + b"\0" for a in argv))
+        (d / "environ").write_bytes(b"".join(f"{k}={v}".encode() + b"\0" for k, v in env.items()))
+        self.folder.mkdir(exist_ok=True)
+        (d / "cwd").symlink_to(self.folder)
+
+    def test_a_titled_terminal_with_no_agent_is_not_a_running_coordinator(self):  # lc-l78.32
+        self.shell_terminal()
+        r = self.setup_machine()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        line = next(l for l in r.stdout.splitlines() if l.startswith("machine coordinator: recorded but dead"))
+        self.assertIn("orca-ide terminal close --terminal term_1", line)
+        self.assertEqual(len(self.creates(["terminal", "create"])), 1)
+        self.assertEqual(self.creates(["terminal", "close"]), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every file")
+    def test_a_restored_machine_coordinator_that_cannot_be_read_is_never_doubled(self):  # lc-l78.32, review B1
+        self.shell_terminal()
+        self.agent_process(4101, ["claude", "--plugin-dir", "/x", "--resume",
+                                     "aaaa0000-1111-4222-8333-444455556666"], {})
+        (self.proc / "4101" / "environ").chmod(0)
+        r = self.setup_machine()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("machine coordinator: cannot tell", r.stdout)
+        self.assertEqual(self.creates(["terminal", "create"]), [])
+
     def test_running_coordinator_not_restarted(self):
-        self.orca({"terminals": [{"handle": "term_1", "title": "machine coordinator", "worktreePath": str(self.folder)}]})
+        self.shell_terminal()
+        self.agent_process(4001, ["claude"], {"LANE_ROLE": "machine-coordinator"})
         r = self.setup_machine()
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(self.creates(["terminal", "create"]), [])
         self.assertIn("machine coordinator: exists", r.stdout)
+
+    def test_the_folder_gets_a_persona_anchor_that_automations_ignore(self):  # lc-l78.2
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("persona anchor: created", r.stdout)
+        self.assertFalse((self.folder / "CLAUDE.md").exists())
+        text = " ".join((self.folder / "CLAUDE.local.md").read_text().split())
+        persona = self.folder.resolve() / ".lane-control" / "machine-coordinator.md"
+        for needed in (str(persona), "in full before anything else", "machine coordinator", "automation",
+                       "night manager", "lane sweep", "machine check", "Task", "ignore this note"):
+            self.assertIn(needed, text)
+        self.assertIn("persona anchor: exists", self.setup_machine("--no-start").stdout)
+
+    def test_the_owners_own_instruction_files_in_the_machine_folder_are_kept(self):
+        self.folder.mkdir()
+        (self.folder / "CLAUDE.md").write_text("My caps: two lanes.\n")
+        (self.folder / "CLAUDE.local.md").write_text("Local: two lanes.\n")
+        self.assertIn("persona anchor: updated", self.setup_machine("--no-start").stdout)
+        self.assertEqual((self.folder / "CLAUDE.md").read_text(), "My caps: two lanes.\n")
+        text = (self.folder / "CLAUDE.local.md").read_text()
+        self.assertTrue(text.startswith("<!-- lane-control:persona-anchor begin"))
+        self.assertTrue(text.endswith("Local: two lanes.\n"), text)
+
+    def machine_git(self, *args):
+        return subprocess.run(["git", "-C", str(self.folder), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                              check=True, capture_output=True, text=True).stdout
+
+    def own_repo(self, root=None):
+        root = root or self.folder
+        root.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+
+    def test_in_the_owners_git_repo_the_anchor_never_shows(self):  # review m2
+        self.own_repo()
+        for _ in range(2):
+            r = self.setup_machine("--no-start")
+            self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertTrue((self.folder / "CLAUDE.local.md").is_file())
+        self.assertNotIn("CLAUDE", self.machine_git("status", "--porcelain", "--untracked-files=all"))
+        exclude = (self.folder / ".git" / "info" / "exclude").read_text()
+        self.assertEqual(exclude.count("/CLAUDE.local.md\n"), 1)
+        self.assertIn(".git/info/exclude", r.stdout)
+
+    def test_a_folder_inside_a_repo_and_one_that_already_ignores_it(self):
+        self.own_repo(self.folder.parent / "outer")
+        self.folder = self.folder.parent / "outer" / "mc"
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.assertNotIn("CLAUDE", self.machine_git("status", "--porcelain", "--untracked-files=all"))
+        self.assertIn("/mc/CLAUDE.local.md\n", (self.folder.parent / ".git" / "info" / "exclude").read_text())
+        (self.folder.parent / ".git" / "info" / "exclude").write_text("")
+        (self.folder / ".gitignore").write_text("CLAUDE.local.md\n")
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.assertEqual((self.folder.parent / ".git" / "info" / "exclude").read_text(), "")
+
+    def test_a_committed_or_unhideable_anchor_file_is_not_written(self):
+        self.own_repo()
+        (self.folder / "CLAUDE.local.md").write_text("theirs\n")
+        self.machine_git("add", "-f", "CLAUDE.local.md")
+        self.machine_git("commit", "-q", "-m", "theirs")
+        r = self.setup_machine("--no-start")
+        self.assertIn("persona anchor: skipped", r.stdout)
+        self.assertIn("committed", r.stdout)
+        self.assertEqual((self.folder / "CLAUDE.local.md").read_text(), "theirs\n")
+        self.machine_git("rm", "-q", "CLAUDE.local.md")
+        self.machine_git("commit", "-q", "-m", "gone")
+        (self.folder / ".gitignore").write_text("!CLAUDE.local.md\n")  # wins over .git/info/exclude
+        r = self.setup_machine("--no-start")
+        self.assertIn("persona anchor: skipped", r.stdout)
+        self.assertFalse((self.folder / "CLAUDE.local.md").exists())
+
+    def test_check_reports_the_machine_anchor_and_changes_nothing(self):
+        def tree():
+            return {str(p): p.read_bytes() for p in self.home.rglob("*") if p.is_file() and not p.is_symlink()}
+        before = tree()
+        r = self.setup_machine("--check")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("check persona: missing", r.stdout)
+        self.assertIn("check persona anchor: missing", r.stdout)
+        self.assertEqual(tree(), before)  # nothing installed, written or created
+        self.assertFalse(self.folder.exists())
+        self.assertEqual(self.orca_calls(), [])
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        r = self.setup_machine("--check")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("check persona anchor: ok", r.stdout)
+        f = self.folder / "CLAUDE.local.md"
+        f.write_text(f.read_text().replace("in full", "partly"))
+        r = self.setup_machine("--check")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check persona anchor: stale", r.stdout)
+
+    def test_check_reads_this_machine_only(self):
+        r = self.setup_machine("--check", "--host", "trial-vps")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("project-setup --check", r.stderr)
 
     def test_creates_four_automations(self):
         r = self.setup_machine("--no-start")
@@ -1630,6 +1759,8 @@ class MachineSetupTests(MachineSetupBase):
 
     def test_rerun_is_idempotent(self):
         self.setup_machine()
+        self.agent_process(4001, ["claude", "--name", "machine coordinator"],  # the one it started runs
+                           {"LANE_ROLE": "machine-coordinator"})
         n = len(self.orca_calls())
         self.assertEqual(len(self.automations()), 4)
         r = self.setup_machine()
