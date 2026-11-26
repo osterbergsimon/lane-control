@@ -11,13 +11,16 @@ changed, so the automation's agent passes it on to the machine coordinator; anyt
                                                        agent terminal for: the night manager cannot check in on it
                            CHANGED coordinator <name>: found in Orca again
   machine-check --last   print the changes the last check found (what the automation's agent passes on)
+  machine-check --peek   what a check would find now, read only: the same lines, but nothing is recorded (no state,
+                         no budget-stopped marker), so the automation's next check still finds and passes them on.
+                         `lane-control machine report` runs this.
 
 Every run also writes or clears the budget-stopped marker (`budget-state --mark`), which needs a run at least hourly.
 A coordinator is looked up as night-precheck does (the single agent terminal in its checkout; a paused project is not);
 one it cannot find is a WARN line when it first cannot be found or the reason changes, not on every run. Memory is low below lane-room's minimum (LANE_ROOM_MIN_MEM_GB from lane-limits.sh). Runners are RUNNER_REPOS from
 machine.conf; a runner list gh cannot read keeps the last known state. A first run counts the normal state (step 0,
 memory ok, no runner offline) as the last one. State: ~/.cache/lane-control/machine-check.json.
-Exit: 0 changed (or --last); 1 nothing changed; 2 the state file cannot be written.
+Exit: 0 changed (or --last); 1 nothing changed; 2 the state file cannot be written (or a usage error).
 """
 import json
 import os
@@ -37,9 +40,11 @@ def state_file() -> Path:
     return base / "lane-control" / "machine-check.json"
 
 
-def budgets() -> dict:
-    """{budget: {"step": n, "name": ..., "weekly": w, "ceiling": c} or {"step": "unknown", "why": ...}}."""
-    r = subprocess.run([str(HERE / "budget-state"), "--mark"], capture_output=True, text=True, timeout=120)
+def budgets(mark: bool = True) -> dict:
+    """{budget: {"step": n, "name": ..., "weekly": w, "ceiling": c} or {"step": "unknown", "why": ...}}; mark: also
+    write or clear the budget-stopped marker (`budget-state --mark`), never for --peek."""
+    r = subprocess.run([str(HERE / "budget-state"), *(["--mark"] if mark else [])], capture_output=True, text=True,
+                       timeout=120)
     if r.returncode != 0:
         why = (r.stderr.strip().splitlines() or ["budget-state failed"])[-1].removeprefix("budget-state: ")
         return {"*": {"step": "unknown", "why": why}}
@@ -80,12 +85,13 @@ def main(argv) -> int:
     if argv == ["--last"]:
         print("\n".join(old.get("last", [])) or "machine-check: no change found yet")
         return 0
-    if argv:
-        print("usage: machine-check [--last]", file=sys.stderr)
+    peek = argv == ["--peek"]  # read only: the automation's next check still reports these
+    if argv and not peek:
+        print("usage: machine-check [--last|--peek]", file=sys.stderr)
         return 2
     changes, new = [], {"budgets": {}, "runners": dict(old.get("runners", {}))}
 
-    now_budgets = budgets()
+    now_budgets = budgets(mark=not peek)
     if "*" in now_budgets:  # budget-state itself failed: keep what is known per budget, report the failure once
         now_budgets = {**{k: v for k, v in old.get("budgets", {}).items() if k != "*"}, "*": now_budgets["*"]}
     for name, b in sorted(now_budgets.items()):
@@ -158,6 +164,10 @@ def main(argv) -> int:
         new["unfound"] = now_unfound
 
     new["last"] = ([time.strftime("%Y-%m-%d %H:%M")] + changes) if changes else old.get("last", [])
+    if peek:
+        for line in changes:
+            print(line)
+        return 0 if changes else 1
     try:
         sf.parent.mkdir(parents=True, exist_ok=True)
         tmp = sf.with_name(sf.name + ".tmp")
@@ -172,4 +182,12 @@ def main(argv) -> int:
 
 
 if __name__ == "__main__":
+    try:  # run by a person under its old name: one line with its lane-control form (core/frontdoor.py)
+        import importlib.util as _iu
+        _fd = _iu.spec_from_file_location("lc_frontdoor", Path(__file__).resolve().parents[1] / "frontdoor.py")
+        _m = _iu.module_from_spec(_fd)
+        _fd.loader.exec_module(_m)
+        _m.hint("machine-check", sys.argv[1:])
+    except Exception:  # never fails the command
+        pass
     sys.exit(main(sys.argv[1:]))

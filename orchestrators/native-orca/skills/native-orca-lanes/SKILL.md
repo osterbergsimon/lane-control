@@ -22,8 +22,8 @@ Waits are lane work: you never sit on a build, a CI run, a lane's setup or a che
 
 ## 1. Gate: before a lane opens
 Do these in order; any that fails holds the lane, and you tell the owner what it printed.
-1. A rested project is woken first: `<lane-control>/scripts/project-pause wake .` in your folder (your persona names
-   the path; harmless when not resting).
+1. A rested project is woken first: `<lane-control>/scripts/lane-control project wake .` in your folder (your persona
+   names the path; harmless when not resting).
 2. The issue: one beads issue per lane (`bd search` first, add to an existing one). Give it the next lane key
    `<KEY>-<n>` as the label `lane:<KEY>-<n>`, and `bd update <id> --claim` it at launch.
 3. Tier: by the paths the task touches (your persona's path map; highest tier wins, in doubt one tier up). Look it up

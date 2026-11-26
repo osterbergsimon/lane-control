@@ -14,8 +14,9 @@ AGENTS   machine coordinator   one per machine, optional   splits the budget, wa
          project coordinator   one per project             queues, briefs, opens lanes, reviews, merges on your word
          lane                  one per issue               own worktree and branch, ends in a pull request
 
-SETUP    machine-setup   once per machine   machine coordinator, 4 automations, CI limits timer
-         project-setup   once per project   lane tools, skills, personas, tier table, coordinator (--refresh updates)
+SETUP    lane-control machine setup   once per machine   machine coordinator, 4 automations, CI limits timer
+         lane-control project setup   once per project   lane tools, skills, personas, tier table, coordinator
+                                                          (lane-control project refresh updates them)
 
 LANE     lane-room   may another lane open?        lane-tier     which model does this tier use?
 TOOLS    lane-heavy  one gate for heavy builds     design-shots  screenshots of a UI
@@ -27,7 +28,7 @@ BOX      optional. A coordinator that lives on the box can keep working while th
       tunnel   orca-tunnel-<host> (ssh -L), made by orca-host-install --pair
       you      no click in Orca, no pairing code
   direction 2: the box's coordinator starts lanes on the desktop
-      tunnel   lane-tunnel@<host> (ssh -R), made by project-setup before it sends the box its link
+      tunnel   lane-tunnel@<host> (ssh -R), made by lane-control project setup before it sends the box its link
       you      say yes once per box: setup makes the link with orca pair (the desktop then listens on every
                interface); or --pair-by-hand: make the share link in Orca and paste it (keeps it on loopback)
 
@@ -51,7 +52,7 @@ More: the sections below; [Getting started](getting-started.md).
   folder, in an Orca terminal titled `machine coordinator`.
 - **Project coordinator** (one per project). You talk to it in the terminal titled `<project> coordinator`. It turns
   your asks into issues, picks a tier, opens lanes, checks what comes back and merges only on your word. The one
-  exception is away-improve mode, which you switch on yourself.
+  exception is the ratchet (unattended improvement), which you switch on yourself.
 - **Lane**: one worker for one issue, with its own worktree and branch. It opens a pull request and reports once.
   Reviewers (code, and design for anything a user sees) are workers too. A lane for a failing test or a bug gets the
   debugger persona.
@@ -71,22 +72,23 @@ More: [roles](../core/roles.md), [model routing](../core/model-routing.md), [nat
 | What | Where | Who puts it there |
 |---|---|---|
 | The checkout: scripts, templates, docs | `~/code/lane-control` (any folder works) | you, `git clone`; update with `git pull` |
-| The installed tree, the one everything uses: the repo at one commit | `~/.local/share/lane-control/<sha>/` and the `current` link to it (old trees kept for running lanes) | `lane-control install`, and `project-setup` or `machine-setup` run from the main checkout on its default branch at a newer commit (anywhere else they keep it, unless you say yes) |
-| Links to the lane tools and `lane-control`, which agents call | `~/.agents/bin/`, links into `.../lane-control/current/core/scripts/` | `lane-control install`, `project-setup` |
-| Skills (the three lane skills and the design skills) | `~/.agents/skills/`, linked for Claude and OpenCode | `project-setup`, `--refresh` |
-| One project's settings and tier table, **outside its repo** | `~/.config/lane-control/projects/<folder>-<hash>/` (`settings.json`, `lanes.tsv`) | `project-setup`; `--show` prints them |
-| This machine's settings and state | `~/.config/lane-control/`: `machine.conf`, `limits.sh` (optional, yours), the away file, away-improve's files, `hosts/<host>.json`, `tunnels/<host>.env` | `machine-setup`, you, `lane-away`, `lane-improve`, `project-setup`, `lane-tunnel` |
+| The installed tree, the one everything uses: the repo at one commit | `~/.local/share/lane-control/<sha>/` and the `current` link to it (old trees kept for running lanes) | `lane-control install`, and `lane-control project setup` or `lane-control machine setup` run from the main checkout on its default branch at a newer commit (anywhere else they keep it, unless you say yes) |
+| Links to the lane tools and `lane-control`, which agents call | `~/.agents/bin/`, links into `.../lane-control/current/core/scripts/` | `lane-control install`, `lane-control project setup` |
+| Skills (the three lane skills and the design skills) | `~/.agents/skills/`, linked for Claude and OpenCode |
+`lane-control project setup`, `--refresh` |
+| One project's settings and tier table, **outside its repo** | `~/.config/lane-control/projects/<folder>-<hash>/` (`settings.json`, `lanes.tsv`) | `lane-control project setup`; `--show` prints them |
+| This machine's settings and state | `~/.config/lane-control/`: `machine.conf`, `limits.sh` (optional, yours), the away file, away-improve's files, `hosts/<host>.json`, `tunnels/<host>.env` | `lane-control machine setup`, you, `lane-away`, `lane-control ratchet`, `lane-control project setup`, `lane-tunnel` |
 | The model environment (optional, for a gateway) | the one source `~/.config/lane-control/model-env.conf`, and from it `model-env.sh`, `~/.config/fish/conf.d/lane-control-models.fish` and the `env` block of Claude's user settings (what it wrote there is noted in `model-env.written.json`) | `model-env`, only when you run it |
 | Budget config and weekly ceiling | `~/.config/rove/playbook.conf.sh` (an old folder name, still the default) and the ceiling file it names | you ([getting started](getting-started.md), step 2.2) |
-| In a project's repo | `AGENTS.lane-control.md` plus one pointer line in `AGENTS.md`, and the lane files in `.lane-control/`; the rendered personas there are not committed | `project-setup`, committing only on your yes |
-| Beads: issues and memories | a private repo `<project>-beads` in `~/code/`; the project's `.beads` is a git-ignored link to it | you, or `project-setup` on your yes |
-| On a box | the desktop's installed tree at the same sha, in the box's own `~/.local/share/lane-control/<sha>/` and `current` | `project-setup <repo> <host>`, on every run (kept when the box has that sha) |
+| In a project's repo | `AGENTS.lane-control.md` plus one pointer line in `AGENTS.md`, and the lane files in `.lane-control/`; the rendered personas there are not committed | `lane-control project setup`, committing only on your yes |
+| Beads: issues and memories | a private repo `<project>-beads` in `~/code/`; the project's `.beads` is a git-ignored link to it | you, or `lane-control project setup` on your yes |
+| On a box | the desktop's installed tree at the same sha, in the box's own `~/.local/share/lane-control/<sha>/` and `current` | `lane-control project setup <repo> <host>`, on every run (kept when the box has that sha) |
 
 Personas name `.../lane-control/current`, never a checkout or a lane worktree. A `git pull` changes nothing until
 `lane-control install`, or a setup or `--refresh` from that main checkout, moves `current` and with it every tool
 link at once. A setup from a lane worktree, another branch, or a commit not shown to be newer keeps the installed tree
 and runs that tree's own setup (`lane-control: kept`), unless you say yes. The skills and each project's
-personas follow at `project-setup <project> --refresh`, which records the installed sha in the project's settings.
+personas follow at `lane-control project refresh <project>`, which records the installed sha in the project's settings.
 `lane-control status` compares the checkout with `current`; `lane-control doctor` lists every project, link, skill and
 box that is behind and what to run; `lane-control prune` removes old trees that no running process uses and no hook,
 persona, unit or link names, and nothing without a valid `current` (a dry run unless `--apply`).
@@ -123,20 +125,20 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
 
 ## Setup
 
-- **`machine-setup`** (once per machine; `--host <host>` runs it on a box): writes `machine.conf` (you fill in the
-  projects), checks the usage feed, starts the machine coordinator, creates the four automations, reports Orca's
+- **`lane-control machine setup`** (once per machine; `--host <host>` runs it on a box): writes `machine.conf` (you fill
+  in the projects), checks the usage feed, starts the machine coordinator, creates the four automations, reports Orca's
   cleanup rules and installs the `ci-presence` timer.
-- **`project-setup <project>`** (once per project): onboards the repo (an adapting agent and a reviewer write the lane
+- **`lane-control project setup <project>`** (once per project): onboards the repo (an adapting agent and a reviewer write the lane
   files; committed only on your yes), installs the main checkout's newer last commit as the machine's tree (as `lane-control
   install` does; elsewhere it keeps the installed one and runs its setup), links the lane tools, installs the skills, renders the personas, writes the tier table
   and starts the coordinator. Today onboarding a new project needs Claude. Onboarding on OpenCode is parked, so do not
   expect it soon: PR #66 was parked after review round 7, with findings still open.
-- **`project-setup <project> --refresh`**: after lane-control changed. Updates the tools, skills and personas, keeps
-  the tier table and engines and starts nothing. It commits nothing, with one exception, only on your yes: moving a
-  retired design lead's additions into `DESIGN.md`. Restart the coordinator (`project-pause stop`, then `start`) so it
-  reads the new persona.
+- **`lane-control project refresh <project>`**: after lane-control changed. Updates the tools, skills and personas,
+  keeps the tier table and engines and starts nothing. It commits nothing, with one exception, only on your yes: moving
+  a retired design lead's additions into `DESIGN.md`. Restart the coordinator (`lane-control project stop`, then
+  `start`) so it reads the new persona.
 - Both say `exists` for what is already done, so running them again is safe.
-- **`project-setup --check <repo> <host>`**: run it before a box setup. It lists every prerequisite, says what is
+- **`lane-control project check <repo> <host>`**: run it before a box setup. It lists every prerequisite, says what is
   missing or could not be checked, and changes nothing. A listening port is not proof: it also checks each tunnel
   unit's state, restart counter and socket owner, that the box runs one Orca server (and which), and the box's SHELL
   ([remote.md](../orchestrators/native-orca/remote.md#a-listening-port-is-not-proof-lc-l78)).
@@ -145,8 +147,8 @@ More: [getting started](getting-started.md), [native Orca setup](../orchestrator
 
 ## A box: two directions
 
-`project-setup <repo> <host>` sets up both. They are separate connections with opposite roles. Both tunnels are
-`ssh` processes **on the desktop**, so the box never has to reach the desktop's network.
+`lane-control project setup <repo> <host>` sets up both. They are separate connections with opposite roles. Both tunnels
+are `ssh` processes **on the desktop**, so the box never has to reach the desktop's network.
 
 **Why there are two.** In Orca's own model the coordinator runs on your computer (the client) and starts workers on
 paired servers with `--on`. Direction 1 covers that. lane-control also lets a project's coordinator **live on its
@@ -179,22 +181,22 @@ direction 2: the box's coordinator starts lanes on the desktop
 | What it is for | you watch and drive the box's coordinator and lanes in your Orca window | the box gets what it lacks (graphics, a browser, a GPU): its coordinator starts a lane on the desktop |
 | Server (is dialled) | the box's `orcad` | the desktop's Orca app |
 | Client (dials) | the desktop's Orca | the box's Orca |
-| Tunnel | `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair` | `lane-tunnel@<host>` (`ssh -R`), made by `project-setup` before the link is sent |
+| Tunnel | `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair` | `lane-tunnel@<host>` (`ssh -R`), made by `lane-control project setup` before the link is sent |
 | systemd units | desktop: `orca-tunnel-<host>.service`; box: `orcad.service` when it has a user manager, else a detached process | desktop: `lane-tunnel@<host>.service` |
-| Who makes the pairing code | the box's `orcad`, by itself; `orca-host-install` reads it over ssh | the desktop's Orca: `project-setup` runs `orca pair` after your yes; or **you**, by hand (`--pair-by-hand`) |
-| Who saves it | `orca-host-install` gives it to `orca environment add` on the desktop on stdin | `project-setup` sends it on ssh's stdin; the box runs `environment add --pairing-code -` |
+| Who makes the pairing code | the box's `orcad`, by itself; `orca-host-install` reads it over ssh | the desktop's Orca: `lane-control project setup` runs `orca pair` after your yes; or **you**, by hand (`--pair-by-hand`) |
+| Who saves it | `orca-host-install` gives it to `orca environment add` on the desktop on stdin | `lane-control project setup` sends it on ssh's stdin; the box runs `environment add --pairing-code -` |
 
-**Direction 1 is automatic.** `orchestrators/orca-cotal/scripts/orca-host-install <host> --pair` (`project-setup` runs
-it when the box's server does not answer yet) copies `orcad` and its Node runtime from the desktop's own Orca install,
-so the box downloads nothing, and checks Node's checksum. It starts `orcad` on the box's 127.0.0.1, opens the `-L`
-tunnel, reads the box's pairing code and adds the box to your Orca. No click and no code from you. The script sits in
-the parked Orca + Cotal folder, but native Orca uses it. Without `--pair` it only puts the files on the box, for
+**Direction 1 is automatic.** `orchestrators/orca-cotal/scripts/orca-host-install <host> --pair` (`lane-control project
+setup` runs it when the box's server does not answer yet) copies `orcad` and its Node runtime from the desktop's own
+Orca install, so the box downloads nothing, and checks Node's checksum. It starts `orcad` on the box's 127.0.0.1, opens
+the `-L` tunnel, reads the box's pairing code and adds the box to your Orca. No click and no code from you. The script
+sits in the parked Orca + Cotal folder, but native Orca uses it. Without `--pair` it only puts the files on the box, for
 Orca's own Settings > SSH connect to reuse (useful where the box has no internet); that route makes no
 `orca-tunnel-<host>`.
 
 **Direction 2 needs one yes from you**, once per box. The owner decided (2026-11-25): "we do it with share link, with
 --on-client as fallback, but must make sure to make it as painless as possible for user", and on the field report's
-recipe (2026-11-26): "if we can handle automatically its much smoother for user". So by default `project-setup` makes
+recipe (2026-11-26): "if we can handle automatically its much smoother for user". So by default `lane-control project setup` makes
 the link itself: `orca pair --address 127.0.0.1:<box port> --rotate --json` on the desktop, held in memory, sent to the box on
 ssh's stdin, saved there by `environment add --pairing-code -` through `core/scripts/pairing-code-stdin.cjs`, then
 proved with the same reads `--check` makes. It passes `--rotate`, so the box never gets an unused link made earlier
@@ -209,11 +211,11 @@ used network pairing remains. After, it prints the bind and the revoke steps.
 under an older name is reported with the remove-then-add steps (a box keeps one name per desktop).
 
 **The loopback option.** Answer no, or pass `--pair-by-hand`, to keep the desktop on 127.0.0.1: in the desktop's Orca,
-Settings > Servers > "Share this computer", choosing **127.0.0.1**, then paste that link at `project-setup`'s hidden
-prompt. Only the window makes a link that does not widen the listener. Press Enter at the prompt, or pass
-`--no-desktop-lanes`, to skip direction 2. The two ends can use different ports (`--tunnel-remote-port` in
-`project-setup`, `--remote-port` in `lane-tunnel`). Either link lets the box run commands as you on the desktop until
-you revoke it in the same Settings page.
+Settings > Servers > "Share this computer", choosing **127.0.0.1**, then paste that link at `lane-control project
+setup`'s hidden prompt. Only the window makes a link that does not widen the listener. Press Enter at the prompt, or
+pass `--no-desktop-lanes`, to skip direction 2. The two ends can use different ports (`--tunnel-remote-port` in
+`lane-control project setup`, `--remote-port` in `lane-tunnel`). Either link lets the box run commands as you on the
+desktop until you revoke it in the same Settings page.
 
 **The fallback.** When neither link can be made, setup says so and points to the hand-off with `send --on-client`
 (Orca 1.4.272 or later), documented in [remote.md](../orchestrators/native-orca/remote.md#the-fallback-send---on-client).
@@ -228,19 +230,18 @@ again; `lane-tunnel start` with the same options brings direction 2's back. Neit
 ControlMaster (`ControlPath=none`), and `lane-control doctor` says when a unit flaps, a box runs two Orca servers, or a
 box's user manager kept an old SHELL after a `chsh`.
 
-**The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; run `project-setup
---check <repo> <host>`; make sure ssh can log in without asking anything (for a smartcard or agent key, `lane-tunnel`
-has extra options; `orca-tunnel-<host>` has none); sign the agents in on the box; sign `gh` in there and let git use
-it, for beads; answer setup's yes/no questions, the link's among them. Removing: `project-setup --remove-host <host>`
+**The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; run `lane-control project
+check <repo> <host>`; make sure ssh can log in without asking anything (for a smartcard or agent key, `lane-tunnel` has
+extra options; `orca-tunnel-<host>` has none); sign the agents in on the box; sign `gh` in there and let git use it, for
+beads; answer setup's yes/no questions, the link's among them. Removing: `lane-control project remove-host <host>`
 undoes direction 2 only, prints how to drop direction 1, and you revoke the link.
 
-**Is `lane-tunnel` still needed?** This is about how direction 2 is carried; direction 2 itself stays. The tunnel is
-not needed when the box can reach the desktop directly (same LAN or Tailscale) **and** you accept the desktop's Orca
+**Is `lane-tunnel` still needed?** This is about how direction 2 is carried; direction 2 itself stays. The tunnel is not
+needed when the box can reach the desktop directly (same LAN or Tailscale) **and** you accept the desktop's Orca
 listening on every network interface, not only on the address you picked. It is needed when the desktop must stay on
-127.0.0.1 or only outbound ssh gets through.
-`project-setup` itself always sets the tunnel up: the link it makes names 127.0.0.1, and it refuses a hand link
-with any other address.
-Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you-need-the-tunnel).
+127.0.0.1 or only outbound ssh gets through. `lane-control project setup` itself always sets the tunnel up: the link it
+makes names 127.0.0.1, and it refuses a hand link with any other address. Details: [Do you need the
+tunnel?](../orchestrators/native-orca/remote.md#do-you-need-the-tunnel).
 
 **How far this is tested, and what is pending:**
 - On main, the native Orca trial ran both with containers: a container as the box, and a second Orca server standing in
@@ -262,14 +263,14 @@ More: [native Orca on an SSH host](../orchestrators/native-orca/remote.md).
 
 ## Automations
 
-`machine-setup` creates four **Orca automations** in the machine coordinator's folder. Each first runs a **precheck**,
-a plain script that spends no model tokens; an agent starts only when the precheck finds something.
+`lane-control machine setup` creates four **Orca automations** in the machine coordinator's folder. Each first runs a
+**precheck**, a plain script that spends no model tokens; an agent starts only when the precheck finds something.
 
 | Automation | Runs | Precheck | What its agent does | Why Orca 1.4.274 does not make it unnecessary |
 |---|---|---|---|---|
-| `night manager` | hourly | `night-precheck` | sends a check-in to each coordinator that is due: idle while you are away or it is night (and, day or night, one that away-improve mode covers); passes on offline CI runners | no Orca built-in wakes an idle coordinator, or checks budget steps or runners |
+| `night manager` | hourly | `night-precheck` | sends a check-in to each coordinator that is due: idle while you are away or it is night (and, day or night, one that the ratchet covers); passes on offline CI runners | no Orca built-in wakes an idle coordinator, or checks budget steps or runners |
 | `lane sweep` | every 3 hours | `lane-sweep --precheck` (new findings only) | sends each new finding to that lane's coordinator; removes nothing | Orca tells a coordinator about its supervised workers; the sweep also sees lane worktrees with no live worker |
-| `machine check` | every 30 minutes | `machine-check` | passes changes (budget step, memory, runners, a coordinator Orca cannot find) to the machine coordinator | Orca has no budget steps, no runner state and no "memory low" warning |
+| `machine check` | every 30 minutes | `machine-check` (by hand, read only: `lane-control machine report`) | passes changes (budget step, memory, runners, a coordinator Orca cannot find) to the machine coordinator | Orca has no budget steps, no runner state and no "memory low" warning |
 | `away watchdog` | every 15 minutes | `away-watchdog` (finds a stalled away-improve cycle and writes the messages, with their evidence, to an outbox; a daily summary) | sends them with `away-watchdog --send` from its own terminal (a precheck has none), to the coordinator, then the machine coordinator; puts what reached nobody in front of you | Orca's worker notices (silent 10 min, idle 60 min, exited) go to the coordinator, which is the one that may be stuck; the schedule is Orca's own |
 
 They are already Orca automations, so there is nothing of ours to move onto that feature. The reasons come from the
@@ -287,7 +288,7 @@ Two other things run by themselves and are not Orca automations: **`ci-presence`
 minutes and at boot) that sets CI's CPU and memory limits by whether you are there, and the tunnels above.
 
 Tell the machine you leave or return with `lane-away on|off|status`. It changes limits and allows night check-ins; it
-never starts away-improve mode.
+never starts the ratchet.
 
 More: [night manager](../orchestrators/native-orca/night-manager.md), [a machine](../orchestrators/native-orca/setup.md#a-machine).
 
@@ -305,14 +306,15 @@ More: [night manager](../orchestrators/native-orca/night-manager.md), [a machine
 More: [budget steps](../core/model-routing.md#budget-thresholds-per-metered-budget-ceiling--the-owners-weekly-percent),
 [usage feeds](../core/machine.md#usage-feeds-per-metered-budget).
 
-## Away-improve mode
+## The ratchet
 
-Off unless **you** switch it on (`lane-improve on`). Each chosen project's coordinator then keeps improving its product
-on one `away/<date>` branch, merging there only through `away-merge`, and keeps one draft pull request for you. Nothing
-reaches the main line without your word. `lane-improve off` ends it; running work finishes first. The `away watchdog` automation watches each cycle from outside
-and tells a stalled coordinator, with the evidence, then the machine coordinator; it merges and changes nothing.
+Off unless **you** switch it on (`lane-control ratchet on`). Each chosen project's coordinator then keeps improving its
+product on one `away/<date>` branch, merging there only through `away-merge`, and keeps one draft pull request for you.
+Nothing reaches the main line without your word. `lane-control ratchet off` ends it; running work finishes first. The
+`away watchdog` automation watches each cycle from outside and tells a stalled coordinator, with the evidence, then the
+machine coordinator; it merges and changes nothing.
 
-More: [away-improve mode, the owner's guide](away-improve.md).
+More: [the ratchet, the owner's guide](away-improve.md).
 
 ## Cleanup
 
@@ -321,7 +323,8 @@ More: [away-improve mode, the owner's guide](away-improve.md).
   orchestration worker workspaces" is recommended beside it.
 - The rules are each Orca server's own. The app's Settings page does not set a box's global rules, so give each
   project on a box its own rule ([rules are per server](orca-cleanup.md#rules-are-per-server)).
-- GitHub's "Automatically delete head branches" removes the remote branch; `project-setup` offers to turn it on.
+- GitHub's "Automatically delete head branches" removes the remote branch; `lane-control project setup` offers to turn
+  it on.
 - When Orca does not take a merged lane, the coordinator removes it by hand, after checks.
 - `lane-sweep` reports what is left over. Without `--apply` it removes nothing.
 

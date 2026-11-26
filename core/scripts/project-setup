@@ -3557,8 +3557,8 @@ def skipped_adapt(repo: Path) -> None:
     if not onboarded(repo):
         say("adapt", "skipped", f"--skip-adapt: no onboarding agent ran, so the project's own files are not written: "
             f"no {GENERATED}, nothing under {ADAPTED}/ but the rendered personas (git-excluded), and the coordinator "
-            "is told the project is not adapted yet. Adapt it later, once a model is at hand: project-setup "
-            f"{repo} --readapt (with --adapter and --adapt-reviewer)")
+            "is told the project is not adapted yet. Adapt it later, once a model is at hand: lane-control project "
+            f"setup {repo} --readapt (with --adapter and --adapt-reviewer)")
 
 
 def onboard_from(role: str) -> str:
@@ -4402,7 +4402,7 @@ NATIVE_KICKOFF = {
 }
 NOT_ADAPTED = (" This project is not adapted to lane-control yet (it was set up with --skip-adapt): AGENTS.lane-control.md "
                "and the project's files under .lane-control/ (all but the personas) do not exist, so do not look for "
-               "them; say so to the owner in that line, and that `project-setup {repo} --readapt` adapts it once a "
+               "them; say so to the owner in that line, and that `lane-control project setup {repo} --readapt` adapts it once a "
                "model is at hand.")
 NATIVE_RESUME = ("You are back after a pause. Reread your persona, {persona}; then resume from `bd recall "
                  "{handover}`, `orca-ide orchestration run-current` and `orca-ide worktree list`, and tell the "
@@ -6621,4 +6621,12 @@ def _main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    try:  # run by a person under its old name: one line with its lane-control form (core/frontdoor.py)
+        import importlib.util as _iu
+        _fd = _iu.spec_from_file_location("lc_frontdoor", Path(__file__).resolve().parents[1] / "frontdoor.py")
+        _m = _iu.module_from_spec(_fd)
+        _fd.loader.exec_module(_m)
+        _m.hint("project-setup", sys.argv[1:])
+    except Exception:  # never fails the command
+        pass
     sys.exit(main())

@@ -71,6 +71,14 @@
 # Exit: 0, 1 refused or nothing to do, 2 usage.
 set -u
 self=$(readlink -f "$0")
+# run by a person under its old name: one line with its lane-control form (core/frontdoor.py); never by a script
+if [ -z "${LANE_CONTROL_FRONT_DOOR:-}" ] && [ -t 2 ]; then
+  case ${1:-} in
+    on | off | drained | status | rest | pr | cycle) printf 'lane-improve: note: this is now `lane-control ratchet%s` (the old name keeps working)\n' "$(printf ' %q' "$@")" >&2 ;;
+    *) echo 'lane-improve: note: this is now `lane-control ratchet on|off|drained|status|rest|pr|cycle` (the old name keeps working)' >&2 ;;
+  esac
+fi
+export LANE_CONTROL_FRONT_DOOR=1
 case ${1:-} in
   on | off | drained | status | rest | pr | cycle) exec python3 "${self%/*}/../improve.py" "$@" ;;
   -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$self" ;;

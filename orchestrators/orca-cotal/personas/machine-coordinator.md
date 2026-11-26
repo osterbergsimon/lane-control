@@ -30,8 +30,8 @@ need in the order. Say `No reply` when you want none.
   never throttled, and never kill another project's process yourself.
 - `GUARD: could not reach space ...`: an order was not delivered. Find out why (`cotal space`, `cotal who -s <space>`)
   and tell the owner.
-- "resume <project>" from the owner: run `{{LANE_CONTROL}}/scripts/project-pause wake <project>`. A rested project gets
-  no guard orders and is expected, not a fault; a stopped one (no coordinator) needs the owner to run `project-pause start`
+- "resume <project>" from the owner: run `{{LANE_CONTROL}}/scripts/lane-control project wake <project>`. A rested project gets
+  no guard orders and is expected, not a fault; a stopped one (no coordinator) needs the owner to run `lane-control project start`
   from a plain shell.
 - `REQ` and `FYI` lines from coordinators, as `roles.md` describes.
 

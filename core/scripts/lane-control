@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""lane-control: the one versioned lane-control tree on this machine (core/install.py).
+"""lane-control: the one front door (core/frontdoor.py) and the one versioned lane-control tree on this machine
+(core/install.py).
 
+  lane-control project|machine|ratchet <verb> ...
+        runs the script that form names (project-setup, project-pause, machine-setup, machine-check, lane-improve) with
+        the arguments it puts first and every other argument unchanged; `lane-control help` lists them all.
   lane-control install [--version <sha|tag|branch>] [--from <checkout>]
         lay the whole tree of that commit (default: the checkout's HEAD) at
         ${XDG_DATA_HOME:-~/.local/share}/lane-control/<sha>/, switch `current` to it by rename and link the lane tools
@@ -26,7 +30,7 @@
         install lock). With no valid `current` it removes nothing. A flat copy from before the versioned install is
         named in a note, never removed.
 
-After an install, run `project-setup --refresh <project>` for each project: its personas and skills are rendered
+After an install, run `lane-control project refresh <project>` for each project: its personas and skills are rendered
 from the tree, and the project records the sha it was set up with."""
 import argparse
 import importlib.util
@@ -34,6 +38,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sys
 from pathlib import Path
 
@@ -49,6 +54,7 @@ def _load(name, rel):
 
 I = _load("lc_install", "core/install.py")
 H = _load("lc_boxhealth", "core/boxhealth.py")
+F = _load("lc_frontdoor", "core/frontdoor.py")
 OURS = ("night manager", "lane sweep", "machine check")  # machine-setup's automations: it repairs their paths
 
 
@@ -314,7 +320,77 @@ def cmd_prune(a) -> int:
     return 0
 
 
+INSTALL_HELP = (("install [--version <sha>] [--from <checkout>]", "lay a commit's tree as current"),
+                ("status", "the current sha and the checkout's"),
+                ("doctor [--json] [--no-ssh]", "what to fix here and on each box"),
+                ("prune [--apply]", "remove unused trees (a dry run)"))
+INSTALL_CMDS = ("install", "status", "doctor", "prune")
+
+
+def help_screen() -> str:
+    """Everything on one screen, grouped, within 100 columns."""
+    out = ["lane-control: one front door for lane-control on this machine", ""]
+    for g, what in F.GROUPS.items():
+        out.append(what[0].upper() + what[1:])
+        out += [f"  {F.usage(gg, v):<{F.WIDTH}} {line}" for (gg, v), (_, _, _, line) in F.ROUTES.items() if gg == g]
+    out.append("The install: one versioned tree per machine and per box")
+    out += [f"  {'lane-control ' + usage:<{F.WIDTH}} {line}" for usage, line in INSTALL_HELP]
+    out += ["", "lane-control <group> --help: what each form runs; lane-control <group> <verb> --help: options.",
+            "Old names keep working: " + ", ".join(F.OLD) + ",",
+            "and lane-control improve (now ratchet)."]
+    return "\n".join(out)
+
+
+def unknown(word: str) -> int:
+    """A first word that is no group and no install command (review m3): name them all."""
+    print(f"lane-control: no command `{word}`. Groups: {', '.join(F.GROUPS)}; the install: {', '.join(INSTALL_CMDS)}."
+          + (" Presence (you are away) is lane-away; the ratchet is lane-control ratchet." if word == "away" else "")
+          + " lane-control help lists them all.", file=sys.stderr)
+    return 2
+
+
+def front_door(argv: list) -> int:
+    """`lane-control <group> <verb> ...`: exec the script it names, with its first arguments and the rest unchanged."""
+    group = F.canonical(argv[0])
+    if argv[0] != group and F.for_a_person():  # the alias: works, and says the new name
+        print(f"lane-control: note: `{argv[0]}` is now `{group}`: lane-control {' '.join([group, *argv[1:]])} "
+              f"({argv[0]} keeps working)", file=sys.stderr, flush=True)
+    if argv[1:2] in ([], ["-h"], ["--help"], ["help"]):
+        print(F.group_help(group), file=sys.stdout if argv[1:] else sys.stderr)
+        one = {s for (g, _), (s, *_) in F.ROUTES.items() if g == group}
+        if not argv[1:] or len(one) != 1:
+            return 0 if argv[1:] else 2
+        r = (one.pop(), ["--help"])  # a group of one script (ratchet): its own whole help follows
+    else:
+        text = F.verb_help(argv)
+        if text is not None:
+            print(text)
+            return 0
+        r = F.route(argv)
+    if r is None:
+        print(f"lane-control: no form `lane-control {group} {argv[1]}`\n" + F.group_help(group), file=sys.stderr)
+        return 2
+    script, args = r
+    path = Path(__file__).resolve().parent / script  # this tree's own script, as its old name would run it
+    sys.stdout.flush()
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # Python ignores it; the script gets the default, as when run itself
+    os.execve(str(path), [str(path), *args], {**os.environ, F.ENV: "1"})
+    return 127  # not reached
+
+
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] in ([], ["-h"], ["--help"], ["help"]):
+        if argv[1:2] and F.canonical(argv[1]) in F.GROUPS:
+            return front_door([argv[1], "--help"])
+        if argv[1:2]:
+            return main([argv[1], "--help"]) if argv[1] in INSTALL_CMDS else unknown(argv[1])
+        print(help_screen(), file=sys.stdout if argv else sys.stderr)
+        return 0 if argv else 2
+    if F.canonical(argv[0]) in F.GROUPS:
+        return front_door(argv)
+    if argv[0] not in INSTALL_CMDS and not argv[0].startswith("-"):
+        return unknown(argv[0])
     ap = argparse.ArgumentParser(prog="lane-control", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
