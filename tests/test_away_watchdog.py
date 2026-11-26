@@ -498,6 +498,53 @@ class MaxHoursTests(ImproveTest):
         self.assertEqual(self.on("--continue", "--max-hours", "8.5").returncode, 0)
         self.assertEqual(self.state()["max_hours"], 8.5)
 
+    def test_every_unmetered_period_with_no_end_keeps_a_bound(self):  # M5
+        self.assertEqual(self.on("--project", "shop", "--unmetered", "--hours", "3").returncode, 0)
+        self.assertIsNone(self.state()["max_hours"])
+        r = self.on("--continue", "--until-back")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.state()["unmetered"], self.state()["end"], self.state()["max_hours"]), (True, "until-back", 12))
+        self.assertIn("a bound of 12 h applies", r.stdout)
+
+    def test_none_is_kept_across_reruns_until_a_value_is_given(self):  # M5
+        self.assertEqual(self.on("--project", "shop", "--unmetered", "--max-hours", "none").returncode, 0)
+        self.assertTrue(self.state()["max_hours_off"])
+        self.assertEqual(self.on("--continue", "--until-back").returncode, 0)
+        self.assertIsNone(self.state()["max_hours"])
+        self.assertEqual(self.on("--continue", "--max-hours", "5").returncode, 0)
+        self.assertEqual((self.state()["max_hours"], self.state()["max_hours_off"]), (5, False))
+
+    def test_a_new_cycle_is_refused_once_the_cap_is_reached(self):  # m1
+        self.on("--project", "shop", "--max-hours", "1")
+        later = {"LANE_NOW": str(time.time() + 2 * 3600)}
+        r = self.run_script("lane-improve", "cycle", "shop", "--phase", "scout", "--dispatch", "ctx_new", env=later)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("a cap is reached (hours:", r.stderr)
+        self.assertEqual(self.run_script("lane-improve", "cycle", "shop", "--phase", "scout").returncode, 0)  # before it
+        self.run_script("lane-improve", "cycle", "shop", "--phase", "build", "--item", "x")
+        self.run_script("lane-improve", "off")
+        r = self.run_script("lane-improve", "cycle", "shop", "--phase", "scout")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("draining", r.stderr)
+        self.assertEqual(self.run_script("lane-improve", "cycle", "shop", "--phase", "review", "--round", "1").returncode, 0)
+
+    def test_a_wrap_up_at_max_hours_survives_a_lost_record_as_unknown(self):  # m2, m4
+        self.on("--project", "shop", "--max-hours", "1")
+        later = {"LANE_NOW": str(time.time() + 2 * 3600)}
+        self.assertEqual(self.run_script("lane-improve", "drained", "shop", env=later).returncode, 0)
+        (self.conf_dir / "improve-period.json").unlink()
+        rows = {x["project"]: x for x in map(json.loads, self.run_script("lane-improve", "status", "--json", env=later).stdout.splitlines())}
+        self.assertEqual(rows["shop"]["improve"], "unknown")
+        self.assertIn("missing", rows["shop"]["error"])
+        self.assertIn("period record", self.run_script("lane-improve", "status", env=later).stdout)
+
+    def test_status_json_says_a_broken_state_file_is_unknown(self):  # m4
+        self.improve_file().write_text("{junk")
+        rows = [json.loads(x) for x in self.run_script("lane-improve", "status", "--json").stdout.splitlines()]
+        self.assertTrue(rows)
+        self.assertEqual({x["improve"] for x in rows}, {"unknown"})
+        self.assertIn("not valid JSON", rows[0]["error"])
+
     def test_bad_values_are_refused(self):
         for v in ("0", "-1", "x", "nan", "100000"):
             self.assertEqual(self.on("--project", "shop", "--max-hours", v).returncode, 2, v)

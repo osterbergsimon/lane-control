@@ -2468,19 +2468,30 @@ class AwayImproveContentTests(unittest.TestCase):
         for needle in ("**Record every step**", "`lane-improve cycle <your project> --phase", "**On start or resume**",
                        "never start a second lane", "`$ORCA_TERMINAL_HANDLE`", "## 1a. Watchdog and recovery",
                        "a fresh worker on the same worktree and PR", "--close parked --findings-file",
-                       "is not proof that a lane is working", "never beyond the lane's budget", "--metric"):
+                       "is not proof that a lane is working", "never beyond the lane's budget", "--metric",
+                       "**before** you start its lane", "--worker <reviewer's id>", "`orchestration worker-list` first",
+                       "**One worker per worktree:**", "settled or stopped", "never reuse the worktree", "Do not reply",
+                       "`--max-hours`"):
             self.assertIn(needle, t, needle)
         guide = flat(ROOT / "docs" / "away-improve.md")
         for needle in ("## The watchdog", "fails loudly", "A title is never matched", "is not proof", "The ledger.",
                        "The daily summary.", "--max-hours", "REST `PATCH`", "status [--json]", "lane-improve cycle <project>",
-                       "silent (10 minutes), idle (60 minutes) or exits"):
+                       "silent (10 minutes), idle (60 minutes) or exits", "**Who sends.**", "away-watchdog --send",
+                       "**When it keeps quiet.**", "never puts two workers on one worktree", "written before it is sent"):
             self.assertIn(needle, guide, needle)
         help_text = (ROOT / "core" / "scripts" / "lane-improve").read_text()
         for needle in ("--max-hours H", "lane-improve cycle <project>", "status [--json]"):
             self.assertIn(needle, help_text, needle)
         dog = (ROOT / "core" / "scripts" / "away-watchdog").read_text()
-        for needle in ("never merges, edits a lane", "A title is never matched", "is not proof", "fails loudly"):
+        for needle in ("never merges, edits a lane", "A title is never matched", "is not proof", "fails loudly",
+                       "sends nothing (a precheck has no Orca terminal", "--from` its own Orca terminal"):
             self.assertIn(needle, " ".join(dog.split()), needle)
+
+    def test_the_machine_coordinator_offers_max_hours_and_the_night_manager_reads_its_cap(self):  # AWY-2 review m6
+        mc = flat(PERSONA_DIR / "machine-coordinator.md")
+        self.assertIn("`--max-hours H`", mc)
+        self.assertIn("`--max-hours 12`", mc)
+        self.assertIn("cap=<items|weekly|hours>", flat(ROOT / "orchestrators" / "native-orca" / "night-manager.md"))
 
     def test_skill_installed_for_claude_and_opencode(self):
         src = (ROOT / "core" / "scripts" / "project-setup").read_text()

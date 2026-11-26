@@ -51,13 +51,16 @@
 #       --summary-file sets the short summary the coordinator writes (a file kept outside the project, at most 8000
 #       characters; later refreshes keep it); without it the summary already in the PR stays. It edits no file in the project.
 #       It stays a draft and is never merged by an agent; only the owner merges it.
-#   lane-improve cycle <project> [--phase scout|build|review|merge|idle] [--item "<title>"] [--pr N] [--round N]
-#                    [--dispatch <ctx_id>] [--worktree <path>] [--budget-min M] [--address <term_|run:|dispatch:>] [--json]
+#   lane-improve cycle <project> [--phase queued|scout|build|review|merge|idle] [--item "<title>"] [--pr N] [--round N]
+#                    [--dispatch <ctx_id>] [--worker <ctx_id>] [--worktree <path>] [--budget-min M]
+#                    [--address <term_|run:|dispatch:>] [--json]
 #   lane-improve cycle <project> --close merged|parked [--findings-file <path>] [--metric "<text>"]
 #       The cycle's state, kept per project in improve-cycle.json beside the improve file: the coordinator records each step
 #       (phase, item, PR, review round, the lane's dispatch and worktree) and reads it back on resume (no flags: prints it),
-#       so a restart mid-cycle neither loses the phase nor starts a second lane. A new scout or build lane gets its
-#       deadline now: --budget-min (default 240) minutes. The address is the coordinator's own Orca terminal
+#       so a restart mid-cycle neither loses the phase nor starts a second lane. A new queued, scout or build lane gets its
+#       deadline now: --budget-min (default 240) minutes; --worker records another dispatch working for the cycle (its
+#       reviewer), watched as live but never a new lane. A new scout (a new cycle) is refused once a cap is reached or the
+#       period drains; an unmetered period with no end keeps a --max-hours bound on every re-run unless `--max-hours none`. The address is the coordinator's own Orca terminal
 #       ($ORCA_TERMINAL_HANDLE, recorded by itself; --address overrides), which away-watchdog sends to. --close ends the
 #       cycle into the ledger, improve-ledger.jsonl (item, PR, merge sha, metric, rounds, parked findings): away-merge
 #       closes it `merged` itself; a parked item needs --findings-file.

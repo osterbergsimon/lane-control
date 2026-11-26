@@ -31,17 +31,19 @@ The design is `docs/superpowers/specs/2026-11-23-away-improve-design.md` in lane
 Run cycles back to back, each starting when the last item is merged: a lane's report wakes you, so you wait for nothing: never polling, never looping on `check` (the watchdog's and the night manager's nudges are only a fallback for a lost wake, section 1a).
 
 **Record every step** with `lane-improve cycle <your project> --phase <phase> ...` (in `core/scripts/` of the lane-control
-checkout your persona names): `--phase scout --dispatch <id>` when the scout starts, `--phase build --item "<title>"
---dispatch <id> --worktree <path> [--budget-min <minutes>]` when the build lane starts, `--pr <n>` once it has a PR,
-`--phase review --round <n>` for each review round, `--phase merge` before `away-merge`. A new scout or build lane gets
-its deadline then (default 240 minutes). Run it from your own terminal: it records your Orca address
-(`$ORCA_TERMINAL_HANDLE`), which is where the watchdog writes to. `away-merge` closes the cycle itself; an item you park
-(section 1a) you close with `--close parked --findings-file <path>`. **On start or resume** run `lane-improve cycle <your
-project>` first: if it shows a lane out, check that dispatch (`orchestration worker-show`) and carry on with it; never
-start a second lane for the same step.
+checkout your persona names), **before** you start its lane and again with `--dispatch <id>` once it has one:
+`--phase queued` for a queued lane (step 1), `--phase scout`, `--phase build --item "<title>" --worktree <path>
+[--budget-min <minutes>]`, `--pr <n>` once it has a PR, `--phase review --round <n> --worker <reviewer's id>` for each
+review round (a reviewer, or any other worker for this cycle, is `--worker`: never `--dispatch`), `--phase merge` before
+`away-merge`. A new queued, scout or build lane gets its deadline then (default 240 minutes). Run it from your own
+terminal: it records your Orca address (`$ORCA_TERMINAL_HANDLE`), which is where the watchdog writes to. `away-merge`
+closes the cycle itself; an item you park (section 1a) you close with `--close parked --findings-file <path>`.
+**On start or resume** run `lane-improve cycle <your project>` and `orchestration worker-list` first: if a lane is
+recorded out, or a live worker is on its worktree, carry on with it; never start a second lane for the same step.
 
 Before each cycle: `lane-improve status` still says `improve: on`, its end has not passed and the line for your project
-does not say `cap reached` (the owner may have set a cap: `--max-items` and `--stop-at`, section 3); `<lane-control>/core/scripts/budget-state --project <your project>` shows a step below no-new-work (unmetered: `budget-state --project` prints
+does not say `cap reached` (the owner may have set a cap: `--max-items`, `--stop-at` and `--max-hours`, section 3;
+`lane-improve cycle --phase scout` refuses a new cycle once one is reached); `<lane-control>/core/scripts/budget-state --project <your project>` shows a step below no-new-work (unmetered: `budget-state --project` prints
 `unmetered` when the feed gives no reading, which is not a stop, and there are no budget steps for improve work, but
 `lane-room` and `lane-heavy` still apply); `~/.agents/bin/lane-room` exits 0. Otherwise
 stop (section 3).
@@ -87,16 +89,19 @@ stop (section 3).
 The `away watchdog` automation checks your cycle every 15 minutes from outside and writes to the address you recorded.
 It merges nothing and changes no lane; its message carries the evidence (item, PR, phase, round, what Orca says of the
 worker, the idle time, the deadline).
-- **A nudge** (no live lane, nothing merged or recorded for 45 minutes): run `lane-improve cycle <your project>`, act on
-  the lane that reported, or start the next cycle.
-- **A deadline** (the lane is past its budget): if Orca shows the worker live and working, ask it where it stands and
-  record a new budget (`--budget-min`). Otherwise recover: start a fresh worker on the same worktree and PR
-  (`worker-start --worktree path:<its worktree>`, the brief naming the issue, the PR and what is left) and record it
-  (`--phase build --dispatch <new id>`), or park the item: write its findings to a file outside the project and run
+- **A nudge** (nothing live, nothing merged or recorded for 45 minutes): run `lane-improve cycle <your project>`, act on
+  the lane that reported, or start the next cycle (not after a cap, `off` or the end time: then only the lane still out).
+- **A deadline** (the lane is past its budget): if Orca shows a worker live and working, ask it where it stands and
+  record a new budget (`--budget-min`). **One worker per worktree:** start a fresh worker on the same worktree and PR
+  (`worker-start --worktree path:<its worktree>`, the brief naming the issue, the PR and what is left; record it with
+  `--phase build --dispatch <new id>`) only once `orchestration worker-list` shows every worker on that worktree settled
+  or stopped. Stopping a live one is the owner's word. While it is unknown, or a worker waits, never reuse the
+  worktree: ask the worker, ask the owner, or park the item: write its findings to a file outside the project and run
   `lane-improve cycle <your project> --close parked --findings-file <path>`. Then the next cycle.
 - A terminal that exists, a port that answers or a worker Orca cannot speak for is not proof that a lane is working.
-- Reply in one line; the watchdog backs off by itself (the wait doubles, never beyond the lane's budget) and tells the
-  machine coordinator when it stays stalled.
+- Do not reply: the message comes from an automation run that has ended. The watchdog backs off by itself (the wait
+  doubles, never beyond the lane's budget), sends nothing at the budget's stop step or while the project is paused, and
+  tells the machine coordinator when it stays stalled.
 
 ## 2. The log: in PRs and merge commits
 There is no log file on the away branch. Each item's entry is in its build lane's PR body, under the headings What, Why,

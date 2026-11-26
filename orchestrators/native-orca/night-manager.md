@@ -14,7 +14,7 @@ lane-control checkout; `<lc>` below means that path. Keep every step short: you 
    doubles, up to 8 h, and a coordinator that has nothing left within its limits can ask for quiet). A
    `DUE <name> wrapup idle=<n>min waited=<h>h` line means the period has ended and that coordinator has not yet
    wrapped up (its draft PR and `lane-improve drained`). A `DUE <name> wrapup idle=<n>min
-   cap=<items|weekly>:<n>/<max>` line means the owner's cap for that project (`--max-items`, `--stop-at`) is reached: it
+   cap=<items|weekly|hours>:<n>/<max>` line means the owner's cap for that project (`--max-items`, `--stop-at`, `--max-hours`) is reached: it
    wraps up like an ended period, while the mode goes on for the others. An `UNFOUND <name> (<why>)` line means Orca has no single
    agent terminal in that coordinator's checkout (none, several, or Orca not answering): nobody can be checked in on
    there, and it is said once a night per project: pass the line to the machine coordinator (step 4). Exit 1 means

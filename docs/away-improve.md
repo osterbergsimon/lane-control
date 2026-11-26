@@ -231,27 +231,40 @@ Be clear about what is enforced and what is a backstop.
 
 A lost wake once stalled a cycle for hours at a remote site: the coordinator waited for a report that had come, and the
 night manager's nudges, doubling up to 8 hours, were too slow to catch it. The `away watchdog` automation (every 15
-minutes, made by `machine-setup`) watches each cycle from outside. Its precheck, `away-watchdog`, does the work itself and
-spends no tokens; it never merges, edits a lane, starts or stops a worker.
+minutes, made by `machine-setup`) watches each cycle from outside. It never merges, edits a lane, starts or stops a worker.
 
-- **What it reads.** The cycle the coordinator records (`lane-improve cycle`: phase, item, PR, round, the lane's dispatch and
-  worktree, and the lane's **deadline**, set when the lane starts: `--budget-min`, default 240 minutes), the last merge on
-  the away branch, and Orca's own word on the lane's worker (`orchestration worker-show`). A lane counts as live only when
-  Orca says `live` and its outcome is still in progress: a terminal that exists, a port that answers, or a worker Orca cannot
-  speak for is not proof, and the message says which it was.
-- **Whom it tells, and when.** No live lane and nothing merged or recorded for `WATCHDOG_MIN` (45) minutes: a message to the
-  coordinator. A lane past its deadline, live or not: a message to recover it (a fresh worker on the same worktree and PR, or
-  park the item with its findings). Both repeat while it lasts, the wait doubling (45, 90, 180 minutes) but never longer
-  than the lane's budget. Past `WATCHDOG_ESCALATE_MIN` (120) minutes the machine coordinator is told as well. Each message
-  carries its evidence: item, PR, phase, round, what Orca said of the worker, the idle time and what it counts from, the
-  deadline, and how often it has been said.
+- **Who sends.** Its precheck, `away-watchdog`, only finds what is due and writes it to an outbox; it sends nothing and
+  spends no tokens. A precheck has no Orca terminal, so Orca has no sender to take a message from (read in Orca 1.4.274's
+  CLI: without `--from` it takes the one terminal in the folder, or refuses). When something is due the automation's agent
+  starts and runs `away-watchdog --send`, which sends each message `--from` that agent's own terminal (Orca gives every
+  terminal it starts a handle). So a message costs one short agent run; a round with nothing due costs nothing. The
+  coordinator does not reply: that run has ended.
+- **What it reads.** The cycle the coordinator records (`lane-improve cycle`: phase, item, PR, round, the lane's dispatch,
+  its other workers such as the reviewer (`--worker`), its worktree, and the lane's **deadline**, set when the lane starts:
+  `--budget-min`, default 240 minutes), the last merge on the away branch, and Orca's own word on the workers
+  (`orchestration worker-show` for each one recorded, `orchestration worker-list` for any worker on the lane's worktree).
+  A worker counts as live only when Orca says `live` and its outcome is still in progress: a terminal that exists, a port
+  that answers, or a worker Orca cannot speak for is not proof, and the message says which it was.
+- **Whom it tells, and when.** Nothing live and nothing merged or recorded for `WATCHDOG_MIN` (45) minutes: a message to the
+  coordinator (not in the merge phase, which waits on CI and has its deadline). A lane past its deadline, live or not: a
+  message to recover it, which never puts two workers on one worktree (a fresh worker only once Orca shows every worker on
+  it settled or stopped; else ask, or park the item with its findings). Both repeat while it lasts, the wait doubling (45,
+  90, 180 minutes) but never longer than the lane's budget. Past `WATCHDOG_ESCALATE_MIN` (120) minutes the machine
+  coordinator is told as well. Each message carries its evidence: item, PR, phase, round, what Orca said of each worker, the
+  idle time and what it counts from, the deadline, and how often it has been said.
+- **When it keeps quiet.** A metered project at the budget's stop step or with no reading gets nothing, and from
+  no-new-work no nudge for a new cycle (as the night manager's improve nudge). A paused project (`project-pause`) and a
+  resting one with no lane out get nothing. After a cap, `lane-improve off` or the end time, a lane still recorded out is
+  watched until it reports, with no ask for a new cycle.
 - **Addresses are explicit.** The coordinator's is the Orca terminal it recorded itself (`lane-improve cycle` keeps
   `$ORCA_TERMINAL_HANDLE`, or `--address`); when that terminal is gone, the single agent terminal in the project's checkout.
   The machine coordinator's is `MACHINE_COORDINATOR_TO` in `machine.conf`, else the single agent terminal in
-  `MACHINE_COORDINATOR_FOLDER` (`~/machine-coordinator`). A title is never matched. When nobody can be reached (none,
-  several, Orca down, a send refused) it **fails loudly**: an `UNADDRESSED` line, what the coordinator should have heard goes
-  to the machine coordinator, and when that fails too the automation's agent starts and writes it in front of you (its run
-  in Orca, and `notes.md` in the machine coordinator's folder), at most every `WATCHDOG_ESCALATE_MIN` minutes while it stays.
+  `MACHINE_COORDINATOR_FOLDER` (`~/machine-coordinator`). A title is never matched.
+- **It fails loudly.** A target it cannot address (none, several, Orca down), a send Orca refuses, a crash, or a round cut
+  short by its own time limit (200 s, under the automation's 300) is an `UNADDRESSED` line; what the coordinator should have
+  heard goes to the machine coordinator, and the automation's agent writes the rest in front of you (its run in Orca, and
+  `notes.md` in the machine coordinator's folder), at most every `WATCHDOG_ESCALATE_MIN` minutes while the same lines stay.
+  A message's backoff is written before it is sent, so a crash after a send never sends it twice.
 - **The ledger.** Each closed cycle is one line in `improve-ledger.jsonl`: item, PR, merge sha, metric (`away-merge
   --metric "<before -> after>"`), review rounds, the lane's minutes, and the findings of a parked item.
 - **The daily summary.** At the first round after `NIGHT_END` the machine coordinator gets the cycles merged and parked
@@ -290,8 +303,10 @@ once to look for new work. Nudges go out by day or night; the plain check-ins st
 ## What is tested, and what is not
 
 The watchdog, the cycle state, the ledger, `status --json`, `--max-hours` and the REST body are covered with stubs for
-`orca-ide` and `gh` and temporary repositories. Not run for real: a watchdog message through a real Orca (`orchestration
-send --to term_<id>` from an automation's precheck, which has no terminal of its own) and the REST `PATCH` against GitHub,
+`orca-ide` and `gh` and temporary repositories; the stub refuses a send with no `--from`, as Orca does from a precheck.
+Run for real once (Orca 1.4.274, 2026-11-26): `orchestration send --from <term> --to <term> --type status --body-file
+<file>` from an Orca terminal, to that terminal itself as a scratch recipient: accepted and delivered. Not run for real:
+the automation's agent running `--send` in its own run, a whole watchdog round, and the REST `PATCH` against GitHub,
 including the organisation whose classic Projects made `gh pr edit` fail.
 
 The scripts, the state handling, the merge checks, the nudges and the OpenCode guard's command checks are covered by the
