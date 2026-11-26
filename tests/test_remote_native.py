@@ -1710,7 +1710,7 @@ class DocTests(unittest.TestCase):
     def test_the_docs_put_the_check_first_and_keep_the_link_a_hand_step(self):
         # PAIR-1 (lc-lxd): orca pair widens the desktop, so the 127.0.0.1 link stays the owner's, and --check comes first
         remote = " ".join(REMOTE_DOC.read_text().split())
-        for s in ("## Check first", "project-setup --check <repo> <host>", "changes nothing", "This stays a hand step",
+        for s in ("## Check first", "project-setup --check <repo> <host>", "changes nothing", "In setup today this is a hand step",
                   "`orca pair`", "--address 127.0.0.1", "refusing to widen to all interfaces",
                   "docs/research/2026-11-25-orca-pairing.md", "Orca on your SSH hosts"):
             self.assertIn(s, remote, s)

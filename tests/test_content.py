@@ -837,11 +837,11 @@ class NativePersonaTests(unittest.TestCase):
         for role in LANE_STARTERS:
             self.assertIn("read the usage feed and the ceiling before each launch", flat(NATIVE / f"{role}.md"), role)
 
-    def test_lane_starters_check_their_own_inbox_after_a_lane_on_another_host(self):
+    def test_lane_starters_check_their_inbox_when_a_cross_host_wake_seems_lost(self):
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
             self.assertRegex(t, r"on another host.*`orca-ide orchestration check`", role)
-            self.assertIn("on each wake", t, role)
+            self.assertIn("With both servers at the same version", t, role)
 
     def test_lane_starters_use_native_orca_orchestration(self):
         for role in LANE_STARTERS:
@@ -860,7 +860,13 @@ class NativePersonaTests(unittest.TestCase):
         # existing worktree
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
-            self.assertIn("--worktree new-top-level --repo <exact selector>", t, role)
+            self.assertIn("takes `--worktree new-child` or `new-top-level`, with `--repo <exact selector>`", t, role)
+            self.assertNotIn("Orca refuses `new-child`", t, role)
+        skill = flat(NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md")
+        self.assertIn("`--worktree new-child` or `new-top-level`, with `--repo <exact selector>`", skill)
+        self.assertNotIn("Orca refuses `new-child`", skill)
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
             self.assertIn("orca-ide worktree create", t, role)
             self.assertIn("--worktree path:<that worktree>", t, role)
 
@@ -1093,9 +1099,9 @@ def reliability_entry(n):
 class LessonsDoctrineTests(unittest.TestCase):
     """Phase 5: the week's lessons are doctrine (spec section 9); each test pins an entry's key sentence."""
 
-    def test_entries_29_to_37_follow_entry_28_in_order(self):
+    def test_numbered_entries_run_in_order(self):
         numbers = [int(n) for n in re.findall(r"(?m)^## (\d+)\. ", (ROOT / "core" / "reliability.md").read_text())]
-        self.assertEqual(numbers, list(range(1, 38)))
+        self.assertEqual(numbers, list(range(1, 49)))
 
     def test_idle_coordinator_with_pending_work_is_stuck(self):
         t = reliability_entry(29)
@@ -1427,8 +1433,8 @@ AGENTS_ONLY = re.compile(r"(?:Read|then|reread)(?: the repo's)? AGENTS\.md(?! an
 
 
 class NativeHandsAfterMainTests(unittest.TestCase):
-    """Final round: #41's worker-abandon sits under exception 2, still on the owner's word; a lost cross-host wake is
-    noticed by the night manager or the owner, never by a loop of the coordinator's."""
+    """Final round: #41's worker-abandon sits under exception 2, still on the owner's word; after a lost cross-host
+    wake the coordinator runs `check`, never in a loop."""
 
     def test_exception_2_names_worker_abandon_on_the_owners_word(self):
         for path in (ROOT / "core" / "roles.md", NATIVE / "coordinator.md",
@@ -1441,9 +1447,15 @@ class NativeHandsAfterMainTests(unittest.TestCase):
 
     def test_who_notices_a_lost_cross_host_wake(self):
         t = flat(NATIVE / "coordinator.md")
-        self.assertIn("If a cross-host wake is lost, the night manager's idle check or the owner notices it; you never "
-                      "loop on `check`.", t)
-        self.assertLess(t.index("is poll-only"), t.index("If a cross-host wake is lost"))
+        self.assertIn("What catches a report that is lost or never sent: the night manager's idle check (while the owner "
+                      "is away or it is night), Orca's \"Worker stopped without reporting\" notice where the build has "
+                      "it, and otherwise the owner.", t)
+        self.assertIn("Before you call a quiet lane lost, run `orca-ide orchestration worker-show --dispatch "
+                      "<dispatch>`.", t)
+
+    def test_what_to_do_about_a_lost_cross_host_wake(self):
+        t = flat(NATIVE / "coordinator.md")
+        self.assertIn("If a wake seems lost, run `orca-ide orchestration check`; never loop on it.", t)
 
 
 class AdaptTemplatesKnowTheGeneratedFileTests(unittest.TestCase):
@@ -1488,14 +1500,15 @@ class EntryPointsNameTheGeneratedFileTests(unittest.TestCase):
 class CrossHostReportContractTests(unittest.TestCase):
     """UP-3: what is known about a worker's report (worker_done) reaching a coordinator, across hosts and not, and the
     recovery for a dispatch that can no longer report. Tested live on one machine (record.md, 2026-11-20 UP-3);
-    delivery across hosts is not verified, and every text says so instead of claiming a wake."""
+    delivery across hosts rests on the field report 2026-11-26 (both servers at the same version), and no text keeps
+    the old poll-only rule."""
 
     REMOTE = ROOT / "orchestrators" / "native-orca" / "remote.md"
 
     def test_remote_doc_states_what_is_known_and_what_is_not(self):
         t = flat(self.REMOTE)
         self.assertNotIn("## Not yet established", t)
-        for needle in ("## Reports across hosts", "poll-only", "Not verified",
+        for needle in ("## Reports across hosts", "field report 2026-11-26",
                        "Orca's one-line message prompt", "orca-ide orchestration check",
                        "`--task-id`", "`--dispatch-id`", "`missing_task_id`", "`missing_dispatch_id`",
                        "`worker_identity_changed`", "Rejected worker_done",
@@ -1508,21 +1521,20 @@ class CrossHostReportContractTests(unittest.TestCase):
                        "ask the owner", "Not tested"):
             self.assertIn(needle, t, needle)
 
-    def test_remote_doc_claims_no_delivery_across_hosts(self):
+    def test_a_cross_host_wake_is_stated_with_its_version_and_source(self):
+        # lc-l78.25: the field measured it; the doc says on what versions, who measured and what to do if it seems lost
         t = flat(self.REMOTE)
-        for claim in ("wakes the coordinator on the box", "is delivered to the box", "reaches the box's coordinator"):
-            self.assertNotIn(claim, t, claim)
-        self.assertRegex(t, r"(?i)across hosts[^.]*(not verified|poll-only)")
+        reports = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
+        for needle in ("both servers at the same version (1.4.274)", "that lane's `worker_done` wakes the box's coordinator",
+                       "--worktree new-child --repo name:<project> --setup skip", "lane-control has not repeated",
+                       "`name:<project>`, naming the project, resolves where a `github:` selector does not",
+                       "If a wake seems lost, run `orca-ide orchestration check`"):
+            self.assertIn(needle, reports, needle)
 
-    def test_no_text_says_a_cross_host_report_simply_comes_back(self):
-        # UP-6 review M1: the box paragraph said "its report comes back by Orca" next to the poll-only rule.
-        texts = [(self.REMOTE.name, flat(self.REMOTE))] + [(r, flat(NATIVE / f"{r}.md")) for r in LANE_STARTERS]
-        for name, t in texts:
-            self.assertNotIn("comes back by Orca", t, name)
-            self.assertNotIn("report comes back", t, name)
-        for name, t in texts[1:]:
-            self.assertIn("it reports by Orca; across hosts that is poll-only", t, name)
-        self.assertIn("it reports by Orca; across hosts that is poll-only", texts[0][1])
+    def test_no_text_keeps_the_poll_only_rule(self):
+        for f in (self.REMOTE, ROOT / "docs" / "how-it-fits.md", ROOT / "orchestrators" / "native-orca" / "skills"
+                  / "native-orca-lanes" / "SKILL.md", *sorted(NATIVE.glob("*.md"))):
+            self.assertNotIn("poll-only", flat(f), f.relative_to(ROOT))
 
     def test_one_rule_for_abandoning_a_dispatch_everywhere(self):
         # review n1: no text lets the coordinator abandon without the owner; remote.md has no exception
@@ -1546,10 +1558,10 @@ class CrossHostReportContractTests(unittest.TestCase):
                        "first live check", "two plugin files"):
             self.assertIn(needle, t, needle)
 
-    def test_lane_starters_treat_a_cross_host_report_as_poll_only_and_know_the_recovery(self):
+    def test_lane_starters_know_the_recovery_for_a_refused_report(self):
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
-            for needle in ("poll-only", "`Rejected worker_done`", "`worker_identity_changed`",
+            for needle in ("`Rejected worker_done`", "`worker_identity_changed`",
                            "read the lane's branch", "orca-ide orchestration worker-show --dispatch <dispatch>",
                            "orca-ide orchestration worker-abandon --dispatch <dispatch>",
                            "orca-ide orchestration worker-release --dispatch <dispatch>",
@@ -1617,12 +1629,57 @@ class OrcaCanaryTests(unittest.TestCase):
             self.assertRegex(t, r"`retained`[^.]*close[^.]*terminal[^.]*yourself", name)
             self.assertIn("orca-ide terminal close --terminal <handle>", t, name)
 
-    def test_cross_server_reports_stay_poll_only_after_the_canary(self):
+    def test_the_canary_facts_on_mixed_versions_stay(self):
         t = flat(self.REMOTE)
         reports = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
-        self.assertIn("poll-only", reports)
         self.assertIn("Canary 2026-11-21", reports)
-        self.assertRegex(reports, r"(?i)agent coordinator[^.]*not (verified|tested)")
+        self.assertIn("keep both servers on one version", reports)
+
+
+class FieldReportDocTests(unittest.TestCase):
+    """DOC-3 (lc-l78): what the field report 2026-11-26 added to the docs."""
+
+    def test_pairing_facts(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "remote.md")
+        t = t[t.index("### Pairing facts"):t.index("### Two ports")]
+        for needle in ("is the address the client dials, not the bind", "still widens to every interface",
+                       "`environment add --pairing-code -` is not a feature of Orca's CLI", "pairing-code-stdin.cjs",
+                       "out of `ps`", "This server is already paired as", "a remove, then an add",
+                       "An offer is a credential with a scope", "`--rotate` replaces an unused offer",
+                       "the earlier link keeps working"):
+            self.assertIn(needle, t, needle)
+
+    def test_the_default_pairing_route_and_what_it_widens(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "remote.md")
+        t = t[t.index("### Pairing facts"):t.index("### Two ports")]
+        for needle in ("**The default route (owner, 2026-11-26, lc-bmk): the CLI mint**",
+                       "widens the desktop's listener to every interface", "The hand share link (step 1) stays",
+                       "Not built when this was written"):
+            self.assertIn(needle, t, needle)
+
+    def test_upstream_asks_are_recorded_not_filed(self):
+        t = (ROOT / "docs" / "orca-upstream-asks.md").read_text()
+        asks = re.split(r"(?m)^## ", t)[1:]
+        self.assertEqual([a.split(":")[0] for a in asks], ["A1", "A5", "C5/G2", "D1", "I", "J"])
+        for a in asks:
+            for needle in ("**Ask:**", "**Field evidence:**", "**Meanwhile:**", "**Status:** recorded, not filed."):
+                self.assertIn(needle, a, (a[:5], needle))
+        self.assertIn("(orca-upstream-asks.md)", (ROOT / "docs" / "README.md").read_text())
+
+    def test_cleanup_rules_are_per_server(self):
+        t = flat(ROOT / "docs" / "orca-cleanup.md")
+        for needle in ("`workspaceCleanupPolicy`", "`preview`, `run` and `report`", "page is the client's",
+                       "that server's global rules", "unprotected until its own rule is set",
+                       "(`rules-off`) reports that server", "`no-rule-matched` is correct there"):
+            self.assertIn(needle, t, needle)
+
+    def test_each_field_tip_has_a_failure_a_fix_and_its_mark(self):
+        t = (ROOT / "core" / "reliability.md").read_text()
+        entries = [e for e in re.split(r"(?m)^## ", t) if "(field report 2026-11-26)" in e]
+        self.assertEqual(len(entries), 11)
+        for e in entries:
+            self.assertRegex(e, r"(?m)^- \*\*Failure:\*\* ", e)
+            self.assertRegex(e, r"(?m)^- \*\*Fix:\*\* ", e)
 
 
 class PublicRepoPathTests(unittest.TestCase):
@@ -1749,22 +1806,34 @@ class CrossHostRouteTests(unittest.TestCase):
         good = "An agent on another host: a `run:` target does not cross hosts (it is refused with `--on`)."
         self.assertTrue(RUN_REFUSED.search(good))
 
-    def test_remote_md_names_the_route_and_who_notices_a_lost_wake(self):
+    def test_remote_md_names_the_route(self):
         t = flat(NATIVE_DIR / "remote.md")
         for needle in ("send --on <environment> --to term_<id> --subject", "orca_session_id:<id>", "1.4.256 or newer",
                        "`run:` targets are refused with `--on`", "orca-ide terminal list --environment <environment> --json",
                        "`orca-ide orchestration reply --id <msg_id>`", "`reply --on` is refused",
                        "run once between scratch servers in the canary", "`server_mail_unsupported`",
-                       "`send --to dispatch:<id>`", "no route to a peer session",
-                       "If a cross-host wake is lost, the night manager's idle check or the owner notices it",
-                       "covers coordinators, the only long-lived sessions that start lanes"):
+                       "`send --to dispatch:<id>`", "no route to a peer session"):
             self.assertIn(needle, t)
 
-    def test_lane_starters_say_who_notices_a_lost_cross_host_wake(self):
-        # night-precheck measures idle for coordinators, and since the design lead is retired (2026-11-21) only
-        # coordinators start lanes: the DAC-1 gap (a design lead's lost wake at night) does not come back
-        self.assertIn("If a cross-host wake is lost, the night manager's idle check or the owner notices it; you "
-                      "never loop on `check`.", flat(NATIVE / "coordinator.md"))
+    def test_remote_md_names_who_notices_a_lost_or_unsent_report(self):
+        t = flat(NATIVE_DIR / "remote.md")
+        t = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
+        for needle in ("What catches a report that is lost or never sent: the night manager's idle check",
+                       "\"Worker stopped without reporting\" notice where the build has it", "row 10",
+                       "and otherwise the owner", "Before you call a quiet lane lost, run "
+                       "`orca-ide orchestration worker-show --dispatch <dispatch>`"):
+            self.assertIn(needle, t, needle)
+
+    def test_the_wake_is_claimed_for_the_measured_direction_only(self):
+        for f in (NATIVE_DIR / "remote.md", NATIVE / "coordinator.md",
+                  NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md", ROOT / "docs" / "how-it-fits.md"):
+            t = flat(f)
+            with self.subTest(doc=f.relative_to(ROOT)):
+                self.assertRegex(t, r"(?i)box coordinator's lane on the desktop|box coordinator is woken by its lane")
+                self.assertRegex(t, r"(?i)(other direction|desktop coordinator's lane on a box)[^.]*not measured")
+                self.assertNotIn("a cross-host `worker_done` wakes the coordinator", t)
+
+    def test_only_coordinators_start_lanes(self):
         self.assertEqual(LANE_STARTERS, ["coordinator"])
 
     def test_the_design_spec_corrects_its_environment_route(self):
