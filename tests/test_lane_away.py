@@ -17,6 +17,15 @@ from test_machine_setup import MachineTest, write_exec  # noqa: E402
 # checkout (cwd) so two projects with the same branch name stay apart. GH_CREATE_FAIL / GH_EDIT_FAIL make that call fail.
 GH_SUMMARY_BLOCK = r'''
 sf = os.environ.get("GH_SUMMARY")
+if sf and a[:3] == ["api", "--method", "PATCH"] and "/pulls/" in a[3]:  # the body over REST (field report B6)
+    db = json.load(open(sf)) if os.path.exists(sf) else {"next": 100, "prs": {}}
+    n = a[3].rsplit("/", 1)[1]
+    if a[3] != "repos/{owner}/{repo}/pulls/" + n or n not in db["prs"]:
+        print("gh: Not Found (HTTP 404)", file=sys.stderr); sys.exit(1)
+    if os.environ.get("GH_EDIT_FAIL") or os.environ.get("GH_PATCH_FAIL"):
+        print(os.environ.get("GH_PATCH_FAIL") or os.environ["GH_EDIT_FAIL"], file=sys.stderr); sys.exit(1)
+    db["prs"][n]["body"] = json.load(open(a[a.index("--input") + 1], encoding="utf-8"))["body"]
+    json.dump(db, open(sf, "w")); sys.exit(0)
 if sf and a[:1] == ["pr"]:
     db = json.load(open(sf)) if os.path.exists(sf) else {"next": 100, "prs": {}}
     def save():
@@ -270,7 +279,7 @@ class ImproveOnTests(ImproveTest):
         self.assertEqual(r.returncode, 0, r.stderr)
         st = self.state()
         self.assertEqual(set(st), {"started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration",
-                                   "prs", "stop_at", "max_items"})
+                                   "prs", "stop_at", "max_items", "max_hours"})
         self.assertEqual(st["integration"], {"blog": "main", "shop": "main"})
         self.assertEqual(st["end"], "until-back")
         self.assertEqual(st["limits"], "nothing that needs db migrations")
@@ -942,7 +951,7 @@ class SummaryPrTests(ImproveTest):
         (self.tmp / "gh.log").write_text("")
         self.assertEqual(self.on("--continue", "--hours", "2").returncode, 0)
         self.assertEqual(self.db(), before)
-        self.assertEqual([c for c in self.gh_log() if c.startswith("pr create") or c.startswith("pr edit")], [])
+        self.assertEqual([c for c in self.gh_log() if c.startswith(("pr create", "pr edit", "api --method PATCH"))], [])
 
     def test_a_closed_recorded_pr_is_said_to_be_closed_not_to_be_opened_later(self):
         self.on("--project", "shop")
@@ -1018,7 +1027,7 @@ class SummaryPrTests(ImproveTest):
         (self.tmp / "gh-summary.json").write_text(json.dumps(db))
 
     def edits(self):
-        return [c for c in self.gh_log() if c.startswith("pr edit")]
+        return [c for c in self.gh_log() if c.startswith(("pr edit", "api --method PATCH"))]
 
     def test_a_body_saved_with_crlf_keeps_its_summary_on_the_next_refresh(self):  # R1-04
         self.on("--project", "shop")
@@ -1201,7 +1210,7 @@ class SummaryPrTests(ImproveTest):
         self.assertEqual(r.returncode, 1)
         self.assertIn("closed", r.stderr)
         self.assertEqual(self.summary_prs(self.shop)[n]["body"], before)
-        self.assertEqual([c for c in self.gh_log() if c.startswith(("pr create", "pr edit"))], [])
+        self.assertEqual([c for c in self.gh_log() if c.startswith(("pr create", "pr edit", "api --method PATCH"))], [])
 
     def test_a_pr_from_a_fork_with_the_same_branch_name_is_never_adopted(self):
         """B1: `gh pr list --head` matches the branch name only, a fork's PR included."""
@@ -1265,7 +1274,7 @@ class SummaryPrTests(ImproveTest):
         self.on()
         self.run_script("lane-improve", "pr", "shop")
         for c in self.gh_log():
-            if c.startswith(("pr create", "pr edit")):
+            if c.startswith(("pr create", "pr edit", "api --method PATCH")):
                 continue
             self.assertTrue(c.startswith(("pr list", "pr view")), c)
         for c in self.gh_log():

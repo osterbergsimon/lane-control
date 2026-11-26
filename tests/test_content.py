@@ -2393,6 +2393,25 @@ class AwayImproveContentTests(unittest.TestCase):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
         self.assertIn("never start improve mode", mc)
 
+    def test_the_cycle_is_recorded_read_on_resume_and_watched(self):  # field report B1, B4, F3, F6 (lc-l78)
+        t = flat(AWAY_SKILL)
+        for needle in ("**Record every step**", "`lane-improve cycle <your project> --phase", "**On start or resume**",
+                       "never start a second lane", "`$ORCA_TERMINAL_HANDLE`", "## 1a. Watchdog and recovery",
+                       "a fresh worker on the same worktree and PR", "--close parked --findings-file",
+                       "is not proof that a lane is working", "never beyond the lane's budget", "--metric"):
+            self.assertIn(needle, t, needle)
+        guide = flat(ROOT / "docs" / "away-improve.md")
+        for needle in ("## The watchdog", "fails loudly", "A title is never matched", "is not proof", "The ledger.",
+                       "The daily summary.", "--max-hours", "REST `PATCH`", "status [--json]", "lane-improve cycle <project>",
+                       "silent (10 minutes), idle (60 minutes) or exits"):
+            self.assertIn(needle, guide, needle)
+        help_text = (ROOT / "core" / "scripts" / "lane-improve").read_text()
+        for needle in ("--max-hours H", "lane-improve cycle <project>", "status [--json]"):
+            self.assertIn(needle, help_text, needle)
+        dog = (ROOT / "core" / "scripts" / "away-watchdog").read_text()
+        for needle in ("never merges, edits a lane", "A title is never matched", "is not proof", "fails loudly"):
+            self.assertIn(needle, " ".join(dog.split()), needle)
+
     def test_skill_installed_for_claude_and_opencode(self):
         src = (ROOT / "core" / "scripts" / "project-setup").read_text()
         self.assertIn('"away-improve"', src)

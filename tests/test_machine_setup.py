@@ -1532,17 +1532,19 @@ class MachineSetupTests(BudgetTest):
             out[c[c.index("--name") + 1]] = c
         return out
 
-    def test_creates_three_automations(self):
+    def test_creates_four_automations(self):
         r = self.setup_machine("--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         a = self.automations()
-        self.assertEqual(set(a), {"night manager", "lane sweep", "machine check"})
-        triggers = {"night manager": "37 * * * *", "lane sweep": "17 */3 * * *", "machine check": "*/30 * * * *"}
+        self.assertEqual(set(a), {"night manager", "lane sweep", "machine check", "away watchdog"})
+        triggers = {"night manager": "37 * * * *", "lane sweep": "17 */3 * * *", "machine check": "*/30 * * * *",
+                    "away watchdog": "*/15 * * * *"}
         import shlex
         s = self.home / ".local" / "share" / "lane-control" / "current" / "core" / "scripts"  # INST-1: the install
         prechecks = {"night manager": shlex.quote(f"{s}/night-precheck"),
                      "lane sweep": shlex.quote(f"{s}/lane-sweep") + " --precheck",
-                     "machine check": shlex.quote(f"{s}/machine-check")}
+                     "machine check": shlex.quote(f"{s}/machine-check"),
+                     "away watchdog": shlex.quote(f"{s}/away-watchdog")}
         for name, c in a.items():
             with self.subTest(name=name):
                 def opt(k):
@@ -1557,6 +1559,10 @@ class MachineSetupTests(BudgetTest):
                 self.assertIn("--enabled", c)
                 self.assertNotIn("--apply", opt("--prompt"))
         self.assertIn("night-manager.md", a["night manager"][a["night manager"].index("--prompt") + 1])
+        watch = a["away watchdog"][a["away watchdog"].index("--prompt") + 1]
+        self.assertIn("away-watchdog", watch)
+        self.assertIn("--last", watch)
+        self.assertIn("by a name or a title", watch)
 
     def test_automations_take_the_opencode_form_on_a_machine_without_claude(self):
         # lc-mrz: Orca takes no extra agent args for OpenCode, so the model is OpenCode's own default
@@ -1566,7 +1572,7 @@ class MachineSetupTests(BudgetTest):
                 r = self.setup_machine("--no-start", *args)
                 self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
                 a = self.automations()
-                self.assertEqual(set(a), {"night manager", "lane sweep", "machine check"})
+                self.assertEqual(set(a), {"night manager", "lane sweep", "machine check", "away watchdog"})
                 for name, c in a.items():
                     self.assertEqual(c[c.index("--provider") + 1], "opencode2", name)
                     self.assertFalse([x for x in c if x.startswith("--extra-agent-args")], name)
@@ -1610,12 +1616,12 @@ class MachineSetupTests(BudgetTest):
     def test_rerun_is_idempotent(self):
         self.setup_machine()
         n = len(self.orca_calls())
-        self.assertEqual(len(self.automations()), 3)
+        self.assertEqual(len(self.automations()), 4)
         r = self.setup_machine()
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         later = self.orca_calls()[n:]
         self.assertEqual([c for c in later if c[1:2] in (["create"], ["add"])], [])
-        for line in ("night manager: exists", "lane sweep: exists", "machine check: exists",
+        for line in ("night manager: exists", "lane sweep: exists", "machine check: exists", "away watchdog: exists",
                      "machine coordinator: exists", "ci-presence timer: exists"):
             self.assertIn(line, r.stdout)
 
@@ -1638,7 +1644,7 @@ class MachineSetupTests(BudgetTest):
         r = self.setup_machine("--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("ci-presence timer: skipped", r.stdout)
-        self.assertEqual(len(self.automations()), 3)
+        self.assertEqual(len(self.automations()), 4)
         self.assertFalse((self.home / ".config" / "systemd" / "user" / "ci-presence.timer").exists())
 
     def test_no_start(self):
@@ -1720,7 +1726,7 @@ class MachineSetupTests(BudgetTest):
                                    {"id": "old-ls", "name": "lane-sweep", "prompt": "x", "precheck": None}]})
         r = self.setup_machine("--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        self.assertEqual(set(self.automations()), {"machine check"})
+        self.assertEqual(set(self.automations()), {"machine check", "away watchdog"})
         self.assertEqual(self.creates(["automations", "edit"]), [])
         self.assertIn("orca-ide automations remove old-nm", r.stdout)
         self.assertIn("orca-ide automations remove old-ls", r.stdout)
