@@ -411,7 +411,9 @@ def shell_fix(login: str) -> str:
 
 # --- lane-control paths stored in Orca ------------------------------------------------------------------------------
 
-PATH_RE = re.compile(r"(?:~/|/)[^\s'\"`;|&()<>,]+")
+# An absolute or ~/ path that starts a word (after a space, a quote, = or a parenthesis): not the //host of a URL, and
+# not the tail of a relative path such as docs/lane-control/notes.md (review m4).
+PATH_RE = re.compile(r"(?:^|(?<=[\s'\"`=(]))(?:~/|/)(?!/)[^\s'\"`;|&()<>,]+")
 
 
 def stale_paths(text: str, root: Path, home: Path) -> list:
@@ -439,8 +441,11 @@ def stale_paths(text: str, root: Path, home: Path) -> list:
             continue
         d = Path(full)
         while d != d.parent:
+            if (d / ".lane-control-sha").exists():  # an installed tree, under another data root: not a checkout
+                break
             if (d / ".lane-control-root").exists():
-                out.append((p, f"names the checkout {d}, not the installed tree"))
+                if d != Path(full.rstrip("/")):  # a script or doc inside it; a checkout named as a project is fine
+                    out.append((p, f"names the checkout {d}, not the installed tree"))
                 break
             d = d.parent
     return out

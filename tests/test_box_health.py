@@ -324,6 +324,8 @@ class StalePathTests(Module):
         text = (f"'{root}/current/core/scripts/night-precheck' and {root}/{sha}/core/scripts/x and "
                 f"{root}/scripts/lane-sweep; {co}/core/scripts/lane-sweep --precheck, ~/gone/lane-control/x. "
                 "~/code/lane-control-beads stays")
+        text += (f" https://github.com/someone/lane-control/pulls docs/lane-control/notes.md and the project {co} "
+                 f"or {co}/")  # review m4: a URL, a relative path and a checkout named as a project are not flagged
         got = dict(self.B.stale_paths(text, root, self.home))
         self.assertNotIn(f"{root}/current/core/scripts/night-precheck", got)
         self.assertIn("itself, not current", got[f"{root}/{sha}/core/scripts/x"])

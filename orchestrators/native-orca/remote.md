@@ -108,7 +108,9 @@ So lane-control checks what owns a port and how it got there:
   the unit restarts for ever (127 restarts seen) while the port still answers. A unit counts as up only when it is
   `active/running`, its restart counter does not climb, and its own ssh owns the socket (`ssh -L`: the listener on
   127.0.0.1:`<port>`; `ssh -R`: a TCP connection of its own). An old unit is rewritten by `orca-host-install <host>
-  --tunnel` (direction 1) or the next `lane-tunnel start` (direction 2), and a running one restarted.
+  --tunnel` (direction 1) or the next `lane-tunnel start` (direction 2), and a running one restarted: a `lane-tunnel
+  start` for one host also restarts every other host's tunnel whose running ssh is from before. Each repair line names
+  the unit's own port, ssh config (`LANE_SSH_CONFIG=...`) and options (`--no-enable`, `--auth-sock`, `--ssh`).
 - **`orca-host-install <host> --tunnel [--port N]`** restores only direction 1's unit for a box paired before (after a
   reboot, a cleaned `~/.config/systemd/user`, or a unit from before `ControlPath=none`): nothing is installed or
   started on the box and no environment is removed or added. It needs the box's server on that port and the
@@ -126,7 +128,9 @@ So lane-control checks what owns a port and how it got there:
   manager keeps launching terminals with the old shell and its environment. `orca-host-install` sets the manager's
   `SHELL` to the passwd one before it starts the server. Where the server already ran, do it on the box yourself:
   `systemctl --user set-environment SHELL=<login shell>`, then `systemctl --user restart orcad.service` (its terminals
-  end; a running agent keeps the environment it started with). `--check` and `lane-control doctor` compare the two.
+  end; a running agent keeps the environment it started with). `--check` and `lane-control doctor` compare the
+  manager's SHELL and the running server's own (from its environment) with passwd, and say `restart needed` on every
+  run until the server has the login shell.
 - **`lane-control doctor`** on the desktop reads each tunnel unit the same way, and each box's own doctor (over ssh)
   its runtimes, the pin and its SHELL. It changes nothing.
 
