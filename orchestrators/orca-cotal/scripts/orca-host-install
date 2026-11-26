@@ -219,7 +219,14 @@ UNIT
 }
 # Proof that the tunnel is the unit's: active/running, its own ssh owning 127.0.0.1:<port>, and its restart counter not
 # climbing. A port that answers is not proof: a ControlMaster or a stale ssh can hold it while the unit flaps.
-unit_state() { systemctl --user show "$unit" -p ActiveState -p SubState -p NRestarts -p MainPID --value 2>/dev/null | tr '\n' ' '; }
+# "<ActiveState> <SubState> <NRestarts> <MainPID>", read by name: systemd prints properties in its own order (MainPID
+# before NRestarts), whatever order -p asks for.
+unit_state() {
+  systemctl --user show "$unit" -p ActiveState -p SubState -p NRestarts -p MainPID 2>/dev/null | awk -F= '
+    { v[$1] = substr($0, index($0, "=") + 1) }
+    END { printf "%s %s %s %s\n", (v["ActiveState"] == "" ? "unknown" : v["ActiveState"]),
+          (v["SubState"] == "" ? "unknown" : v["SubState"]), v["NRestarts"] + 0, v["MainPID"] + 0 }'
+}
 prove_tunnel() {
   i=0
   while :; do

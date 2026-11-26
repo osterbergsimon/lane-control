@@ -188,12 +188,12 @@ if args[1:2] == ["show"] and units:  # BOX-1: what --check and doctor read of a 
         open(c, "w").write(str(k + 1))
         n += k
     state = ("active", "running") if pid else ("inactive", "dead")
-    print("LoadState=loaded\nActiveState=%s\nSubState=%s\nNRestarts=%d\nMainPID=%d" % (state + (n, pid)))
+    print("LoadState=loaded\nActiveState=%s\nSubState=%s\nMainPID=%d\nNRestarts=%d" % (state + (pid, n)))  # systemd's order
     sys.exit(0)
 if args[1:2] == ["show"] and any(a.startswith("orca-tunnel-") for a in args):  # direction 1's unit (BOX-1)
     pid = int(os.environ.get("STUB_ORCA_TUNNEL_PID") or 0)
     state = ("active", "running") if pid else ("inactive", "dead")
-    print("LoadState=loaded\nActiveState=%s\nSubState=%s\nNRestarts=0\nMainPID=%d" % (state + (pid,)))
+    print("LoadState=loaded\nActiveState=%s\nSubState=%s\nMainPID=%d\nNRestarts=0" % (state + (pid,)))
     sys.exit(0)
 for u in units:
     if "is-enabled" in args:

@@ -64,6 +64,9 @@ if a[1:2] == ["show"]:
     elif u.get("climb"):
         u["NRestarts"] = u.get("NRestarts", 0) + 1
     json.dump(st, open(sp, "w"))
+    # systemd prints in its own order, not the -p order (review B1): Unit's properties, then Service's, MainPID first
+    order = ["Id", "LoadState", "ActiveState", "SubState", "UnitFileState", "MainPID", "NRestarts"]
+    props = sorted(props, key=lambda p: order.index(p) if p in order else len(order))
     print("\n".join(str(u.get(p, "")) if "--value" in a else "%s=%s" % (p, u.get(p, "")) for p in props))
     sys.exit(0)
 sys.exit(0)
@@ -134,6 +137,10 @@ class Env(unittest.TestCase):
                 p.kill()
             p.wait()
             p.stdout.close()
+
+    @property
+    def node(self):
+        return str(self.bin / "node")
 
     def spawn(self, *words, port=0, exe=sys.executable):
         p = subprocess.Popen([exe, "-c", HOLD, str(port), *words], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -515,6 +522,18 @@ class HostInstallTests(Env):
         self.assertFalse(any(c[:2] in (["environment", "rm"], ["environment", "add"]) for c in orca), orca)
         ssh = (self.box.parent / "box.ssh-log").read_text() if (self.box.parent / "box.ssh-log").exists() else ""
         self.assertNotIn("tar ", ssh)  # nothing installed, no server started
+
+    def test_the_unit_state_is_read_by_name_in_systemds_own_order(self):
+        # review B1: real systemd prints MainPID before NRestarts whatever -p says; a fresh tunnel has 0 restarts
+        server = self.spawn(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port, exe=self.node)
+        self.units(**{"orca-tunnel-box.service": self.running(server, NRestarts=0)})
+        out = subprocess.run(["systemctl", "--user", "show", "orca-tunnel-box.service", "-p", "ActiveState", "-p",
+                              "SubState", "-p", "NRestarts", "-p", "MainPID"], env=self.env, capture_output=True,
+                             text=True).stdout.splitlines()
+        self.assertEqual([x.split("=")[0] for x in out], ["ActiveState", "SubState", "MainPID", "NRestarts"])
+        r = self.run_tool("--tunnel", "--port", str(self.port))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"its ssh (pid {server}) owns 127.0.0.1:{self.port}, restarted 0 times", r.stdout)
 
     def test_tunnel_reads_the_port_from_the_unit_it_wrote_before(self):
         server = self.spawn(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
