@@ -61,7 +61,11 @@ def end_processes(handle):
     if not proc or not Path(proc).is_dir():
         return
     for d in Path(proc).iterdir():
-        if (d / "environ").is_file() and f"ORCA_TERMINAL_HANDLE={handle}".encode() in (d / "environ").read_bytes().split(b"\0"):
+        try:
+            env = (d / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue  # an entry a test made unreadable
+        if f"ORCA_TERMINAL_HANDLE={handle}".encode() in env:
             shutil.rmtree(d)
 
 

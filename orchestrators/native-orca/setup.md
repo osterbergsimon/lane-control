@@ -32,10 +32,14 @@ facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writ
 anchor** (`core/anchor.py`): a session started there by hand is told to read the persona; workers and headless runs are
 told to ignore it. Other lines in the file are kept and it is never committed. Where the folder has an `AGENTS.md` and
 no `CLAUDE.md`, the anchor imports it, because Claude would otherwise stop reading it. `project-setup --check <repo>`
-says whether the persona and anchor are as setup writes them. Whether the coordinator **runs** is decided by a live
-agent process, never by a terminal's title or Orca's agent mark (both stay on an empty shell, as after a server
-restart): `project-pause start` says `recorded but dead`, clears the record and starts it. The old terminal is left
-open for you to close.
+says whether the persona and anchor are as setup writes them. Whether the coordinator **runs** is decided by its
+processes, never by a terminal's title or Orca's agent mark (both stay on an empty shell, as after a server restart).
+Three answers: running (left alone); `recorded but dead` (`project-pause start` clears the record and starts it; the
+old terminal is left open for you to close); and `cannot tell`, when an agent that may be it cannot be read or placed.
+After an Orca restore, a coordinator can run as `claude --resume <id>` in a sandbox whose environment lane-control
+cannot read: it is ruled out only when its command line names another session or Claude's transcript for that id is
+under other folders alone. `cannot tell` starts nothing, so there is never a second coordinator; if the terminal it
+names is an empty shell, close it and run again.
 
 ## Beads
 Where a project's beads lives, its backup and its restore: `core/issues.md`, "Where beads lives". `project-setup` checks
@@ -147,8 +151,10 @@ every step says `exists` on a re-run):
   `machine-setup` existed has no `machine.conf`: create it (run `machine-setup`, which writes it from the example, or
   copy the example there by hand), since `lane-improve` and `night-precheck` need the file.
 - The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an
-  Orca terminal titled `machine coordinator` with its persona and hook. The folder's `CLAUDE.md` gets the same
-  persona anchor, which the automations' sessions there are told to ignore; `machine-setup --check` reads it.
+  Orca terminal titled `machine coordinator` with its persona and hook, unless it runs already or that cannot be told
+  (above: the same proof). The folder's `CLAUDE.local.md` gets the same persona anchor, which the automations' sessions
+  there are told to ignore; `machine-setup --check` reads it. The folder may be your own git repo: git does not see
+  the file (listed in `.git/info/exclude` unless already ignored; a committed one is left alone).
 - Three Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
   manager` hourly (`night-precheck`; the agent follows `night-manager.md`), `lane sweep` every 3 hours
   (`lane-sweep --precheck`, report only, waking its agent only for findings new since the last run) and `machine check` every 30 minutes (`machine-check`: a budget step,

@@ -29,7 +29,7 @@ orchestrator to another; everything that does depend on one is in `orchestrators
 | `templates/machine.conf.example`, `ci-presence.service`, `ci-presence.timer` | the machine config's example and the ci-presence user units |
 | `lcroot.py` | finds the lane-control checkout by its marker file, `.lane-control-root` |
 | `install.py` | the versioned install: lays a commit's tree, switches `current`, links the lane tools, the box copy, doctor and prune |
-| `anchor.py` | the persona anchor: the few lines in a coordinator folder's `CLAUDE.md` (machine, written by `machine-setup`) or `CLAUDE.local.md` (project, written by `project-setup`, never committed) that send a session started by hand to its persona; both setups' `--check` reads it |
+| `anchor.py` | the persona anchor: the few lines in a coordinator folder's `CLAUDE.local.md` (written by `machine-setup` and `project-setup`, kept out of git) that send a session started by hand to its persona; both setups' `--check` reads it |
 | `agentsdoc.py` | where generated coordination goes in a project: `AGENTS.lane-control.md` and AGENTS.md's one pointer line (`orchestrators/README.md`) |
 
 Why shared: roles, routing, budgets, the heavy-work gate, beads and the reliability log are how we work, whatever

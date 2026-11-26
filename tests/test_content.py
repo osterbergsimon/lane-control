@@ -2868,19 +2868,29 @@ LANE_SKILL = ROOT / "orchestrators" / "native-orca" / "skills" / "native-orca-la
 class AnswerChannelTests(unittest.TestCase):
     """lc-l78.3: a coordinator asked from a peer's side answered in its own terminal, and nothing reached the asker."""
 
-    def test_a_peer_is_answered_by_message_at_the_address_its_message_carries(self):
-        for path in (NATIVE / "coordinator.md", NATIVE / "machine-coordinator.md", LANE_SKILL):
+    NEEDLES = ("an answer written only in your own terminal reaches nobody",
+               "orca-ide orchestration reply --id <msg_id> --body", "<msg_id> <type> from <address>",
+               "the asker's own Run or dispatch", "`Reply:` line", "`send --to run:<id>`",
+               "`send --to dispatch:ctx_<id>`", "`<cross-session-message from=", "that `from` as `to`",
+               "orca-ide orchestration run-list", "tell the owner your answer reached nobody",
+               "Ask a peer by message too, never by typing or pasting into its terminal")
+
+    def test_the_lane_skill_says_how_a_peer_is_answered_at_the_address_its_message_carries(self):
+        t = flat(LANE_SKILL)
+        self.assertIn("### Answering a peer, and asking one", LANE_SKILL.read_text())
+        for needle in self.NEEDLES:
+            self.assertIn(needle, t, needle)
+
+    def test_the_personas_link_the_one_copy_and_keep_the_two_rules(self):
+        for path in (NATIVE / "coordinator.md", NATIVE / "machine-coordinator.md"):
             t = flat(path)
             for needle in ("an answer written only in your own terminal reaches nobody",
-                           "orca-ide orchestration reply --id <msg_id> --body", "<msg_id> <type> from <address>",
-                           "the asker's own Run or dispatch", "`Reply:` line", "`send --to run:<id>`",
-                           "`send --to dispatch:ctx_<id>`", "`<cross-session-message from=", "that `from` as `to`",
-                           "orca-ide orchestration run-list", "tell the owner your answer reached nobody"):
+                           "never by typing or pasting into its terminal", "Answering a peer, and asking one",
+                           "orchestrators/native-orca/skills/native-orca-lanes/SKILL.md"
+                           if path.name == "machine-coordinator.md" else "`native-orca-lanes` skill"):
                 self.assertIn(needle, t, (path.name, needle))
-
-    def test_an_asker_never_types_into_a_terminal(self):
-        for path in (NATIVE / "coordinator.md", NATIVE / "machine-coordinator.md", LANE_SKILL):
-            self.assertIn("Ask a peer by message too, never by typing or pasting into its terminal", flat(path), path.name)
+            self.assertNotIn("reply --id <msg_id> --body", t, path.name)  # one copy: it would drift
+            self.assertNotIn("<cross-session-message", t, path.name)
 
 
 class ReviewCapEndingTests(unittest.TestCase):

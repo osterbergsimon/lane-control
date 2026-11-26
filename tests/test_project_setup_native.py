@@ -66,6 +66,7 @@ class NativeEnv(Env):
         self.env["XDG_STATE_HOME"] = str(self.home / ".local" / "state")
         self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
         self.env.pop("CLAUDE_CONFIG_DIR", None)
+        self.env.pop("ORCA_CLAUDE_CONFIG_DIR", None)  # transcripts are looked for under the temp HOME alone
         self.env["ORCA_TERMINAL_HANDLE"] = "term_owner"  # project-pause runs in one of Orca's terminals
         self.env.pop("LANE_ROLE", None)
         self.proc = self.home / "proc"  # the running agents, as /proc shows them (LANE_PROC_DIR)
@@ -1596,11 +1597,12 @@ class Round2Tests(Case):
                              env={**self.e.env, "LANE_ROLE": role})
         self.addCleanup(p.wait)
         self.addCleanup(p.kill)
+        # its real /proc entry, and only the ones a test started: never this machine's other agents
+        (self.e.proc / str(p.pid)).symlink_to(f"/proc/{p.pid}")
         return p
 
     def test_a_live_agent_process_counts_without_agent_identity(self):
         # R2-3: Orca may not mark a terminal it did not recognise; a live agent process in the checkout still counts.
-        del self.e.env["LANE_PROC_DIR"]  # real processes, the real /proc
         self.e.set_state(agent_exits=True)  # the terminal never gets agentIdentity
         self.e.run(str(self.repo), "--no-design-lead")
         self.live_agent("claude", sys.executable, "-c", "import time; time.sleep(60)")
@@ -1610,7 +1612,6 @@ class Round2Tests(Case):
         self.assertIn("exists", r.stdout)
 
     def test_a_node_run_agent_counts_too(self):
-        del self.e.env["LANE_PROC_DIR"]  # real processes, the real /proc
         script = self.e.home / "tools" / "opencode2"
         script.parent.mkdir()
         script.write_text("import time\ntime.sleep(60)\n")
@@ -1620,7 +1621,6 @@ class Round2Tests(Case):
         self.assertIn("sessions running: app coordinator", self.e.pause("status", str(self.repo)).stdout)
 
     def test_an_agent_of_another_role_or_folder_does_not_count(self):
-        del self.e.env["LANE_PROC_DIR"]  # real processes, the real /proc
         self.e.set_state(agent_exits=True)
         self.e.run(str(self.repo), "--no-design-lead")
         self.live_agent("claude", sys.executable, "-c", "import time; time.sleep(60)", role="design-lead")

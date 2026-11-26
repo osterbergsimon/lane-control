@@ -3,11 +3,13 @@
 (LANE_PROC_DIR) in a temporary HOME."""
 import json
 import os
+import re
 import shutil
 import unittest
+from unittest import mock
 
 from test_project_setup import git
-from test_project_setup_native import Case, opt
+from test_project_setup_native import Case, load, opt, session_record
 
 SHELL_TERMINAL = {"handle": "term_1", "title": "✳ app coordinator", "agentIdentity": "claude"}
 
@@ -150,9 +152,18 @@ class Liveness(Case):
         self.setup_project()
         self.restart_server()
         handle = self.e.settings(self.repo)["terminals"]["coordinator"]
-        self.process(4001, ["claude"], {"ORCA_TERMINAL_HANDLE": "term_other"})
+        self.process(4001, ["claude"], {"ORCA_TERMINAL_HANDLE": "term_other"}, cwd=self.e.home)
         self.process(4002, ["claude"], {"ORCA_TERMINAL_HANDLE": handle, "LANE_ROLE": "debugger"})
         self.assertIn("sessions running: none", self.e.pause("status", str(self.repo)).stdout)
+
+    def test_an_unmarked_agent_in_the_checkout_but_another_terminal_is_a_doubt(self):
+        # it may be the coordinator, started again by hand in a tab of another name
+        self.setup_project()
+        self.restart_server()
+        self.process(4001, ["claude"], {"ORCA_TERMINAL_HANDLE": "term_other"})
+        r = self.e.pause("start", str(self.repo))
+        self.assertIn("cannot tell", r.stdout, r.stderr)
+        self.assertEqual(len(self.started()), 1)
 
     def test_a_leftover_child_of_the_session_is_not_an_agent(self):
         # an MCP server or a dev server inherits the markers and can outlive the agent
@@ -179,16 +190,6 @@ class Liveness(Case):
         (self.e.proc / str(pid) / "environ").chmod(0)
 
     @unittest.skipIf(os.geteuid() == 0, "root reads every file")
-    def test_an_unreadable_agent_of_another_session_does_not_make_a_dead_one_run(self):
-        self.setup_project()
-        self.restart_server()
-        self.unreadable(4001, ["claude", "--dangerously-skip-permissions", "--resume", "x"])
-        self.unreadable(4002, ["claude", "--name", "shop coordinator"])
-        r = self.e.pause("start", str(self.repo))
-        self.assertIn("recorded but dead", r.stdout, r.stderr)
-        self.assertEqual(len(self.started()), 2)
-
-    @unittest.skipIf(os.geteuid() == 0, "root reads every file")
     def test_an_unreadable_agent_that_names_this_session_counts(self):
         self.setup_project()
         persona = self.repo / ".lane-control" / "coordinator.md"
@@ -200,12 +201,171 @@ class Liveness(Case):
             self.unreadable(4001, argv)
             self.assertIn("sessions running: app coordinator", self.e.pause("status", str(self.repo)).stdout, argv)
 
-    def test_without_a_process_list_orcas_mark_is_kept_so_nothing_starts_twice(self):
+    def test_without_a_process_list_it_cannot_tell_and_starts_nothing(self):
         self.setup_project()
         r = self.e.pause("start", str(self.repo), env_extra={"LANE_PROC_DIR": str(self.e.home / "no-proc")})
-        self.assertIn("session coordinator: exists", r.stdout, r.stderr)
-        self.assertIn("could not check", r.stdout)
+        self.assertIn("session coordinator: cannot tell", r.stdout, r.stderr)
+        self.assertEqual((r.returncode, len(self.started())), (1, 1))
+
+
+OWN, OTHER = "aaaa0000-1111-4222-8333-444455556666", "bbbb0000-1111-4222-8333-444455556666"
+
+
+@unittest.skipIf(os.geteuid() == 0, "root reads every file")
+class Restored(Case):
+    """The shape the review saw on a real desktop (2026-11-26): after an Orca restore, a coordinator's agent runs as
+    `claude --plugin-dir <dir> [--dangerously-skip-permissions] --resume <id>` under a second `orca-agents` tree, in
+    another sandbox namespace. No --name, no persona in its command line, environment and working directory denied.
+    Orca lists its terminal, titled and marked `claude`, with no process id. Every coordinator there looks like this."""
+
+    setup_project = Liveness.setup_project
+    process, terminals, started, closes = Liveness.process, Liveness.terminals, Liveness.started, Liveness.closes
+    restart_server, unreadable = Liveness.restart_server, Liveness.unreadable
+
+    def argv(self, sid):
+        return ["claude", "--plugin-dir", "/x/orca/claude-agent-view/x/orca-agent-view",
+                "--dangerously-skip-permissions", "--resume", sid]
+
+    def transcript(self, folder, sid):
+        """Claude keeps a session's transcript under the folder it runs in."""
+        d = self.e.home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(folder.resolve()))
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{sid}.jsonl").write_text("{}\n")
+
+    def restore(self, sid=OWN, transcript=True, mark=True):
+        """The set-up project's coordinator after the restore: the same terminal in Orca's list, a new process."""
+        self.setup_project()
+        self.restart_server()
+        rows = [{**t, "title": "\u2733 app coordinator", "connected": True, "ptyId": "w::/x@@0000aaaa"}
+                for t in self.terminals()]
+        if not mark:
+            rows = [{k: v for k, v in t.items() if k != "agentIdentity"} for t in rows]
+        self.e.set_state(terminals=rows)
+        self.unreadable(4101, self.argv(sid))
+        if transcript:
+            self.transcript(self.repo, sid)
+
+    def record(self):
+        st = self.e.settings(self.repo)
+        return st["terminals"], st["runs"]
+
+    def test_start_cannot_tell_and_starts_no_second_coordinator(self):
+        self.restore()
+        before = self.record()
+        r = self.e.pause("start", str(self.repo))
+        self.assertEqual(r.returncode, 1, r.stdout)
+        line = next(l for l in r.stdout.splitlines() if l.startswith("session coordinator: cannot tell"))
+        for needed in ("4101", "Nothing is started", before[0]["coordinator"], "empty shell"):
+            self.assertIn(needed, line)
+        self.assertNotIn("recorded but dead", r.stdout)
+        self.assertEqual((len(self.started()), self.record()), (1, before))
+
+    def test_setup_run_again_starts_nothing_either(self):
+        self.restore()
+        r = self.setup_project()
+        self.assertIn("session coordinator: cannot tell", r.stdout)
         self.assertEqual(len(self.started()), 1)
+
+    def test_doubt_starts_nothing_without_orcas_mark_or_a_transcript(self):
+        for transcript, mark in ((True, False), (False, True), (False, False)):
+            with self.subTest(transcript=transcript, mark=mark):
+                self.setUp()
+                self.restore(transcript=transcript, mark=mark)
+                r = self.e.pause("start", str(self.repo))
+                self.assertIn("cannot tell", r.stdout, r.stderr)
+                self.assertEqual(len(self.started()), 1)
+
+    def test_status_and_wake_say_cannot_tell_and_keep_the_record(self):
+        self.restore()
+        before = self.record()
+        out = self.e.pause("status", str(self.repo)).stdout
+        self.assertIn("app coordinator: cannot tell", out)
+        self.assertNotIn("recorded but dead", out)
+        self.assertNotIn("stopped", out)
+        self.assertEqual(self.e.pause("rest", str(self.repo)).returncode, 0)
+        r = self.e.pause("wake", str(self.repo))
+        self.assertIn("cannot tell", r.stdout, r.stderr)
+        self.assertEqual((self.record(), self.e.settings(self.repo)["paused"]), (before, False))
+
+    def test_stop_asks_the_marked_terminal_for_its_handover_and_never_claims_nothing_ran(self):
+        self.restore()
+        r = self.e.pause("stop", str(self.repo), "--wait", "1")
+        self.assertEqual(r.returncode, 1, r.stdout)  # asked, no new handover: everything stays
+        self.assertNotIn("no standing session was running", r.stdout)
+        self.assertEqual(len(json.loads(self.e.state.read_text())["sent"]), 1)
+        self.assertEqual(self.closes(), [])
+        self.e.set_state(handover_on_send={"handover-latest": "new"})
+        r = self.e.pause("stop", str(self.repo), "--wait", "5")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.terminals(), [])
+
+    def test_stop_with_no_marked_terminal_changes_nothing(self):
+        self.restore(mark=False)
+        before = self.record()
+        r = self.e.pause("stop", str(self.repo), "--no-handover")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cannot tell", r.stderr)
+        self.assertIn("Nothing was changed", r.stderr)
+        self.assertEqual((self.record(), self.closes()), (before, []))
+        self.assertNotIn("paused", {k for k, v in self.e.settings(self.repo).items() if v})
+
+    def test_the_recorded_session_id_proves_it_across_namespaces(self):
+        self.restore()
+        rec = session_record(self.e, self.repo, "coordinator", "claude")
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        rec.write_text(OWN + "\n")
+        r = self.e.pause("start", str(self.repo))
+        self.assertIn("session coordinator: exists", r.stdout, r.stderr)
+        self.assertEqual((r.returncode, len(self.started())), (0, 1))
+
+    def test_other_projects_restored_coordinators_do_not_hide_a_dead_one(self):
+        # the field report's case on such a desktop: this shell is empty, the others' agents run
+        self.setup_project()
+        self.restart_server()
+        for pid, name, sid in ((4102, "shop", OTHER), (4103, "blog", "cccc0000-1111-4222-8333-444455556666")):
+            folder = self.e.home / "code" / name
+            folder.mkdir(parents=True)
+            self.transcript(folder, sid)
+            self.unreadable(pid, self.argv(sid))
+        r = self.e.pause("start", str(self.repo))
+        self.assertIn("recorded but dead", r.stdout, r.stderr + r.stdout)
+        self.assertEqual((r.returncode, len(self.started())), (0, 2))
+
+    def test_an_unreadable_agent_that_names_another_session_is_ruled_out(self):
+        self.setup_project()
+        self.restart_server()
+        self.unreadable(4002, ["claude", "--name", "shop coordinator"])
+        self.unreadable(4003, ["opencode2", "--prompt", "Read your persona, /x/shop/.lane-control/coordinator.md, then"])
+        r = self.e.pause("start", str(self.repo))
+        self.assertIn("recorded but dead", r.stdout, r.stderr)
+        self.assertEqual(len(self.started()), 2)
+
+    def test_after_the_owner_closes_the_empty_shell_it_starts(self):
+        # the way out of a doubt that is wrong: no terminal of Orca's can hold the coordinator any more
+        self.restore()
+        self.e.set_state(terminals=[])
+        r = self.e.pause("start", str(self.repo))
+        self.assertIn("recorded but dead", r.stdout, r.stderr)
+        self.assertEqual((r.returncode, len(self.started())), (0, 2))
+
+    def test_a_retitled_terminal_orca_marks_in_the_checkout_keeps_the_doubt(self):
+        self.restore()
+        self.e.set_state(terminals=[{**t, "title": "fish /x", "handle": "term_77"} for t in self.terminals()])
+        r = self.e.pause("start", str(self.repo))
+        self.assertIn("cannot tell", r.stdout, r.stderr)
+        self.assertEqual(len(self.started()), 1)
+
+    def test_a_folder_name_claude_would_cut_short_rules_nothing_out(self):
+        # Claude shortens a long folder name, so a transcript not found under it proves nothing
+        m = load()
+        long = self.e.home / ("d" * 120) / ("e" * 120)
+        long.mkdir(parents=True)
+        self.transcript(self.e.home, OTHER)
+        with mock.patch.dict(os.environ, self.e.env, clear=True):
+            self.assertEqual(m.transcript_of(OTHER, self.repo), "elsewhere")
+            self.assertEqual(m.transcript_of(OTHER, long), "unknown")
+            self.assertEqual(m.transcript_of("not-an-id", self.repo), "unknown")
+            self.assertEqual(m.transcript_of(OTHER, self.e.home), "here")
 
 
 BEGIN, END = "<!-- lane-control:persona-anchor begin", "<!-- lane-control:persona-anchor end -->"

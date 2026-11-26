@@ -1029,12 +1029,12 @@ class CheckTests(Case):
         self.assertIn("check project anchor on box: to do", r.stdout)
         self.assertIn("check machine anchor on box: to do", r.stdout)
         for folder, persona, anchor in ((repo, "coordinator.md", "CLAUDE.local.md"),
-                                        (machine, "machine-coordinator.md", "CLAUDE.md")):
+                                        (machine, "machine-coordinator.md", "CLAUDE.local.md")):
             (folder / ".lane-control").mkdir(parents=True)
             (folder / ".lane-control" / persona).write_text("persona\n")
         r = self.check(target=str(repo))  # a persona without its anchor: set up before the anchor
         self.assertIn("check project anchor on box: to do (a persona but no anchor", r.stdout)
-        for folder, anchor in ((repo, "CLAUDE.local.md"), (machine, "CLAUDE.md")):
+        for folder, anchor in ((repo, "CLAUDE.local.md"), (machine, "CLAUDE.local.md")):
             (folder / anchor).write_text("<!-- lane-control:persona-anchor begin -->\n"
                                          "<!-- lane-control:persona-anchor end -->\n")
         before = self.snapshot()

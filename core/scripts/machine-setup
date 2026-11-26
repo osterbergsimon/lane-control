@@ -19,11 +19,14 @@ precheck and prompt, and never from a lane worktree.
 3. The machine coordinator's private folder (--folder, default ~/machine-coordinator; never push it to a public
    remote) with notes.md, added to Orca as a folder project. Its persona (orchestrators/native-orca/personas/) is
    rendered to <folder>/.lane-control/machine-coordinator.md, with <folder>/.lane-control/additions/
-   machine-coordinator.md appended when that exists; the harness's persona hook is installed. <folder>/CLAUDE.md
+   machine-coordinator.md appended when that exists; the harness's persona hook is installed. <folder>/CLAUDE.local.md
    gets a persona anchor (core/anchor.py): a few lines that tell a session the owner started by hand there to read
-   the persona, and an automation's or worker's session to ignore them. The rest of that file is kept.
-4. Unless --no-start, the machine coordinator starts in an Orca terminal titled `machine coordinator` (skipped when a
-   terminal with that title exists): `env LANE_ROLE=machine-coordinator LANE_PERSONA=... claude --model sonnet
+   the persona, and an automation's or worker's session to ignore them. The rest of that file is kept. Where the folder
+   is in a git repo, git does not see the file: it is listed in .git/info/exclude unless already ignored; a committed
+   one, or one a .gitignore rule would still show, is not written.
+4. Unless --no-start, the machine coordinator starts in an Orca terminal titled `machine coordinator`. It is skipped
+   when its agent is proven to run (project-setup's session_state, never the title alone: a titled terminal with no
+   agent is `recorded but dead` and a new one starts) and when that cannot be told (`cannot tell`): `env LANE_ROLE=machine-coordinator LANE_PERSONA=... claude --model sonnet
    --permission-mode auto --name "machine coordinator"` (default claude/sonnet; Claude's --name keeps the session
    and terminal title, so peers find it by SendMessage). Claude's first-start folder question: --trust-folder answers
    yes; otherwise it is asked in a terminal, as project-setup does.
@@ -237,17 +240,18 @@ def persona_step(harness: str, model: str, folder: Path) -> Path:
 
 
 def anchor_block(folder: Path) -> str:
-    return anchor.machine_block(folder, folder / ".lane-control" / f"{ROLE}.md", TITLE)
+    return anchor.machine_block(folder, folder / ".lane-control" / f"{ROLE}.md", TITLE, anchor.imports_for(folder))
 
 
 def anchor_step(folder: Path):
     """The folder's persona anchor (core/anchor.py): a session started by hand there is told to read the persona."""
-    f = folder / anchor.MACHINE_FILE
+    f = folder / anchor.FILE
     try:
+        ignored = anchor.hide(f)  # first, so git never sees it: the folder may be the owner's own repo
         state = anchor.apply(f, anchor_block(folder))
     except (anchor.AnchorError, OSError) as e:
         return say("persona anchor", "skipped", f"({e})")
-    say("persona anchor", state, str(f))
+    say("persona anchor", state, str(f) + (f" (git does not see it: ignored by {ignored})" if ignored else ""))
 
 
 def check(folder: Path) -> int:
@@ -256,7 +260,7 @@ def check(folder: Path) -> int:
     persona = folder / ".lane-control" / f"{ROLE}.md"
     has = persona.is_file()
     say("check persona", "ok" if has else "missing", f"({persona})" if has else f"(no {persona}: run machine-setup)")
-    f = folder / anchor.MACHINE_FILE
+    f = folder / anchor.FILE
     try:
         state, why = anchor.check(f, anchor_block(folder)), ""
     except anchor.AnchorError as e:
@@ -268,11 +272,21 @@ def check(folder: Path) -> int:
 
 
 def start_step(harness: str, model: str, mode: str, folder: Path, persona: Path, trust: bool):
-    terms = orca("terminal", "list").get("terminals", []) or []
-    if any(t.get("title") == TITLE for t in terms):
-        return say(TITLE, "exists", "(a terminal with that title is open; not started again)")
+    ps = project_setup()  # its liveness proof: a terminal with the title is none (lc-l78.32)
+    ps.ORCA = machineconf.orca_cli()
+    try:
+        state = ps.session_state(ps.Place(), TITLE, None, ROLE, folder)
+    except ps.Fail as e:
+        raise Fail(str(e)) from None
+    if state.live:
+        return say(TITLE, "exists", "(its agent runs; not started again)")
+    if state.doubt:
+        return say(TITLE, "cannot tell", "(" + ps.cannot_tell(TITLE, state, "run machine-setup again") + ")")
+    if state.found:
+        close = "; ".join(f"orca-ide terminal close --terminal {t.get('handle')}" for t in state.found)
+        say(TITLE, "recorded but dead", f"(a terminal with that title and no live agent; it is left open, and if it is "
+                                        f"an empty shell close it: {close})")
     if harness == "claude":
-        ps = project_setup()
         try:
             ps.ensure_claude_trust(folder, record=trust)
         except ps.Fail as e:

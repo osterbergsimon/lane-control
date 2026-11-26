@@ -19,9 +19,12 @@ and unmark the project paused in its settings store (the night manager skips it)
 session for its handover through its own Orca Run, waits (--wait SECONDS, default 600) until each one's handover memory changes
 (handover-latest), then closes their terminals (--no-handover closes them without asking); start starts the missing ones again, each
 resuming its recorded session (Claude --resume, OpenCode --session; a fresh session when the harness no longer has it).
-A session runs only when an agent process of it does (project-setup's session_state): a terminal with its title, or
-Orca's agent mark, is no proof. One with a record or a terminal and no agent is `recorded but dead`: start says so and
-starts it, stop and wake say so and clear its record, status only says it. Its terminal is never closed for you.
+Whether a session runs is decided by its processes (project-setup's session_state): a terminal with its title, or
+Orca's agent mark, is no proof. Surely not running, with a record or a terminal: `recorded but dead`. start says so and
+starts it, stop and wake say so and clear its record, status only says it; its terminal is never closed for you.
+`cannot tell` (an agent that may be it, which cannot be read or placed, as after an Orca restore): start starts nothing
+and exits 1, wake unmarks the project and keeps the record, status says it, and stop treats the recorded or titled
+terminal Orca marks as an agent's as running (asking for its handover first), or changes nothing when there is none.
 stop runs in an Orca terminal (Orca sends messages only from its own terminals), finds each session's Run (the one
 recorded at its start, else the one of its name that no earlier start made), and changes nothing when a Run, a
 handover or that terminal is missing. rest and stop refuse while a lane's agent runs. Each start makes the session a
@@ -92,10 +95,12 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
     p = ps.native_project(repo)
     place = ps.Place()
     states = ps.session_states(place, repo, p["project"])
-    live = {role: t for role, (t, _, _) in states.items() if t}
+    live = {role: s.live for role, s in states.items() if s.live}
+    unsure = {role: s for role, s in states.items() if s.doubt}
 
-    def dead():  # (role, title, terminals) of each standing session with no live agent
-        return [(r, ps.session_title(r, p["project"]), found) for r, (t, found, _) in states.items() if not t]
+    def dead():  # (role, title, terminals) of each standing session surely not running
+        return [(r, ps.session_title(r, p["project"]), s.found) for r, s in states.items()
+                if not s.live and not s.doubt]
     if cmd in ("rest", "stop"):  # as on the Orca + Cotal path: never while a lane runs
         lanes = ps.running_lanes(place, repo)
         if lanes:
@@ -107,7 +112,9 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
               "no session was stopped. `project-pause wake` ends it.")
         return 0
     if cmd == "wake":
-        if "coordinator" not in live:
+        for role, s in unsure.items():
+            print(f"{ps.session_title(role, p['project'])}: cannot tell if it runs: {s.doubt}. Its record is kept.")
+        if "coordinator" not in live and "coordinator" not in unsure:
             for role, title, found in dead():
                 ps.drop_dead_session(repo, role, title, found)
             print(f"{p['project']}: its coordinator is not running, so it stays paused until `project-pause start`.")
@@ -120,13 +127,28 @@ def native(cmd: str, repo: Path, wait: float, ask: bool) -> int:
         if live and p["st"].get("paused"):
             state = "resting"
         names = ", ".join(ps.session_title(r, p["project"]) for r in live) or "none"
-        print(f"{p['project']}: {state if live or p['st'].get('paused') else 'stopped'} (sessions running: {names})")
+        if not (live or p["st"].get("paused")):
+            state = "cannot tell" if unsure else "stopped"
+        print(f"{p['project']}: {state} (sessions running: {names}{' proven' if unsure and not live else ''})")
+        for role, s in unsure.items():
+            print(f"  {ps.session_title(role, p['project'])}: cannot tell if it runs: {s.doubt}. Nothing is started "
+                  "while that is so")
         for role, title, found in dead():
             line = ps.dead_session(repo, role, title, found)
             if line:
                 print(f"  {title}: recorded but dead ({line[len(title) + 2:]}). `project-pause start` starts it again")
         return 0
-    # stop
+    # stop. A session in doubt is never called stopped: the terminal Orca marks as its agent's is treated as running
+    # (the handover it must write first proves it does); with no such terminal nothing is changed.
+    for role, s in unsure.items():
+        title = ps.session_title(role, p["project"])
+        if not s.marked:
+            raise ps.Fail(f"cannot tell whether {title} runs: {s.doubt}. Nothing was changed. If it runs in a "
+                          "terminal, ask it for its handover and close that terminal yourself; if its terminal is an "
+                          "empty shell, close it; then run project-pause stop again")
+        print(f"{title}: cannot tell if it runs ({s.doubt}); Orca marks terminal {s.marked['handle']} as an agent's, "
+              "so stop treats it as running there")
+        live[role] = s.marked
     for role, title, found in dead():
         ps.drop_dead_session(repo, role, title, found)
     if not live:
