@@ -114,12 +114,16 @@ the links.
 - `lane-control doctor [--json] [--no-ssh]`: the installed sha against each project's (its settings store), the
   `~/.agents/bin` links, the lane skills, and each box a tree was sent to (its `current` over ssh). Exit 1 with a
   `todo:` line saying what to run for each thing out of date.
-- `lane-control prune [--apply]`: the trees that are not current and that no running process of yours uses (its cwd,
-  an open file or its command line); a dry run unless `--apply`.
+- `lane-control prune [--apply]`: the trees that are not current, that no running process of yours uses (its cwd,
+  an open file or its command line) and that no project's hook or persona, user unit, plugin or `~/.agents/bin` link
+  names; a dry run unless `--apply`, under the install lock, and nothing at all without a valid `current`.
 - `project-setup` and `machine-setup` run from the main checkout on its default branch install its HEAD first (or use
-  the tree they run from). From a lane worktree, another branch or a commit older than the installed one they keep the
-  installed tree (`lane-control: kept ...`) unless the owner answers yes in a terminal or `LANE_CONTROL_SWITCH=1` is
-  set (the tests set it, in their scratch HOME); with nothing installed that is an error. A failed install exits 1 and
+  the tree they run from). From a lane worktree, another branch or a commit not shown to be newer than the installed one
+  (older, unrelated, or a checkout that lacks the installed commit) they keep the installed tree (`lane-control: kept
+  ...`) and run that tree's own script instead, so its skills and personas are rendered, not the checkout's, unless the
+  owner answers yes in a terminal or `LANE_CONTROL_SWITCH=1` is set. After `lane-control install --version <older>`,
+  the next setup from the main checkout at a newer commit switches back; run setups from that older tree's
+  `.../current/scripts/` to stay (the tests set it, in their scratch HOME); with nothing installed that is an error. A failed install exits 1 and
   renders nothing. They render `{{LANE_CONTROL}}` and the persona hook as `.../lane-control/current`, link the lane
   tools (a link is never turned back into a copy), and record the sha in the project's settings store (`lane_control`;
   `lane_control_dirty` when the rendered text was not the installed tree's); `--show` says `lane-control <a>

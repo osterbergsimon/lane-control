@@ -205,7 +205,7 @@ class BoxScriptTests(Scratch):
         box = self.tmp / "box"
         box.mkdir(exist_ok=True)
         env = {k: v for k, v in os.environ.items() if k != "XDG_DATA_HOME"}
-        env["HOME"] = str(box)
+        env.update(HOME=str(box), XDG_CONFIG_HOME=str(box / ".config"))  # fish makes its folder there (n3)
         return box, env, box / ".local" / "share" / "lane-control"
 
     def send(self, shell, data=None, count=None):
@@ -294,6 +294,24 @@ class PolicyTests(Scratch):
         os.environ["LANE_CONTROL_SWITCH"] = "1"
         self.assertEqual(self.I.use(self.src).sha, self.one)
 
+    def test_a_clone_that_lacks_the_installed_commit_never_moves_it(self):
+        old = self.tmp / "old-clone"  # M8: cloned before the newer commit, never fetched since
+        subprocess.run(["git", "clone", "-q", str(self.src), str(old)], check=True)
+        two = self.commit_two()
+        self.I.use(self.src)
+        self.assertEqual(self.I.installed(), two)
+        u = self.I.use(old)
+        self.assertEqual((u.state, u.sha), ("kept", two))
+        self.assertTrue(any("not shown to be newer" in n for n in u.notes), u.notes)
+        self.assertEqual(self.I.installed(), two)
+        self.assertEqual(self.I.source(), self.src.resolve())
+
+    def test_a_newer_commit_from_the_main_checkout_still_moves_it(self):
+        self.I.use(self.src)
+        two = self.commit_two()
+        self.assertEqual(self.I.use(self.src).state, "installed")
+        self.assertEqual(self.I.installed(), two)
+
     def test_nothing_installed_and_no_yes_is_an_error(self):
         git("checkout", "-q", "-b", "other", cwd=self.src)
         with self.assertRaises(self.I.InstallError):
@@ -351,6 +369,11 @@ class DoctorPruneTests(Scratch):
         r = self.cli("doctor", "--no-ssh")
         self.assertIn("its persona hook is /old/checkout/core/harnesses/persona-hook.sh", r.stdout)
         self.assertIn("not the installed tree", r.stdout)
+
+    def test_doctor_on_a_desktop_that_only_drives_boxes_names_no_skills(self):
+        self.cli("install", "--from", str(self.src))  # m8: no project and no lane skill here
+        r = self.cli("doctor", "--no-ssh")
+        self.assertNotIn("skill ", r.stdout)
 
     def test_prune_removes_nothing_without_a_valid_current(self):
         self.cli("install", "--from", str(self.src))

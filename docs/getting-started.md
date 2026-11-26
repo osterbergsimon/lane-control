@@ -438,7 +438,8 @@ Why each step:
   checkout). After the first one, `~/.agents/bin/lane-control install` works from anywhere: it remembers the main
   checkout (never a lane worktree). `project-setup` run from the main checkout on its default branch installs that
   checkout's last commit itself too, so a forgotten install is not a problem. Run from a lane worktree, another branch
-  or an older commit, it keeps the installed one (`lane-control: kept ...`) unless you answer yes in a terminal.
+  or a commit not shown to be newer, it keeps the installed one (`lane-control: kept ...`) and runs that tree's own
+  setup, so skills and personas come from it, unless you answer yes in a terminal.
   Uncommitted changes are never installed (it says so). A failed install exits 1 and changes nothing.
 - `--refresh` renders the skills and the personas again from the installed tree and records its sha. It keeps each
   persona's engine and model and the project's tier table, starts nothing and commits nothing, and says which running

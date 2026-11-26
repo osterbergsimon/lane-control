@@ -2037,19 +2037,30 @@ class InstallTests(Case):
         self.assertTrue((self.e.home / ".agents" / "bin" / "lane-heavy").is_symlink())
         self.assertEqual(self.lane("coordinator").read_text(), persona)
 
-    def test_a_lane_worktree_keeps_the_installed_tree_without_a_yes(self):
-        self.e.run(str(self.repo), "--no-start")
-        other = "d" * 40
-        (self.lc() / other).mkdir()
-        (self.lc() / other / ".lane-control-sha").write_text(other + "\n")
-        (self.lc() / "current").unlink()
-        (self.lc() / "current").symlink_to(other)
-        r = self.e.run(str(self.repo), "--refresh", adapt=True, env_extra={"LANE_CONTROL_SWITCH": ""})
-        if not subprocess.run(["git", "rev-parse", "--git-dir"], cwd=ROOT, capture_output=True, text=True
-                              ).stdout.strip().endswith(".git"):  # this checkout is a linked worktree (a lane)
-            self.assertIn("lane-control: kept", r.stdout)
-            self.assertEqual(os.readlink(self.lc() / "current"), other)
+    def test_a_lane_worktree_keeps_the_installed_tree_and_renders_from_it(self):
+        self.e.run(str(self.repo), "--no-start")  # installs this checkout's HEAD (the tests say yes)
+        head = self.head()
+        clone, lane = Path(self.e.home) / "lc-main", Path(self.e.home) / "lc-lane"  # n2: its own clone and worktree
+        subprocess.run(["git", "clone", "-q", str(ROOT), str(clone)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "lane", str(lane)], check=True,
+                       capture_output=True)
+        skill = Path("orchestrators/native-orca/skills/native-orca-lanes/SKILL.md")
+        persona = Path("orchestrators/native-orca/personas/coordinator.md")
+        for rel in (skill, persona):
+            (lane / rel).write_text((lane / rel).read_text() + "\nUNREVIEWED LANE RULE\n")
+        subprocess.run(["git", "-C", str(lane), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "lane"],
+                       check=True, capture_output=True)
+        r = self.e.run(str(self.repo), "--refresh", adapt=True, env_extra={"LANE_CONTROL_SWITCH": ""},
+                       script=lane / "core" / "scripts" / "project-setup")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("lane-control: kept", r.stdout)
+        self.assertIn("the kept install", r.stderr)  # M7: the kept tree's own setup ran
+        self.assertEqual(os.readlink(self.lc() / "current"), head)
+        installed = self.e.home / ".agents" / "skills" / "native-orca-lanes" / "SKILL.md"
+        self.assertNotIn("UNREVIEWED LANE RULE", installed.read_text())
+        self.assertEqual(installed.read_text(), (self.lc() / head / skill).read_text())
+        self.assertNotIn("UNREVIEWED LANE RULE", self.lane("coordinator").read_text())
+        self.assertIn(str(self.lc() / "current"), self.lane("coordinator").read_text())
 
     def test_tests_never_install_into_a_real_xdg_data_home(self):
         sentinel = Path(self.e.home) / "sentinel-data"  # INST-1 review M1: stands in for a real XDG_DATA_HOME

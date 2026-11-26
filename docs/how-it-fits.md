@@ -69,7 +69,7 @@ More: [roles](../core/roles.md), [model routing](../core/model-routing.md), [nat
 | What | Where | Who puts it there |
 |---|---|---|
 | The checkout: scripts, templates, docs | `~/code/lane-control` (any folder works) | you, `git clone`; update with `git pull` |
-| The installed tree, the one everything uses: the repo at one commit | `~/.local/share/lane-control/<sha>/` and the `current` link to it (old trees kept for running lanes) | `lane-control install`, and `project-setup` or `machine-setup` run from a checkout |
+| The installed tree, the one everything uses: the repo at one commit | `~/.local/share/lane-control/<sha>/` and the `current` link to it (old trees kept for running lanes) | `lane-control install`, and `project-setup` or `machine-setup` run from the main checkout on its default branch at a newer commit (anywhere else they keep it, unless you say yes) |
 | Links to the lane tools and `lane-control`, which agents call | `~/.agents/bin/`, links into `.../lane-control/current/core/scripts/` | `lane-control install`, `project-setup` |
 | Skills (the three lane skills and the design skills) | `~/.agents/skills/`, linked for Claude and OpenCode | `project-setup`, `--refresh` |
 | One project's settings and tier table, **outside its repo** | `~/.config/lane-control/projects/<folder>-<hash>/` (`settings.json`, `lanes.tsv`) | `project-setup`; `--show` prints them |
@@ -80,11 +80,13 @@ More: [roles](../core/roles.md), [model routing](../core/model-routing.md), [nat
 | On a box | the desktop's installed tree at the same sha, in the box's own `~/.local/share/lane-control/<sha>/` and `current` | `project-setup <repo> <host>`, on every run (kept when the box has that sha) |
 
 Personas name `.../lane-control/current`, never a checkout or a lane worktree. A `git pull` changes nothing until
-`lane-control install`: that moves `current` and with it every tool link at once. The skills and each project's
+`lane-control install`, or a setup or `--refresh` from that main checkout, moves `current` and with it every tool
+link at once. A setup from a lane worktree, another branch, or a commit not shown to be newer keeps the installed tree
+and runs that tree's own setup (`lane-control: kept`), unless you say yes. The skills and each project's
 personas follow at `project-setup <project> --refresh`, which records the installed sha in the project's settings.
 `lane-control status` compares the checkout with `current`; `lane-control doctor` lists every project, link, skill and
-box that is behind and what to run; `lane-control prune` removes old trees no running process uses (a dry run unless
-`--apply`).
+box that is behind and what to run; `lane-control prune` removes old trees that no running process uses and no hook,
+persona, unit or link names, and nothing without a valid `current` (a dry run unless `--apply`).
 
 More: [core and its scripts](../core/README.md), [where beads lives](../core/issues.md#where-beads-lives-backup-and-restore-lc-5c1),
 [updating an existing host](getting-started.md#updating-an-existing-host).
@@ -109,8 +111,8 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
   projects), checks the usage feed, starts the machine coordinator, creates the three automations, reports Orca's
   cleanup rules and installs the `ci-presence` timer.
 - **`project-setup <project>`** (once per project): onboards the repo (an adapting agent and a reviewer write the lane
-  files; committed only on your yes), installs this checkout's last commit as the machine's tree (as `lane-control
-  install` does), links the lane tools, installs the skills, renders the personas, writes the tier table
+  files; committed only on your yes), installs the main checkout's newer last commit as the machine's tree (as `lane-control
+  install` does; elsewhere it keeps the installed one and runs its setup), links the lane tools, installs the skills, renders the personas, writes the tier table
   and starts the coordinator. Today onboarding a new project needs Claude. Onboarding on OpenCode is parked, so do not
   expect it soon: PR #66 was parked after review round 7, with findings still open.
 - **`project-setup <project> --refresh`**: after lane-control changed. Updates the tools, skills and personas, keeps

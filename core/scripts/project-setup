@@ -472,7 +472,19 @@ def remote_cmd(script: str, args: list) -> str:
 LC_DIRTY = False  # the rendered text may not be the installed tree's (uncommitted changes, or a kept older install)
 
 
-def use_install() -> None:
+def reexec_kept(u, rel: str, argv: list) -> None:
+    """A refused switch keeps the installed tree: then the whole run is that tree's own script, so its skills, templates
+    and personas are rendered, never this refused checkout's (INST-1 review M7). Returns only when not kept."""
+    if u.state != "kept":
+        return
+    script = u.tree / rel
+    print(f"project-setup: note: running {script} (the kept install) instead of this checkout", file=sys.stderr,
+          flush=True)
+    sys.stdout.flush()
+    os.execv(sys.executable, [sys.executable, str(script), *argv])
+
+
+def use_install(rel: "str | None" = None, argv: "list | None" = None) -> None:
     """Install (or use) this lane-control's tree (core/install.py): from the owner's main checkout on its default
     branch its HEAD goes to .../lane-control/<sha> and `current` is switched to it; from a lane worktree, another
     branch or an older commit the installed one is kept unless the owner says yes in a terminal (or
@@ -487,6 +499,8 @@ def use_install() -> None:
     say("lane-control", u.state, f"{u.sha or ''} at {u.stable}".strip())
     for n in u.notes:  # on stderr, like the other warnings: a re-run's stdout stays all `exists`
         print(f"project-setup: note: {n}", file=sys.stderr)
+    if rel is not None:
+        reexec_kept(u, rel, argv if argv is not None else sys.argv[1:])
 
 
 def record_version(repo: Path, set_up_before: bool) -> None:
@@ -4624,7 +4638,7 @@ def main(argv=None) -> int:
         return check_host(a, host)
     if not a.show:  # before the host copy and before anything is rendered; --show sends and switches nothing
         try:
-            use_install()
+            use_install("core/scripts/project-setup", argv)
         except Fail as e:
             print(f"project-setup: {e}", file=sys.stderr)
             return 1

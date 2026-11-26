@@ -466,6 +466,11 @@ def main(argv) -> int:
     except install.InstallError as e:
         print(f"machine-setup: {e}; nothing was changed", file=sys.stderr)
         return 1
+    if u.state == "kept":  # the kept tree's own machine-setup renders the persona, never this checkout's (review M7)
+        print(f"machine-setup: note: running {u.tree / 'core/scripts/machine-setup'} (the kept install) instead",
+              file=sys.stderr, flush=True)
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, str(u.tree / "core" / "scripts" / "machine-setup"), *argv])
     LC = u.stable
     harnesses.PERSONA_HOOK = LC / "core" / "harnesses" / "persona-hook.sh"  # never the checkout (INST-1 review B1)
     say("lane-control", u.state, f"{u.sha or ''} at {u.stable}".strip())

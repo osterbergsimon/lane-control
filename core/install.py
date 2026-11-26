@@ -108,8 +108,11 @@ def switch_refusal(checkout: Path, sha: str, cur):
     branch, want = git(checkout, "symbolic-ref", "--short", "-q", "HEAD"), default_branch(checkout)
     if branch != want:
         return f"{checkout} is on {branch or 'a detached HEAD'}, not its default branch {want}"
-    if cur and git(checkout, "merge-base", "--is-ancestor", sha, cur) is not None:
-        return f"its commit {short(sha)} is older than the installed {short(cur)}"
+    if cur and git(checkout, "merge-base", "--is-ancestor", cur, sha) is None:
+        # Only a commit shown to be newer moves it: an older one, an unrelated one, or one this checkout cannot judge
+        # (it lacks the installed commit: a clone that was not fetched) asks first (INST-1 review M8).
+        return (f"its commit {short(sha)} is not shown to be newer than the installed {short(cur)} (older, unrelated, "
+                "or this checkout does not have that commit: git fetch?)")
     return None
 
 
@@ -246,6 +249,8 @@ def use(here: Path, root: Path = None, ask=None) -> Use:
     sha = tree_sha(here)
     if sha:
         cur = here.parent / "current"
+        if (data_root() / "current").resolve() == here:  # HOME or the data folder behind a symlink: the path as named
+            cur = data_root() / "current"
         stable = cur if cur.resolve() == here else here
         notes = [] if stable == cur else [f"running {short(sha)}, which is not current ({short(installed(here.parent))})"]
         return Use(here, stable, sha, "used", notes)

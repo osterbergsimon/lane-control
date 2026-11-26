@@ -14,8 +14,9 @@
         and each box project-setup sent a tree to (its current sha over ssh, unless --no-ssh). Exit 1 when something
         needs doing; each such line says what to run.
   lane-control prune [--apply]
-        the trees that are not current and that no running process uses (cwd, open file or command line): listed, and
-        removed only with --apply.
+        the trees that are not current, that no running process uses (cwd, open file or command line) and that no
+        hook, persona, unit, plugin or ~/.agents/bin link names: listed, and removed only with --apply (under the
+        install lock). With no valid `current` it removes nothing.
 
 After an install, run `project-setup --refresh <project>` for each project: its personas and skills are rendered
 from the tree, and the project records the sha it was set up with."""
@@ -100,6 +101,7 @@ def project_todos(root: str, sha, cur) -> list:
     """What is out of date in one project: its recorded sha, a hook or persona that names a checkout or one sha's
     tree instead of .../current, text rendered from uncommitted changes."""
     r, stable = Path(root), str(I.data_root() / "current")
+    alt = str(I.data_root().resolve() / "current")  # the same folder, named through a symlinked HOME (review m7)
     out = []
     if cur and sha != cur:
         out.append(f"{root}: lane-control {I.short(cur)} installed, project set up with {I.short(sha)}: "
@@ -110,7 +112,7 @@ def project_todos(root: str, sha, cur) -> list:
     except OSError:
         text = ""
     for m in re.findall(r"[^\s\"']*core/harnesses/persona-hook\.sh", text):
-        if not m.startswith(stable + "/"):
+        if not m.startswith((stable + "/", alt + "/")):
             out.append(f"{root}: its persona hook is {m}, not under {stable}: run project-setup {root} --refresh")
             break
     return out
@@ -130,14 +132,18 @@ def doctor(a) -> dict:
                                f"(uncommitted changes, or an older install kept): commit, install, then "
                                f"project-setup {root} --refresh")
     stable = I.data_root() / "current"
+    names = (stable, I.data_root().resolve() / "current")  # as named, and through a symlinked HOME (review m7)
     for n in I.BIN_TOOLS:
         f = I.bin_dir() / n
-        state = ("link" if f.is_symlink() and os.readlink(f) == str(stable / "core" / "scripts" / n) else
-                 "other link" if f.is_symlink() else "copy" if f.exists() else "missing")
+        state = ("link" if f.is_symlink() and os.readlink(f) in [str(s / "core" / "scripts" / n) for s in names] else
+                 "link elsewhere" if f.is_symlink() else "copy" if f.exists() else "missing")
         out["links"][n] = state
         if cur and state != "link":
-            out["todo"].append(f"{f} is a {state}: run lane-control install (it links the lane tools)")
+            out["todo"].append(f"{f}: {state}, not a link into {stable}: run lane-control install")
+    lane_skills = any((I.home() / ".agents" / "skills" / n).exists() for n in SKILLS)
     for n, rel in SKILLS.items():
+        if not (out["projects"] or lane_skills):  # a desktop that only drives boxes has no skills of its own (m8)
+            break
         f = I.home() / ".agents" / "skills" / n / "SKILL.md"
         try:
             same = f.read_text() == (stable / rel).read_text()
@@ -145,7 +151,9 @@ def doctor(a) -> dict:
             same = None if f.is_file() else False
         out["skills"][n] = "ok" if same else "missing" if not f.is_file() else "differs" if same is False else "unknown"
         if cur and out["skills"][n] != "ok":
-            out["todo"].append(f"skill {n} is {out['skills'][n]}: run project-setup <project> --refresh")
+            why = {"missing": "is missing", "differs": "differs from the installed tree"}.get(out["skills"][n],
+                                                                                            "cannot be read")
+            out["todo"].append(f"skill {n} {why}: run project-setup <project> --refresh")
     for host, sent in I.boxes():
         there = None if a.no_ssh else I.box_doctor(host)
         b = {"host": host, "sent": sent, "current": there and there.get("current"),
@@ -184,13 +192,17 @@ def cmd_doctor(a) -> int:
 
 def cmd_prune(a) -> int:
     root = I.data_root()
-    plan = I.prune_plan(root)
-    for sha, what, why in plan:
-        if what == "remove" and a.apply:
-            shutil.rmtree(root / sha)
-            print(f"removed {sha} ({why})")
-        else:
-            print(f"{'would remove' if what == 'remove' else 'keep'} {sha} ({why})")
+    if not root.is_dir():
+        print("nothing installed")
+        return 0
+    with I.lock(root):  # no install or setup switches `current` between the plan and the removal (review m9)
+        plan = I.prune_plan(root)
+        for sha, what, why in plan:
+            if what == "remove" and a.apply:
+                shutil.rmtree(root / sha)
+                print(f"removed {sha} ({why})")
+            else:
+                print(f"{'would remove' if what == 'remove' else 'keep'} {sha} ({why})")
     if not a.apply and any(w == "remove" for _, w, _ in plan):
         print("dry run: nothing removed; lane-control prune --apply removes them")
     return 0
@@ -208,7 +220,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("doctor", help="installed sha against each project, the links, skills and boxes")
     p.add_argument("--json", action="store_true")
     p.add_argument("--no-ssh", action="store_true", help="do not ask the boxes")
-    p = sub.add_parser("prune", help="remove trees no running process uses (dry run without --apply)")
+    p = sub.add_parser("prune", help="remove trees nothing uses or names (dry run without --apply)")
     p.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
     return {"install": cmd_install, "status": cmd_status, "doctor": cmd_doctor, "prune": cmd_prune}[a.cmd](a)

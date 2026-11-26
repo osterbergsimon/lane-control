@@ -63,7 +63,7 @@ def main(argv=None) -> int:
     ps.ORCA = ps.orca_cli()
     os.environ.setdefault("COTAL_ORCA_BIN", ps.ORCA)
     try:
-        ps.use_install()  # the persona names .../lane-control/current, not this checkout (INST-1 review m6)
+        ps.use_install("orchestrators/orca-cotal/scripts/machine-coordinator-setup", argv if argv is not None else sys.argv[1:])  # the persona names .../lane-control/current, not this checkout (INST-1 review m6)
         ps.preflight({harness})
         ensure_folder(folder)
         ps.orca_repo(folder)
