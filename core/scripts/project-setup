@@ -67,6 +67,14 @@ The tier table is decided once per project: a full --tiers, else the defaults (o
 project's table unless --tiers gives another. Nothing is refused by model or harness (owner 2026-11-24): the project's
 table is the only place that says which models it uses.
 
+Before a role's pin or a tier table is written with a model it did not have, the gateway that model goes through is
+asked what it serves (one GET <base>/v1/models; core/modelenv.py): ANTHROPIC_BASE_URL for Claude (from model-env's
+source, your Claude settings or this shell, never from a repo), the provider's baseURL in OpenCode's config for
+OpenCode. A model it does not list is not written. One it could not confirm (no answer, a refused key, an alias like
+`opus` with no ANTHROPIC_DEFAULT_OPUS_MODEL to say what is sent, only a wildcard) is written only on your yes in a
+terminal; without a terminal it is not written. --no-model-check writes without the check. With no gateway nothing is
+asked or said.
+
 --suggest-tiers <provider> suggests that table from an OpenAI-compatible gateway (a self-hosted LiteLLM, say): GET
 <base>/v1/models, and <base>/model/info where it answers (LiteLLM: the model behind each alias). Each row is
 opencode/<provider>/<alias>, <provider> being the gateway's provider id in OpenCode's config. The base URL is --gateway,
@@ -1177,6 +1185,27 @@ def check_tier_table(text: str) -> list:
     return [tuple(l.split()) for l in r.stdout.splitlines() if l.strip()]
 
 
+MODEL_ANSWERS: dict = {}  # one /v1/models request per gateway in a run
+MODEL_YES: set = set()  # unconfirmed models the owner said yes to: not asked twice in a run
+
+
+def check_written_models(items: list, a, unwritten: str) -> None:
+    """(label, harness, model) about to be written: Refused when the gateway one goes through does not list it, or
+    could not confirm it and the owner did not say yes (core/modelenv.py gate; --no-model-check skips the check)."""
+    if a.no_model_check or not items:
+        return
+    if str(HERE / "core") not in sys.path:
+        sys.path.insert(0, str(HERE / "core"))
+    import modelenv
+    found = modelenv.check_models(items, modelenv.view(os.environ), os.environ, MODEL_ANSWERS)
+    for line in modelenv.check_lines(found):
+        print(line, flush=True)
+    yes = (lambda q: owner_says_yes(q, step="model check")) if has_terminal() else None
+    why = modelenv.gate(found, yes, MODEL_YES)
+    if why:
+        raise Refused(f"{why}. {unwritten}")
+
+
 def choose_tiers(repo: Path, a, default_table: Path) -> str:
     """The project's tier table, decided once. An explicit --tiers wins; otherwise a table the project already has is
     kept, and a project without one gets the defaults."""
@@ -1184,7 +1213,10 @@ def choose_tiers(repo: Path, a, default_table: Path) -> str:
     try:
         default_text = default_table.read_text()
         if a.tiers or not table.exists():
-            check_tier_table(default_text)
+            rows = check_tier_table(default_text)
+            if not table.exists() or table.read_text() != default_text:
+                check_written_models([(f"tier {t}", h, m) for t, h, m in rows if h in HARNESSES and m != "-"], a,
+                                     "The tier table was not written")
             return default_text
         return table.read_text()
     except (OSError, UnicodeDecodeError) as e:
@@ -2795,6 +2827,8 @@ def resolve_settings(repo: Path, a) -> dict:
         why = native_pin_refusal(pins, mode)
         if why:
             raise Refused(why)
+    check_written_models([(f"the {r}", h, m) for r, (h, m) in pins.items() if f"{h}/{m}" != stored.get(r)], a,
+                         "The settings store was not changed")
     settings(repo, **changes)
     return {"pins": pins, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
 
@@ -4257,6 +4291,7 @@ def native_on_host(a, argv: list, host: str, value_flags: set) -> int:
             try:
                 ms = subprocess.run([tool_path("LANE_MACHINE_SETUP", "core/scripts/machine-setup"), "--host", host,
                                      *(["--no-start"] if a.no_start else []),
+                                     *(["--no-model-check"] if a.no_model_check else []),
                                      *(["--trust-folder"] if a.trust_folder else [])],
                                     stdin=None if tty else subprocess.DEVNULL, timeout=None if tty else 1800)
             except subprocess.TimeoutExpired:
@@ -4442,6 +4477,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-desktop-lanes", action="store_true",
                     help="with a host: do not ask for this desktop's share link (no lanes from the host here)")
     ap.add_argument("--no-machine-setup", action="store_true", help="with a host: do not run machine-setup there")
+    ap.add_argument("--no-model-check", action="store_true",
+                    help="write a model even when the gateway does not list it (core/modelenv.py)")
     ap.add_argument("--orca-from", metavar="DIR",
                     help="with a host: install Orca's server there from this slot folder or folder of slots instead of "
                          "this desktop's own (orca-host-install --from); pins a box to a known-good server")
