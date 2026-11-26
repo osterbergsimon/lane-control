@@ -161,6 +161,19 @@ Claude on this machine:
 machine-setup
 ```
 
+No model is built in, so the first run asks two things: the machine coordinator's model, as `claude/<model>` (for
+example `claude/sonnet`), and the model for the automations (for example `sonnet`). To answer up front:
+`machine-setup --machine-coordinator claude/sonnet --automation-model sonnet`, or set `MACHINE_COORDINATOR=` and
+`AUTOMATION_MODEL=` in `machine.conf`. A later run keeps what the machine has and changes no automation's model unless
+you add `--replace-automation-model`.
+
+Claude through a gateway: **do this before `machine-setup`.** An alias such as `sonnet` can only be checked once it is
+mapped to a name your gateway lists; unmapped, `machine-setup` asks whether to write it unchecked, and without a
+terminal writes nothing. First run `model-env` (it asks for the gateway, its model names and the auto-mode classifier
+model), with your gateway key set in that shell. Add the line it prints to your shell profile, restart Orca from a
+shell that has the values, and check with `model-env --check`. Details:
+[the model environment](../orchestrators/native-orca/setup.md#the-model-environment-claude-through-a-gateway).
+
 OpenCode only, on a gateway (the machine coordinator and the automations then run on OpenCode; step 2.3 comes first):
 
 ```bash
@@ -399,8 +412,13 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
   versions, pairing both ways, the tunnel, the agent and the gateway key on the host) and changes nothing. Then
   `project-setup ~/code/<project> example-host`, driven from this machine's Orca
   ([orchestrators/native-orca/remote.md](../orchestrators/native-orca/remote.md)). For the host's coordinator to run
-  lanes here it asks for this desktop's link, which you make by hand in Orca: Settings > Servers > "Share this
-  computer", choosing 127.0.0.1 (setup says so before it starts, so you can make it while it runs).
+  lanes here it needs a link to this desktop's Orca. Setup makes it for you with `orca pair`, once you say yes: first
+  it says what the link grants (terminals here, so any command as you on this computer, which can reach your screen
+  too), that its `--rotate` ends every other unused access link of this Orca, that this desktop's Orca will then
+  listen on every network interface (revoking does not narrow that; restarting Orca does), and how to revoke it. To
+  keep the desktop on loopback, answer no (or pass `--pair-by-hand`) and make the link by hand in Orca instead:
+  Settings > Servers > "Share this computer", choosing 127.0.0.1, then paste it at setup's hidden prompt (with
+  `--pair-by-hand` setup gives these steps before it starts, so you can make it while it runs).
 - **Cleanup and branches:** [docs/orca-cleanup.md](orca-cleanup.md).
 - **More projects and models:** repeat step 4 per repo; tiers and routing are in [core/model-routing.md](../core/model-routing.md).
 - **Switch orchestrators:** `scripts/orch status ~/code/<project>`, then follow [the switch guide](../orchestrators/switching.md).
@@ -483,7 +501,7 @@ project-pause start ~/code/<project>
 A box has two connections, both tunnels started on the desktop ([how the parts fit](how-it-fits.md#a-box-two-directions)):
 `orca-tunnel-<host>` (`ssh -L`, direction 1: the desktop controls the box, made by `orca-host-install --pair`) and
 `lane-tunnel@<host>` (`ssh -R`, direction 2: the box's coordinator starts lanes on the desktop, made by
-`project-setup` after the share link).
+`project-setup` before it sends the box its link to the desktop).
 
 A box set up with `project-setup <repo> <host>` has no lane-control checkout of its own. It gets the desktop's installed
 tree, whole and at the same sha, in its own `~/.local/share/lane-control/<sha>/` with its own `current` link, on every

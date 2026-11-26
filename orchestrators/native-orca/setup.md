@@ -81,8 +81,9 @@ tunnel, both started on this machine (`remote.md`; the picture:
 - direction 1, this machine controls the box: `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair`,
   with no click and no pairing code from the owner;
 - direction 2, the box's coordinator starts lanes here: `lane-tunnel@<host>` (`ssh -R`), made by `project-setup`
-  after the share link, which the owner makes in this machine's Orca. `project-setup --remove-host <host>` undoes
-  this direction only.
+  before it sends the box its link to this machine's Orca: made with `orca pair` after the owner's yes, or the share
+  link the owner makes by hand (`--pair-by-hand`, which keeps this machine on loopback). `project-setup --remove-host
+  <host>` undoes this direction only.
 
 ## OpenCode on a self-hosted LiteLLM gateway
 A self-hosted gateway with any models behind it is first class, and nothing is refused by model or harness (owner
@@ -127,9 +128,102 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
 The URL, the key's variable and the model names stay in OpenCode's config and the project's settings store: no key,
 host or gateway URL in any repo.
 
+## The model environment (Claude through a gateway)
+What lane-control writes itself: each role's model in the project's settings store and tier table, the persona and the
+start command (`claude --model <model>`), and each automation's `--model` in its record. In a checkout's
+`.claude/settings.local.json` it writes hooks and away-improve's deny rules, never a model and no `env` block. The
+model environment is written by one tool, and only when you run it:
+
+```bash
+core/scripts/model-env --set ANTHROPIC_BASE_URL=<gateway URL> \
+  --set ANTHROPIC_DEFAULT_SONNET_MODEL=<name> --set CLAUDE_CODE_AUTO_MODE_MODEL=<name>
+core/scripts/model-env --check
+```
+
+Or run it with no arguments in a terminal and answer its questions. On a box, run it there.
+
+- **One source**, `~/.config/lane-control/model-env.conf`: `NAME=value` lines (mode 0600). It takes
+  `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`, `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL`,
+  `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL` and
+  `CLAUDE_CODE_DISABLE_THINKING`. **Never a key or a token** (it refuses them): the key stays where your shell or
+  login starts agents.
+- **Three homes written from it:** `~/.config/lane-control/model-env.sh` (add one `. <that file>` line to your shell
+  profile; no startup file is ever edited), `~/.config/fish/conf.d/lane-control-models.fish` (when `~/.config/fish`
+  exists) and the `env` block of Claude's user settings (`$CLAUDE_CONFIG_DIR/settings.json`, else
+  `~/.claude/settings.json`). A file or a value it did not write, or one edited since, is reported and left as it is.
+- **`--check`** compares each home with the source, value by value, and changes nothing: those three, hand-written
+  lines in shell startup files and `~/.config/environment.d`, the `env` blocks of set-up projects' Claude settings, the
+  systemd user manager's environment and the shell it runs in. Exit 1 when something differs, is missing or only a
+  shell could work out.
+- **A running agent keeps the environment it was born with.** After a change, restart each agent session, and whatever
+  starts them (Orca, its server on a box) when it had the old values from a shell or the systemd user manager.
+
+**The auto-mode classifier model is set explicitly** (field report 2026-11-26: a session died mid-turn with a 400
+naming the classifier's model group). With a gateway, `model-env` writes nothing until
+`CLAUDE_CODE_AUTO_MODE_MODEL` names one, and has no default. Give it a **non-reasoning** model your gateway serves, by
+its own name (Claude Code 2.1.302 or newer reads it). Claude Code's docs say it ignores the variable for Claude Opus 5,
+Sonnet 5.5 and Opus 5.5 (`model-env` warns), and that when your provider cannot serve the model, auto mode denies each
+action it checks; hence the served-model check. Whether an alias reasons is something only you know: lane-control can
+warn from its name and no more. To see which model reviewed, their docs give `claude --permission-mode auto
+--debug-file <log>` and `classifier_request_started` in that log. **A classifier model configured by the server wins
+over the variable:** Claude Code 2.1.332 then ignores it and logs `ignoring CLAUDE_CODE_AUTO_MODE_MODEL`.
+
+`CLAUDE_CODE_BG_CLASSIFIER_MODEL` is **not** set or checked. Claude Code 2.1.329 to 2.1.332 declare the name, but in
+those four binaries no code that reads its value was found (`CLAUDE_CODE_AUTO_MODE_MODEL`, the control, is read), and
+their docs do not name it. In 2.1.332's code, the classifier of a background session's state asks the small fast model
+with thinking off: `ANTHROPIC_SMALL_FAST_MODEL` when set, else usually `ANTHROPIC_DEFAULT_HAIKU_MODEL`, both of which
+`model-env` takes. A server setting can change that, and none of this was run live. Look again after a Claude Code
+update.
+
+**A `--model` with a Claude name turns extended thinking on, and some gateway backends reject it** (the field report).
+Claude Code decides from the model's name which request fields to send. Its gateway docs also say that on an
+Anthropic-format gateway it treats a name it does not recognise, a gateway alias too, as a current model that gets the
+thinking field, so renaming alone is not proof. If a backend answers 400 naming `thinking`, their compatibility switch
+is `CLAUDE_CODE_DISABLE_THINKING=1` (`model-env --set` takes it); on a model that thinks by default it may still think.
+
+**The settings `env` block may not reach the process** (the field report saw it not arrive). It is Claude Code that
+reads it, so it reaches Claude Code and what Claude Code starts: not the terminal it was started from, not Orca, not
+OpenCode. Its docs also list cases where the launch environment wins (sessions started by the desktop app or a
+self-hosted runner), and variables a project's settings cannot set. That is why the same values also go in the shell
+files, and why `--check` looks at every place rather than at one.
+
+**The served-model check.** Before a model is written (`model-env`, `machine-setup`'s coordinator and automation
+models, `project-setup`'s role pins and tier table), the gateway it goes through is asked once for
+`<base>/v1/models`. **Nothing is written blindly:**
+
+| The check says | Meaning | What happens |
+|---|---|---|
+| `ok` | the gateway lists the name | written |
+| `not served` | the gateway answered and does not list it | not written |
+| `could not check` | no answer, a refused key, a bare alias such as `opus` with no `ANTHROPIC_DEFAULT_OPUS_MODEL`, a paged list, a key that is for another URL | in a terminal you are asked, once per run for the same doubt, and only `y` writes; without a terminal, not written |
+| `not proven` | only a wildcard in the list matches | the same |
+
+`--no-model-check` writes without asking the gateway. A script or a box setup with no terminal needs that flag, or the
+doubt fixed: for an alias, name its model first with `model-env --set ANTHROPIC_DEFAULT_<ALIAS>_MODEL=<name>`.
+`ok` is not proof that the model works: only a request to it is. With no gateway nothing is asked.
+
+**Which URL and which key.** For Claude the URL is `ANTHROPIC_BASE_URL` from `model-env`'s source (or the value being
+written), else your Claude user settings, else the shell; never a repo's settings. For OpenCode it is the provider's
+`baseURL` in OpenCode's config. The key comes only from the environment (`ANTHROPIC_AUTH_TOKEN` or
+`ANTHROPIC_API_KEY`; for OpenCode the variable that same config names), goes in a header to that URL only, and is never
+printed or stored. **When the shell names an `ANTHROPIC_BASE_URL` of its own and it is not the URL to be asked, the key
+is not sent** (nothing is) and the check says `could not check`: to move to another gateway, run the command with its
+URL and its key in the shell. A shell with a key and no URL of its own sends it to the URL above, as Claude Code would.
+
 ## A machine
 `core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
-every step says `exists` on a re-run):
+every step says `exists` on a re-run).
+
+**No model is built in.** The machine coordinator's: `--machine-coordinator claude/<model>` (or
+`opencode/<provider>/<model>`), else `MACHINE_COORDINATOR=` in `machine.conf`, else what its persona already names,
+else it asks in a terminal. The automations' (only when Claude runs them): `--automation-model <model>`, else
+`AUTOMATION_MODEL=`; with neither, a new automation takes the model the existing Claude automations' records agree on
+(so a machine that has them is not asked again), and where they name none or differ it is asked in a terminal. A re-run
+never changes the model an existing
+automation's record names; `--automation-model <model> --replace-automation-model` does, and changes only the
+`--model` in its extra arguments. Without a terminal and without a model it stops and says what to write;
+`machine.conf` is already there to write it in.
+
 - `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators
   (`<name> <checkout>` each: the owner's list of whom the night manager may wake; Orca gives each one's harness and
   session name, the single agent terminal in that checkout, and a harness and terminal title written after the checkout

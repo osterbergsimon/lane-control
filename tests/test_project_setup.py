@@ -78,6 +78,10 @@ class Env:
         self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
         self.env["LANE_CONTROL_SWITCH"] = "1"
         self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
+        for k in [k for k in self.env if k.startswith("ANTHROPIC_") or k in ("OPENCODE_CONFIG", "CLAUDE_CONFIG_DIR",
+                                                                            "CLAUDE_CODE_AUTO_MODE_MODEL",
+                                                                            "CLAUDE_CODE_SUBAGENT_MODEL")]:
+            del self.env[k]  # a developer's own gateway is never asked by a test (core/modelenv.py)
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
         # The design skills table (core/design-skills.tsv) names upstream repos: tests install none unless they ask.
         (self.home / "design-skills.tsv").write_text("# none\n")
