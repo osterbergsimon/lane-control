@@ -11,6 +11,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -319,8 +320,9 @@ class SwitchTests(OrchTest):
         spec = importlib.util.spec_from_file_location("orch_mod", ROOT / "core" / "orch.py")
         orch = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(orch)
-        orch.time.strftime = lambda fmt: "20261116-120000"  # the same second for both
-        self.assertNotEqual(orch.stamp(), orch.stamp())
+        # the same second for both; patched for this test only (time is the one shared module: lc-wja's suite run)
+        with mock.patch.object(orch.time, "strftime", lambda fmt, *t: "20261116-120000"):
+            self.assertNotEqual(orch.stamp(), orch.stamp())
 
     def test_a_failed_worktree_leaves_no_temp_dir(self):
         p = self.fixture()
