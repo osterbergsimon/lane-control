@@ -1820,6 +1820,97 @@ class MachineModelTests(MachineSetupBase):
         self.assertEqual(self.orca_calls(), [])
         self.assertFalse(self.folder.exists())
 
+    def test_a_fresh_machine_without_a_terminal_gets_the_machine_conf_to_fill_in(self):  # review m2
+        r = self.bare_setup("--no-start")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        conf = self.conf_dir / "machine.conf"
+        self.assertEqual(conf.read_text(), (ROOT / "core" / "templates" / "machine.conf.example").read_text())
+        for needle in (str(conf), 'MACHINE_COORDINATOR="claude/<model>"', 'AUTOMATION_MODEL="<model>"'):
+            self.assertIn(needle, r.stderr)
+        self.assertEqual(self.orca_calls(), [])
+
+    # review m3: a machine whose automations already name a model is not asked again for a new one (AWY-2 adds one)
+
+    def drop_record(self, name: str):
+        state = json.loads((self.tmp / "orca.json").read_text())
+        state["automations"] = [a for a in state["automations"] if a["name"] != name]
+        (self.tmp / "orca.json").write_text(json.dumps(state))
+
+    def test_a_new_automation_takes_the_model_the_existing_records_agree_on(self):
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        for name in ("night manager", "lane sweep"):
+            self.edit_record(name, extraAgentArgs="--model m-agreed")
+        self.drop_record("machine check")
+        r = self.bare_setup("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.records()["machine check"]["extraAgentArgs"], "--model m-agreed")
+        line = next(l for l in r.stdout.splitlines() if l.startswith("automation model:"))
+        self.assertIn("m-agreed", line)
+        self.assertIn("existing", line)
+        self.assertEqual(self.edits(), [])
+
+    def test_records_that_disagree_give_a_new_automation_no_model(self):
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.edit_record("night manager", extraAgentArgs="--model m-one")
+        self.edit_record("lane sweep", extraAgentArgs="--model m-two")
+        self.drop_record("machine check")
+        r = self.bare_setup("--no-start")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertNotIn("machine check", self.records())
+        for needle in ("m-one", "m-two", "--automation-model"):
+            self.assertIn(needle, r.stdout + r.stderr)
+
+    def test_a_given_model_wins_over_what_the_records_agree_on(self):
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        self.drop_record("machine check")
+        r = self.bare_setup("--no-start", "--automation-model", "m-given")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.records()["machine check"]["extraAgentArgs"], "--model m-given")
+        self.assertEqual(self.records()["lane sweep"]["extraAgentArgs"], "--model sonnet")
+
+    # review M1: nothing is written on a model the gateway did not confirm, without a yes
+
+    def down_gateway(self):
+        (self.home / ".claude" / "settings.json").write_text(
+            json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9"}}))
+
+    def test_a_gateway_that_is_down_writes_no_coordinator_without_a_terminal(self):
+        self.down_gateway()
+        r = self.bare_setup("--machine-coordinator", "claude/m-x", "--automation-model", "m-x")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("--no-model-check", r.stderr)
+        self.assertEqual(self.orca_calls(), [])
+        self.assertFalse(self.folder.exists())
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-x", "--automation-model", "m-x",
+                            "--no-model-check")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+    def test_an_alias_nothing_maps_is_not_written_without_a_terminal(self):
+        self.gateway("m-live")  # the getting-started example, claude/sonnet, on a gateway with no mapping
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/sonnet", "--automation-model", "sonnet")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("ANTHROPIC_DEFAULT_SONNET_MODEL", r.stderr)
+        self.assertFalse(self.folder.exists())
+
+    def test_an_unconfirmed_automation_model_creates_no_automation(self):
+        self.gateway("m-live")
+        r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-live", "--automation-model", "haiku")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.creates(["automations", "create"]), [])
+
+    def test_in_a_terminal_one_question_covers_the_same_doubt(self):
+        from test_remote_native import run_pty
+        self.gateway("m-live")
+        argv = [sys.executable, str(SCRIPTS / "machine-setup"), "--folder", str(self.folder), "--trust-folder",
+                "--no-start", "--machine-coordinator", "claude/sonnet", "--automation-model", "sonnet"]
+        rc, out = run_pty(argv, self.env, answer="n", prompt="anyway? [y/N]")
+        self.assertEqual(rc, 1, out)
+        self.assertFalse(self.folder.exists())
+        rc, out = run_pty(argv, self.env, answer="y", prompt="anyway? [y/N]")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.count("anyway? [y/N]"), 1, out)
+        self.assertEqual(len(self.records()), 3)
+
     def test_no_automation_model_creates_no_automation_and_the_rest_still_runs(self):
         r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-coord")
         self.assertEqual(r.returncode, 1, r.stdout)

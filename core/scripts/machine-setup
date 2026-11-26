@@ -14,12 +14,15 @@ precheck and prompt, and never from a lane worktree, or its model when --replace
 
 No model is built in. The machine coordinator's is --machine-coordinator, else MACHINE_COORDINATOR in machine.conf,
 else the one its persona already names (the last run's), else asked in a terminal; without a terminal the run stops
-(exit 2) before it makes anything. The automations' is --automation-model, else AUTOMATION_MODEL in machine.conf; it
-is needed only to create a Claude automation (asked in a terminal; without one none is created, exit 1). An existing
-automation keeps the model its own record names: with another one given it is named and left; only
---replace-automation-model changes it, and then only the --model in its extra arguments. Before a new model is
-written, the gateway (ANTHROPIC_BASE_URL, or the OpenCode provider's baseURL) is asked what it serves
-(<base>/v1/models): one it does not list is not written (--no-model-check writes it anyway). With a gateway it also
+(exit 2) with machine.conf written from the example, naming what to put in it, and nothing else made. The automations'
+is --automation-model, else AUTOMATION_MODEL in machine.conf; it is needed only to create a Claude automation. With
+neither, a new one takes the model the existing Claude automations' records agree on (and says so); where they name
+none, or differ, it is asked in a terminal, and without one none is created (exit 1). An existing automation keeps the
+model its own record names: with another one given it is named and left; only --replace-automation-model changes it,
+and then only the --model in its extra arguments. Before a new model is written, the gateway (ANTHROPIC_BASE_URL, or
+the OpenCode provider's baseURL) is asked what it serves (<base>/v1/models): one it does not list is not written, and
+one it could not confirm (no answer, a refused key, a bare alias, only a wildcard) is written only on your yes in a
+terminal (--trust-folder does not answer that); --no-model-check writes without the check. With a gateway it also
 says whether model-env, which sets the auto-mode classifier model explicitly, still has to be run.
 
 1. ~/.config/lane-control/machine.conf (LANE_MACHINE_CONF) from core/templates/machine.conf.example, mode 0600, if
@@ -142,9 +145,12 @@ class SystemExit2(Exception):
 
 # --- models: none is built in (lc-l78.18) -----------------------------------------------------------------------------
 
-COORDINATOR_HOW = ("pass --machine-coordinator claude/<model> (or opencode/<provider>/<model>), or set "
-                   "MACHINE_COORDINATOR= in machine.conf; there is no default")
-AUTOMATION_HOW = ("pass --automation-model <model>, or set AUTOMATION_MODEL= in machine.conf; there is no default")
+def how_to_name_models() -> str:
+    """Exactly what to write, and where: both at once, so a run without a terminal does not stop twice."""
+    return (f"there is no default. Write both in {machineconf.path()}:\n"
+            '  MACHINE_COORDINATOR="claude/<model>"    (or "opencode/<provider>/<model>")\n'
+            '  AUTOMATION_MODEL="<model>"              (for the automations, when Claude runs them)\n'
+            "or pass --machine-coordinator claude/<model> --automation-model <model>")
 
 
 def check_model_name(model: str, what: str) -> str:
@@ -198,26 +204,30 @@ def coordinator_model(flag: "str | None", conf: dict, folder: Path) -> tuple:
         spec, where = ask_value("Machine coordinator model, as claude/<model> or opencode/<provider>/<model> "
                                 "(no default): "), "your answer"
         if not spec:
-            raise SystemExit2(f"no model for the machine coordinator: {COORDINATOR_HOW}")
+            raise SystemExit2(f"no model for the machine coordinator: {how_to_name_models()}")
     harness, model = harness_model(spec)
     say("coordinator model", spec, f"(from {where})")
     return harness, model, spec != last
 
 
-def served(label: str, harness: str, model: str, cache: dict) -> "str | None":
-    """Asks the gateway before a model is written: None to go on, or why not (lc-l78.19)."""
+def served(label: str, harness: str, model: str, cache: dict, approved: set) -> "str | None":
+    """Asks the gateway before a model is written: None to go on, or why not (lc-l78.19). What it could not confirm
+    needs the owner's yes in a terminal."""
     found = modelenv.check_models([(label, harness, model)], modelenv.view(os.environ), os.environ, cache)
     for line in modelenv.check_lines(found):
         print(line, flush=True)
-    return modelenv.refusal(found)
+    terminal = sys.stdin.isatty() and sys.stdout.isatty()
+    return modelenv.gate(found, ask if terminal else None, approved)
 
 
 class Models:
     """The automations' model for this run: what was given (flag, else machine.conf), whether to replace records'."""
 
-    def __init__(self, given: str = "", replace: bool = False, check: bool = True, cache: "dict | None" = None):
+    def __init__(self, given: str = "", replace: bool = False, check: bool = True, cache: "dict | None" = None,
+                 approved: "set | None" = None):
         self.given, self.replace, self.check = given, replace, check
         self.cache = {} if cache is None else cache
+        self.approved = set() if approved is None else approved
 
 
 def args_words(text: str) -> list:
@@ -401,20 +411,29 @@ def automation_agent(provider: str, model: str) -> list:
     return ["--provider", harnesses.load_harness(provider).ORCA_AGENT_ID]
 
 
-def automation_model(models: Models, creating: bool) -> tuple:
+def automation_model(models: Models, creating: bool, records: list) -> tuple:
     """(model, why not): the model to create Claude automations with or to set on records, checked with the gateway.
-    Asked for only when an automation is to be created."""
+    records: our automations that exist. With none given, a new one takes the model their Claude records agree on, so
+    a machine that has them is not asked again; otherwise it is asked for."""
     model = models.given
     if not model and creating:
-        model = ask_value("Model for the automations (a name `claude --model` takes; no default): ")
-        if not model:
-            return "", f"no model for the Claude automations: {AUTOMATION_HOW}. None was created"
+        named = sorted({m for m in (record_model(a) for a in records if a.get("agentId") == "claude") if m})
+        if len(named) == 1:
+            model = named[0]
+            say("automation model", model, "(the one the existing automations' records name; --automation-model "
+                                           "picks another)")
+        else:
+            differ = f"the existing automations name different models ({', '.join(named)}). " if named else ""
+            model = ask_value(f"{differ}Model for the automations (a name `claude --model` takes; no default): ")
+            if not model:
+                return "", (f"no model for the new Claude automations: {differ}Pass --automation-model <model>, or set "
+                            f"AUTOMATION_MODEL= in {machineconf.path()}; there is no default. None was created")
         try:
             check_model_name(model, "the automation model")
         except SystemExit2 as e:
             return "", str(e)
     if model and models.check:
-        why = served("automations", "claude", model, models.cache)
+        why = served("automations", "claude", model, models.cache, models.approved)
         if why:
             return "", f"{why}. No automation was created and no automation's model was changed"
     return model, None
@@ -450,7 +469,8 @@ def automations_step(folder: Path, from_lane: bool = False, provider: str = "cla
     have = {a.get("name"): a for a in orca("automations", "list").get("automations", []) or []}
     creating = provider == "claude" and any(
         name not in have and not any(o in have for o in OLDER_AUTOMATIONS[name]) for name, *_ in automation_specs())
-    model, no_model = automation_model(models, creating) if creating or models.replace else ("", None)
+    ours = [have[name] for name, *_ in automation_specs() if name in have]
+    model, no_model = automation_model(models, creating, ours) if creating or models.replace else ("", None)
     for name, trigger, precheck, timeout, prompt in automation_specs():
         if name in have:
             a = have[name]
@@ -677,25 +697,31 @@ def main(argv) -> int:
     if warning:
         say("lane-control", "warning", warning)
     cache: dict = {}  # one /v1/models request per gateway in a run
-    try:  # the models first: a run that cannot name them, or names a dead one, makes nothing
+    approved: set = set()  # unconfirmed models the owner said yes to
+    try:  # first, so that a run that stops for want of a model leaves the file its message names
+        machine_conf()
+    except OSError as e:
+        print(f"machine-setup: {e}", file=sys.stderr)
+        return 1
+    try:  # then the models: a run that cannot name them, or may not write them, makes nothing else
         conf = conf_models()
         given = a.automation_model or conf.get("AUTOMATION_MODEL", "")
         if given:
             check_model_name(given, "AUTOMATION_MODEL")
         elif a.replace_automation_model:
-            raise SystemExit2(f"--replace-automation-model needs the model to set: {AUTOMATION_HOW}")
+            raise SystemExit2("--replace-automation-model needs the model to set: pass --automation-model <model>, "
+                              f"or set AUTOMATION_MODEL= in {machineconf.path()}")
         harness, model, new_choice = coordinator_model(a.machine_coordinator, conf, folder)
         harnesses.load_harness(harness).start_command(ROLE, Path("/x"), model, a.permission_mode)
     except (SystemExit2, ValueError) as e:
         print(f"machine-setup: {e}", file=sys.stderr)
         return 2
     if new_choice and not a.no_model_check:
-        why = served("machine coordinator", harness, model, cache)
+        why = served("machine coordinator", harness, model, cache, approved)
         if why:
             print(f"machine-setup: {why}. No persona, session or automation was made or changed", file=sys.stderr)
             return 1
     try:
-        machine_conf()
         usage_feed()
         bd_version_step()
         cleanup_step()
@@ -709,7 +735,8 @@ def main(argv) -> int:
         failed = None
         try:
             created = automations_step(folder, from_lane=bool(warning), provider=provider,
-                                       models=Models(given, a.replace_automation_model, not a.no_model_check, cache))
+                                       models=Models(given, a.replace_automation_model, not a.no_model_check, cache,
+                                                     approved))
         except AutomationFail as e:
             created, failed = 0, str(e)
             say("automations", "failed", failed)

@@ -70,9 +70,10 @@ table is the only place that says which models it uses.
 Before a role's pin or a tier table is written with a model it did not have, the gateway that model goes through is
 asked what it serves (one GET <base>/v1/models; core/modelenv.py): ANTHROPIC_BASE_URL for Claude (from model-env's
 source, your Claude settings or this shell, never from a repo), the provider's baseURL in OpenCode's config for
-OpenCode. A model it does not list is not written; --no-model-check writes it anyway. A gateway that does not answer, or
-an alias like `opus` with no ANTHROPIC_DEFAULT_OPUS_MODEL to say what is sent, is "could not check". With no gateway
-nothing is asked or said.
+OpenCode. A model it does not list is not written. One it could not confirm (no answer, a refused key, an alias like
+`opus` with no ANTHROPIC_DEFAULT_OPUS_MODEL to say what is sent, only a wildcard) is written only on your yes in a
+terminal; without a terminal it is not written. --no-model-check writes without the check. With no gateway nothing is
+asked or said.
 
 --suggest-tiers <provider> suggests that table from an OpenAI-compatible gateway (a self-hosted LiteLLM, say): GET
 <base>/v1/models, and <base>/model/info where it answers (LiteLLM: the model behind each alias). Each row is
@@ -1185,11 +1186,12 @@ def check_tier_table(text: str) -> list:
 
 
 MODEL_ANSWERS: dict = {}  # one /v1/models request per gateway in a run
+MODEL_YES: set = set()  # unconfirmed models the owner said yes to: not asked twice in a run
 
 
 def check_written_models(items: list, a, unwritten: str) -> None:
-    """(label, harness, model) about to be written: Refused when the gateway one goes through does not list it
-    (core/modelenv.py; --no-model-check skips the question)."""
+    """(label, harness, model) about to be written: Refused when the gateway one goes through does not list it, or
+    could not confirm it and the owner did not say yes (core/modelenv.py gate; --no-model-check skips the check)."""
     if a.no_model_check or not items:
         return
     if str(HERE / "core") not in sys.path:
@@ -1198,7 +1200,8 @@ def check_written_models(items: list, a, unwritten: str) -> None:
     found = modelenv.check_models(items, modelenv.view(os.environ), os.environ, MODEL_ANSWERS)
     for line in modelenv.check_lines(found):
         print(line, flush=True)
-    why = modelenv.refusal(found)
+    yes = (lambda q: owner_says_yes(q, step="model check")) if has_terminal() else None
+    why = modelenv.gate(found, yes, MODEL_YES)
     if why:
         raise Refused(f"{why}. {unwritten}")
 

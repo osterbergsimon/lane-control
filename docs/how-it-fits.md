@@ -96,8 +96,9 @@ More: [core and its scripts](../core/README.md), [where beads lives](../core/iss
 
 No setup script has a built-in model for the machine coordinator or the automations: you name them once (a flag,
 `machine.conf` or an answer in the terminal) and a re-run keeps them. An automation's own record keeps its model unless
-you pass `--replace-automation-model`. Before a model is written, a gateway in use is asked what it serves
-(`<base>/v1/models`); a name it does not list is not written. For Claude through a gateway, **`model-env`** keeps the
+you pass `--replace-automation-model`; a new automation takes the model the existing records agree on. Before a model
+is written, a gateway in use is asked what it serves (`<base>/v1/models`): a name it does not list is not written, and
+one it cannot confirm is written only on your yes in a terminal (`--no-model-check` skips the check). For Claude through a gateway, **`model-env`** keeps the
 model variables in one source, writes the shell file, the fish file and Claude's settings `env` from it, including the
 auto-mode classifier model (no default), and `model-env --check` compares every place that sets them. It never edits a
 line you wrote, and never writes a key. A running agent keeps the environment it was born with.

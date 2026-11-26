@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_project_setup_native import NativeEnv  # noqa: E402
+from test_project_setup_native import SETUP, NativeEnv  # noqa: E402
 from test_remote_native import run_pty  # noqa: E402
 from test_tier_suggest import KEY, logged, start_gateway  # noqa: E402
 
@@ -423,17 +423,51 @@ class ServedTests(ModelEnvTest):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(logged(self.log), [])
 
-    def test_a_gateway_that_does_not_answer_is_could_not_check_not_ok(self):
+    def written(self) -> list:
+        return [f.name for f in (self.source, self.sh, self.fish, self.settings) if f.exists()]
+
+    def test_a_gateway_that_does_not_answer_writes_nothing_without_a_terminal(self):  # review M1: never blindly
         r = self.put("http://127.0.0.1:9", f"{CLASSIFIER}=small")
-        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(r.returncode, 1, r.stderr + r.stdout)
         self.assertIn("model check: could not check", r.stdout)
         self.assertNotIn("model check: ok", r.stdout)
+        for needle in ("--no-model-check", "terminal", "Nothing was written"):
+            self.assertIn(needle, r.stderr)
+        self.assertEqual(self.written(), [])
+        r = self.put("http://127.0.0.1:9", f"{CLASSIFIER}=small", flags=("--no-model-check",))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
 
-    def test_a_refused_key_is_could_not_check_and_the_key_is_not_printed(self):
+    def test_an_alias_nothing_maps_writes_nothing_without_a_terminal_and_names_the_fix(self):  # review M1
+        r = self.put(self.gateway(["small"]), "ANTHROPIC_MODEL=sonnet", f"{CLASSIFIER}=small")
+        self.assertEqual(r.returncode, 1, r.stderr + r.stdout)
+        self.assertIn("ANTHROPIC_DEFAULT_SONNET_MODEL", r.stderr)
+        self.assertEqual(self.written(), [])
+
+    def test_a_refused_key_writes_nothing_and_the_key_is_not_printed(self):
         r = self.put(self.gateway(["small"], key="other"), f"{CLASSIFIER}=small")
-        self.assertIn("could not check", r.stdout)
+        self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("401", r.stdout)
         self.assertNotIn(KEY, r.stdout + r.stderr)
+        self.assertEqual(self.written(), [])
+
+    def test_in_a_terminal_it_asks_and_only_a_yes_writes(self):  # review M1
+        argv = [sys.executable, str(SCRIPT), "--set", "ANTHROPIC_BASE_URL=http://127.0.0.1:9", "--set",
+                f"{CLASSIFIER}=small"]
+        for answer in ("", "n", "maybe"):
+            with self.subTest(answer=answer):
+                rc, out = run_pty(argv, self.env, answer=answer, prompt="anyway? [y/N]")
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(self.written(), [])
+        rc, out = run_pty(argv, self.env, answer="y", prompt="anyway? [y/N]")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.values()[CLASSIFIER], "small")
+
+    def test_a_dead_model_is_not_offered_as_a_question(self):
+        base = self.gateway(["small"])
+        rc, out = run_pty([sys.executable, str(SCRIPT), "--set", f"ANTHROPIC_BASE_URL={base}", "--set",
+                           f"{CLASSIFIER}=dead"], {**self.env, "ANTHROPIC_AUTH_TOKEN": KEY}, timeout=30)
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn("anyway? [y/N]", out)
 
     def test_an_api_key_goes_in_the_header_claude_code_uses(self):
         base = self.gateway(["small"])
@@ -477,6 +511,47 @@ class CheckModelsTests(ModelEnvTest):
     def test_a_paged_list_never_calls_a_model_unserved(self):
         base = self.gateway(["big"], key=None, more=True)
         self.assertEqual(self.states([("a", "claude", "other")], self.claude(base)), [("unchecked", "other")])
+
+    def test_the_gate_never_lets_an_unconfirmed_model_through_without_a_yes(self):  # review M1
+        base = self.gateway(["vendor/*"], key=None)
+        for view, model in ((self.claude("http://127.0.0.1:9"), "m"), (self.claude(base), "sonnet"),
+                            (self.claude(base), "vendor/x")):
+            with self.subTest(model=model):
+                found = M.check_models([("a", "claude", model)], view, {"HOME": str(self.home)})
+                why = M.gate(found, None, set())
+                self.assertIn("--no-model-check", why or "")
+                self.assertIn("--no-model-check", M.gate(found, lambda q: False, set()) or "")
+                asked, approved = [], set()
+                yes = lambda q: asked.append(q) or True
+                self.assertIsNone(M.gate(found, yes, approved))
+                self.assertIsNone(M.gate(found, yes, approved))  # one question for the same doubt
+                self.assertEqual(len(asked), 1)
+
+    def test_the_gate_passes_what_the_gateway_lists_and_never_asks_about_what_it_does_not(self):
+        ok = [M.Found("a", "x", "ok", "listed")]
+        dead = [M.Found("a", "y", "unserved", "not listed")]
+        asked = []
+        self.assertIsNone(M.gate(ok, None, set()))
+        self.assertIn("does not serve", M.gate(dead, lambda q: asked.append(q) or True, set()))
+        self.assertEqual(asked, [])
+
+    def test_a_key_is_not_sent_to_a_url_other_than_the_one_this_shell_names(self):  # review m4
+        base = self.gateway(["big"])
+        shell = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9", "ANTHROPIC_AUTH_TOKEN": KEY}
+        for token in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            with self.subTest(token=token):
+                env = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9", token: KEY, "HOME": str(self.home)}
+                (found,) = M.check_models([("a", "claude", "big")], self.claude(base), env)
+                self.assertEqual(found.state, "unchecked")
+                self.assertIn("another URL", found.detail)
+                self.assertNotIn(KEY, found.detail)
+        self.assertEqual(logged(self.log), [])  # nothing was sent at all
+        for own in (base, base + "/", base + "/v1"):  # the same gateway, however it is written
+            with self.subTest(own=own):
+                self.assertEqual(self.states([("a", "claude", "big")], self.claude(base),
+                                             {**shell, "ANTHROPIC_BASE_URL": own}), [("ok", "big")])
+        self.assertEqual(self.states([("a", "claude", "big")], self.claude(base),
+                                     {"ANTHROPIC_AUTH_TOKEN": KEY}), [("ok", "big")])  # the shell names no URL
 
     def test_no_gateway_means_nothing_to_check(self):
         for view in ({}, {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}):
@@ -563,12 +638,36 @@ class ProjectSetupTests(unittest.TestCase):
         self.assertEqual(self.pins()["coordinator"], "claude/gw-big")
         self.assertEqual(len(logged(self.log)), 1, logged(self.log))
 
-    def test_default_aliases_without_a_default_model_variable_are_could_not_check_and_written(self):
+    def test_default_aliases_without_a_default_model_variable_are_not_written_blindly(self):  # review M1
         self.use_gateway()
         r = self.setup()
-        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("model check: could not check", r.stdout)
-        self.assertIn("ANTHROPIC_DEFAULT_OPUS_MODEL", r.stdout)
+        for needle in ("ANTHROPIC_DEFAULT_OPUS_MODEL", "--no-model-check"):
+            self.assertIn(needle, r.stderr)
+        self.assertEqual(self.pins(), {})
+
+    def test_a_gateway_that_is_down_writes_no_pin_without_a_terminal(self):  # review M1
+        self.base = "http://127.0.0.1:9"
+        self.use_gateway()
+        r = self.setup("--coordinator", "claude/gw-big", "--reviewer", "claude/gw-big")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.pins(), {})
+
+    def test_in_a_terminal_it_asks_before_it_writes_unconfirmed_models(self):  # review M1
+        self.base = "http://127.0.0.1:9"
+        self.use_gateway()
+        argv = [sys.executable, str(SETUP), str(self.repo), "--no-start", "--skip-adapt", "--coordinator",
+                "claude/gw-big", "--reviewer", "claude/gw-big", "--tiers",
+                str(self.tiers(("standard", "claude", "gw-big", "inherit")))]
+        rc, out = run_pty(argv, self.e.env, answer="n", prompt="anyway? [y/N]")
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.pins(), {})
+        rc, out = run_pty(argv, self.e.env, answer="y", prompt="anyway? [y/N]")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.pins()["coordinator"], "claude/gw-big")
+        self.assertEqual(out.count("anyway? [y/N]"), 1, out)  # the same doubt is asked once in a run
+        self.assertTrue((self.e.store(self.repo) / "lanes.tsv").exists())
 
     def test_an_opencode_row_is_checked_with_its_providers_gateway(self):
         f = self.e.home / ".config" / "opencode" / "opencode.json"

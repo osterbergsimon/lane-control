@@ -25,8 +25,8 @@ RUNNER_REPOS=""
 # these; left empty, machine-setup keeps what the machine already has (the coordinator's persona, each automation's own
 # record) and asks in a terminal for the rest.
 #   MACHINE_COORDINATOR  claude/<model> or opencode/<provider>/<model>
-#   AUTOMATION_MODEL     a name `claude --model` takes, for the three automations when Claude runs them. It is used when
-#                        one is created; an existing one keeps its own unless you pass --replace-automation-model
+#   AUTOMATION_MODEL     a name `claude --model` takes, for the automations when Claude runs them. It is used when one
+#                        is created; an existing one keeps its own unless you pass --replace-automation-model
 MACHINE_COORDINATOR=""
 AUTOMATION_MODEL=""
 

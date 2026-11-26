@@ -164,7 +164,15 @@ its own name (Claude Code 2.1.302 or newer reads it). Claude Code's docs say it 
 Sonnet 5.5 and Opus 5.5 (`model-env` warns), and that when your provider cannot serve the model, auto mode denies each
 action it checks; hence the served-model check. Whether an alias reasons is something only you know: lane-control can
 warn from its name and no more. To see which model reviewed, their docs give `claude --permission-mode auto
---debug-file <log>` and `classifier_request_started` in that log.
+--debug-file <log>` and `classifier_request_started` in that log. **A classifier model configured by the server wins
+over the variable:** Claude Code 2.1.332 then ignores it and logs `ignoring CLAUDE_CODE_AUTO_MODE_MODEL`.
+
+`CLAUDE_CODE_BG_CLASSIFIER_MODEL` is **not** set or checked. Claude Code 2.1.329 to 2.1.332 declare the name, but in
+those four binaries no code that reads its value was found (`CLAUDE_CODE_AUTO_MODE_MODEL`, the control, is read), and
+their docs do not name it. In 2.1.332's code, the classifier of a background session's state asks the small fast model
+with thinking off: `ANTHROPIC_SMALL_FAST_MODEL` when set, else usually `ANTHROPIC_DEFAULT_HAIKU_MODEL`, both of which
+`model-env` takes. A server setting can change that, and none of this was run live. Look again after a Claude Code
+update.
 
 **A `--model` with a Claude name turns extended thinking on, and some gateway backends reject it** (the field report).
 Claude Code decides from the model's name which request fields to send. Its gateway docs also say that on an
@@ -180,13 +188,26 @@ files, and why `--check` looks at every place rather than at one.
 
 **The served-model check.** Before a model is written (`model-env`, `machine-setup`'s coordinator and automation
 models, `project-setup`'s role pins and tier table), the gateway it goes through is asked once for
-`<base>/v1/models`: `ANTHROPIC_BASE_URL` for Claude (from the source, your Claude settings or the shell, never from a
-repo's settings), the provider's `baseURL` in OpenCode's config for OpenCode. A name it does not list is not written;
-`--no-model-check` writes it anyway. The key is `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` (for OpenCode the
-variable its config names), taken from the environment, sent in a header to that URL only, never printed or stored. A
-gateway that does not answer or refuses the key is `could not check`, and so is a bare alias such as `opus` until
-`ANTHROPIC_DEFAULT_OPUS_MODEL` says what is sent; a list with only a wildcard is `not proven`. Neither blocks the
-write, and neither means the model works. A listed name is not proof either: only a request to the model is.
+`<base>/v1/models`. **Nothing is written blindly:**
+
+| The check says | Meaning | What happens |
+|---|---|---|
+| `ok` | the gateway lists the name | written |
+| `not served` | the gateway answered and does not list it | not written |
+| `could not check` | no answer, a refused key, a bare alias such as `opus` with no `ANTHROPIC_DEFAULT_OPUS_MODEL`, a paged list, a key that is for another URL | in a terminal you are asked, once per run for the same doubt, and only `y` writes; without a terminal, not written |
+| `not proven` | only a wildcard in the list matches | the same |
+
+`--no-model-check` writes without asking the gateway. A script or a box setup with no terminal needs that flag, or the
+doubt fixed: for an alias, name its model first with `model-env --set ANTHROPIC_DEFAULT_<ALIAS>_MODEL=<name>`.
+`ok` is not proof that the model works: only a request to it is. With no gateway nothing is asked.
+
+**Which URL and which key.** For Claude the URL is `ANTHROPIC_BASE_URL` from `model-env`'s source (or the value being
+written), else your Claude user settings, else the shell; never a repo's settings. For OpenCode it is the provider's
+`baseURL` in OpenCode's config. The key comes only from the environment (`ANTHROPIC_AUTH_TOKEN` or
+`ANTHROPIC_API_KEY`; for OpenCode the variable that same config names), goes in a header to that URL only, and is never
+printed or stored. **When the shell names an `ANTHROPIC_BASE_URL` of its own and it is not the URL to be asked, the key
+is not sent** (nothing is) and the check says `could not check`: to move to another gateway, run the command with its
+URL and its key in the shell. A shell with a key and no URL of its own sends it to the URL above, as Claude Code would.
 
 ## A machine
 `core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
@@ -195,9 +216,12 @@ every step says `exists` on a re-run).
 **No model is built in.** The machine coordinator's: `--machine-coordinator claude/<model>` (or
 `opencode/<provider>/<model>`), else `MACHINE_COORDINATOR=` in `machine.conf`, else what its persona already names,
 else it asks in a terminal. The automations' (only when Claude runs them): `--automation-model <model>`, else
-`AUTOMATION_MODEL=`, asked in a terminal when one is to be created. A re-run never changes the model an existing
+`AUTOMATION_MODEL=`; with neither, a new automation takes the model the existing Claude automations' records agree on
+(so a machine that has them is not asked again), and where they name none or differ it is asked in a terminal. A re-run
+never changes the model an existing
 automation's record names; `--automation-model <model> --replace-automation-model` does, and changes only the
-`--model` in its extra arguments. Without a terminal and without an answer it says what to pass.
+`--model` in its extra arguments. Without a terminal and without a model it stops and says what to write;
+`machine.conf` is already there to write it in.
 
 - `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators
   (`<name> <checkout>` each: the owner's list of whom the night manager may wake; Orca gives each one's harness and

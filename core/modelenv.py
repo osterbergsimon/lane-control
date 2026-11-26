@@ -6,8 +6,10 @@ KEYS go in it, and never a key or a token: those stay in the owner's own environ
 and generates from it a POSIX shell file, a fish mirror and the `env` block of Claude Code's user settings. A file or a
 value lane-control did not write (or that was edited since) is reported and left as it is.
 
-check_models() is what project-setup, machine-setup and model-env call before they write a model id: one request to
-<gateway>/v1/models (core/tiersuggest.py). With no gateway there is nothing to ask and nothing is said.
+check_models() and gate() are what project-setup, machine-setup and model-env call before they write a model id: one
+request to <gateway>/v1/models (core/tiersuggest.py). A model the gateway does not list is not written; one it could
+not confirm is written only on the owner's yes in a terminal. With no gateway there is nothing to ask and nothing is
+said.
 """
 import fnmatch
 import hashlib
@@ -276,6 +278,11 @@ def _target(harness: str, model: str, seen: dict, env):
             sent = behind.removesuffix("[1m]")
         if sent in CHOSEN_BY_CLAUDE or sent in ALIASES:
             return f"which id `{sent}` sends is Claude Code's own choice"
+        own = env.get(BASE)  # a shell that names a URL of its own holds the key for that one
+        if own and tiersuggest.root_of(own) != tiersuggest.root_of(base) and \
+                (env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY")):
+            return (f"the key in this shell is for another URL, the one its own {BASE} names: nothing was sent. Run "
+                    f"with {BASE} and the key of the gateway being written")
         return base, _claude_headers(env), sent
     if harness == "opencode":
         provider, slash, alias = model.partition("/")
@@ -349,6 +356,30 @@ def refusal(found: list) -> "str | None":
         return None
     return ("the gateway does not serve " + "; ".join(f"{f.model} ({f.label}): {f.detail}" for f in dead)
             + ". Use a name it serves, or pass --no-model-check to write it anyway")
+
+
+HOW_TO_CONFIRM = ("Fix what that line says (make the gateway answer, set its key in this shell, or name an alias's "
+                  "model: model-env --set ANTHROPIC_DEFAULT_<ALIAS>_MODEL=<name>), run this in a terminal to be "
+                  "asked, or pass --no-model-check to write it without the check")
+
+
+def gate(found: list, ask, approved: set) -> "str | None":
+    """None to go on and write, else why nothing is to be written. A model the gateway does not list is refused. One it
+    could not confirm (no answer, a refused key, a bare alias, only a wildcard) is never written blindly: the owner is
+    asked once, and without a yes it is refused. ask(question) -> bool, or None where there is no terminal. approved:
+    what the owner already said yes to in this run."""
+    why = refusal(found)
+    if why:
+        return why
+    doubts = [f for f in found if f.state != "ok" and (f.model, f.state) not in approved]
+    if not doubts:
+        return None
+    names = ", ".join(dict.fromkeys(f.model for f in doubts))
+    if ask and ask(f"The gateway did not confirm {names} (see above). Write it anyway? [y/N] "):
+        approved.update((f.model, f.state) for f in doubts)
+        return None
+    said = "; ".join(f"{f.model} ({f.label}): {f.detail}" for f in doubts)
+    return f"the gateway did not confirm {said}" + (", and there was no yes" if ask else "") + f". {HOW_TO_CONFIRM}"
 
 
 # --- generated shell files ------------------------------------------------------------------------------------------

@@ -16,16 +16,18 @@ non-reasoning model the gateway serves. There is no default; in a terminal it is
 with nothing to go on asks for the gateway and its models.
 
 Before anything is written every model name is looked up in the gateway's <base>/v1/models (one request). A name it
-does not list writes nothing (--no-model-check writes it anyway). A gateway that does not answer is "could not check".
-The key for that request is ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY of this shell; it is never written or printed,
-and no key or token can be set here.
+does not list writes nothing. One it could not confirm (no answer, a refused key, a bare alias with nothing saying what
+is sent, only a wildcard) is written only on your yes in a terminal; without a terminal nothing is written.
+--no-model-check writes without the check. The key for that request is ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY of
+this shell, and it is not sent when the shell's own ANTHROPIC_BASE_URL names another URL than the one asked. It is never
+written or printed, and no key or token can be set here.
 
 --check compares each home with the source, value by value, and changes nothing: the three generated ones, the
 hand-written lines in shell startup files and environment.d, the env blocks of set-up projects' Claude settings, the
 systemd user manager's environment and this shell's.
 
-Exit: 0 done, or every home agrees; 1 a model is not served, a home was left that differs, or --check found a
-difference; 2 usage, a refused value or a missing answer.
+Exit: 0 done, or every home agrees; 1 a model is not served or not confirmed, a home was left that differs, or
+--check found a difference; 2 usage, a refused value or a missing answer.
 """
 import argparse
 import os
@@ -50,6 +52,13 @@ def say(line: str):
 
 def terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def confirm(question: str) -> bool:
+    try:
+        return input(question).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
 
 
 def ask(name: str, question: str) -> str:
@@ -140,7 +149,7 @@ def write(a, env) -> int:
         found = M.check_models(items, M.view_after(have or {}, values, env), env)
         for line in M.check_lines(found):
             say(line)
-        why = M.refusal(found)
+        why = M.gate(found, confirm if terminal() else None, set())
         if why:
             print(f"model-env: {why}. Nothing was written", file=sys.stderr)
             return 1
