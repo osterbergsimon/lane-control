@@ -841,7 +841,7 @@ class NativePersonaTests(unittest.TestCase):
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
             self.assertRegex(t, r"on another host.*`orca-ide orchestration check`", role)
-            self.assertIn("with both servers at the same version", t, role)
+            self.assertIn("With both servers at the same version", t, role)
 
     def test_lane_starters_use_native_orca_orchestration(self):
         for role in LANE_STARTERS:
@@ -860,7 +860,13 @@ class NativePersonaTests(unittest.TestCase):
         # existing worktree
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
-            self.assertIn("--worktree new-top-level --repo <exact selector>", t, role)
+            self.assertIn("takes `--worktree new-child` or `new-top-level`, with `--repo <exact selector>`", t, role)
+            self.assertNotIn("Orca refuses `new-child`", t, role)
+        skill = flat(NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md")
+        self.assertIn("`--worktree new-child` or `new-top-level`, with `--repo <exact selector>`", skill)
+        self.assertNotIn("Orca refuses `new-child`", skill)
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
             self.assertIn("orca-ide worktree create", t, role)
             self.assertIn("--worktree path:<that worktree>", t, role)
 
@@ -1439,6 +1445,14 @@ class NativeHandsAfterMainTests(unittest.TestCase):
                 self.assertIn("worker-abandon", two)
                 self.assertIn("owner's word", two)
 
+    def test_who_notices_a_lost_cross_host_wake(self):
+        t = flat(NATIVE / "coordinator.md")
+        self.assertIn("What catches a report that is lost or never sent: the night manager's idle check (while the owner "
+                      "is away or it is night), Orca's \"Worker stopped without reporting\" notice where the build has "
+                      "it, and otherwise the owner.", t)
+        self.assertIn("Before you call a quiet lane lost, run `orca-ide orchestration worker-show --dispatch "
+                      "<dispatch>`.", t)
+
     def test_what_to_do_about_a_lost_cross_host_wake(self):
         t = flat(NATIVE / "coordinator.md")
         self.assertIn("If a wake seems lost, run `orca-ide orchestration check`; never loop on it.", t)
@@ -1511,7 +1525,7 @@ class CrossHostReportContractTests(unittest.TestCase):
         # lc-l78.25: the field measured it; the doc says on what versions, who measured and what to do if it seems lost
         t = flat(self.REMOTE)
         reports = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
-        for needle in ("both servers at the same version (1.4.274)", "a cross-host `worker_done` wakes the coordinator",
+        for needle in ("both servers at the same version (1.4.274)", "that lane's `worker_done` wakes the box's coordinator",
                        "--worktree new-child --repo name:<project> --setup skip", "lane-control has not repeated",
                        "`name:<project>`, naming the project, resolves where a `github:` selector does not",
                        "If a wake seems lost, run `orca-ide orchestration check`"):
@@ -1800,6 +1814,24 @@ class CrossHostRouteTests(unittest.TestCase):
                        "run once between scratch servers in the canary", "`server_mail_unsupported`",
                        "`send --to dispatch:<id>`", "no route to a peer session"):
             self.assertIn(needle, t)
+
+    def test_remote_md_names_who_notices_a_lost_or_unsent_report(self):
+        t = flat(NATIVE_DIR / "remote.md")
+        t = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
+        for needle in ("What catches a report that is lost or never sent: the night manager's idle check",
+                       "\"Worker stopped without reporting\" notice where the build has it", "row 10",
+                       "and otherwise the owner", "Before you call a quiet lane lost, run "
+                       "`orca-ide orchestration worker-show --dispatch <dispatch>`"):
+            self.assertIn(needle, t, needle)
+
+    def test_the_wake_is_claimed_for_the_measured_direction_only(self):
+        for f in (NATIVE_DIR / "remote.md", NATIVE / "coordinator.md",
+                  NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md", ROOT / "docs" / "how-it-fits.md"):
+            t = flat(f)
+            with self.subTest(doc=f.relative_to(ROOT)):
+                self.assertRegex(t, r"(?i)box coordinator's lane on the desktop|box coordinator is woken by its lane")
+                self.assertRegex(t, r"(?i)(other direction|desktop coordinator's lane on a box)[^.]*not measured")
+                self.assertNotIn("a cross-host `worker_done` wakes the coordinator", t)
 
     def test_only_coordinators_start_lanes(self):
         self.assertEqual(LANE_STARTERS, ["coordinator"])

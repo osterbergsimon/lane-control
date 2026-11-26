@@ -126,7 +126,8 @@ For what the box lacks (graphics, a browser, a GPU), its coordinator starts a la
 hosts, below).
 1. The owner makes a share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this
    computer's own address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a
-   link). In setup today this is a hand step (Pairing facts, below, has the newer decision). `orca pair` cannot keep the desktop on loopback, not even with `--address 127.0.0.1`: in Orca
+   link). In setup today this is a hand step (Pairing facts, below, has the newer decision). `orca pair` cannot keep
+   the desktop on loopback, not even with `--address 127.0.0.1`: in Orca
    1.4.274 every offer the CLI asks for widens the desktop to every interface first, whatever the address, because the CLI's
    `pairing.createOffer` has no way to ask for the window's "this computer" reach (read from the source; a scratch
    `serve` pinned to 127.0.0.1 refused it with "refusing to widen to all interfaces", PAIR-1,
@@ -305,14 +306,18 @@ needs a dispatch of yours, so it is no route to a peer session: for that, the ro
    reply --id <msg_id>` (`reply --on` is refused). A sender does not poll for it or look up the other side's handle.
 `worker_done` from the other server's lane is not a message of this kind: it is covered below.
 
-**Across hosts a report wakes the coordinator.** On current builds, with both servers at the same version (1.4.274),
-a cross-host `worker_done` wakes the coordinator. Measured in the field (field report 2026-11-26): a box coordinator's
+**A box coordinator is woken by its lane on the desktop.** On current builds, with both servers at the same version
+(1.4.274), that lane's `worker_done` wakes the box's coordinator. Measured in the field (field report 2026-11-26): its
 Run started a lane on the desktop with `--on <desktop> --worktree new-child --repo name:<project> --setup skip`; the
 lane sent its completion, and Orca's message prompt woke the box's coordinator within seconds. lane-control has not
 repeated the run. On the repo selector: `name:<project>`, naming the project, resolves where a `github:` selector does
-not (same report).
-If a wake seems lost, run `orca-ide orchestration check` (`orca-ide orchestration worker-show --dispatch <dispatch>`
-says what Orca knows of the worker); never loop on it.
+not (same report). The other direction, a desktop coordinator's lane on a box (`--on <box>`), is not measured.
+If a wake seems lost, run `orca-ide orchestration check`; never loop on it. Before you call a quiet lane lost, run
+`orca-ide orchestration worker-show --dispatch <dispatch>`, which says what Orca knows of the worker.
+What catches a report that is lost or never sent: the night manager's idle check on the coordinator's machine (while
+the owner is away or it is night), Orca's "Worker stopped without reporting" notice where the build has it
+([overlap audit](../../docs/research/2026-11-25-orca-overlap.md), row 10; not tested across hosts, nor that it wakes
+an idle coordinator), and otherwise the owner.
 
 Canary 2026-11-21 (scratch servers in containers, a plain shell terminal as the coordinator on the side that
 started the lane, a haiku worker on the other; docs/research/2026-11-21-orca-newer.md, Canary results):

@@ -8,9 +8,11 @@ field's; lane-control has not reproduced it unless a section says so.
 - **Ask:** a notice shaped like `worker_failed` to the supervisor when a supervised worker exits without reporting.
 - **Field evidence:** the report (A1) asks for this notice for a supervised worker that exits without reporting; no more
   detail is recorded here.
-- **Meanwhile:** `lane-sweep` reports stuck lanes and the night manager passes them on; an away-improve watchdog is
-  open (lc-l78.4). The [overlap audit](research/2026-11-25-orca-overlap.md), row 10, read in Orca's source and release
-  notes that newer builds send some stopped-worker and exit notices (not tested): check that before filing.
+- **Meanwhile:** the ask may already be met: the [overlap audit](research/2026-11-25-orca-overlap.md) read in Orca's
+  source and release notes that 1.4.268 already sends "Worker stopped without reporting", and later builds more exit
+  notices (row 10; not tested): check that before filing. `lane-sweep` covers only the lanes on its own machine, so for
+  a lane on the other host the coordinator's night manager does not get a stuck report from it; what remains is the
+  night manager's idle check of the coordinator, and the owner. An away-improve watchdog is open (lc-l78.4).
 - **Status:** recorded, not filed.
 
 ## A5: a reply identity across hosts
@@ -45,7 +47,7 @@ field's; lane-control has not reproduced it unless a section says so.
 - **Ask:** let the model be set in a field that does not force a fresh session, or have the refusal name the conflict
   and the flag to clear.
 - **Field evidence:** `automations edit --reuse-session` is refused with extra agent arguments ("Extra arguments
-  require a fresh session for every run."), so a model pin forces a leak per run.
+  require a fresh session for every run."), so a model pin starts a fresh session on every run.
 - **Meanwhile:** no workaround is recorded.
 - **Status:** recorded, not filed.
 

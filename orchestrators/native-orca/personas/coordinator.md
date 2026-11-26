@@ -49,16 +49,21 @@ You plan, decide and check; lanes do the work, including the waiting.
   `new-child` or `new-top-level`: `orca-ide worktree create`, then `worker-start --worktree path:<that worktree>
   --agent opencode --model <provider>/<model>` from your table, no `--effort`. Do the checks in the
   `native-orca-lanes` skill, section 2, first.
-- Any other lane on another host (`--on <environment>`) takes `--worktree new-top-level --repo <exact selector>`;
-  Orca refuses `new-child` and `current` there.
+- Any other lane on another host (`--on <environment>`) takes `--worktree new-child` or `new-top-level`, with `--repo
+  <exact selector>` (`name:<project>` resolves where a `github:` selector does not); `current` is invalid there.
+  `new-child` nests under your workspace, or starts top-level with a warning when that server is too old to nest.
 - A lane on a failing test, a CI run or a bug report is a debugger lane: its brief starts with the debugger persona,
   `.lane-control/debugger.md` in your checkout.
 - Talk to a lane with `orca-ide orchestration send --to dispatch:<id>`; read its reports and questions with
   `orca-ide orchestration check`, and answer a question with `reply`. If a reply seems lost, send again and ask the
   lane to run `check`.
-- A lane on another host reports like any other: with both servers at the same version its `worker_done` wakes you
-  (`{{LANE_CONTROL}}/orchestrators/native-orca/remote.md`, Reports across hosts). If a wake seems lost, run
-  `orca-ide orchestration check`; never loop on it.
+- A report from a lane on another host: measured one way only. With both servers at the same version, a box
+  coordinator's lane on the desktop wakes it with its `worker_done`; a desktop coordinator's lane on a box is not
+  measured (`{{LANE_CONTROL}}/orchestrators/native-orca/remote.md`, Reports across hosts). If a wake seems lost, run
+  `orca-ide orchestration check`; never loop on it. Before you call a quiet lane lost, run `orca-ide orchestration
+  worker-show --dispatch <dispatch>`.
+- What catches a report that is lost or never sent: the night manager's idle check (while the owner is away or it is
+  night), Orca's "Worker stopped without reporting" notice where the build has it, and otherwise the owner.
 - A `Rejected worker_done` in `check` names a code and a dispatch. `missing_task_id` or `missing_dispatch_id`: tell the
   lane to send again with both ids. `worker_identity_changed`: that dispatch can no longer report, and the lane's work
   is on its branch: read the lane's branch, ask the owner before you abandon it, then run `orca-ide orchestration

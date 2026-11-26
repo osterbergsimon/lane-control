@@ -57,10 +57,12 @@ orca-ide orchestration worker-start --spec-file <brief> --worktree new-child --a
 ```
 
 - `<id>` is `claude` for Claude and `opencode` for OpenCode; `--effort` only for Claude.
-- Another host (`--on <environment>`): `--worktree new-top-level --repo <exact selector>` (Orca refuses `new-child`
-  and `current` there; an OpenCode lane there: below). A selector naming the project (`name:<project>`) resolves
-  where a `github:` one does not. With both servers at the same version its report wakes you; if a wake seems lost,
-  run `orca-ide orchestration check`.
+- Another host (`--on <environment>`): `--worktree new-child` or `new-top-level`, with `--repo <exact selector>`
+  (`current` is invalid there; an OpenCode lane there: below). `new-child` nests under your workspace, or starts
+  top-level with a warning when that server is too old to nest (1.4.274's help; a box coordinator's `new-child` start
+  on the desktop ran in the field). A selector naming the project (`name:<project>`) resolves where a `github:` one
+  does not. Reports: measured only for a box coordinator's lane on the desktop (same version: its `worker_done` wakes
+  the coordinator); the other direction is not measured. If a wake seems lost, run `orca-ide orchestration check`.
 - A paired box (`paired_environment` in the project's settings store): only for what this machine lacks (graphics,
   a browser, a GPU).
 

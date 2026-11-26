@@ -216,9 +216,10 @@ Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you
   ([pairing research](research/2026-11-25-orca-pairing.md), read from Orca's source). The link is a credential, and the
   address in it is what the box dials, not what the desktop listens on:
   [pairing facts](../orchestrators/native-orca/remote.md#pairing-facts).
-- A lane's report across the two machines wakes the coordinator that started it, with both Orcas at the same version
-  (1.4.274): measured in the field (field report 2026-11-26) for a box coordinator's lane on the desktop, not repeated
-  here. If a wake seems lost, the coordinator runs `orca-ide orchestration check`.
+- A box coordinator's lane on the desktop wakes it with its report, with both Orcas at the same version (1.4.274):
+  measured in the field (field report 2026-11-26), not repeated here. A desktop coordinator's lane on a box is not
+  measured. A report that is lost or never sent is left to the night manager's idle check, Orca's stopped-worker notice
+  where the build has it, and otherwise you ([reports across hosts](../orchestrators/native-orca/remote.md#reports-across-hosts)).
 
 More: [native Orca on an SSH host](../orchestrators/native-orca/remote.md).
 
