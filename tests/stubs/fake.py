@@ -50,6 +50,17 @@ def out(obj, code=0):
     sys.exit(code)
 
 
+def stub_offer(seed, n, addr):
+    """The link `orca pair` gives in the stub: deterministic from the seed, so a test can look for it everywhere."""
+    import base64
+    import hashlib
+    h = hashlib.sha256(f"{seed}:{n}".encode()).hexdigest()
+    payload = {"v": 2, "endpoint": "ws://" + addr, "deviceToken": "dvtok-" + h[:32],
+               "publicKeyB64": base64.b64encode(bytes.fromhex(h)).decode(), "pairedDeviceId": "dev_" + h[32:40],
+               "scope": "runtime"}
+    return "orca://pair?code=" + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+
+
 def opt(name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
@@ -64,6 +75,20 @@ def orca():
     if cmd == "host list":
         out({"ok": True, "result": {"hosts": [{"kind": "local", "name": "this machine", "id": "local",
                                                "machineName": state.get("machine_name", "deskbox")}]}})
+    if args[:1] == ["pair"]:  # an access link for another Orca: made from STUB_PAIR_SEED, so no secret is in the env
+        state["pair_calls"] = state.get("pair_calls", 0) + 1
+        if os.environ.get("STUB_PAIR_UNAVAILABLE"):
+            out({"ok": True, "result": {"available": False, "reason": "network_exposure_failed",
+                                        "guidance": "Runtime bind address is pinned to 127.0.0.1; refusing to widen "
+                                                    "to all interfaces."}}, 1)
+        if "--rotate" in args:
+            state["pair_rotations"] = state.get("pair_rotations", 0) + 1
+        addr = opt("--address", "192.0.2.10")
+        if os.environ.get("STUB_PAIR_OWN_PORT"):  # an Orca that keeps its own port whatever --address says
+            addr = addr.rsplit(":", 1)[0] + ":" + os.environ["STUB_PAIR_OWN_PORT"]
+        url = stub_offer(os.environ.get("STUB_PAIR_SEED", "seed"), state.get("pair_rotations", 0), addr)
+        out({"ok": True, "result": {"available": True, "scope": "runtime", "pairingUrl": url,
+                                    "webClientUrl": "https://web.invalid/#" + url, "endpoint": "ws://" + addr}})
     if cmd == "environment list":
         if os.environ.get("STUB_LIST_READS_STDIN"):  # a CLI that reads whatever its stdin holds
             sys.stdin.read()
