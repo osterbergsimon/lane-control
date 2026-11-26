@@ -36,7 +36,7 @@ Everything you run on a machine goes through one command, `lane-control` (`core/
 lane-control project setup|check|refresh|show <repo> [<host>]   # a project, here or on a box
 lane-control project rest|wake|stop|start|status <project>      # its coordinator
 lane-control machine setup|check|changes                        # this machine (or a box with --host)
-lane-control improve on|off|status|...                          # away-improve mode, only on your word
+lane-control ratchet on|off|status|...                          # the ratchet (unattended improvement), only on your word
 lane-control install|status|doctor|prune                        # the one versioned tree
 ```
 
@@ -57,7 +57,7 @@ Always: beads (`bd`), `gh` (authenticated), `jq`, `git`, bash, Python 3, and Cla
 ## The core
 The shared doctrine and scripts are in `core/` (`core/README.md`): roles, model routing, beads doctrine, the reliability log, machine checks, the config, and the machine caps every orchestrator uses: `lane-heavy` (the machine-wide gate for builds and full test suites), `lane-room` (the check before opening a lane), `lane-tier` (looks up a tier in a project's tier table) and `lane-limits.sh` (their shared limits; a machine's own in a copy of `limits.example.sh`). They are installed to `~/.agents/bin` and are reachable at their old paths under `scripts/`.
 
-Away-improve mode lets each project's coordinator keep improving its product on its own `away/<date>` branch while you are away, spending your usage, and keeps one draft PR for you to review (opened when the mode starts, its summary refreshed after every merge): it is off unless you switch it on with `lane-control improve on`, and has optional caps (`--max-items`, `--stop-at`). The owner's guide is `docs/away-improve.md`.
+The ratchet lets each project's coordinator keep improving its product on its own `away/<date>` branch while you are away, spending your usage, and keeps one draft PR for you to review (opened when the mode starts, its summary refreshed after every merge): it is off unless you switch it on with `lane-control ratchet on`, and has optional caps (`--max-items`, `--stop-at`). The owner's guide is `docs/away-improve.md`.
 
 A merged lane's worktree is removed by Orca's own "Delete merged workspaces" cleanup rule, not by a script of ours; setup says when that rule is off and where to turn it on, and turns on GitHub's "Automatically delete head branches" (recommended; Enter means yes) (`docs/orca-cleanup.md`).
 

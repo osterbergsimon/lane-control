@@ -244,17 +244,17 @@ automation's record names; `--automation-model <model> --replace-automation-mode
   the runner repos it watches, night hours, idle and recheck minutes, and how long `lane-away on` lasts. Fill it in by
   hand; no value from it goes in a repo. A machine set up before `lane-control machine setup` existed has no
   `machine.conf`: create it (run `lane-control machine setup`, which writes it from the example, or copy the example
-  there by hand), since `lane-control improve` and `night-precheck` need the file.
-- The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an
-  Orca terminal titled `machine coordinator` with its persona and hook, unless it runs already or that cannot be told
-  (above: the same proof). The folder's `CLAUDE.local.md` gets the same persona anchor, which the automations' sessions
-  there are told to ignore; `lane-control machine check` reads it. The folder may be your own git repo: git does not see
-  the file (listed in `.git/info/exclude` unless already ignored; a committed one is left alone).
+  there by hand), since `lane-control ratchet` and `night-precheck` need the file.
+- The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an Orca
+  terminal titled `machine coordinator` with its persona and hook, unless it runs already or that cannot be told (above:
+  the same proof). The folder's `CLAUDE.local.md` gets the same persona anchor, which the automations' sessions there
+  are told to ignore; `lane-control machine setup --check` reads it. The folder may be your own git repo: git does not
+  see the file (listed in `.git/info/exclude` unless already ignored; a committed one is left alone).
 - Four Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
   manager` hourly (`night-precheck`; the agent follows `night-manager.md`), `lane sweep` every 3 hours
   (`lane-sweep --precheck`, report only, waking its agent only for findings new since the last run) and `machine check` every 30 minutes (`machine-check`: a budget step,
   memory or runner state changed; it also keeps the `budget-stopped` marker for the CI limits) and `away watchdog` every 15
-  minutes (`away-watchdog`: while away-improve mode is on its precheck finds a stalled cycle, and its agent sends the
+  minutes (`away-watchdog`: while the ratchet (unattended improvement) is on its precheck finds a stalled cycle, and its agent sends the
   messages to that coordinator and the machine coordinator from its own terminal; [the watchdog](../../docs/away-improve.md#the-watchdog)).
 - The `ci-presence` user timer: the CI slice's CPU and memory follow presence (`lane-limits.sh`).
 - On a machine set up by hand before: automations named `night-manager` or `lane-sweep` and an older CI timer
@@ -268,11 +268,11 @@ The owner says they leave or return with `core/scripts/lane-away on|off|status` 
 A coordinator gets night check-ins only when it was started with `LANE_ROLE`/`LANE_PERSONA` (project-setup does
 this); one started by hand is named on the precheck's stderr instead.
 
-Away-improve mode (optional, off by default) is a separate switch from presence, the owner's own: `lane-control improve
+The ratchet (optional, off by default) is a separate switch from presence, the owner's own: `lane-control ratchet
 on [--until HH:MM | --hours N | --until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]...
 [--unmetered] [--continue]` cuts an `away/<date>` branch for each project (at most one per project, ever; `--continue`
 carries on with it and cuts one for a project that has none, or the owner adopts or drops it first) and has each coordinator keep improving its product there until
-`lane-control improve off`; the coordinator's `away-improve` skill (installed with the other lane skills) runs it, and
+`lane-control ratchet off`; the coordinator's `away-improve` skill (installed with the other lane skills) runs it, and
 `core/scripts/away-merge` is its only merge route. `lane-away on` (even `--until-back`), night and the budget never start it,
 and it does not make the owner count as away (`docs/superpowers/specs/2026-11-23-away-improve-design.md`). `IMPROVE_IDLE_MIN` in `machine.conf` (default 30) is the
 idle time after which the night manager nudges a coordinator that improve mode covers.

@@ -1,10 +1,14 @@
-# Away-improve mode: the owner's guide
+# The ratchet (unattended improvement): the owner's guide
 
-Away-improve mode lets each project's coordinator keep improving its own product while you are away, on one separate
+The ratchet lets each project's coordinator keep improving its own product while you are away, on one separate
 branch you review when you are back. It spends your usage, so it is off unless you switch it on. This page is what
 you run and what to expect; the design and its reasons are in
 `docs/superpowers/specs/2026-11-23-away-improve-design.md`, and what the agents follow is the `away-improve` skill
 (`orchestrators/native-orca/skills/away-improve/SKILL.md`).
+
+The ratchet only moves forward (owner 2026-11-26). It was called away-improve mode: its files, its skill
+(`away-improve`) and its script (`lane-improve`) keep that name, and `lane-control improve` still works and says the
+new one.
 
 ## What it does
 
@@ -22,21 +26,21 @@ you run and what to expect; the design and its reasons are in
 ## Switching it on and off
 
 Improve mode is separate from presence. `lane-away on` (also `--until-back`), night, "goodnight" and a changed budget
-never start it. Only `lane-control improve on` does, run by you or by the machine coordinator when you asked for the
+never start it. Only `lane-control ratchet on` does, run by you or by the machine coordinator when you asked for the
 improve mode in your own words.
 
 | Command | What it does |
 |---|---|
-| `lane-control improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--max-hours H] [--continue] [--yes]` |
+| `lane-control ratchet on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--max-hours H] [--continue] [--yes]` |
 Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps.
 Without a terminal it refuses unless `--yes`; Claude Code's `!` prefix has no terminal, so there add `--yes` (`!
-lane-control improve on --yes ...`). |
-| `lane-control improve off` | Ends the mode; what is running drains (below). |
-| `lane-control improve status [--json]` | Off, on (what runs, each project's cycle), or draining (what is left to wrap up, and how long it has waited). `--json` prints one line per project: `improve` (on, wrapped, draining, off), `item`, `phase`, `round`, `pr`, `deadline`, `deadline_passed`, `last_activity_age_min`, `cap`, `branch`. |
-| `lane-control improve cycle <project>` | Where the project's cycle stands (phase, item, PR, review round, the lane's dispatch, worktree and deadline). Coordinators record each step with it and read it back when they resume; you can read it any time. |
-| `lane-control improve drained <project>...` or `--all` | A coordinator's wrap-up is done: its deny rules come out. Coordinators run this themselves. While the mode is on it takes only a project whose cap is reached. |
-| `lane-control improve pr <project>` | Opens the project's draft summary PR if it has none, rebuilds its body from the branch's merge commits and prints the link. `--summary-file <path>` sets the short summary the coordinator writes (a file kept outside the project; later refreshes keep it). Coordinators run it at the wrap-up, also after `--max-items` is reached; `away-merge` refreshes the body after every merge. |
-| `lane-control improve rest <project>` | A coordinator's note that nothing within your limits is left. It only quiets the idle nudges. |
+lane-control ratchet on --yes ...`). |
+| `lane-control ratchet off` | Ends the mode; what is running drains (below). |
+| `lane-control ratchet status [--json]` | Off, on (what runs, each project's cycle), or draining (what is left to wrap up, and how long it has waited). `--json` prints one line per project: `improve` (on, wrapped, draining, off), `item`, `phase`, `round`, `pr`, `deadline`, `deadline_passed`, `last_activity_age_min`, `cap`, `branch`. |
+| `lane-control ratchet cycle <project>` | Where the project's cycle stands (phase, item, PR, review round, the lane's dispatch, worktree and deadline). Coordinators record each step with it and read it back when they resume; you can read it any time. |
+| `lane-control ratchet drained <project>...` or `--all` | A coordinator's wrap-up is done: its deny rules come out. Coordinators run this themselves. While the mode is on it takes only a project whose cap is reached. |
+| `lane-control ratchet pr <project>` | Opens the project's draft summary PR if it has none, rebuilds its body from the branch's merge commits and prints the link. `--summary-file <path>` sets the short summary the coordinator writes (a file kept outside the project; later refreshes keep it). Coordinators run it at the wrap-up, also after `--max-items` is reached; `away-merge` refreshes the body after every merge. |
+| `lane-control ratchet rest <project>` | A coordinator's note that nothing within your limits is left. It only quiets the idle nudges. |
 
 Options worth knowing:
 
@@ -48,7 +52,7 @@ Options worth knowing:
   `--max-hours 12` unless you give another value, and `on` says so (`--max-hours none` runs it until `lane-control
   improve off`). Otherwise each project follows its own budget steps: no new cycle from no-new-work, push and handover
   at push-and-handover, nothing at stop.
-- With no end given the mode runs until `lane-control improve off`.
+- With no end given the mode runs until `lane-control ratchet off`.
 
 ### Optional caps
 
@@ -68,28 +72,28 @@ bound of an `--unmetered` period with no end (above):
   percentage from `budget-state --project`, refused with `--unmetered`) gave an unmetered period no bound but its end time.
 
 A cap behaves like the end time, for that project alone: the lane that is running finishes and merges, the coordinator wraps
-up (steps below) and runs `lane-control improve drained <project>`, which while the mode is on is accepted only once its cap is
+up (steps below) and runs `lane-control ratchet drained <project>`, which while the mode is on is accepted only once its cap is
 reached. `--max-items` is also a hard stop in `away-merge`: the Nth merge is the last, and a further one is refused whatever
 the coordinator does (a lane that is running finishes as that Nth merge). `--stop-at` is not: the lane that is running when
 the weekly use reaches it still lands, and the budget's own steps are the backstop. Nothing more merges for the project once
-it has wrapped up, and the mode goes on for the others (`lane-control improve off` then
-drains only the projects still running). `lane-control improve status` shows `items 4/10` and `weekly 66/70` for each project and says
+it has wrapped up, and the mode goes on for the others (`lane-control ratchet off` then
+drains only the projects still running). `lane-control ratchet status` shows `items 4/10` and `weekly 66/70` for each project and says
 `cap reached` when one is hit (`weekly ?/70` when the usage feed gave no reading: not a cap hit), and `hours 3.5/12` for
 `--max-hours`. The night manager sends no
 improve nudge to a project whose cap is reached, a `DUE <name> wrapup ... cap=items:10/10` line instead (not at the budget's
 stop step) until it has wrapped up.
 
-A wrap-up is final for the period. To resume a project after you raise its cap, name it again: `lane-control improve on
+A wrap-up is final for the period. To resume a project after you raise its cap, name it again: `lane-control ratchet on
 --continue --project <name> --max-items <more>` (or `--stop-at`). It is refused while the cap is still reached, and a
 re-run that does not name the project leaves it wrapped up and says so.
 
 The period record (`improve-period.json`, with a lock file beside it) is written under a lock, so coordinators merging at the
 same moment are all counted. `away-merge` holds that lock from the `--max-items` check through the merge and its record, and
 checks the cap again once it has it, so two merges at once cannot both take the last slot (the second is refused). A merge that GitHub made but whose reply gh failed (a timeout, a 5xx) is still counted: `away-merge` looks the PR up once and records it. If it goes missing or unreadable while a cap is set, the caps fail closed: `away-merge` refuses
-every merge, nothing is nudged and `status` says why, instead of the counts starting again from 0. `lane-control improve on
+every merge, nothing is nudged and `status` says why, instead of the counts starting again from 0. `lane-control ratchet on
 --continue` starts the record again from nothing and puts the deny rules back on every project the period covers. While the
-period is draining (after `off`), `on --continue` is refused; there the refusal says to wrap up with `lane-control improve drained
-<project>` (or `--all`) and then run `lane-control improve on --continue`, which starts a new period on the same away
+period is draining (after `off`), `on --continue` is refused; there the refusal says to wrap up with `lane-control ratchet drained
+<project>` (or `--all`) and then run `lane-control ratchet on --continue`, which starts a new period on the same away
 branch (a plain
 `on` is refused while the project has its branch); the last PR can merge there.
 
@@ -99,41 +103,41 @@ A project that already has an `away/*` branch on origin (merged or not) is refus
 
 - adopt it (merge it into the integration branch, then delete the branch), or drop it (delete it), then run `on`
   again; or
-- `lane-control improve on --continue`, which carries on with the branch where there is one and cuts one where there is
+- `lane-control ratchet on --continue`, which carries on with the branch where there is one and cuts one where there is
   none. `--continue` takes no argument. A project with two or more branches is refused, and they are listed.
 
 `--continue` also works while the mode is on, to change the end, the limits or the deny paths, or to add a project: what
 you do not give again stays as it was. Without `--project` the re-run keeps the period's projects exactly, cuts no
-branch and installs no rule, so "two more hours" (`lane-control improve on --continue --hours 2`) never widens a period
-you limited to some projects. `lane-control improve on --continue --project <name>` adds a project (one set up after the
+branch and installs no rule, so "two more hours" (`lane-control ratchet on --continue --hours 2`) never widens a period
+you limited to some projects. `lane-control ratchet on --continue --project <name>` adds a project (one set up after the
 mode started, say) and keeps the others. `away-merge` says this when it finds a project without a branch.
 
 ## Ending it, and what you get back
 
-`lane-control improve off` or the end time stops new cycles. The mode is then **draining**: the lane that is running
+`lane-control ratchet off` or the end time stops new cycles. The mode is then **draining**: the lane that is running
 finishes and its PR can still merge through `away-merge`, and the deny rules stay. Each coordinator then:
 
 1. merges its last PR,
-2. runs `lane-control improve pr <project> --summary-file <path>`: the **draft PR** from `away/<date>` into the
-   integration branch (open since `lane-control improve on`, see below) gets its final summary,
+2. runs `lane-control ratchet pr <project> --summary-file <path>`: the **draft PR** from `away/<date>` into the
+   integration branch (open since `lane-control ratchet on`, see below) gets its final summary,
 3. sends you the summary and that PR's link as its first message,
-4. runs `lane-control improve drained <project>`.
+4. runs `lane-control ratchet drained <project>`.
 
-Look at `lane-control improve status` when you are back. It lists what is still to wrap up and says when a drain has
+Look at `lane-control ratchet status` when you are back. It lists what is still to wrap up and says when a drain has
 waited 12 hours or more. The night manager also nudges a coordinator that has not wrapped up (`DUE <name> wrapup`), by
 day or night, so a drain nobody finished does not sit there. A new `on` is refused while a period is draining; run
-`lane-control improve drained --all` when you want to close it yourself.
+`lane-control ratchet drained --all` when you want to close it yourself.
 
 Then you adopt the whole branch (merge the draft PR as usual) or name the items to drop; the coordinator runs a lane
 that reverts those merges (they are titled `away: <item>`), keeping to the dependencies in the entries.
 
 ## The summary PR
 
-`lane-control improve on` opens, for each project whose away branch it cuts or continues, a **draft PR** from `away/<date>` into
+`lane-control ratchet on` opens, for each project whose away branch it cuts or continues, a **draft PR** from `away/<date>` into
 the integration branch, titled `away: <date> (<project>)`, and records its number in `improve.json`. Its body is built from
 the branch, not from a file on it:
 
-- a short **summary** the coordinator writes at the wrap-up (`lane-control improve pr <project> --summary-file <path>`;
+- a short **summary** the coordinator writes at the wrap-up (`lane-control ratchet pr <project> --summary-file <path>`;
   what was done, what to look at first, what to drop if unsure, what was skipped). Until then it says "No summary yet".
   Later refreshes keep it;
 - **Items merged**: one line per merged item (title, PR number, short sha) with its `git revert -m 1 <sha>` (or "already
@@ -152,8 +156,8 @@ reads the PR's classic Projects over GraphQL and fails on an organisation that s
 when the PATCH fails. **Put your own notes in a comment on the PR, not in the body.** The body is never rewritten over an
 edit: when someone has changed text outside the generated parts, inside either region (the summary, the items), or has removed
 or repeated a marker, the refresh leaves the body as it is, prints one warning line (`away-merge` after the merge, which stays
-done; `lane-control improve pr`, also with `--summary-file`, exits 1) and says how to go on: copy what you want to keep (the summary
-into a file), clear the PR body, then run `lane-control improve pr <project> --summary-file <file>`. Line endings do not count as an
+done; `lane-control ratchet pr`, also with `--summary-file`, exits 1) and says how to go on: copy what you want to keep (the summary
+into a file), clear the PR body, then run `lane-control ratchet pr <project> --summary-file <file>`. Line endings do not count as an
 edit (a browser saves CRLF). A summary of more than 8000 characters is refused the same way. An empty body is written. A summary PR opened by hand with its own text is recorded by `on` but not rewritten. It stays a
 draft: **no agent merges it, marks it ready or closes it**; you merge it (to adopt the whole branch) or name the items to
 drop. A PR you closed is left alone.
@@ -163,7 +167,7 @@ GitHub opens no PR for a branch with nothing beyond its base, so `on` gives each
 summary PR need nothing else). It adds no file. The branch is the integration head plus that one commit, authored as the
 checkout's configured git identity. `--continue` adds none to a branch that has one (a project added with `--continue` gets
 its own, as it gets its own branch). When the commit cannot be made (the checkout has no git identity) the branch is cut from
-the head alone, `on` warns, and `away-merge` opens the PR after the first merged item (`lane-control improve pr <project>` does it by
+the head alone, `on` warns, and `away-merge` opens the PR after the first merged item (`lane-control ratchet pr <project>` does it by
 hand). The start commit is not an item: a branch with only it counts as never given any work when you decide to adopt or drop it.
 
 ## The item PR and its entry
@@ -182,7 +186,7 @@ empty. The copy keeps every code fence closed. Text outside the seven sections i
 
 What is published is checked first: the entry and the `--item` title go through the same secret scan and the same names scan
 as the diff (an entry with a home path, a token or a private name is refused, naming the kind and never the text), and
-`lane-control improve pr --summary-file` runs both on the summary before it writes anything. The entry is also pinned to the review:
+`lane-control ratchet pr --summary-file` runs both on the summary before it writes anything. The entry is also pinned to the review:
 if the PR body was edited after the newest `Review: passed <head sha>` comment (GitHub's `lastEditedAt` against the
 comment's time), the merge is refused until the reviewer has looked again and a new comment is written; a time that cannot be
 read refuses too. Bodies go to `gh` through files, not the command line, so a long or non-English body is fine.
@@ -245,7 +249,7 @@ stops a worker.
   starts and runs `away-watchdog --send`, which sends each message `--from` that agent's own terminal (Orca gives every
   terminal it starts a handle). So a message costs one short agent run; a round with nothing due costs nothing. The
   coordinator does not reply: that run has ended.
-- **What it reads.** The cycle the coordinator records (`lane-control improve cycle`: phase, item, PR, round, the lane's dispatch,
+- **What it reads.** The cycle the coordinator records (`lane-control ratchet cycle`: phase, item, PR, round, the lane's dispatch,
   its other workers such as the reviewer (`--worker`), its worktree, and the lane's **deadline**, set when the lane starts:
   `--budget-min`, default 240 minutes), the last merge on the away branch, and Orca's own word on the workers
   (`orchestration worker-show` for each one recorded, `orchestration worker-list` for any worker on the lane's worktree).
@@ -260,9 +264,9 @@ stops a worker.
   idle time and what it counts from, the deadline, and how often it has been said.
 - **When it keeps quiet.** A metered project at the budget's stop step or with no reading gets nothing, and from
   no-new-work no nudge for a new cycle (as the night manager's improve nudge). A paused project (`lane-control project
-  rest`) and a resting one with no lane out get nothing. After a cap, `lane-control improve off` or the end time, a lane
+  rest`) and a resting one with no lane out get nothing. After a cap, `lane-control ratchet off` or the end time, a lane
   still recorded out is watched until it reports, with no ask for a new cycle.
-- **Addresses are explicit.** The coordinator's is the Orca terminal it recorded itself (`lane-control improve cycle` keeps
+- **Addresses are explicit.** The coordinator's is the Orca terminal it recorded itself (`lane-control ratchet cycle` keeps
   `$ORCA_TERMINAL_HANDLE`, or `--address`); when that terminal is gone, the single agent terminal in the project's checkout.
   The machine coordinator's is `MACHINE_COORDINATOR_TO` in `machine.conf`, else the single agent terminal in
   `MACHINE_COORDINATOR_FOLDER` (`~/machine-coordinator`). A title is never matched.
@@ -288,19 +292,19 @@ While the mode is on, the night manager nudges an idle coordinator (`DUE <name> 
 A coordinator that stays idle is nudged less and less often (30, 60, 120 minutes, at most every 8 hours). The nudge asks
 for a one-line reply, so a session write within 10 minutes of a nudge (the delivered message, the reply) is not work; a write
 later than that starts the wait over. A coordinator that
-runs `lane-control improve rest <project>` because nothing within your limits is left is left alone for 12 hours, then nudged
+runs `lane-control ratchet rest <project>` because nothing within your limits is left is left alone for 12 hours, then nudged
 once to look for new work. Nudges go out by day or night; the plain check-ins still wait for you to be away.
 
 ## Files and settings
 
 | What | Where |
 |---|---|
-| Mode state | `~/.config/lane-control/improve.json` (`LANE_IMPROVE_FILE`); written only by `lane-control improve on`. A missing, unreadable or malformed file means off. |
+| Mode state | `~/.config/lane-control/improve.json` (`LANE_IMPROVE_FILE`); written only by `lane-control ratchet on`. A missing, unreadable or malformed file means off. |
 | Drain state | `improve-drain.json` beside it (`LANE_IMPROVE_DRAIN_FILE`) |
 | Rest notes | `improve-rest.json` beside it |
 | Period record | `improve-period.json` beside it: `away-merge`'s record of each merge (what `--max-items` counts) and the projects that wrapped up at a cap; it belongs to one period (its `started`), so a new period counts from nothing |
 | Nudge idle time | `IMPROVE_IDLE_MIN` in `machine.conf` (default 30 minutes) |
-| Cycle state | `improve-cycle.json` beside it: each project's phase, item, PR, round, lane dispatch, worktree, deadline and address (`lane-control improve cycle`) |
+| Cycle state | `improve-cycle.json` beside it: each project's phase, item, PR, round, lane dispatch, worktree, deadline and address (`lane-control ratchet cycle`) |
 | Ledger | `improve-ledger.jsonl` beside it: one line per closed cycle |
 | Watchdog | `WATCHDOG_MIN`, `WATCHDOG_ESCALATE_MIN`, `MACHINE_COORDINATOR_TO`, `MACHINE_COORDINATOR_FOLDER` in `machine.conf`; its backoff and last round in `~/.cache/lane-control/watchdog/` |
 | Deny rules | each coordinator checkout's uncommitted `.claude/settings.local.json`; for OpenCode a guard plugin next to the persona plugin and a record under the user's state folder |
@@ -323,5 +327,5 @@ suite. The summary PR, the caps and the protection report are covered the same w
 `pr list --head`, `pr create --draft`, `pr edit`, `pr ready` and the protection answers (everyone, partly, none, ruleset, 403, an
 unreadable one), and the start commit is checked against real temporary git repositories; none of the `gh` calls has run against the real GitHub, so the first real `on` is where the PR calls and the
 protection wording get their test. A real away period (scout and build lanes, reviews, `away-merge` against GitHub, the draft
-PR on return) has not been run end to end; the first one is the real test. Watch `lane-control improve status` and the summary PR, and expect to
+PR on return) has not been run end to end; the first one is the real test. Watch `lane-control ratchet status` and the summary PR, and expect to
 adjust the skill from what you see.

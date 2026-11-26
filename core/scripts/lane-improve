@@ -74,8 +74,8 @@ self=$(readlink -f "$0")
 # run by a person under its old name: one line with its lane-control form (core/frontdoor.py); never by a script
 if [ -z "${LANE_CONTROL_FRONT_DOOR:-}" ] && [ -t 2 ]; then
   case ${1:-} in
-    on | off | drained | status | rest | pr | cycle) printf 'lane-improve: note: this is now `lane-control improve%s` (the old name keeps working)\n' "$(printf ' %q' "$@")" >&2 ;;
-    *) echo 'lane-improve: note: this is now `lane-control improve on|off|drained|status|rest|pr|cycle` (the old name keeps working)' >&2 ;;
+    on | off | drained | status | rest | pr | cycle) printf 'lane-improve: note: this is now `lane-control ratchet%s` (the old name keeps working)\n' "$(printf ' %q' "$@")" >&2 ;;
+    *) echo 'lane-improve: note: this is now `lane-control ratchet on|off|drained|status|rest|pr|cycle` (the old name keeps working)' >&2 ;;
   esac
 fi
 export LANE_CONTROL_FRONT_DOOR=1

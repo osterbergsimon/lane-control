@@ -1244,6 +1244,25 @@ class MachineCheckTests(BudgetTest):
         self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
         self.assertEqual(self.check().returncode, 1)
 
+    def test_peek_reads_and_records_nothing(self):
+        # CLI-1 review M2: a hand-run (`lane-control machine report`) must not use up what the automation reports
+        self.check()
+        state = self.home / ".cache" / "lane-control" / "machine-check.json"
+        before = state.read_text()
+        self.playbook(92, 10)
+        for _ in range(2):
+            r = self.check("--peek")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("CHANGED budget main: step 4 stop", r.stdout)
+        self.assertEqual(state.read_text(), before)  # nothing recorded
+        self.assertFalse(self.marker().exists())  # the marker is the automation's check's to write
+        r = self.check()  # the automation's check still finds it, and passes it on
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("CHANGED budget main: step 4 stop", r.stdout)
+        self.assertTrue(self.marker().exists())
+        self.assertEqual(self.check("--peek").returncode, 1)
+        self.assertEqual(self.check("--peek", "--last").returncode, 2)
+
     def test_step_change_wakes_once(self):
         self.check()
         self.playbook(86, 10)

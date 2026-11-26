@@ -52,7 +52,7 @@ More: the sections below; [Getting started](getting-started.md).
   folder, in an Orca terminal titled `machine coordinator`.
 - **Project coordinator** (one per project). You talk to it in the terminal titled `<project> coordinator`. It turns
   your asks into issues, picks a tier, opens lanes, checks what comes back and merges only on your word. The one
-  exception is away-improve mode, which you switch on yourself.
+  exception is the ratchet (unattended improvement), which you switch on yourself.
 - **Lane**: one worker for one issue, with its own worktree and branch. It opens a pull request and reports once.
   Reviewers (code, and design for anything a user sees) are workers too. A lane for a failing test or a bug gets the
   debugger persona.
@@ -77,7 +77,7 @@ More: [roles](../core/roles.md), [model routing](../core/model-routing.md), [nat
 | Skills (the three lane skills and the design skills) | `~/.agents/skills/`, linked for Claude and OpenCode |
 `lane-control project setup`, `--refresh` |
 | One project's settings and tier table, **outside its repo** | `~/.config/lane-control/projects/<folder>-<hash>/` (`settings.json`, `lanes.tsv`) | `lane-control project setup`; `--show` prints them |
-| This machine's settings and state | `~/.config/lane-control/`: `machine.conf`, `limits.sh` (optional, yours), the away file, away-improve's files, `hosts/<host>.json`, `tunnels/<host>.env` | `lane-control machine setup`, you, `lane-away`, `lane-control improve`, `lane-control project setup`, `lane-tunnel` |
+| This machine's settings and state | `~/.config/lane-control/`: `machine.conf`, `limits.sh` (optional, yours), the away file, away-improve's files, `hosts/<host>.json`, `tunnels/<host>.env` | `lane-control machine setup`, you, `lane-away`, `lane-control ratchet`, `lane-control project setup`, `lane-tunnel` |
 | The model environment (optional, for a gateway) | the one source `~/.config/lane-control/model-env.conf`, and from it `model-env.sh`, `~/.config/fish/conf.d/lane-control-models.fish` and the `env` block of Claude's user settings (what it wrote there is noted in `model-env.written.json`) | `model-env`, only when you run it |
 | Budget config and weekly ceiling | `~/.config/rove/playbook.conf.sh` (an old folder name, still the default) and the ceiling file it names | you ([getting started](getting-started.md), step 2.2) |
 | In a project's repo | `AGENTS.lane-control.md` plus one pointer line in `AGENTS.md`, and the lane files in `.lane-control/`; the rendered personas there are not committed | `lane-control project setup`, committing only on your yes |
@@ -268,9 +268,9 @@ More: [native Orca on an SSH host](../orchestrators/native-orca/remote.md).
 
 | Automation | Runs | Precheck | What its agent does | Why Orca 1.4.274 does not make it unnecessary |
 |---|---|---|---|---|
-| `night manager` | hourly | `night-precheck` | sends a check-in to each coordinator that is due: idle while you are away or it is night (and, day or night, one that away-improve mode covers); passes on offline CI runners | no Orca built-in wakes an idle coordinator, or checks budget steps or runners |
+| `night manager` | hourly | `night-precheck` | sends a check-in to each coordinator that is due: idle while you are away or it is night (and, day or night, one that the ratchet covers); passes on offline CI runners | no Orca built-in wakes an idle coordinator, or checks budget steps or runners |
 | `lane sweep` | every 3 hours | `lane-sweep --precheck` (new findings only) | sends each new finding to that lane's coordinator; removes nothing | Orca tells a coordinator about its supervised workers; the sweep also sees lane worktrees with no live worker |
-| `machine check` | every 30 minutes | `machine-check` (by hand: `lane-control machine changes`) | passes changes (budget step, memory, runners, a coordinator Orca cannot find) to the machine coordinator | Orca has no budget steps, no runner state and no "memory low" warning |
+| `machine check` | every 30 minutes | `machine-check` (by hand, read only: `lane-control machine report`) | passes changes (budget step, memory, runners, a coordinator Orca cannot find) to the machine coordinator | Orca has no budget steps, no runner state and no "memory low" warning |
 | `away watchdog` | every 15 minutes | `away-watchdog` (finds a stalled away-improve cycle and writes the messages, with their evidence, to an outbox; a daily summary) | sends them with `away-watchdog --send` from its own terminal (a precheck has none), to the coordinator, then the machine coordinator; puts what reached nobody in front of you | Orca's worker notices (silent 10 min, idle 60 min, exited) go to the coordinator, which is the one that may be stuck; the schedule is Orca's own |
 
 They are already Orca automations, so there is nothing of ours to move onto that feature. The reasons come from the
@@ -288,7 +288,7 @@ Two other things run by themselves and are not Orca automations: **`ci-presence`
 minutes and at boot) that sets CI's CPU and memory limits by whether you are there, and the tunnels above.
 
 Tell the machine you leave or return with `lane-away on|off|status`. It changes limits and allows night check-ins; it
-never starts away-improve mode.
+never starts the ratchet.
 
 More: [night manager](../orchestrators/native-orca/night-manager.md), [a machine](../orchestrators/native-orca/setup.md#a-machine).
 
@@ -306,15 +306,15 @@ More: [night manager](../orchestrators/native-orca/night-manager.md), [a machine
 More: [budget steps](../core/model-routing.md#budget-thresholds-per-metered-budget-ceiling--the-owners-weekly-percent),
 [usage feeds](../core/machine.md#usage-feeds-per-metered-budget).
 
-## Away-improve mode
+## The ratchet
 
-Off unless **you** switch it on (`lane-control improve on`). Each chosen project's coordinator then keeps improving its
+Off unless **you** switch it on (`lane-control ratchet on`). Each chosen project's coordinator then keeps improving its
 product on one `away/<date>` branch, merging there only through `away-merge`, and keeps one draft pull request for you.
-Nothing reaches the main line without your word. `lane-control improve off` ends it; running work finishes first. The
+Nothing reaches the main line without your word. `lane-control ratchet off` ends it; running work finishes first. The
 `away watchdog` automation watches each cycle from outside and tells a stalled coordinator, with the evidence, then the
 machine coordinator; it merges and changes nothing.
 
-More: [away-improve mode, the owner's guide](away-improve.md).
+More: [the ratchet, the owner's guide](away-improve.md).
 
 ## Cleanup
 

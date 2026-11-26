@@ -11,7 +11,7 @@ with the first one.
 
 ## Running projects
 
-- [Away-improve mode](away-improve.md): lets coordinators keep improving a product on its own branch while you are away. Read it before you switch `lane-control improve on`.
+- [The ratchet (unattended improvement)](away-improve.md): lets coordinators keep improving a product on its own branch while you are away. Read it before you switch `lane-control ratchet on`.
 - [Lane cleanup](orca-cleanup.md): how a merged lane's worktree is removed by Orca's own rule. Read it when setup says a cleanup rule is off.
 - [Asks for Orca upstream](orca-upstream-asks.md): what we would ask Orca to change, with the evidence and what we do meanwhile; recorded, not filed. Read it before you file anything at Orca.
 - [Issues doctrine](../core/issues.md): how beads issues are claimed, closed, parked and backed up. Read it when you move a project or restore beads.

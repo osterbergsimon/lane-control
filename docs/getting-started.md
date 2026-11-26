@@ -210,7 +210,8 @@ Then open `~/.config/lane-control/machine.conf` and fill in `COORDINATORS` after
 `<project> ~/code/<project>`), so the night manager knows whom it may wake. Night hours, idle minutes and the length of
 `lane-away on` are in the same file. Nothing from it goes in a repo.
 
-Check later: `lane-control machine changes --last` prints what the last 30-minute check found.
+Check later: `lane-control machine report --last` prints what the last 30-minute check found; `lane-control machine
+report` alone looks now, read only, so the automation still passes on what it finds.
 
 ## 4. Set up a first project
 
@@ -247,8 +248,8 @@ lane-control project setup ~/code/<project>
 Do step 2.3 first (the gateway in OpenCode's config, the key in Orca's environment). Nothing is refused by model or
 harness, and the table is yours to edit.
 
-1. Let project-setup suggest the table from the gateway's model list. It needs the clone from above, and the key
-   variable set in the shell you run it in:
+1. Let `lane-control project setup` suggest the table from the gateway's model list. It needs the clone from above, and
+   the key variable set in the shell you run it in:
 
    ```bash
    lane-control project setup ~/code/<project> --suggest-tiers litellm
@@ -281,7 +282,7 @@ harness, and the table is yours to edit.
    ```
 
    A later run keeps the table you accepted. Do not pass `--adapter` or `--adapt-reviewer`: they must be Claude models
-   (the defaults, `claude/sonnet` and `claude/opus`), and project-setup refuses anything else with exit 2: `--adapter
+   (the defaults, `claude/sonnet` and `claude/opus`), and setup refuses anything else with exit 2: `--adapter
    and --adapt-reviewer must be claude/<model>`.
 
 **Onboarding a new project needs Claude on that machine.** The adapting agent and its reviewer are always Claude, so the
@@ -470,7 +471,7 @@ Why each step:
   never installed (it says so). A failed install exits 1 and changes nothing.
 - `--refresh` renders the skills and the personas again from the installed tree and records its sha. It keeps each
   persona's engine and model and the project's tier table, starts nothing and commits nothing, and says which running
-  agents need a restart. It ignores `--coordinator` (project-setup says so).
+  agents need a restart. It ignores `--coordinator` (setup says so).
 - A machine set up before the install moves to it with the first install: `note: this machine moves to the install
   ...` (from `lane-control install`, or `project-setup: note: ...` when setup installs first), and per project, at
   its `--refresh`, `lane-control: moved ...`. Nothing else to do.
@@ -544,8 +545,8 @@ or park it. Never stop a live lane without your word.
   it refuses while a lane or reviewer runs). `lane-control project rest ~/code/<project>` stops no agent: it only makes
   the night manager skip the project, and `lane-control project wake ~/code/<project>` undoes it.
 - **A running lane:** ask its coordinator. It stops a live lane only on your word, and puts the issue back to open.
-- **Away modes:** `lane-away off` says you are back. `lane-control improve off` ends away-improve mode; what is running
-  drains first ([docs/away-improve.md](away-improve.md)).
+- **Away modes:** `lane-away off` says you are back. `lane-control ratchet off` ends the ratchet (unattended
+  improvement); what is running drains first ([docs/away-improve.md](away-improve.md)).
 - **The machine coordinator and the automations:** close the `machine coordinator` terminal in Orca. The four
   automations wake coordinators at night, so remove them to stop that: `orca-ide automations list`, then `orca-ide
   automations remove <id>` for `night manager`, `lane sweep`, `machine check` and `away watchdog`. Running `lane-control

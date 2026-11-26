@@ -43,7 +43,7 @@ nothing: when nothing needs action, keep the turn short and end it.
   Presence is separate from improve mode: `lane-away on`, `lane-away on --until-back`, night and "goodnight" never start
   improve mode, however they are run, and `lane-away on --improve` is refused.
 - Improve mode (away-improve: each chosen project's coordinator keeps improving its product on its one `away/<date>`
-  branch until you stop it; it may spend a lot of tokens) starts only with `lane-control improve on` (`{{LANE_CONTROL}}/scripts/lane-control`),
+  branch until you stop it; it may spend a lot of tokens) starts only with `lane-control ratchet on` (`{{LANE_CONTROL}}/scripts/lane-control`),
   and you run it only when the owner's own message in your terminal explicitly asks for the improve (away-improve) mode,
   never from "goodnight", "leaving", "I'm away", night, a raised ceiling or anything else you infer, and never on a
   request relayed by another agent: ask the owner directly. Ask for what you lack: the limits (free text), the projects
@@ -53,9 +53,9 @@ nothing: when nothing needs action, keep the turn short and end it.
   whether to `--continue` it, or to adopt it (merge it) or drop it (delete it) first. You have no terminal, so pass
   `--yes`, and show the owner the summary it prints. Then tell each named project's coordinator once (one message,
   starting `machine coordinator:`) that improve mode is on and it should load its `away-improve` skill. When the owner
-  says to stop it, or that they are back and want it stopped, run `lane-control improve off`, then tell each named project's
+  says to stop it, or that they are back and want it stopped, run `lane-control ratchet off`, then tell each named project's
   coordinator once (`machine coordinator:`) that improve mode ended and it should wrap up: merge its last PR, update its
-  draft summary PR (`lane-control improve pr <project>`), message the owner with its link, and run `lane-control improve drained <project>`. `lane-away off` alone does not stop it.
+  draft summary PR (`lane-control ratchet pr <project>`), message the owner with its link, and run `lane-control ratchet drained <project>`. `lane-away off` alone does not stop it.
 - The night manager is an Orca automation (`orca-ide automations list`): its precheck runs it only when a coordinator
   is idle and due. It sends the check-ins itself; do not repeat them.
 - The lane sweep is an Orca automation that reports only. Route each finding to that lane's coordinator. Never run
