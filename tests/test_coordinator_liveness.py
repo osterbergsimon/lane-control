@@ -196,5 +196,123 @@ class Liveness(Case):
         self.assertEqual(len(self.started()), 1)
 
 
+BEGIN, END = "<!-- lane-control:persona-anchor begin", "<!-- lane-control:persona-anchor end -->"
+
+
+class Anchor(Case):
+    """lc-l78.2: the persona hook says nothing without its markers, so a session started by hand came up as a general
+    assistant. Claude reads CLAUDE.local.md in the coordinator's folder at every start."""
+
+    def setUp(self):
+        super().setUp()
+        self.anchor = self.repo / "CLAUDE.local.md"
+        self.persona = self.repo / ".lane-control" / "coordinator.md"
+
+    def setup_project(self, *args, adapt=False):
+        r = self.e.run(str(self.repo), *(args or ("--no-start",)), adapt=adapt)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        return r
+
+    def snapshot(self):
+        return {str(p): p.read_bytes() for p in self.e.home.rglob("*")
+                if p.is_file() and not p.is_symlink() and not p.name.startswith("stub.")}
+
+    def test_setup_writes_a_small_anchor_that_names_the_persona_and_stays_out_of_git(self):
+        r = self.setup_project()
+        self.assertIn("persona anchor: created", r.stdout)
+        text = self.anchor.read_text()
+        for needed in (BEGIN, END, str(self.persona), "in full before anything else", "app coordinator",
+                       str(self.repo)):
+            self.assertIn(needed, text)
+        self.assertLess(len(text), 1200)
+        self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
+        self.assertIn("persona anchor: exists", self.setup_project().stdout)
+
+    def test_it_says_who_is_not_the_coordinator(self):
+        self.setup_project()
+        text = " ".join(self.anchor.read_text().split())
+        for word in ("Task", "reviewer", "sub-agent", "headless", "another folder", "ignore this note"):
+            self.assertIn(word, text)
+
+    def test_the_owners_own_text_is_kept_and_a_changed_anchor_is_put_back(self):
+        self.anchor.write_text("# Mine\nUse the dev database.\n")
+        self.assertIn("persona anchor: updated", self.setup_project().stdout)
+        text = self.anchor.read_text()
+        self.assertTrue(text.startswith(BEGIN))
+        self.assertTrue(text.endswith("# Mine\nUse the dev database.\n"), text)
+        self.anchor.write_text(text.replace("in full before anything else", "sometime") + "More.\n")
+        r = self.setup_project("--refresh", adapt=True)
+        self.assertIn("persona anchor: updated", r.stdout)
+        new = self.anchor.read_text()
+        self.assertEqual((new.count(BEGIN), new.count(END)), (1, 1))
+        self.assertIn("in full before anything else", new)
+        self.assertTrue(new.endswith("Use the dev database.\nMore.\n"), new)
+
+    def test_a_project_that_relies_on_agents_md_keeps_it(self):
+        # Claude reads AGENTS.md by itself only while no CLAUDE.md or CLAUDE.local.md is there, so the anchor imports it
+        (self.repo / "AGENTS.md").write_text("rules\n")
+        self.setup_project()
+        self.assertIn("\n@AGENTS.md\n", self.anchor.read_text())
+        (self.repo / "CLAUDE.md").write_text("mine\n")
+        self.setup_project()
+        self.assertNotIn("@AGENTS.md", self.anchor.read_text())
+
+    def test_without_an_agents_md_nothing_is_imported_and_the_persona_is_never_an_import(self):
+        self.setup_project()
+        self.assertNotIn("\n@", self.anchor.read_text())  # an import would load for every session in the folder
+
+    def test_a_committed_file_or_a_link_is_left_alone_and_said(self):
+        self.anchor.write_text("committed\n")
+        git("add", "-f", "CLAUDE.local.md", cwd=self.repo)
+        git("commit", "-q", "-m", "theirs", cwd=self.repo)
+        r = self.setup_project()
+        self.assertIn("persona anchor: skipped", r.stdout)
+        self.assertIn("committed", r.stdout)
+        self.assertEqual(self.anchor.read_text(), "committed\n")
+        git("rm", "-q", "CLAUDE.local.md", cwd=self.repo)
+        git("commit", "-q", "-m", "gone", cwd=self.repo)
+        target = self.e.home / "elsewhere.md"
+        target.write_text("shared\n")
+        self.anchor.symlink_to(target)
+        r = self.setup_project()
+        self.assertIn("persona anchor: skipped", r.stdout)
+        self.assertIn("link", r.stdout)
+        self.assertEqual(target.read_text(), "shared\n")
+
+    def test_a_half_removed_anchor_is_not_rewritten(self):
+        self.anchor.write_text(BEGIN + " -->\nhalf\n")
+        r = self.setup_project()
+        self.assertIn("persona anchor: skipped", r.stdout)
+        self.assertEqual(self.anchor.read_text(), BEGIN + " -->\nhalf\n")
+
+    def test_check_reports_the_anchor_here_and_changes_nothing(self):
+        self.setup_project()
+        before = self.snapshot()
+        r = self.e.run(str(self.repo), "--check", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("check persona: ok", r.stdout)
+        self.assertIn("check persona anchor: ok", r.stdout)
+        self.assertEqual(self.snapshot(), before)
+        text = self.anchor.read_text()
+        for broken, state in ((None, "missing"), (text.replace("in full", "partly"), "stale")):
+            if broken is None:
+                self.anchor.unlink()
+            else:
+                self.anchor.write_text(broken)
+            before = self.snapshot()
+            r = self.e.run(str(self.repo), "--check", adapt=True)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn(f"check persona anchor: {state}", r.stdout)
+            self.assertIn("--refresh", r.stdout)
+            self.assertEqual(self.snapshot(), before)
+
+    def test_check_of_a_project_not_set_up_says_so(self):
+        r = self.e.run(str(self.repo), "--check", adapt=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("check persona: missing", r.stdout)
+        self.assertFalse(self.anchor.exists())
+        self.assertFalse((self.e.store(self.repo) / "settings.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

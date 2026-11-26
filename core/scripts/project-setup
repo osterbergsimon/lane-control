@@ -11,6 +11,7 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
                 [--orca-from DIR | --orca-bundle TAR] [--orca-version V]
                 [--tunnel-auth-sock PATH] [--tunnel-ssh PATH] [--tunnel-no-enable] [--tunnel-remote-port N]
   project-setup --remove-host <host>
+  project-setup --check <dir> | <git-url|dir> <host>
   project-setup <dir> --suggest-tiers <provider> [--gateway URL] [--gateway-key-env NAME]
 
 Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
@@ -21,7 +22,10 @@ project's additions at the end (kept out of git by .git/info/exclude), the perso
 (core/harnesses/), the design kit (the component-gallery skill, the frontend brief, design-shots and the design
 skills from core/design-skills.tsv, for Claude and OpenCode), and the coordinator started in its own Orca terminal
 titled "<project> coordinator", which makes the session's own Orca Run before the agent starts (its id goes in the
-settings store). The design lead is retired (docs/superpowers/specs/2026-11-21-design-kit-design.md): what is left of
+settings store). A coordinator already runs only when an agent process of it does: a terminal with its title, or Orca's
+agent mark, is no proof, so one that is recorded with no agent is said as `recorded but dead` and started again. The
+main checkout's CLAUDE.local.md gets the coordinator's persona anchor (core/anchor.py): a session started there by hand
+is told to read the persona; the rest of that file is kept, and it is never committed. The design lead is retired (docs/superpowers/specs/2026-11-21-design-kit-design.md): what is left of
 one is moved or named, never deleted silently; --design-lead is refused and --no-design-lead does nothing. Claude and
 OpenCode (v2, opencode2) both take every role; nothing is ever typed into a terminal. A project keeps the
 orchestrator it was set up with (the store, or a .cotal/ folder) unless --orchestrator names another.
@@ -34,8 +38,9 @@ only), passed to the host on ssh's stdin and saved there as an Orca environment,
 here (core/scripts/lane-tunnel, a systemd user service), so the host's coordinator can run lanes here; then
 machine-setup there, unless --no-machine-setup. The link is never in arguments, logs, files or the store: only
 the environment's name is kept; the link is made by hand in Orca (orca pair would widen the desktop to every
-interface), and setup gives the steps before any host work. --check <repo> <host> lists every prerequisite of that run
-and changes nothing. --remove-host undoes the desktop lanes and says where to revoke the link. A project
+interface), and setup gives the steps before any host work. --check <repo> <host> lists every prerequisite of that run,
+and the box's persona anchors, and changes nothing. --check <dir>, with no host, says whether this machine's project has
+its coordinator persona and anchor as setup writes them (exit 1 if not), and changes nothing. --remove-host undoes the desktop lanes and says where to revoke the link. A project
 the host runs on Orca + Cotal keeps that path, as does --orchestrator orca-cotal.
 
 Runs on the execution host as a normal user (never root) and needs a reachable Orca runtime (`orca status`), `cotal`
@@ -2984,7 +2989,8 @@ EXCLUDE_END = "# lane-control: end"
 LOCAL_FILES = ("/.claude/settings.local.json", "/.opencode/plugins/lane-persona.js",  # the second: LANE_OPENCODE_PLUGIN=project
                "/.opencode/plugins/lane-away-guard.js",  # the same for the away-improve guard
                *(f"/{ADAPTED}/{r}.md" for r in NATIVE_ROLES),
-               f"/{ADAPTED}/design-lead.md")  # the retired design lead's rendered persona, removed once it stops
+               f"/{ADAPTED}/design-lead.md",  # the retired design lead's rendered persona, removed once it stops
+               "/CLAUDE.local.md")  # the coordinator's persona anchor (core/anchor.py)
 NATIVE_REVIEW_NOTE = f"""
 Native Orca: the coordinator and reviewer files are in {ADDITIONS}/ (appended to the rendered personas);
 {ADAPTED}/<role>.md are rendered personas, not adapted files: never ask for them there."""
@@ -3079,8 +3085,73 @@ def native_personas(repo: Path, project: str, pins: dict, mode: str, tier_text: 
         if state == "updated":
             changed.append(role)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
+    persona_anchor(repo, project)
     record_version(repo, before)
     return changed
+
+
+def load_anchor():
+    """core/anchor.py: the few lines in CLAUDE.local.md that send a session to its persona."""
+    core = str(HERE / "core")
+    if core not in sys.path:
+        sys.path.insert(0, core)
+    import anchor
+    return anchor
+
+
+def anchor_block(repo: Path, project: str) -> str:
+    a = load_anchor()
+    return a.project_block(repo, repo / ADAPTED / "coordinator.md", session_title("coordinator", project),
+                           a.project_imports(repo))
+
+
+def persona_anchor(repo: Path, project: str) -> None:
+    """The coordinator's persona anchor in the main checkout, never committed. A committed file, a link or a broken
+    anchor is left as it is and said; the rest of setup goes on."""
+    a = load_anchor()
+    f = repo / a.PROJECT_FILE
+    if tracked(repo, f):
+        return say("persona anchor", "skipped", f"({a.PROJECT_FILE} is committed in this repo, so setup does not write "
+                   "it: a session started by hand there is not told to read the persona. Take it out of git to have "
+                   "the anchor)")
+    try:
+        state = a.apply(f, anchor_block(repo, project))
+    except (a.AnchorError, OSError) as e:
+        return say("persona anchor", "skipped", f"({e})")
+    say("persona anchor", state, str(f))
+
+
+def check_local(a) -> int:
+    """--check <repo> with no host: this machine's coordinator persona and its anchor. Reads only. Exit 0 when both are
+    there and as setup writes them, 1 otherwise, 2 for something that is no project folder."""
+    d = Path(a.target).expanduser()
+    top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
+    if top is None or top.returncode != 0:
+        print("project-setup: --check without a host takes the folder of a project on this machine (for a box: "
+              "project-setup --check <repo> <host>)", file=sys.stderr)
+        return 2
+    repo = Path(top.stdout.strip()).resolve()
+    try:
+        if which_orchestrator(a.orchestrator, repo) != "native-orca":
+            say("check", "skipped", "(persona anchors are native Orca's; this project is on another orchestrator)")
+            return 0
+        st = settings(repo)
+        anchor, persona = load_anchor(), repo / ADAPTED / "coordinator.md"
+        fix = f"project-setup {shlex.quote(str(repo))}" + (" --refresh" if "models" in st else "")
+        has = persona.is_file()
+        say("check persona", "ok" if has else "missing", f"({persona})" if has else f"(no {persona}: {fix})")
+        f = repo / anchor.PROJECT_FILE
+        try:
+            state, why = anchor.check(f, anchor_block(repo, a.name or st.get("name") or repo.name)), ""
+        except anchor.AnchorError as e:
+            state, why = "stale", str(e)
+        say("check persona anchor", state, f"({f})" if state == "ok" else f"({why or f}: {fix} writes it)")
+    except Fail as e:
+        print(f"project-setup: {e}", file=sys.stderr)
+        return 1
+    ok = has and state == "ok"
+    say("check", "ok" if ok else "missing", "(nothing was changed)")
+    return 0 if ok else 1
 
 
 DESIGN_LEAD_FILES = (f"{ADDITIONS}/design-lead.md", f"{ADAPTED}/design-lead.md")  # committed: native, Orca + Cotal
@@ -3927,11 +3998,31 @@ for f in (conf + "/opencode/opencode.json", conf + "/opencode/opencode.jsonc"):
         break
 out["gateway_key_env"] = key
 out["gateway_key_set"] = bool(key and os.environ.get(key))
+def anchor(folder, persona, name):  # "unset" without a rendered persona; else whether the anchor is in the folder
+    f = os.path.expanduser(folder)
+    if not os.path.isfile(os.path.join(f, ".lane-control", persona)):
+        return "unset"
+    try:
+        with open(os.path.join(f, name), errors="replace") as h:
+            return "ok" if "<!-- lane-control:persona-anchor begin" in h.read() else "missing"
+    except OSError:
+        return "missing"
+out["anchors"] = {"project": anchor(sys.argv[3], "coordinator.md", "CLAUDE.local.md"),
+                  "machine": anchor("~/machine-coordinator", "machine-coordinator.md", "CLAUDE.md")}
 print(json.dumps(out))
 '''  # what --check asks the box in one ssh call: names and yes/no only, never a value
 CHECK_REFUSES = ("--remove-host", "--suggest-tiers", "--refresh", "--readapt", "--show", "--write-orca-yaml",
                  "--trust-folder", "--with", "--private", "--beads-repo", "--via-host", "--desktop-environment")
 UNCHECKED = "could not check"  # a row whose answer was not read: --check is then not ok
+
+
+def box_folder(a) -> str:
+    """The project's folder on the box, as setup there finds it: the path given, else ~/code/<name> for a URL."""
+    if a.target.startswith(("/", "~/")):
+        return a.target
+    base = a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
+    dest = a.dest if a.dest != str(Path.home() / "code") else "~/code"
+    return f"{dest.rstrip('/')}/{slug(base)}"
 
 
 def check_host(a, host: str) -> int:
@@ -3977,7 +4068,8 @@ def check_host(a, host: str) -> int:
     provider = rest.split("/", 1)[0] if harness == "opencode" and "/" in rest else ""
     me, probe, no_probe = this_machine(), None, None
     try:
-        r = place.ssh(f"python3 - {shlex.quote(me)} {shlex.quote(provider)}", input=BOX_PROBE, timeout=90)
+        r = place.ssh(f"python3 - {shlex.quote(me)} {shlex.quote(provider)} {shlex.quote(box_folder(a))}",
+                      input=BOX_PROBE, timeout=90)
         if r.returncode == 255:
             no_probe = f"ssh {host} did not answer"
             row("ssh", "missing", f"(ssh {host} needs a prompt or fails: run `ssh {host}` once by hand for its host "
@@ -4094,6 +4186,23 @@ def check_host(a, host: str) -> int:
             row("lane-control on box", "to do", "(a copy from before the install; setup sends the whole tree)")
         else:
             row("lane-control on box", "to do", "(setup sends this machine's installed tree)")
+    for kind, who, skip, writes in (
+            ("project", "the box's coordinator", None, f"project-setup <repo> {host}"),
+            ("machine", "the box's machine coordinator", "--no-machine-setup" if a.no_machine_setup else None,
+             f"machine-setup, which project-setup <repo> {host} runs there,")):
+        name = f"{kind} anchor on box"
+        state = (probe or {}).get("anchors", {}).get(kind)
+        if probe is None:
+            unread(name, no_probe)
+        elif state == "ok":
+            row(name, "ok", f"({who}'s folder has its persona anchor)")
+        elif skip:
+            row(name, "skipped", f"({skip})")
+        elif state == "missing":
+            row(name, "to do", f"(a persona but no anchor: a session started by hand is not told to read it; "
+                f"{writes} writes it)")
+        else:
+            row(name, "to do", f"({writes} writes it with {who}'s persona)")
     missing = [n for n, s in rows if s == "missing"]
     unchecked = [n for n, s in rows if s == UNCHECKED]
     todo = [n for n, s in rows if s == "to do"]
@@ -4710,11 +4819,7 @@ def main(argv=None) -> int:
                   "has (only --reviewer is used, for a reviewer persona that is missing)", file=sys.stderr)
             return 2
     if a.check:
-        if not host:
-            print("project-setup: --check takes a repo and a host: project-setup --check <repo> <host>",
-                  file=sys.stderr)
-            return 2
-        return check_host(a, host)
+        return check_host(a, host) if host else check_local(a)
     if not a.show:  # before the host copy and before anything is rendered; --show sends and switches nothing
         try:
             use_install("core/scripts/project-setup", argv)

@@ -1526,6 +1526,52 @@ class MachineSetupTests(BudgetTest):
         self.assertEqual(self.creates(["terminal", "create"]), [])
         self.assertIn("machine coordinator: exists", r.stdout)
 
+    def test_the_folder_gets_a_persona_anchor_that_automations_ignore(self):  # lc-l78.2
+        r = self.setup_machine("--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("persona anchor: created", r.stdout)
+        text = " ".join((self.folder / "CLAUDE.md").read_text().split())
+        persona = self.folder.resolve() / ".lane-control" / "machine-coordinator.md"
+        for needed in (str(persona), "in full before anything else", "machine coordinator", "automation",
+                       "night manager", "lane sweep", "machine check", "Task", "ignore this note"):
+            self.assertIn(needed, text)
+        self.assertIn("persona anchor: exists", self.setup_machine("--no-start").stdout)
+
+    def test_the_owners_claude_md_in_the_machine_folder_is_kept(self):
+        self.folder.mkdir()
+        (self.folder / "CLAUDE.md").write_text("My caps: two lanes.\n")
+        self.assertIn("persona anchor: updated", self.setup_machine("--no-start").stdout)
+        text = (self.folder / "CLAUDE.md").read_text()
+        self.assertTrue(text.startswith("<!-- lane-control:persona-anchor begin"))
+        self.assertTrue(text.endswith("My caps: two lanes.\n"), text)
+
+    def test_check_reports_the_machine_anchor_and_changes_nothing(self):
+        def tree():
+            return {str(p): p.read_bytes() for p in self.home.rglob("*") if p.is_file() and not p.is_symlink()}
+        before = tree()
+        r = self.setup_machine("--check")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("check persona: missing", r.stdout)
+        self.assertIn("check persona anchor: missing", r.stdout)
+        self.assertEqual(tree(), before)  # nothing installed, written or created
+        self.assertFalse(self.folder.exists())
+        self.assertEqual(self.orca_calls(), [])
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertEqual(self.setup_machine("--no-start").returncode, 0)
+        r = self.setup_machine("--check")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("check persona anchor: ok", r.stdout)
+        f = self.folder / "CLAUDE.md"
+        f.write_text(f.read_text().replace("in full", "partly"))
+        r = self.setup_machine("--check")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check persona anchor: stale", r.stdout)
+
+    def test_check_reads_this_machine_only(self):
+        r = self.setup_machine("--check", "--host", "trial-vps")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("project-setup --check", r.stderr)
+
     def automations(self) -> dict:
         out = {}
         for c in self.creates(["automations", "create"]):
