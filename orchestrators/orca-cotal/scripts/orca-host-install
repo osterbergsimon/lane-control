@@ -184,9 +184,15 @@ case $act in
     login=$(getent passwd "$u" 2>/dev/null | cut -d: -f7)
     [ -n "$login" ] || login=$(awk -F: -v u="$u" '$1 == u { print $7 }' /etc/passwd)
     case $login in ''|*[!A-Za-z0-9/._+-]*) exit 0 ;; esac
-    [ "$cur" != "$login" ] || exit 0
-    systemctl --user set-environment "SHELL=$login" || { echo "could not set SHELL=$login in the user manager"; exit 1; }
-    echo "SHELL $login (was ${cur:-unset}) in the user manager: Orca's server starts its terminals with it" ;;
+    if [ "$cur" != "$login" ]; then
+      systemctl --user set-environment "SHELL=$login" || { echo "could not set SHELL=$login in the user manager"; exit 1; }
+      echo "SHELL $login (was ${cur:-unset}) in the user manager: Orca's server starts its terminals with it"
+    fi
+    # A server that already runs keeps the SHELL it started with: said on every run until it is restarted.
+    list | awk '$3 == "server" { print $1 }' | while read -r p; do
+      have=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^SHELL=//p')
+      [ "$have" = "$login" ] || echo "restart needed: Orca's server (pid $p) runs with SHELL=${have:-unset}, the login shell is $login: on this host, systemctl --user restart orcad.service (its terminals end)"
+    done ;;
 esac
 AUDIT
 )
@@ -539,7 +545,6 @@ said=$(audit "$ver" "$port" shell) || die "$said"
 [ -z "$said" ] || printf '%s\n' "$said"
 if [ "$state" = current ]; then
   echo "running orcad $port"
-  [ -z "$said" ] || echo "note: the Orca server on $host started before that; to give its terminals the login shell, on $host: systemctl --user restart orcad.service (its terminals end)"
 else
   r "set -e; cd $rslot; rm -f .orcad-readiness-$port
      [ -w \"\${TMPDIR:-/tmp}\" ] || { mkdir -p ~/tmp; export TMPDIR=\$HOME/tmp; }

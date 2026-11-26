@@ -307,6 +307,17 @@ def runtimes(procs: list, port=None) -> tuple:
     return "ok", f"one server: orcad-{s['slot']} (pid {s['pid']}" + (f", port {s['port']})" if s["port"] else ")")
 
 
+def pair_fix(host: str, procs: list, port=None) -> str:
+    """orca-host-install --pair with the port and version the box serves now (review M1), never the defaults, which
+    would move a box off its port or replace its pin; --stop-stale when something of an older build may go."""
+    servers = [p for p in procs if p["role"] == "server"]
+    keep = servers[0] if len(servers) == 1 else None
+    port = port or (keep or {}).get("port")
+    stale = any(p["slot"] != keep["slot"] for p in procs) if keep else len(servers) > 1
+    return (f"orca-host-install {host} --pair --port {port or '<the port its tunnel uses>'} --version "
+            f"{keep['slot'] if keep else '<the build to keep>'}" + (" --stop-stale" if stale else ""))
+
+
 def named(procs: list) -> str:
     """Each process with its pid, slot, port and role, and whether it is in use (child processes, or adopted)."""
     def use(p):
@@ -336,6 +347,28 @@ def shells() -> tuple:
         return None, login
     manager = next((line[len("SHELL="):] for line in r.stdout.splitlines() if line.startswith("SHELL=")), None)
     return manager, login
+
+
+def server_shell(pid: int):
+    """The SHELL a running process started with (its own environment; a server keeps it until it restarts)."""
+    try:
+        env = (PROC / str(pid) / "environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    return next((e[len(b"SHELL="):].decode(errors="replace") for e in env if e.startswith(b"SHELL=")), "")
+
+
+def shell_state(manager, login, server: "str | None") -> tuple:
+    """(state, detail): ok only when the user manager and the running server (when one runs) have the login shell."""
+    if not login:
+        return "ok", "no login shell in passwd to compare"
+    if manager and manager != login:
+        return "broken", (f"the systemd user manager has SHELL={manager}, the login shell is {login} (a chsh does not "
+                          "reach a manager that already runs, so Orca's server starts terminals with the old one)")
+    if server is not None and server != login:
+        return "restart", (f"restart needed: Orca's server runs with SHELL={server or 'unset'}, the login shell is "
+                           f"{login}; it keeps the shell it started with")
+    return "ok", f"SHELL is {login}" + (" for the user manager and the running server" if server is not None else "")
 
 
 def shell_fix(login: str) -> str:

@@ -147,12 +147,12 @@ class Env(unittest.TestCase):
     def node(self):
         return str(self.bin / "node")
 
-    def spawn_node(self, *words, port=0, child=False):
+    def spawn_node(self, *words, port=0, child=False, shell=None):
         """A process whose argv[0] is node, as Orca's server and its helpers run (review m2)."""
-        return self.spawn(*words, port=port, exe=self.node, child=child)
+        return self.spawn(*words, port=port, exe=self.node, child=child, shell=shell)
 
-    def spawn(self, *words, port=0, exe=sys.executable, child=False):
-        env = {**os.environ, **({"HOLD_CHILD": "1"} if child else {})}
+    def spawn(self, *words, port=0, exe=sys.executable, child=False, shell=None):
+        env = {**os.environ, **({"HOLD_CHILD": "1"} if child else {}), **({"SHELL": shell} if shell else {})}
         p = subprocess.Popen([exe, "-c", HOLD, str(port), *words], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              stdin=subprocess.DEVNULL, text=True, env=env, start_new_session=True)
         self.procs.append(p)
@@ -406,6 +406,19 @@ class DoctorTests(Env):
         d = json.loads(self.doctor("--json")[0].stdout)
         self.assertEqual(d["runtime"]["state"], "broken")
         self.assertEqual({p["pid"] for p in d["runtime"]["processes"]}, {new, old})
+
+    def test_a_server_that_kept_the_old_shell_needs_a_restart_though_the_manager_has_the_new_one(self):
+        import pwd
+        login = pwd.getpwuid(os.getuid()).pw_shell
+        u = self.conf / "systemd" / "user"
+        u.mkdir(parents=True)
+        (u / "orcad.service").write_text("[Service]\nExecStart=/bin/true\n")
+        self.sstate.write_text(json.dumps({"shell": login}))
+        self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769", shell="/bin/oldsh")
+        r, todo = self.doctor()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(any("restart needed" in t and "SHELL=/bin/oldsh" in t and "restart orcad.service" in t
+                            for t in todo), todo)
 
     def test_the_box_doctor_reports_the_serving_pin(self):
         self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769")
@@ -670,7 +683,13 @@ class HostInstallTests(Env):
                            capture_output=True, text=True)
         self.assertEqual(r.stdout, "")
         self.assertFalse(any(c[1:2] == ["set-environment"] for c in self.calls()[n:]))
-        self.assertIn("systemctl --user restart orcad.service", HOST_INSTALL.read_text())  # said for a running one
+        server = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", "6769", shell="/bin/oldsh")
+        for _ in range(2):  # review M3: said on every run while the running server has the old one
+            r = subprocess.run(["sh", "-s", "--", "x", "0", "shell"], input=audit, capture_output=True, text=True,
+                               env={**self.env, "HOME": str(self.box)})
+            self.assertIn(f"restart needed: Orca's server (pid {server}) runs with SHELL=/bin/oldsh, the login shell "
+                          f"is {login}", r.stdout)
+            self.assertIn("systemctl --user restart orcad.service", r.stdout)
 
 class PairTests(HostInstallTests):
     """orca-host-install --pair end to end, from a fake slot, against a box whose 'servers' are this test's children
@@ -762,15 +781,15 @@ class CheckTests(unittest.TestCase):
 
     reap = Env.reap
 
-    def spawn(self, *words, port=0, exe=sys.executable):
-        return Env.spawn(self, *words, port=port, exe=exe)
+    def spawn(self, *words, port=0, exe=sys.executable, child=False, shell=None):
+        return Env.spawn(self, *words, port=port, exe=exe, child=child, shell=shell)
 
-    def spawn_node(self, *words, port=0):
+    def spawn_node(self, *words, port=0, shell=None):
         node = self.e.home / "nodebin" / "node"  # not on PATH
         if not node.exists():
             node.parent.mkdir(exist_ok=True)
             node.symlink_to(sys.executable)
-        return self.spawn(*words, port=port, exe=str(node))
+        return self.spawn(*words, port=port, exe=str(node), shell=shell)
 
     def slot(self, ver):
         return str(self.e.box / ".orca-remote" / f"orcad-{ver}" / "orcad.js")
@@ -814,7 +833,7 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(rows["runtimes on box"].startswith("ok"), rows)
         r, rows = self.check("--orca-version", "1.4.280")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("--pair --version 1.4.280", rows["runtimes on box"])
+        self.assertIn("--pair --port 6769 --version 1.4.280", rows["runtimes on box"])
 
     def test_a_shell_the_user_manager_did_not_get_fails_where_orcad_runs_under_it(self):
         import pwd
@@ -831,6 +850,11 @@ class CheckTests(unittest.TestCase):
         self.assertIn(f"systemctl --user set-environment SHELL={login}", rows["shell on box"])
         r, rows = self.check(env_extra={"STUB_MANAGER_SHELL": login})
         self.assertTrue(rows["shell on box"].startswith("ok"), rows)
+        self.spawn_node(self.slot("0.2.0+bbbb"), "--port", "6769", shell="/bin/oldsh")  # review M3
+        r, rows = self.check(env_extra={"STUB_MANAGER_SHELL": login})
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("restart needed", rows["shell on box"])
+        self.assertIn("systemctl --user restart orcad.service", rows["shell on box"])
 
     def test_a_climbing_restart_counter_fails_the_tunnel_while_its_port_answers(self):
         self.pair()

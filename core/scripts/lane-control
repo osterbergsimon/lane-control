@@ -152,22 +152,25 @@ def tunnels(out: dict) -> None:
 
 
 def runtime(out: dict) -> None:
-    """This user's Orca server processes (a box): one server, nothing of an older slot; and the user manager's SHELL
-    where orcad.service runs under it."""
+    """This user's Orca server processes (a box): one server, nothing of an older slot; and the SHELL of the user
+    manager and of the running server where orcad.service runs under that manager."""
     procs = H.orcad(I.home())
+    servers = [p for p in procs if p["role"] == "server"]
     if procs or (I.home() / ".orca-remote").is_dir():
         state, detail = H.runtimes(procs)
         out["runtime"] = {"state": state, "detail": detail, "processes": procs}
         if state == "broken":
-            out["todo"].append(f"Orca's server here: {detail}: from the desktop run orca-host-install <this host> "
-                               "--pair (it stops the stale ones and proves one runtime), or kill the pids named")
+            out["todo"].append(f"Orca's server here: {detail}: from the desktop run " + H.pair_fix("<this host>", procs) +
+                               " (it names each process first and stops only an older build's unused ones), or kill "
+                               "an unused pid named here")
     if (I.config_home() / "systemd" / "user" / "orcad.service").is_file():
         manager, login = H.shells()
-        out["shell"] = {"manager": manager, "login": login}
-        if manager and login and manager != login:
-            out["todo"].append(f"the systemd user manager has SHELL={manager}, the login shell is {login} (a chsh "
-                               "does not reach a manager that already runs, so Orca's server starts terminals with "
-                               f"the old one): run {H.shell_fix(login)}")
+        server = H.server_shell(servers[0]["pid"]) if len(servers) == 1 else None
+        state, detail = H.shell_state(manager, login, server)
+        out["shell"] = {"manager": manager, "login": login, "server": server, "state": state}
+        if state != "ok":
+            out["todo"].append(f"{detail}: run {H.shell_fix(login)}" if state == "broken" else
+                               f"{detail}: systemctl --user restart orcad.service (its terminals end)")
 
 
 def automations(out: dict) -> None:
@@ -276,7 +279,8 @@ def cmd_doctor(a) -> int:
     if d["runtime"]:
         print(f"orca server: {d['runtime']['detail']}")
     if d["shell"]:
-        print(f"shell: user manager {d['shell']['manager'] or 'none'}, login {d['shell']['login'] or 'unknown'}")
+        print(f"shell: user manager {d['shell']['manager'] or 'none'}, server {d['shell']['server'] or 'none'}, "
+              f"login {d['shell']['login'] or 'unknown'}")
     if d["automations"] is None:
         print("automations: not checked (Orca's CLI did not list them)")
     else:

@@ -3878,6 +3878,7 @@ if len(srv) == 1:
         pass
     out["pin"] = pin
 out["shell"] = list(shells())
+out["server_shell"] = server_shell(srv[0]["pid"]) if len(srv) == 1 else None  # what the running server started with
 out["orcad_unit"] = os.path.isfile(os.path.join(conf, "systemd", "user", "orcad.service"))
 print(json.dumps(out))
 '''  # what --check asks the box in one ssh call: names and yes/no only, never a value
@@ -4079,19 +4080,23 @@ def check_host(a, host: str) -> int:
     if probe is None:
         unread("runtimes on box", no_probe)
     else:
-        state, detail = (probe.get("runtime") or [None, ""])[:2]
+        state, detail, procs = ((probe.get("runtime") or []) + [None, "", []])[:3]
         pin = probe.get("pin") or {}
+        one = [x for x in procs or [] if x.get("role") == "server"]
+        pport = (d1 or {}).get("port") or (one[0].get("port") if len(one) == 1 else None)  # direction 1's, else the server's
         if state == "ok":
             want = a.orca_version
             if want and want not in (pin.get("slot"), pin.get("version"), pin.get("app")):
                 row("runtimes on box", "missing", f"({detail}, but --orca-version asks for {want}: "
-                    f"scripts/orca-host-install {host} --pair --version {want})")
+                    f"scripts/orca-host-install {host} --pair --port {pport or '<its port>'} --version {want} "
+                    "--stop-stale, which replaces it only while it is unused)")
             else:
                 row("runtimes on box", "ok", f"({detail}" + (f", Orca {pin['app']}" if pin.get("app") else "") + ")")
         elif state == "broken":
-            row("runtimes on box", "missing", f"({detail}. One runtime per host: scripts/orca-host-install {host} "
-                "--pair stops an older build's and proves one; another of the same build, stop it on "
-                f"{host}: kill <pid>)")
+            row("runtimes on box", "missing", f"({detail}. One runtime per host: scripts/"
+                f"{HEALTH.pair_fix(host, procs or [], pport)} names each process and stops only an older build's "
+                f"unused ones; one in use goes once its terminals end; another of the same build, on {host}: kill "
+                "<its pid>)")
         elif state == "none":
             row("runtimes on box", "to do" if d1_todo else "warn",
                 "(no Orca server runs there yet: setup starts one)" if d1_todo else
@@ -4099,18 +4104,19 @@ def check_host(a, host: str) -> int:
         else:
             unread("runtimes on box", f"the answer from {host} named no runtime")
         manager, login = (probe.get("shell") or [None, None])[:2]
+        sstate, sdetail = HEALTH.shell_state(manager, login, probe.get("server_shell"))
         if not manager:
             row("shell on box", "skipped", f"(no systemd user manager answered on {host}; a detached server starts "
                 "with the login shell)")
-        elif not login or manager == login:
-            row("shell on box", "ok", f"(the user manager's SHELL is {manager})")
-        elif not probe.get("orcad_unit"):
-            row("shell on box", "to do", f"(the user manager has SHELL={manager}, the login shell is {login}: "
-                "orca-host-install sets it before it starts Orca's server)")
+        elif sstate == "ok":
+            row("shell on box", "ok", f"({sdetail})")
+        elif sstate == "broken" and not probe.get("orcad_unit"):
+            row("shell on box", "to do", f"({sdetail}: orca-host-install sets it before it starts Orca's server)")
+        elif sstate == "broken":
+            row("shell on box", "missing", f"({sdetail}. On {host}: {HEALTH.shell_fix(login)})")
         else:
-            row("shell on box", "missing", f"(the user manager has SHELL={manager}, the login shell is {login}: a "
-                f"chsh does not reach a manager that already runs, so Orca's server starts terminals with the old "
-                f"one. On {host}: {HEALTH.shell_fix(login)})")
+            row("shell on box", "missing", f"({sdetail}. On {host}: systemctl --user restart orcad.service (its "
+                "terminals end; a running agent keeps the environment it started with))")
     missing = [n for n, s in rows if s == "missing"]
     unchecked = [n for n, s in rows if s == UNCHECKED]
     todo = [n for n, s in rows if s == "to do"]
