@@ -24,7 +24,9 @@ coordinator restart  asks the running coordinator by Orca message to back its re
                    or outside an Orca terminal (Orca sends messages only from its own). Not running: it only starts.
 coordinator status  running, resting, paused, recorded but dead or cannot tell (project-pause status).
 --on <host>        runs the box's own lane-control there over ssh (as project-setup <repo> <host> does), so the box's
-                   coordinator starts on the box; <project> is then the box's folder or name.
+                   coordinator starts on the box; <project> is then the box's folder or name. restart sends its
+                   message from an Orca terminal only, and an ssh session is none: there it refuses and changes
+                   nothing (run it in an Orca terminal of the box's server).
 
 lane new           an Orca message to the project's running coordinator, from your Orca terminal, asking it to start a
                    lane for that issue: it gates, routes, briefs, reviews and merges as usual (the tier and the note
@@ -206,7 +208,10 @@ def machine_start(folder: "str | None", force: bool, yes: bool) -> int:
     pin = ms.persona_pin(f)
     if not pin:
         raise ps.Fail(f"no rendered persona with a model in {persona}: run lane-control machine setup first")
-    harness, model = ms.harness_model(pin)
+    try:
+        harness, model = ms.harness_model(pin)
+    except (ms.SystemExit2, ValueError) as e:
+        raise ps.Fail(f"{persona}: {e}: run lane-control machine setup") from None
     mps, s = machine_state(ms, f)
     if s.live:
         if force:
