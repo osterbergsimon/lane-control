@@ -25,6 +25,10 @@
 # Both paths must be absolute, with no line break, backslash, leading quote or leading or trailing space (systemd reads
 # its env files differently from sh); --ssh must be an executable file. --auth-sock need not exist yet (a note says so).
 #
+# The unit's ssh never multiplexes (ControlPath=none, ControlMaster=no): one that rides the user's ControlMaster hands
+# the forward to the master and exits, so the unit flaps while the port still answers. lane-control doctor and
+# project-setup --check read its restart counter and its own connection; a template from before is rewritten, and a
+# running instance restarted, by the next start.
 # The unit never gives up: ssh runs with BatchMode, ConnectTimeout and ExitOnForwardFailure, and Restart=always retries
 # every 10 s, backing off to every 5 minutes (systemd 254 or later; older ones retry every 30 s). So a network that is
 # down for an hour, or a host that still holds the old forward for a while, ends with the tunnel back on its own.
@@ -45,8 +49,10 @@ conf=${XDG_CONFIG_HOME:-$HOME/.config}
 case $conf in /*) ;; *) conf=$HOME/.config ;; esac
 tunnels=$conf/lane-control/tunnels
 units=$conf/systemd/user
-here=$(cd "$(dirname "$0")" && pwd)
-template=$here/../templates/lane-tunnel@.service
+# The script's own folder, through any link (~/.agents/bin/lane-tunnel is one): the template sits beside it in the tree.
+self=$(readlink -f "$0" 2>/dev/null) || self=$0
+here=$(cd "$(dirname "$self")" && pwd)
+template=$(cd "$here/.." && pwd)/templates/lane-tunnel@.service
 
 # The values that go into the instance's env file, and the files they name, checked (exit 2); sets cfg.
 check_values() {
@@ -120,6 +126,13 @@ name=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
 unit=lane-tunnel@$name.service
 envfile=$tunnels/$name.env
 sd() { systemctl --user "$@"; }
+# Whether a unit's running ssh (its MainPID, read by name) runs with ControlPath=none; true when it does not run.
+unmuxed() {
+  pid=$(sd show "$1" -p MainPID 2>/dev/null | sed -n 's/^MainPID=//p')
+  case $pid in ''|0|*[!0-9]*) return 0 ;; esac
+  [ -r "/proc/$pid/cmdline" ] || return 0
+  tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q 'ControlPath=none'
+}
 have_systemd() { command -v systemctl >/dev/null 2>&1 && sd show-environment >/dev/null 2>&1; }
 need_systemd() {
   have_systemd || die "no systemd user manager here (systemctl --user), so the tunnel to $host cannot run as a user service"
@@ -133,6 +146,7 @@ case $op in
     { [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "bad port: $port" 2
     { [ -n "$rport" ] && [ "$rport" -ne "$port" ]; } || rport=$port  # 06768 and 6768 are one port
     check_values
+    [ -f "$template" ] || die "the unit template $template is not there: run lane-tunnel from a whole lane-control tree (the installed one is ~/.local/share/lane-control/current/core/scripts/lane-tunnel)"
     if [ -n "$auth_sock" ] && [ ! -S "$auth_sock" ]; then
       echo "lane-tunnel: note: $auth_sock is not a socket (yet): the agent has to be running there for the unit to use it" >&2
     fi
@@ -140,6 +154,7 @@ case $op in
     mkdir -p "$tunnels" "$units"
     chmod 700 "$tunnels"
     old=$(cat "$envfile" 2>/dev/null || true)
+    old_template=$(cat "$units/lane-tunnel@.service" 2>/dev/null || true)
     new=$(printf 'SSH_HOST=%s\nPORT=%s\nSSH_CONFIG=%s\nPATH=%s' "$host" "$port" "$cfg" "$PATH")
     # One port: the file as before, so a re-run for a tunnel started before does not restart it.
     [ "$rport" = "$port" ] || new=$(printf '%s\nREMOTE_PORT=%s' "$new" "$rport")
@@ -168,8 +183,23 @@ case $op in
       fi
       sd start "$unit" >/dev/null 2>&1 || die "systemctl --user start $unit failed (journalctl --user -u $unit)"
     fi
-    # A changed host, port (either end), agent or wrapper must replace a tunnel that already runs.
-    if [ -n "$old" ] && [ "$old" != "$new" ]; then sd restart "$unit" || die "systemctl --user restart $unit failed"; fi
+    # A changed host, port (either end), agent or wrapper must replace a tunnel that already runs, and so must a changed
+    # template (one written before ControlPath=none keeps a multiplexed ssh running until the unit restarts).
+    changed=0
+    [ -z "$old_template" ] || [ "$old_template" = "$(cat "$units/lane-tunnel@.service")" ] || changed=1
+    if { [ -n "$old" ] && [ "$old" != "$new" ]; } || [ "$changed" = 1 ] || ! unmuxed "$unit"; then
+      sd restart "$unit" || die "systemctl --user restart $unit failed"
+    fi
+    # The template is shared: every other instance that runs is restarted when it changed, or when its running ssh
+    # is from before ControlPath=none (a start for one host must not leave another host's tunnel on a ControlMaster).
+    for f in "$tunnels"/*.env; do
+      [ -e "$f" ] || continue
+      u=lane-tunnel@$(basename "$f" .env).service
+      [ "$u" != "$unit" ] && sd is-active --quiet "$u" 2>/dev/null || continue
+      [ "$changed" = 1 ] || ! unmuxed "$u" || continue
+      if sd restart "$u" >/dev/null 2>&1; then echo "restarted $u: its ssh now runs with ControlPath=none"
+      else echo "lane-tunnel: could not restart $u (systemctl --user restart $u)" >&2; fi
+    done
     # ssh runs with BatchMode, so a key or card it cannot use ends it at once: look again after a few seconds, while the
     # owner is here to read it.
     i=0

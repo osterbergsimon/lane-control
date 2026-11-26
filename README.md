@@ -4,7 +4,7 @@ How we run software projects with coding agents, whichever orchestrator starts t
 
 Orchestrators change fast, so the repo keeps what does not depend on one (`core/`) apart from what does (`orchestrators/<name>/`). A project can be set up on any supported orchestrator, moved from one to another without losing its rules, work or history, and a parked orchestrator can be retested later from what we learned last time.
 
-New here? Follow [Getting started](docs/getting-started.md): an empty machine to a first merged lane. Every doc is listed in the [docs index](docs/README.md).
+New here? Follow [Getting started](docs/getting-started.md): an empty machine to a first merged lane. To see what each part does and how they connect, read [How the parts fit](docs/how-it-fits.md). Every doc is listed in the [docs index](docs/README.md).
 
 ## What it is
 Three layers of agents, each run by the orchestrator you use:
@@ -72,6 +72,10 @@ Keep attribution if you prefer it; then drop the Identity line from your AGENTS.
 - **One issue, one key, one lane**; claim at launch, close at merge, park resumably (`core/issues.md`).
 - **Decisions surface to you** with a recommendation, the way the orchestrator offers; messages are few, terse and event-driven.
 - **Scripts enforce only limits the owner decided**; no silent machine-wide caps.
+- **Use Orca where we can** (owner 2026-11-25: "lets use orca where we can"): when Orca has its own feature that does
+  the job, use it instead of lane-control code; lane-control keeps only what Orca lacks. Before adding plumbing, read
+  Orca's help and its release notes since the pinned version. What overlaps today, with a replace, wrap or keep each:
+  `docs/research/2026-11-25-orca-overlap.md`.
 - **Every failure with a durable fix** goes into `core/reliability.md`.
 
 ## Sandbox

@@ -1,5 +1,14 @@
 # Native Orca on an SSH host
 
+Two separate connections, each with its own tunnel. Both tunnels are systemd user units **on this machine** (the
+desktop), so only outbound ssh from here is needed. The picture, and what the owner does by hand:
+[how the parts fit](../../docs/how-it-fits.md#a-box-two-directions).
+- **Direction 1**, the desktop controls the box (the box's Orca is the server): `orca-tunnel-<host>` (`ssh -L`), made
+  by `orca-host-install --pair`. The box's server makes the pairing code and the script uses it: nothing for the owner.
+- **Direction 2**, the box's coordinator starts lanes on the desktop (the desktop's Orca is the server):
+  `lane-tunnel@<host>` (`ssh -R`), made by `project-setup`, which also gives the box its link to this desktop: made
+  with `orca pair` after the owner's yes, or the share link the owner makes by hand (`--pair-by-hand`).
+
 `project-setup <repo> <host>` sets a project up on an SSH host (a box) and keeps it driven from this machine's Orca
 window (design: `docs/superpowers/specs/2026-11-19-native-orca-setup-design.md`, section 7). `<repo>` is a git URL or
 an absolute (or `~/`) path on the host; `<host>` is what ssh calls it (`LANE_SSH_CONFIG` names a separate ssh config,
@@ -9,13 +18,43 @@ space, a newline) is refused before anything runs. Setup's own ssh calls never w
 by hand first: with `BatchMode` an unknown host key is refused ("Host key verification failed"), not asked about. With `--show` or
 `--refresh`, only the copy and the host's own `--show` or `--refresh` run. Every step says `exists` on a re-run.
 
+## Check first
+`project-setup --check <repo> <host>` lists every prerequisite at once and changes nothing, here or on the box (no copy,
+no install, no pairing, no tunnel, no file); with a flag that acts (`--remove-host`, `--refresh`, `--suggest-tiers`,
+...) it is refused. Rows: Orca here and whether this desktop's Orca already listens beyond loopback
+(`desktop listener`), ssh without a prompt, direction 1 (the box's server saved here and answering) and the Orca
+versions on both sides, the `--orca-from`/`--orca-bundle` source, systemd here, direction 2 (read from the box's Orca
+CLI: has it this desktop as an environment, and can it reach it), the tunnel, the coordinator's agent CLI on the box,
+the gateway key's variable there (its name only, never its value), lane-control on the box, and three that a
+listening port does not answer (below, [A listening port is not proof](#a-listening-port-is-not-proof-lc-l78)): each
+tunnel unit as a unit (`direction 1 tunnel` when `orca-tunnel-<host>` is written here, and `tunnel`), `runtimes on
+box` (one Orca server, the pin it serves; with `--orca-version`, that one) and `shell on box`. Each line is
+`check <what>: ok|missing|warn|to do|could not check|skipped`, a missing one with what fixes it. `to do` is a step
+setup does itself, or the desktop's link (made after your yes, or by hand with `--pair-by-hand`); it passes. A box
+that has this desktop under the name an earlier run recorded, while this machine's name changed, is `missing`, with
+the remove-then-add steps (one name per desktop, below). `could not check (<why>)` is a row it could not
+read (ssh down, Python or Orca's CLI on the box failing, a version Orca did not say); it never counts as a yes or a
+no. It exits 1 when a row is missing or could not be checked.
+Then `project-setup <repo> <host>` says, for a native-Orca box project, before the box's server and its own run, what
+pairing each direction has (`pairing: direction 1 saved|to do|unknown`, `pairing: direction 2 to do|recorded|skipped`)
+and, with `--pair-by-hand`, the steps to make the desktop's link now (direction 2, step 2), so it is ready when the
+prompt comes.
+
 ## Direction 1: this machine drives the box
-1. lane-control is copied to `~/.local/share/lane-control` on the box, and the box's copy says which orchestrator the
+1. The desktop's installed lane-control tree, whole and at the same sha, is sent to the box's own
+   `~/.local/share/lane-control/<sha>/` (a tar on ssh's stdin; kept when the box has that sha) and the box's `current`
+   link is switched to it (`core/install.py`, `core/README.md` "The install"). The box's personas name its own
+   `~/.local/share/lane-control/current`. A box set up before has its old partial copy in that folder; it stays, unused.
+   The box's copy then says which orchestrator the
    project is on there (`--which-orchestrator`). A project the box already runs on Orca + Cotal keeps that path, and
    nothing below is done for it.
 2. Orca's server on the box: when the environment `<host>` (every character but letters, digits, `.`, `_`, `-` made
    `-`) does not answer here, `orchestrators/orca-cotal/scripts/orca-host-install <host> --pair --port <p>` puts it
-   there from this machine's Orca install and pairs it here through a `-L` tunnel (`orca-tunnel-<host>.service`).
+   there from this machine's Orca install (the server and its node runtime, node checked against its sha, so the box
+   downloads neither), starts it on the box's 127.0.0.1 (a systemd user unit when the box has a user manager, else a
+   detached process), opens `orca-tunnel-<host>` (`ssh -L`, direction 1, a user unit here), reads the box server's
+   pairing code itself and runs `orca environment add` here: no click and no code from the owner. Without `--pair` the
+   script only puts the files there, for Orca's own Settings > SSH connect to reuse (a box with no internet).
    `<p>` is the first free port from 6769 (`--orca-port` to choose): the desktop listens on 6768, and the tunnel uses
    one port at both ends. **Ports 6769 and up are reserved for Orca tunnels** (the range project-setup searches is
    6769-6868): do not put your own services there, on this machine or on a box, or setup takes the next free one and a
@@ -53,8 +92,47 @@ by hand first: with `BatchMode` an unknown host key is refused ("Host key verifi
    that runs Node needs Node there. A box set up before the kit gets it on its next `project-setup <repo> <host>` or
    `--refresh` (both install the lane tools, `design-shots` among them, and the skills).
 4. `core/scripts/machine-setup --host <host>` (skipped with `--no-machine-setup`): the box's own machine coordinator,
-   night manager, lane sweep and machine check.
+   night manager, lane sweep and machine check. No model is built in: on a box's first setup it asks for them in your
+   terminal. Without a terminal it writes the box's `machine.conf` from the example and stops, saying what to put in it
+   (`MACHINE_COORDINATOR=`, `AUTOMATION_MODEL=`); or run it yourself:
+   `machine-setup --host <host> --machine-coordinator <h>/<model> --automation-model <model>`. On a box with a gateway,
+   a run without a terminal also needs the gateway to confirm each new model, or `--no-model-check`.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.
+
+### A listening port is not proof (lc-l78)
+A site that ran boxes for weeks found four failures in one evening that a port answering hid (field report lc-l78).
+So lane-control checks what owns a port and how it got there:
+
+- **Tunnels never multiplex.** Both tunnel units run ssh with `-o ControlPath=none -o ControlMaster=no`. With your own
+  `ControlMaster auto` in `~/.ssh/config`, the unit's ssh would hand the forward to your master connection and exit:
+  the unit restarts for ever (127 restarts seen) while the port still answers. A unit counts as up only when it is
+  `active/running`, its restart counter does not climb, and its own ssh owns the socket (`ssh -L`: the listener on
+  127.0.0.1:`<port>`; `ssh -R`: a TCP connection of its own). An old unit is rewritten by `orca-host-install <host>
+  --tunnel` (direction 1) or the next `lane-tunnel start` (direction 2), and a running one restarted: a `lane-tunnel
+  start` for one host also restarts every other host's tunnel whose running ssh is from before. Each repair line names
+  the unit's own port, ssh config (`LANE_SSH_CONFIG=...`) and options (`--no-enable`, `--auth-sock`, `--ssh`).
+- **`orca-host-install <host> --tunnel [--port N]`** restores only direction 1's unit for a box paired before (after a
+  reboot, a cleaned `~/.config/systemd/user`, or a unit from before `ControlPath=none`): nothing is installed or
+  started on the box and no environment is removed or added. It needs the box's server on that port and the
+  environment saved here; when that does not answer through the restored tunnel, it points at `--pair`.
+- **One runtime per host.** Before `orca-host-install --pair` changes anything on the box it lists every process of an
+  older server slot there (a server, or a node helper such as the terminal daemon) with its pid, port, child processes
+  and whether a newer server adopted it (a `daemon-v*.pid` names it). Only an unused one (no child process: no live
+  terminal or agent, and not adopted) may be stopped, and only with `--stop-stale` or a yes in a terminal; anything
+  else is left and named. A server already serving the port from another build is replaced only with that consent and
+  when it is unused, and without `--version` (or a yes) not at all. A server of this build, or `orcad.service`, on
+  another port stops the run before anything changes, with the `--port` and pid to use. Afterwards exactly one server
+  of this build must run, on this port, owning the listener; an older one left in use is named. `--check` and the box's
+  `lane-control doctor` fail on more than one.
+- **SHELL.** A `chsh` changes passwd, not a systemd user manager that already runs, and Orca's server under that
+  manager keeps launching terminals with the old shell and its environment. `orca-host-install` sets the manager's
+  `SHELL` to the passwd one before it starts the server. Where the server already ran, do it on the box yourself:
+  `systemctl --user set-environment SHELL=<login shell>`, then `systemctl --user restart orcad.service` (its terminals
+  end; a running agent keeps the environment it started with). `--check` and `lane-control doctor` compare the
+  manager's SHELL and the running server's own (from its environment) with passwd, and say `restart needed` on every
+  run until the server has the login shell.
+- **`lane-control doctor`** on the desktop reads each tunnel unit the same way, and each box's own doctor (over ssh)
+  its runtimes, the pin and its SHELL. It changes nothing.
 
 ### Beads on a box (lc-5c1)
 What reaches a box today: nothing of beads. The project's `.beads` is a git-ignored link, so a clone of the project has
@@ -81,23 +159,48 @@ Agents on the box sign in there once, by the owner; setup never copies a credent
 there as here.
 
 ## Direction 2: the box's coordinator runs lanes here
+Direction 2 is a supported, first-class path, not a fallback (owner 2026-11-25: "coordinator lives on box for just that
+reason. direction 2 must stay."). Orca's own model, a coordinator on the client that starts workers on paired servers
+with `--on`, is covered by direction 1. lane-control also lets a project's coordinator live on its box, so that it keeps
+working while the desktop is off or unreachable; to run lanes on the desktop it needs the box paired the other way.
+The way is a link to this desktop's Orca and `lane-tunnel` (below). The owner decided (2026-11-25): "we do it with
+share link, with --on-client as fallback, but must make sure to make it as painless as possible for user", and on the
+field report's recipe (2026-11-26): "if we can handle automatically its much smoother for user". So by default setup
+makes the link itself with `orca pair` (step 1); the share link made by hand stays, for a desktop that must stay on
+loopback (step 2, `--pair-by-hand`). When neither can be made, the documented fallback is the `send --on-client`
+hand-off (The fallback, below).
+
 For what the box lacks (graphics, a browser, a GPU), its coordinator starts a lane in this desktop's Orca with
-`--on <this machine>`; the lane works in its own clone here, pushes to GitHub, and it reports by Orca; across hosts that
-is poll-only (Reports across hosts, below).
-1. The owner makes a share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this
-   computer's own address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a
-   link). Orca 1.4.250 has no CLI for it. `orca pair` (1.4.254 and later) is not a tested stand-in: in the canary
-   (2026-11-21) a scratch 1.4.268 `serve` pinned with `--bind` to its container-network address refused it, also with
-   `--address 127.0.0.1` ("Runtime bind address is pinned to <ip>; refusing to widen to all interfaces"). That wording
-   says the offer widens the server to every interface; the widening itself was not observed, and a desktop listening
-   on 127.0.0.1 was not tried. Keep to the Settings > Servers link with 127.0.0.1.
-2. `project-setup <repo> <host>` asks for the link on a hidden prompt, in a terminal only (Enter, no terminal or
-   `--no-desktop-lanes` skips it; a box already paired is not asked again). A terminal that cannot hide what is
-   typed is refused instead of asked.
-3. `core/scripts/lane-tunnel start --remote-port <box port> <host> <port>` runs `lane-tunnel@<host>.service`, a
-   systemd user service from `core/templates/lane-tunnel@.service`: `ssh -N -R 127.0.0.1:<box
-   port>:127.0.0.1:<port> <host>`, restarted always. `<port>` is the link's; `<box port>` is the same unless
-   `--tunnel-remote-port` names another (Two ports, below). Its host and ports are in
+`--on <this machine>`; the lane works in its own clone here, pushes to GitHub, and it reports by Orca (Reports across
+hosts, below).
+1. By default `project-setup <repo> <host>` makes the link, in a terminal and after one yes (Enter is no), with the
+   field report's recipe plus `--rotate` (lc-l78.23; measured there on two servers at the same version, run here
+   with stubs only): `orca pair --address 127.0.0.1:<box port> --rotate --json` on this desktop, after the tunnel is
+   up and checked, so a failed check leaves the listener as it was. Before it asks it says, in plain words, what the
+   link grants, what `--rotate` ends, what it does to this desktop's listener (and whether it already listens on
+   every interface) and how to revoke it; after, it prints the bind it reads again and the same revoke steps. The
+   facts behind each of those are in Pairing facts, below. The one the yes turns on: `orca pair` widens the listener.
+   This desktop's Orca then listens on every interface (0.0.0.0) at once, also after restarts while the box stays
+   paired. In Orca 1.4.274 every offer the CLI asks for does that, whatever the address, because the CLI's
+   `pairing.createOffer` has no way to ask for the window's "this computer" reach (read from the source; a scratch
+   `serve` pinned to 127.0.0.1 refused it with "refusing to widen to all interfaces", PAIR-1,
+   `docs/research/2026-11-25-orca-pairing.md`). To undo it: `project-setup --remove-host <host>`, then Settings >
+   Servers > revoke, then restart Orca (Pairing facts).
+   This desktop's Orca port is `LANE_DESKTOP_ORCA_PORT` (default 6768); Orca's CLI does not say its own port, so
+   setup checks that the listener there is the running Orca app's (the pid `orca status` gives). When nothing
+   listens there, or something else does, setup goes straight to the hand link, which names its own port.
+2. By hand, for a desktop that must stay on 127.0.0.1: `--pair-by-hand`, or a no at the question. The owner makes a
+   share link once per box, in Orca here: Settings > Servers > "Share this computer", choosing this computer's own
+   address (127.0.0.1; a network address widens what the desktop listens on, and setup refuses such a link). Nothing
+   but the window can make a link that keeps the desktop on 127.0.0.1, and it ends no other link. Setup asks for it on a hidden prompt, in a
+   terminal only (Enter, no terminal or `--no-desktop-lanes` skips it; a box already paired is not asked again). A
+   terminal that cannot hide what is typed is refused instead of asked. Orca's own SSH install (connecting the box
+   as an SSH target, Settings > "Orca on your SSH hosts") is direction 1, not this: an agent on the box then talks to
+   the box's own server (`docs/research/2026-11-25-orca-pairing.md`, section 1).
+3. `core/scripts/lane-tunnel start --remote-port <box port> <host> <port>` runs `lane-tunnel@<host>.service`
+   (direction 2's tunnel), a systemd user service from `core/templates/lane-tunnel@.service`: `ssh -N -R 127.0.0.1:<box
+   port>:127.0.0.1:<port> <host>`, restarted always. `<port>` is this desktop's Orca port (a hand link's own port);
+   `<box port>` is the same unless `--tunnel-remote-port` names another (Two ports, below). Its host and ports are in
    `~/.config/lane-control/tunnels/<host>.env` (`PORT`, and `REMOTE_PORT` only when it differs: a file from before
    has `PORT` only, which the unit reads as both). It needs a systemd user manager here (`loginctl enable-linger
    $USER` keeps it without a login session); without one nothing is paired.
@@ -110,17 +213,74 @@ is poll-only (Reports across hosts, below).
 4. The link goes to the box on ssh's stdin. There `project-setup --box-pairing add <this machine>` runs Orca's CLI as
    the launcher Orca wrote (`~/.orca/cli/bin/orca`) does, plus `node --require core/scripts/pairing-code-stdin.cjs`,
    with `environment add --name <this machine> --pairing-code -`: the preload reads the code from stdin and puts it in
-   the CLI's own argument list inside the process. Orca 1.4.250's `environment add` takes the code only as an
-   argument, so this keeps it out of `ps` and `/proc`.
-   If that step fails, the tunnel is stopped again and the owner is told to revoke the link, since it may have
-   reached the box.
+   the CLI's own argument list inside the process, so it stays out of `ps` and `/proc`. Orca's CLI itself does not
+   support `-` there: it reads the code from its arguments only (Pairing facts, below).
+   If that step fails, the tunnel is stopped again, a link setup made is rotated, and the owner is told to revoke
+   the link, since it may have reached the box. `orca-host-install` gives direction 1's code to this desktop's Orca
+   CLI the same way (`--box-pairing add` here, for the desktop's own launcher), never in its argv (lc-5zn).
 5. Only the name is kept: `paired_environment` in the box's project settings store (the coordinator persona reads
    it), and `~/.config/lane-control/hosts/<host>.json` here (host, environment names, `tunnel_port` here and
    `tunnel_remote_port` on the box; a record from before has `tunnel_port` only, which is both).
 
 The link is never in an argument, a log, a file, the settings store or a test's output (`tests/test_remote_native.py`,
-`test_link_not_in_argv_or_files`). It lets the box run commands as the owner on this computer (no desktop control)
-until it is revoked.
+`test_link_not_in_argv_or_files`). It lets the box open terminals here and so run any command as the owner on this
+computer, until it is revoked (step 1, what the link grants).
+
+### The fallback: `send --on-client`
+When neither link can be made, setup says so and points here; it does not fall back by itself, and lane-control has
+not built this route. The box's coordinator can still mail an agent here with `orca orchestration send --on-client
+<this machine> --to bot:<id>` (Orca 1.4.272 or later), which a person here approves once (not run). It is not a
+drop-in: it needs direction 1 in place and the desktop connected, it reaches a bot, not a lane, so it can ask the
+desktop for work but cannot start a supervised lane there ([pairing research](../../docs/research/2026-11-25-orca-pairing.md),
+section 6).
+
+### Pairing facts
+**The default route (owner, 2026-11-26, lc-bmk): the CLI mint**, `orca pair --address 127.0.0.1:<port> --rotate
+--json`, the code sent on ssh's stdin through the preload: "if we can handle automatically its much smoother for
+user". It widens the desktop's listener to every interface. The hand share link (step 2) stays, as the route that
+keeps the desktop on loopback. Built in PAIN-1 (steps 1 and 2 above).
+
+Marked "field" where they come from the field report 2026-11-26, from a site running native Orca; lane-control has
+not re-run those. Marked "source" where they are read from Orca 1.4.274's source, not run.
+- **`--address` in `orca pair` is the address the client dials, not the bind.** These are two separate facts, often
+  mixed up. An offer made at `127.0.0.1:<port>` names a loopback address and works behind a tunnel (field). The
+  desktop's listener still widens to every interface (step 1 above). A loopback-addressed offer does not mean a
+  loopback desktop.
+- **`environment add --pairing-code -` is not a feature of Orca's CLI**, which reads the code from its arguments only.
+  It works through lane-control's preload, `core/scripts/pairing-code-stdin.cjs` (step 4), which also keeps the code
+  out of `ps`. Typed without the preload, the code is not read from stdin.
+- **One name per desktop on a box.** Saving the same desktop under a second name is refused ("This server is already
+  paired as ..."), so a rename is a remove, then an add (field). Setup reads the name an earlier run recorded: a box
+  that still answers under it is kept; a stale one is reported, with `project-setup --remove-host <host>` first and
+  then setup again (remove-then-add), and nothing is sent.
+- **An offer is a credential with a scope.** The link is a credential: a paired client can open terminals here, so
+  the box can run any command as you on this computer. Without `--grant-desktop-control` (setup never gives it) Orca
+  itself will not drive this desktop's screen and input for the box, but a command run as you can, as anything with
+  a terminal here can (`orca pair --help`). Treat it as a secret: setup reads `orca pair`'s answer from a pipe and
+  holds it in memory, never printed, logged or written.
+- **An unused offer is reused** (source): without `--rotate` Orca hands out a link it made earlier and nobody used
+  yet (for a laptop, another box, a failed run), so two machines would hold one credential and one Settings entry.
+  So setup mints with `--rotate`. `--rotate` replaces an unused offer, and it ends **every** unused access link of
+  this Orca, whoever it was made for (one from `orca pair`, or from "Share this computer", not yet added on its
+  machine); links in use are not touched. Setup says so before the question; the hand link ends none. A restart
+  cannot print an earlier offer again, but the earlier link keeps working until `--rotate`
+  (`docs/research/2026-11-25-orca-pairing.md`, section 3.2). `--rotate` does not revoke a link a client has used:
+  that is done in the window.
+- **Any failure once `orca pair` was started** (the mint, the box's add, the proof after it, Ctrl-C) ends on one
+  path: an unused link is rotated again (which also ends any other unused one), the listener is read again and
+  printed, and the mint's revoke steps follow. A box that has the link already keeps the tunnel and its record, so
+  `--remove-host` finds it.
+- **A paired box whose tunnel is down** (a reboot, a locked card) gets the tunnel started again from the record
+  first, and no question when that brings it back. Otherwise a new link replaces that pairing, and setup says that
+  the earlier entry stays valid here until it is revoked too.
+- **Revoking** (source): `project-setup --remove-host <host>`, then Settings > Servers > revoke on the entry Orca
+  made for the link. Orca names every access link "Runtime" and the date it was made, not after the box; with two of
+  one date, it is the one added at the time setup ran (setup prints it, and keeps it in the host's record) and last
+  used after that. Only the window revokes a link the box has used.
+- **Revoking ends the box's access at once but does not narrow the listener** (source): Orca keeps listening on
+  every interface until it restarts, and after a restart too while any other network pairing that was used remains
+  (`resolveInitialWebSocketBindHost`). To narrow it: revoke, then quit Orca and start it again; `project-setup
+  --check <repo> <host>` shows the desktop listener.
 
 ### Two ports
 The box's Orca dials what the link says: 127.0.0.1 and the link's port. When that port is taken on the box (its own
@@ -129,10 +289,13 @@ Orca server on 6768, say), `project-setup <repo> <host> --tunnel-remote-port <bo
 memory, changing nothing else in it. That is safe because the endpoint is only where the box dials: Orca pins this
 desktop by the public key in the link and seals the token to it, and this desktop's Orca server does not check which
 port the box dialled (read from Orca 1.4.250's and 1.4.268's source; not yet run against a real desktop). The box
-saves the port it dials, so moving the box's end later means pairing again (`--remove-host`, then a new link).
+saves the port it dials, so moving the box's end later means pairing again (`--remove-host`, then a new link). A link
+setup makes already names the box's port (`--address 127.0.0.1:<box port>`); one from an Orca that keeps its own port
+gets the same rewrite.
 Direction 1's `-L` tunnel has the same shape (one port at both ends, `--orca-port`) and is not changed.
 
 ### Do you need the tunnel?
+This is about direction 2's tunnel, `lane-tunnel@<host>`, only; direction 1 and `orca-tunnel-<host>` are not affected.
 The box's Orca dials the address the link names; the tunnel is one way to give it one.
 - Not needed when the box can reach this machine directly (the same LAN, or both on Tailscale) and you accept this
   desktop's Orca listening on every network interface: a link made with that address ("Share this computer",
@@ -148,9 +311,10 @@ The box's Orca dials the address the link names; the tunnel is one way to give i
   box with a direct address is not something setup does; whether it should is the owner's decision.
 
 ## A host that takes only a smartcard
-The unit's ssh runs with `BatchMode`, so it can never ask for a PIN or a passphrase, and (by default) it does not see
-your ssh agent. A jump host that accepts only a key on a smartcard therefore needs the unit to use an agent that has
-the card unlocked. The owner unlocks it, then starts the tunnel:
+This section and the `--tunnel-` options are about direction 2's unit, `lane-tunnel@<host>`; they change nothing in
+direction 1's `orca-tunnel-<host>`, which has no such options. That unit's ssh runs with `BatchMode`, so it can never
+ask for a PIN or a passphrase, and (by default) it does not see your ssh agent. A jump host that accepts only a key on a
+smartcard therefore needs the unit to use an agent that has the card unlocked. The owner unlocks it, then starts the tunnel:
 - `lane-tunnel start --auth-sock <agent socket> <host> <port>` puts `SSH_AUTH_SOCK=<socket>` in the instance's env file
   (`LANE_TUNNEL_AUTH_SOCK` does the same). `--ssh <path>` (or `LANE_TUNNEL_SSH`) runs an executable of yours in place
   of `ssh`, with ssh's arguments, for a card that needs a wrapper. Both paths are absolute, with no line break, and
@@ -166,7 +330,7 @@ the card unlocked. The owner unlocks it, then starts the tunnel:
   --remote-port <tunnel_remote_port> <host> <tunnel_port>`). A re-run of `project-setup <repo> <host>` prints that
   line from the record: when the box cannot reach this machine (the tunnel is down), before it asks for a link, and
   while it runs, when a `--tunnel-` option was given. A new share link is not needed while the box still has this
-  machine's environment: press Enter at the prompt and run that line instead.
+  machine's environment: answer no to the question and press Enter at the prompt, and run that line instead.
 
 A key or card the unit cannot use is not a silent restart loop, and a short outage does not end the tunnel. The unit
 never gives up (`StartLimitIntervalSec=0`): it retries every 10 seconds at first and backs off to every 5 minutes
@@ -190,9 +354,10 @@ line break, a backslash, a leading quote or leading or trailing spaces (systemd 
 ## Removing a box
 `project-setup --remove-host <host>`: the box forgets this machine's environment (`environment rm`, and
 `paired_environment` leaves its stores), `lane-tunnel@<host>` stops and its env file goes, and the owner is told to
-revoke the link in Orca here: Settings > Servers, the link shared with that box. An unreachable box still has its
-tunnel stopped, and the command to run there later is printed. Direction 1 stays; the output names the two commands
-that drop it too.
+revoke the link in Orca here: Settings > Servers, the "Runtime" entry of the date it was made (step 1, Revoke), and,
+for a link setup made, to restart Orca to narrow the listener. An unreachable box still has its
+tunnel stopped, and the command to run there later is printed. Direction 1 (`orca-tunnel-<host>`) stays; the output
+names the two commands that drop it too.
 
 ## Reports across hosts
 What a worker's report (`worker_done`) does, as far as it is known. "Known" below is Orca 1.4.250, where "tested"
@@ -236,13 +401,18 @@ needs a dispatch of yours, so it is no route to a peer session: for that, the ro
    reply --id <msg_id>` (`reply --on` is refused). A sender does not poll for it or look up the other side's handle.
 `worker_done` from the other server's lane is not a message of this kind: it is covered below.
 
-Not verified: that a `worker_done` from a lane on the other Orca server (a lane started with `--on <environment>`)
-reaches, or wakes, an agent coordinator on the box. Across hosts, treat a report as poll-only: the coordinator runs
-`orca-ide orchestration check` right after it starts the lane, on each wake, and before it calls a quiet lane lost
-(`orca-ide orchestration worker-show --dispatch <dispatch>` says what Orca knows of the worker). The personas say so
-too. If a cross-host wake is lost, the night manager's idle check or the owner notices it; the coordinator never loops
-on `check`. The night manager's idle check covers coordinators, the only long-lived sessions that start lanes (frontend lanes and the design reviewer report to the coordinator too). A live check needs a box with a signed-in agent coordinator and the owner's share link (record.md, NO-6); until
-it is run, nothing here may be read as "delivered".
+**A box coordinator is woken by its lane on the desktop.** On current builds, with both servers at the same version
+(1.4.274), that lane's `worker_done` wakes the box's coordinator. Measured in the field (field report 2026-11-26): its
+Run started a lane on the desktop with `--on <desktop> --worktree new-child --repo name:<project> --setup skip`; the
+lane sent its completion, and Orca's message prompt woke the box's coordinator within seconds. lane-control has not
+repeated the run. On the repo selector: `name:<project>`, naming the project, resolves where a `github:` selector does
+not (same report). The other direction, a desktop coordinator's lane on a box (`--on <box>`), is not measured.
+If a wake seems lost, run `orca-ide orchestration check`; never loop on it. Before you call a quiet lane lost, run
+`orca-ide orchestration worker-show --dispatch <dispatch>`, which says what Orca knows of the worker.
+What catches a report that is lost or never sent: the night manager's idle check on the coordinator's machine (while
+the owner is away or it is night), Orca's "Worker stopped without reporting" notice where the build has it
+([overlap audit](../../docs/research/2026-11-25-orca-overlap.md), row 10; not tested across hosts, nor that it wakes
+an idle coordinator), and otherwise the owner.
 
 Canary 2026-11-21 (scratch servers in containers, a plain shell terminal as the coordinator on the side that
 started the lane, a haiku worker on the other; docs/research/2026-11-21-orca-newer.md, Canary results):
@@ -255,8 +425,8 @@ started the lane, a haiku worker on the other; docs/research/2026-11-21-orca-new
   dispatch:<id>` reaches the worker, but the haiku worker would not act on it, saying the sender was not its
   coordinator's handle (our reading: its brief names the coordinator only as "Run home (relayed by Orca)"); `send
   --on` is refused (`server_mail_unsupported`).
-- Whether a report wakes an agent coordinator across hosts is not verified: on one server it does (Orca prompts the
-  idle coordinator to run `check`), across servers only the Run's mail was seen. Reports across hosts stay poll-only.
+- The canary's coordinators were shell terminals, so it showed no agent waking; the field report above did, on equal
+  versions. Different versions are what the lines above show: keep both servers on one version.
 
 ## A dispatch that can no longer report
 A worker can finish its work and still be unable to report: a runtime restart left its dispatch with another owner

@@ -837,11 +837,11 @@ class NativePersonaTests(unittest.TestCase):
         for role in LANE_STARTERS:
             self.assertIn("read the usage feed and the ceiling before each launch", flat(NATIVE / f"{role}.md"), role)
 
-    def test_lane_starters_check_their_own_inbox_after_a_lane_on_another_host(self):
+    def test_lane_starters_check_their_inbox_when_a_cross_host_wake_seems_lost(self):
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
             self.assertRegex(t, r"on another host.*`orca-ide orchestration check`", role)
-            self.assertIn("on each wake", t, role)
+            self.assertIn("With both servers at the same version", t, role)
 
     def test_lane_starters_use_native_orca_orchestration(self):
         for role in LANE_STARTERS:
@@ -860,7 +860,13 @@ class NativePersonaTests(unittest.TestCase):
         # existing worktree
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
-            self.assertIn("--worktree new-top-level --repo <exact selector>", t, role)
+            self.assertIn("takes `--worktree new-child` or `new-top-level`, with `--repo <exact selector>`", t, role)
+            self.assertNotIn("Orca refuses `new-child`", t, role)
+        skill = flat(NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md")
+        self.assertIn("`--worktree new-child` or `new-top-level`, with `--repo <exact selector>`", skill)
+        self.assertNotIn("Orca refuses `new-child`", skill)
+        for role in LANE_STARTERS:
+            t = flat(NATIVE / f"{role}.md")
             self.assertIn("orca-ide worktree create", t, role)
             self.assertIn("--worktree path:<that worktree>", t, role)
 
@@ -1093,9 +1099,9 @@ def reliability_entry(n):
 class LessonsDoctrineTests(unittest.TestCase):
     """Phase 5: the week's lessons are doctrine (spec section 9); each test pins an entry's key sentence."""
 
-    def test_entries_29_to_37_follow_entry_28_in_order(self):
+    def test_numbered_entries_run_in_order(self):
         numbers = [int(n) for n in re.findall(r"(?m)^## (\d+)\. ", (ROOT / "core" / "reliability.md").read_text())]
-        self.assertEqual(numbers, list(range(1, 38)))
+        self.assertEqual(numbers, list(range(1, 49)))
 
     def test_idle_coordinator_with_pending_work_is_stuck(self):
         t = reliability_entry(29)
@@ -1427,8 +1433,8 @@ AGENTS_ONLY = re.compile(r"(?:Read|then|reread)(?: the repo's)? AGENTS\.md(?! an
 
 
 class NativeHandsAfterMainTests(unittest.TestCase):
-    """Final round: #41's worker-abandon sits under exception 2, still on the owner's word; a lost cross-host wake is
-    noticed by the night manager or the owner, never by a loop of the coordinator's."""
+    """Final round: #41's worker-abandon sits under exception 2, still on the owner's word; after a lost cross-host
+    wake the coordinator runs `check`, never in a loop."""
 
     def test_exception_2_names_worker_abandon_on_the_owners_word(self):
         for path in (ROOT / "core" / "roles.md", NATIVE / "coordinator.md",
@@ -1441,9 +1447,15 @@ class NativeHandsAfterMainTests(unittest.TestCase):
 
     def test_who_notices_a_lost_cross_host_wake(self):
         t = flat(NATIVE / "coordinator.md")
-        self.assertIn("If a cross-host wake is lost, the night manager's idle check or the owner notices it; you never "
-                      "loop on `check`.", t)
-        self.assertLess(t.index("is poll-only"), t.index("If a cross-host wake is lost"))
+        self.assertIn("What catches a report that is lost or never sent: the night manager's idle check (while the owner "
+                      "is away or it is night), Orca's \"Worker stopped without reporting\" notice where the build has "
+                      "it, and otherwise the owner.", t)
+        self.assertIn("Before you call a quiet lane lost, run `orca-ide orchestration worker-show --dispatch "
+                      "<dispatch>`.", t)
+
+    def test_what_to_do_about_a_lost_cross_host_wake(self):
+        t = flat(NATIVE / "coordinator.md")
+        self.assertIn("If a wake seems lost, run `orca-ide orchestration check`; never loop on it.", t)
 
 
 class AdaptTemplatesKnowTheGeneratedFileTests(unittest.TestCase):
@@ -1488,14 +1500,15 @@ class EntryPointsNameTheGeneratedFileTests(unittest.TestCase):
 class CrossHostReportContractTests(unittest.TestCase):
     """UP-3: what is known about a worker's report (worker_done) reaching a coordinator, across hosts and not, and the
     recovery for a dispatch that can no longer report. Tested live on one machine (record.md, 2026-11-20 UP-3);
-    delivery across hosts is not verified, and every text says so instead of claiming a wake."""
+    delivery across hosts rests on the field report 2026-11-26 (both servers at the same version), and no text keeps
+    the old poll-only rule."""
 
     REMOTE = ROOT / "orchestrators" / "native-orca" / "remote.md"
 
     def test_remote_doc_states_what_is_known_and_what_is_not(self):
         t = flat(self.REMOTE)
         self.assertNotIn("## Not yet established", t)
-        for needle in ("## Reports across hosts", "poll-only", "Not verified",
+        for needle in ("## Reports across hosts", "field report 2026-11-26",
                        "Orca's one-line message prompt", "orca-ide orchestration check",
                        "`--task-id`", "`--dispatch-id`", "`missing_task_id`", "`missing_dispatch_id`",
                        "`worker_identity_changed`", "Rejected worker_done",
@@ -1508,21 +1521,20 @@ class CrossHostReportContractTests(unittest.TestCase):
                        "ask the owner", "Not tested"):
             self.assertIn(needle, t, needle)
 
-    def test_remote_doc_claims_no_delivery_across_hosts(self):
+    def test_a_cross_host_wake_is_stated_with_its_version_and_source(self):
+        # lc-l78.25: the field measured it; the doc says on what versions, who measured and what to do if it seems lost
         t = flat(self.REMOTE)
-        for claim in ("wakes the coordinator on the box", "is delivered to the box", "reaches the box's coordinator"):
-            self.assertNotIn(claim, t, claim)
-        self.assertRegex(t, r"(?i)across hosts[^.]*(not verified|poll-only)")
+        reports = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
+        for needle in ("both servers at the same version (1.4.274)", "that lane's `worker_done` wakes the box's coordinator",
+                       "--worktree new-child --repo name:<project> --setup skip", "lane-control has not repeated",
+                       "`name:<project>`, naming the project, resolves where a `github:` selector does not",
+                       "If a wake seems lost, run `orca-ide orchestration check`"):
+            self.assertIn(needle, reports, needle)
 
-    def test_no_text_says_a_cross_host_report_simply_comes_back(self):
-        # UP-6 review M1: the box paragraph said "its report comes back by Orca" next to the poll-only rule.
-        texts = [(self.REMOTE.name, flat(self.REMOTE))] + [(r, flat(NATIVE / f"{r}.md")) for r in LANE_STARTERS]
-        for name, t in texts:
-            self.assertNotIn("comes back by Orca", t, name)
-            self.assertNotIn("report comes back", t, name)
-        for name, t in texts[1:]:
-            self.assertIn("it reports by Orca; across hosts that is poll-only", t, name)
-        self.assertIn("it reports by Orca; across hosts that is poll-only", texts[0][1])
+    def test_no_text_keeps_the_poll_only_rule(self):
+        for f in (self.REMOTE, ROOT / "docs" / "how-it-fits.md", ROOT / "orchestrators" / "native-orca" / "skills"
+                  / "native-orca-lanes" / "SKILL.md", *sorted(NATIVE.glob("*.md"))):
+            self.assertNotIn("poll-only", flat(f), f.relative_to(ROOT))
 
     def test_one_rule_for_abandoning_a_dispatch_everywhere(self):
         # review n1: no text lets the coordinator abandon without the owner; remote.md has no exception
@@ -1546,10 +1558,10 @@ class CrossHostReportContractTests(unittest.TestCase):
                        "first live check", "two plugin files"):
             self.assertIn(needle, t, needle)
 
-    def test_lane_starters_treat_a_cross_host_report_as_poll_only_and_know_the_recovery(self):
+    def test_lane_starters_know_the_recovery_for_a_refused_report(self):
         for role in LANE_STARTERS:
             t = flat(NATIVE / f"{role}.md")
-            for needle in ("poll-only", "`Rejected worker_done`", "`worker_identity_changed`",
+            for needle in ("`Rejected worker_done`", "`worker_identity_changed`",
                            "read the lane's branch", "orca-ide orchestration worker-show --dispatch <dispatch>",
                            "orca-ide orchestration worker-abandon --dispatch <dispatch>",
                            "orca-ide orchestration worker-release --dispatch <dispatch>",
@@ -1575,7 +1587,7 @@ class CrossHostReportContractTests(unittest.TestCase):
 
 class OrcaCanaryTests(unittest.TestCase):
     """lc-seu: the canary for one Orca version (docs/research/2026-11-21-orca-newer.md, "Canary results"), and what
-    its results force in remote.md: `orca pair` is no stand-in for the share link, the "too old" texts a newer box
+    its results force in remote.md: what `orca pair` does to the desktop's listener, the "too old" texts a newer box
     meets on an older server, and how a report crosses servers of different versions."""
 
     REMOTE = ROOT / "orchestrators" / "native-orca" / "remote.md"
@@ -1599,10 +1611,11 @@ class OrcaCanaryTests(unittest.TestCase):
                        "needs an Orca update to nest across machines", "refusing to widen to all interfaces"):
             self.assertIn(needle, flat_text(res), needle)
 
-    def test_remote_doc_says_orca_pair_is_no_stand_in_for_the_share_link(self):
+    def test_remote_doc_says_what_orca_pair_does_to_the_desktop(self):
+        # PAIN-1 (lc-bmk): setup mints the link with `orca pair` by default; the step says it widens the desktop
         t = flat(self.REMOTE)
-        step = t[t.index("1. The owner makes a share link"):t.index("2. `project-setup <repo> <host>` asks")]
-        for needle in ("`orca pair`", "refusing to widen to all interfaces", "Settings > Servers"):
+        step = t[t.index("1. By default `project-setup <repo> <host>` makes the link"):t.index("2. By hand")]
+        for needle in ("`orca pair`", "refusing to widen to all interfaces", "Settings > Servers", "every interface"):
             self.assertIn(needle, step, needle)
 
     def test_remote_doc_names_the_too_old_texts_a_newer_box_meets(self):
@@ -1617,12 +1630,57 @@ class OrcaCanaryTests(unittest.TestCase):
             self.assertRegex(t, r"`retained`[^.]*close[^.]*terminal[^.]*yourself", name)
             self.assertIn("orca-ide terminal close --terminal <handle>", t, name)
 
-    def test_cross_server_reports_stay_poll_only_after_the_canary(self):
+    def test_the_canary_facts_on_mixed_versions_stay(self):
         t = flat(self.REMOTE)
         reports = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
-        self.assertIn("poll-only", reports)
         self.assertIn("Canary 2026-11-21", reports)
-        self.assertRegex(reports, r"(?i)agent coordinator[^.]*not (verified|tested)")
+        self.assertIn("keep both servers on one version", reports)
+
+
+class FieldReportDocTests(unittest.TestCase):
+    """DOC-3 (lc-l78): what the field report 2026-11-26 added to the docs."""
+
+    def test_pairing_facts(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "remote.md")
+        t = t[t.index("### Pairing facts"):t.index("### Two ports")]
+        for needle in ("is the address the client dials, not the bind", "still widens to every interface",
+                       "`environment add --pairing-code -` is not a feature of Orca's CLI", "pairing-code-stdin.cjs",
+                       "out of `ps`", "This server is already paired as", "a remove, then an add",
+                       "An offer is a credential with a scope", "`--rotate` replaces an unused offer",
+                       "the earlier link keeps working"):
+            self.assertIn(needle, t, needle)
+
+    def test_the_default_pairing_route_and_what_it_widens(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "remote.md")
+        t = t[t.index("### Pairing facts"):t.index("### Two ports")]
+        for needle in ("**The default route (owner, 2026-11-26, lc-bmk): the CLI mint**",
+                       "widens the desktop's listener to every interface", "The hand share link (step 2) stays",
+                       "Built in PAIN-1"):
+            self.assertIn(needle, t, needle)
+
+    def test_upstream_asks_are_recorded_not_filed(self):
+        t = (ROOT / "docs" / "orca-upstream-asks.md").read_text()
+        asks = re.split(r"(?m)^## ", t)[1:]
+        self.assertEqual([a.split(":")[0] for a in asks], ["A1", "A5", "C5/G2", "D1", "I", "J"])
+        for a in asks:
+            for needle in ("**Ask:**", "**Field evidence:**", "**Meanwhile:**", "**Status:** recorded, not filed."):
+                self.assertIn(needle, a, (a[:5], needle))
+        self.assertIn("(orca-upstream-asks.md)", (ROOT / "docs" / "README.md").read_text())
+
+    def test_cleanup_rules_are_per_server(self):
+        t = flat(ROOT / "docs" / "orca-cleanup.md")
+        for needle in ("`workspaceCleanupPolicy`", "`preview`, `run` and `report`", "page is the client's",
+                       "that server's global rules", "unprotected until its own rule is set",
+                       "(`rules-off`) reports that server", "`no-rule-matched` is correct there"):
+            self.assertIn(needle, t, needle)
+
+    def test_each_field_tip_has_a_failure_a_fix_and_its_mark(self):
+        t = (ROOT / "core" / "reliability.md").read_text()
+        entries = [e for e in re.split(r"(?m)^## ", t) if "(field report 2026-11-26)" in e]
+        self.assertEqual(len(entries), 11)
+        for e in entries:
+            self.assertRegex(e, r"(?m)^- \*\*Failure:\*\* ", e)
+            self.assertRegex(e, r"(?m)^- \*\*Fix:\*\* ", e)
 
 
 class PublicRepoPathTests(unittest.TestCase):
@@ -1749,22 +1807,34 @@ class CrossHostRouteTests(unittest.TestCase):
         good = "An agent on another host: a `run:` target does not cross hosts (it is refused with `--on`)."
         self.assertTrue(RUN_REFUSED.search(good))
 
-    def test_remote_md_names_the_route_and_who_notices_a_lost_wake(self):
+    def test_remote_md_names_the_route(self):
         t = flat(NATIVE_DIR / "remote.md")
         for needle in ("send --on <environment> --to term_<id> --subject", "orca_session_id:<id>", "1.4.256 or newer",
                        "`run:` targets are refused with `--on`", "orca-ide terminal list --environment <environment> --json",
                        "`orca-ide orchestration reply --id <msg_id>`", "`reply --on` is refused",
                        "run once between scratch servers in the canary", "`server_mail_unsupported`",
-                       "`send --to dispatch:<id>`", "no route to a peer session",
-                       "If a cross-host wake is lost, the night manager's idle check or the owner notices it",
-                       "covers coordinators, the only long-lived sessions that start lanes"):
+                       "`send --to dispatch:<id>`", "no route to a peer session"):
             self.assertIn(needle, t)
 
-    def test_lane_starters_say_who_notices_a_lost_cross_host_wake(self):
-        # night-precheck measures idle for coordinators, and since the design lead is retired (2026-11-21) only
-        # coordinators start lanes: the DAC-1 gap (a design lead's lost wake at night) does not come back
-        self.assertIn("If a cross-host wake is lost, the night manager's idle check or the owner notices it; you "
-                      "never loop on `check`.", flat(NATIVE / "coordinator.md"))
+    def test_remote_md_names_who_notices_a_lost_or_unsent_report(self):
+        t = flat(NATIVE_DIR / "remote.md")
+        t = t[t.index("## Reports across hosts"):t.index("## A dispatch that can no longer report")]
+        for needle in ("What catches a report that is lost or never sent: the night manager's idle check",
+                       "\"Worker stopped without reporting\" notice where the build has it", "row 10",
+                       "and otherwise the owner", "Before you call a quiet lane lost, run "
+                       "`orca-ide orchestration worker-show --dispatch <dispatch>`"):
+            self.assertIn(needle, t, needle)
+
+    def test_the_wake_is_claimed_for_the_measured_direction_only(self):
+        for f in (NATIVE_DIR / "remote.md", NATIVE / "coordinator.md",
+                  NATIVE_DIR / "skills" / "native-orca-lanes" / "SKILL.md", ROOT / "docs" / "how-it-fits.md"):
+            t = flat(f)
+            with self.subTest(doc=f.relative_to(ROOT)):
+                self.assertRegex(t, r"(?i)box coordinator's lane on the desktop|box coordinator is woken by its lane")
+                self.assertRegex(t, r"(?i)(other direction|desktop coordinator's lane on a box)[^.]*not measured")
+                self.assertNotIn("a cross-host `worker_done` wakes the coordinator", t)
+
+    def test_only_coordinators_start_lanes(self):
         self.assertEqual(LANE_STARTERS, ["coordinator"])
 
     def test_the_design_spec_corrects_its_environment_route(self):
@@ -2393,6 +2463,36 @@ class AwayImproveContentTests(unittest.TestCase):
         mc = flat(PERSONA_DIR / "machine-coordinator.md")
         self.assertIn("never start improve mode", mc)
 
+    def test_the_cycle_is_recorded_read_on_resume_and_watched(self):  # field report B1, B4, F3, F6 (lc-l78)
+        t = flat(AWAY_SKILL)
+        for needle in ("**Record every step**", "`lane-improve cycle <your project> --phase", "**On start or resume**",
+                       "never start a second lane", "`$ORCA_TERMINAL_HANDLE`", "## 1a. Watchdog and recovery",
+                       "a fresh worker on the same worktree and PR", "--close parked --findings-file",
+                       "is not proof that a lane is working", "never beyond the lane's budget", "--metric",
+                       "**before** you start its lane", "--worker <reviewer's id>", "`orchestration worker-list` first",
+                       "**One worker per worktree:**", "settled or stopped", "never reuse the worktree", "Do not reply",
+                       "`--max-hours`"):
+            self.assertIn(needle, t, needle)
+        guide = flat(ROOT / "docs" / "away-improve.md")
+        for needle in ("## The watchdog", "fails loudly", "A title is never matched", "is not proof", "The ledger.",
+                       "The daily summary.", "--max-hours", "REST `PATCH`", "status [--json]", "lane-improve cycle <project>",
+                       "silent (10 minutes), idle (60 minutes) or exits", "**Who sends.**", "away-watchdog --send",
+                       "**When it keeps quiet.**", "never puts two workers on one worktree", "written before it is sent"):
+            self.assertIn(needle, guide, needle)
+        help_text = (ROOT / "core" / "scripts" / "lane-improve").read_text()
+        for needle in ("--max-hours H", "lane-improve cycle <project>", "status [--json]"):
+            self.assertIn(needle, help_text, needle)
+        dog = (ROOT / "core" / "scripts" / "away-watchdog").read_text()
+        for needle in ("never merges, edits a lane", "A title is never matched", "is not proof", "fails loudly",
+                       "sends nothing (a precheck has no Orca terminal", "--from` its own Orca terminal"):
+            self.assertIn(needle, " ".join(dog.split()), needle)
+
+    def test_the_machine_coordinator_offers_max_hours_and_the_night_manager_reads_its_cap(self):  # AWY-2 review m6
+        mc = flat(PERSONA_DIR / "machine-coordinator.md")
+        self.assertIn("`--max-hours H`", mc)
+        self.assertIn("`--max-hours 12`", mc)
+        self.assertIn("cap=<items|weekly|hours>", flat(ROOT / "orchestrators" / "native-orca" / "night-manager.md"))
+
     def test_skill_installed_for_claude_and_opencode(self):
         src = (ROOT / "core" / "scripts" / "project-setup").read_text()
         self.assertIn('"away-improve"', src)
@@ -2665,6 +2765,186 @@ class DocsIndexTests(unittest.TestCase):
             index.write_text("[a](guide.md#same-1) [b](guide.md#4b-on-a-gateway) [c](guide.md#no-such-anchor) "
                              "[d](#nowhere) [e](#index)\n\n# Index\n")
             self.assertEqual(linked_files(root, index)[1], ["guide.md#no-such-anchor", "#nowhere"])
+
+
+# --- docs/how-it-fits.md and the Scripts table (lc-rpy) -----------------------------------------------------------
+
+SCRIPT_DIRS = ("core/scripts", "scripts", "orchestrators/*/scripts")
+SKILL_DIRS = ("orchestrators/*/skills/*", "core/skills/*")
+# Repo path -> why it needs no mention. Keep it short; nothing needs it today.
+UNDOCUMENTED = {}
+RUNNERS = {"owner", "coordinator", "lane", "automation", "setup", "library"}
+
+
+def repo_scripts(root):
+    """Every file (links too) directly in the script folders, as repo-relative strings."""
+    return sorted(f.relative_to(root).as_posix() for pattern in SCRIPT_DIRS for d in Path(root).glob(pattern)
+                  for f in d.iterdir() if not f.name.startswith(".") and not f.is_dir())
+
+
+def repo_skills(root):
+    return sorted(d.relative_to(root).as_posix() for pattern in SKILL_DIRS for d in Path(root).glob(pattern)
+                  if d.is_dir() and not d.name.startswith((".", "__")))
+
+
+def scripts_section(root):
+    """core/README.md's "## Scripts" section, up to the next heading of that level."""
+    m = re.search(r"^## Scripts\n(.*?)(?=^## |\Z)", (Path(root) / "core" / "README.md").read_text(), re.M | re.S)
+    return m.group(1) if m else ""
+
+
+def script_rows(root):
+    """The Scripts table's rows, header and rule left out, each as its list of cells (\\| is not a cell border)."""
+    rows = [[c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+            for line in scripts_section(root).splitlines() if line.startswith("|")]
+    return rows[2:]
+
+
+def listed_scripts(root):
+    """The scripts with a row of their own in the Scripts table: the paths in the first cell of a row that has a
+    purpose. A mention anywhere else does not count."""
+    return {path for row in script_rows(root) if len(row) == 4 and row[1] for path in re.findall(r"`([^`]+)`", row[0])}
+
+
+def undocumented(root, excluded=UNDOCUMENTED):
+    """Scripts without a row in the Scripts table, and skills that docs/how-it-fits.md does not name in backticks."""
+    page = Path(root) / "docs" / "how-it-fits.md"
+    text = page.read_text() if page.is_file() else ""
+    listed = listed_scripts(root)
+    missing = [s for s in repo_scripts(root) if s not in listed]
+    missing += [s for s in repo_skills(root) if f"`{s.rsplit('/', 1)[1]}`" not in text]
+    return [path for path in missing if path not in excluded]
+
+
+class HowItFitsTests(unittest.TestCase):
+    def test_every_script_and_skill_is_named(self):
+        self.assertEqual(undocumented(ROOT), [], "give each script a row with its purpose in core/README.md's "
+                                                 "Scripts table, and name each skill in docs/how-it-fits.md")
+
+    def test_every_exclusion_exists_and_says_why(self):
+        for path, why in UNDOCUMENTED.items():
+            self.assertTrue((ROOT / path).exists(), f"{path} is gone: drop its exclusion")
+            self.assertTrue(why.strip(), f"{path} is excluded without a reason")
+
+    def test_the_folders_are_read(self):
+        self.assertIn("core/scripts/lane-room", repo_scripts(ROOT))
+        self.assertIn("scripts/orch", repo_scripts(ROOT))
+        self.assertIn("orchestrators/wsp/scripts/wsp-owner-code.mjs", repo_scripts(ROOT))
+        self.assertIn("core/skills/component-gallery", repo_skills(ROOT))
+        self.assertIn("orchestrators/native-orca/skills/away-improve", repo_skills(ROOT))
+
+    def test_every_row_has_a_purpose_a_runner_and_a_doc(self):
+        rows = script_rows(ROOT)
+        self.assertTrue(rows, "core/README.md has no Scripts table")
+        for row in rows:
+            self.assertEqual(len(row), 4, row)
+            script, purpose, who, doc = row
+            self.assertTrue(purpose, script)
+            for part in re.sub(r"\([^)]*\)", "", who).split(","):
+                self.assertIn(part.strip(), RUNNERS, f"{script}: run by {who!r}")
+            self.assertRegex(doc, LINK, script)
+
+    def test_every_path_in_a_row_is_the_same_script(self):
+        for row in script_rows(ROOT):
+            paths = re.findall(r"`([^`]+)`", row[0])
+            self.assertTrue(paths, row[0])
+            for path in paths:
+                self.assertTrue((ROOT / path).is_file(), f"the Scripts table names {path}, which is not there")
+            self.assertEqual(len({(ROOT / p).resolve() for p in paths}), 1, f"these are different files: {paths}")
+
+    def test_no_link_in_the_page_or_the_table_is_broken(self):
+        for doc in ("docs/how-it-fits.md", "core/README.md"):
+            _, broken = linked_files(ROOT, ROOT / doc)
+            self.assertEqual(broken, [], f"{doc} links to files or headings that do not exist")
+
+    def test_the_index_and_the_table_lead_to_the_page(self):
+        index = (ROOT / "docs" / "README.md").read_text()
+        start = index[index.index("## Start here"):index.index("## Running projects")]
+        self.assertIn("(how-it-fits.md)", start)
+        self.assertIn("docs/how-it-fits.md", linked_files(ROOT, ROOT / "core" / "README.md")[0])
+        self.assertIn("core/README.md", linked_files(ROOT, ROOT / "docs" / "how-it-fits.md")[0])
+
+    def test_both_tunnels_are_worded_the_same_way(self):
+        for doc in ("docs/how-it-fits.md", "docs/getting-started.md", "orchestrators/native-orca/setup.md",
+                    "orchestrators/native-orca/remote.md"):
+            text = " ".join((ROOT / doc).read_text().split())
+            for tunnel in ("`orca-tunnel-<host>` (`ssh -L`", "`lane-tunnel@<host>` (`ssh -R`"):
+                self.assertIn(tunnel, text, doc)
+
+    def test_the_check_catches_a_new_script_and_a_new_skill(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for sub in ("docs", "core/scripts", "scripts", "orchestrators/x/scripts", "orchestrators/x/skills/new-skill",
+                        "core/skills/told", "core/scripts/__pycache__"):
+                (root / sub).mkdir(parents=True)
+            for script in ("core/scripts/listed", "core/scripts/on-the-page", "core/scripts/no-purpose",
+                           "core/scripts/in-a-purpose", "scripts/listed-too", "orchestrators/x/scripts/new"):
+                (root / script).write_text("x")
+            (root / "core" / "README.md").write_text(
+                "## Scripts\n\n| Script | What | Who | Doc |\n|---|---|---|---|\n"
+                "| `core/scripts/listed`, `scripts/listed-too` | a \\| b, calls `core/scripts/in-a-purpose` | owner "
+                "| [d](x.md) |\n| `core/scripts/no-purpose` |  | owner | [d](x.md) |\n\n"
+                "## Later\n`core/scripts/on-the-page`\n")
+            (root / "docs" / "how-it-fits.md").write_text("`core/scripts/on-the-page` and `told`; new-skill unquoted")
+            missing = ["core/scripts/in-a-purpose", "core/scripts/no-purpose", "core/scripts/on-the-page",
+                       "orchestrators/x/scripts/new", "orchestrators/x/skills/new-skill"]
+            self.assertEqual(undocumented(root, {}), missing)
+            self.assertEqual(undocumented(root, {"core/scripts/in-a-purpose": "why"}), missing[1:])
+            self.assertEqual(len(script_rows(root)[0]), 4)
+
+
+LANE_SKILL = ROOT / "orchestrators" / "native-orca" / "skills" / "native-orca-lanes" / "SKILL.md"
+
+
+class AnswerChannelTests(unittest.TestCase):
+    """lc-l78.3: a coordinator asked from a peer's side answered in its own terminal, and nothing reached the asker."""
+
+    NEEDLES = ("an answer written only in your own terminal reaches nobody",
+               "orca-ide orchestration reply --id <msg_id> --body", "<msg_id> <type> from <address>",
+               "the asker's own Run or dispatch", "`Reply:` line", "`send --to run:<id>`",
+               "`send --to dispatch:ctx_<id>`", "`<cross-session-message from=", "that `from` as `to`",
+               "orca-ide orchestration run-list", "tell the owner your answer reached nobody",
+               "Ask a peer by message too, never by typing or pasting into its terminal")
+
+    def test_the_lane_skill_says_how_a_peer_is_answered_at_the_address_its_message_carries(self):
+        t = flat(LANE_SKILL)
+        self.assertIn("### Answering a peer, and asking one", LANE_SKILL.read_text())
+        for needle in self.NEEDLES:
+            self.assertIn(needle, t, needle)
+
+    def test_the_personas_link_the_one_copy_and_keep_the_two_rules(self):
+        for path in (NATIVE / "coordinator.md", NATIVE / "machine-coordinator.md"):
+            t = flat(path)
+            for needle in ("an answer written only in your own terminal reaches nobody",
+                           "never by typing or pasting into its terminal", "Answering a peer, and asking one",
+                           "orchestrators/native-orca/skills/native-orca-lanes/SKILL.md"
+                           if path.name == "machine-coordinator.md" else "`native-orca-lanes` skill"):
+                self.assertIn(needle, t, (path.name, needle))
+            self.assertNotIn("reply --id <msg_id> --body", t, path.name)  # one copy: it would drift
+            self.assertNotIn("<cross-session-message", t, path.name)
+
+
+class ReviewCapEndingTests(unittest.TestCase):
+    """lc-l78.5: a reviewer that still said no at round 2 left the lane idle."""
+
+    def test_the_two_round_cap_ends_in_issues_a_parked_pr_a_closed_cycle_and_a_message(self):
+        for path in (NATIVE / "coordinator.md", LANE_SKILL):
+            t = flat(path)
+            for needle in ("At most two rounds", "in the same turn", "never end in silence",
+                           "Each unresolved finding becomes an issue", "`bd search` first",
+                           "gh pr ready <n> --undo", "Parked after review round 2", "word for word",
+                           "never quote a secret or private data", "stop the reviewer", "release the lane's worker",
+                           "label `parked`", "Resume (<date>)", "no free slot resumes it", "Tell the owner",
+                           "with your recommendation"):
+                self.assertIn(needle, t, (path.name, needle))
+            self.assertNotIn("after that, or when the lane disputes a finding, the owner decides", t, path.name)
+            self.assertIn("lane disputes", t, path.name)
+
+    def test_away_improve_closes_the_cycle_too(self):
+        t = flat(ROOT / "orchestrators" / "native-orca" / "skills" / "away-improve" / "SKILL.md")
+        for needle in ("not clean after the second round", "write no `Review: passed` comment", "`native-orca-lanes`, section 6",
+                       "listed as parked in your summary", "start the next cycle", "never pick it again"):
+            self.assertIn(needle, t, needle)
 
 
 if __name__ == "__main__":

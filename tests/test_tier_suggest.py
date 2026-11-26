@@ -26,6 +26,7 @@ def start_gateway(case, home, models, info=None, key=KEY, log=None, **extra):
     spec = home / f"gateway-{abs(hash((tuple(models), str(log), str(extra))))}.json"
     spec.write_text(json.dumps({"key": key, "models": models, "info": info, **extra}))
     p = subprocess.Popen([sys.executable, str(GATEWAY), str(spec), str(log)], stdout=subprocess.PIPE, text=True)
+    case.addCleanup(p.stdout.close)
     case.addCleanup(p.wait)
     case.addCleanup(p.kill)
     return f"http://127.0.0.1:{p.stdout.readline().strip()}"
@@ -71,6 +72,16 @@ class PickTests(unittest.TestCase):
         r = subprocess.run(["bash", str(ROOT / "core" / "scripts" / "lane-tier"), str(f), "deep"],
                            capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout), (0, "harness=opencode model=gw/chat permission=-\n"), r.stderr)
+
+
+class KeyNeverPrintedTests(unittest.TestCase):
+    def test_a_key_a_header_cannot_carry_is_never_quoted_in_the_error(self):
+        # http.client's own error quotes the whole header value; a key pasted with a line break must not reach it
+        for bad in (KEY + "\nX: y", KEY + "\u00e9\u4e2d"):
+            with self.subTest(bad=len(bad)):
+                with self.assertRaises(T.GatewayError) as caught:
+                    T.fetch_models("http://127.0.0.1:9", bad)
+                self.assertNotIn(KEY, str(caught.exception))
 
 
 class OpenCodeConfigTests(unittest.TestCase):

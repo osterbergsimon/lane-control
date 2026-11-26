@@ -2,14 +2,20 @@
 
 Orca's own orchestration (runs, tasks, workers, messages), with no Cotal. Status and trial results: `record.md`.
 Pin the Orca version you tested: Orca ships often and its orchestration commands change (`record.md`).
+Where Orca has a feature that does the job, use it rather than adding lane-control code (README, Doctrines, "Use Orca
+where we can"; what overlaps today: `docs/research/2026-11-25-orca-overlap.md`).
 
 ## Install
 - The Orca desktop app on the workstation (on Linux its CLI is `orca-ide`; plain `orca` may be another program).
   Agents run as a normal user, never root.
 - Always: beads (`bd`, bd 1.0.4 or newer: `machine-setup` checks it and says how to fix it, never installs it), `gh` (authenticated), `jq`, `git`, bash, and the agent harnesses you use (Claude Code),
   signed in once as the user the agents run as.
-- The machine caps: `~/.agents/bin/lane-heavy` and `lane-room` (copies of `core/scripts/`; `project-setup`
-  installs them, or copy them by hand with `lane-limits.sh` and `lane-tier`).
+- lane-control itself, installed once per machine: `scripts/lane-control install` from a checkout lays its last commit
+  at `~/.local/share/lane-control/<sha>/` with a `current` link (`project-setup` does it too when run from a
+  checkout; `core/README.md`, "The install"). Personas name `.../lane-control/current`, never the checkout.
+- The machine caps: `~/.agents/bin/lane-heavy` and `lane-room` (links into `.../lane-control/current/core/scripts/`;
+  `project-setup` and `lane-control install` make them, with `lane-limits.sh`, `lane-tier`, `design-shots` and
+  `lane-control`).
 - The lane skill, `skills/native-orca-lanes` (gate, lane, messages, report shape, review, close): `project-setup`
   installs it with the caps in `~/.agents/skills/native-orca-lanes` (with the lane brief as its `brief.md`), linked
   into `~/.claude/skills` and `~/.config/opencode/skills`; `--refresh` puts back a changed or missing file. Orca's
@@ -21,6 +27,19 @@ Pin the Orca version you tested: Orca ships often and its orchestration commands
 (`templates/agents-section.md`) to the project's `AGENTS.lane-control.md`, with one pointer line to it in AGENTS.md:
 how the coordinator works on Orca's orchestration, the heavy-work rule and where the handovers live. The project's own
 facts stay in its AGENTS.md (the policy: `../README.md`, "What lane-control writes into a project").
+
+`project-setup` also keeps the coordinator findable and honest. The main checkout's `CLAUDE.local.md` gets a **persona
+anchor** (`core/anchor.py`): a session started there by hand is told to read the persona; workers and headless runs are
+told to ignore it. Other lines in the file are kept and it is never committed. Where the folder has an `AGENTS.md` and
+no `CLAUDE.md`, the anchor imports it, because Claude would otherwise stop reading it. `project-setup --check <repo>`
+says whether the persona and anchor are as setup writes them. Whether the coordinator **runs** is decided by its
+processes, never by a terminal's title or Orca's agent mark (both stay on an empty shell, as after a server restart).
+Three answers: running (left alone); `recorded but dead` (`project-pause start` clears the record and starts it; the
+old terminal is left open for you to close); and `cannot tell`, when an agent that may be it cannot be read or placed.
+After an Orca restore, a coordinator can run as `claude --resume <id>` in a sandbox whose environment lane-control
+cannot read: it is ruled out only when its command line names another session or Claude's transcript for that id is
+under other folders alone. `cannot tell` starts nothing, so there is never a second coordinator; if the terminal it
+names is an empty shell, close it and run again.
 
 ## Beads
 Where a project's beads lives, its backup and its restore: `core/issues.md`, "Where beads lives". `project-setup` checks
@@ -69,16 +88,23 @@ project and lane (`core/machine.md`); open a lane only when `~/.agents/bin/lane-
 its own heavy targets (a CI script, a make target) through `lane-heavy` so every caller gets the gate.
 
 ## An SSH host
-`core/scripts/project-setup <repo> <host>` sets a project up on an SSH box, driven from this machine's Orca, and lets
-the box's coordinator run lanes here with the desktop's share link (`remote.md`); `project-setup --remove-host
-<host>` undoes the second part.
+`core/scripts/project-setup <repo> <host>` sets a project up on an SSH box in two directions, each with its own
+tunnel, both started on this machine (`remote.md`; the picture:
+[how the parts fit](../../docs/how-it-fits.md#a-box-two-directions)):
+- direction 1, this machine controls the box: `orca-tunnel-<host>` (`ssh -L`), made by `orca-host-install --pair`,
+  with no click and no pairing code from the owner;
+- direction 2, the box's coordinator starts lanes here: `lane-tunnel@<host>` (`ssh -R`), made by `project-setup`
+  before it sends the box its link to this machine's Orca: made with `orca pair` after the owner's yes, or the share
+  link the owner makes by hand (`--pair-by-hand`, which keeps this machine on loopback). `project-setup --remove-host
+  <host>` undoes this direction only.
 
 ## OpenCode on a self-hosted LiteLLM gateway
 A self-hosted gateway with any models behind it is first class, and nothing is refused by model or harness (owner
 2026-11-24, `core/model-routing.md`, "Sandbox per tier"); each project's own tier table says which models it uses.
 0. A host set up before this change still has the old copies: `~/.agents/bin/lane-tier`, the lane skills and the
-   rendered personas there refuse an OpenCode tier until they are refreshed. Update the host's lane-control checkout,
-   run `core/scripts/project-setup <repo> --refresh` from it for each project (it reinstalls the lane tools and skills
+   rendered personas there refuse an OpenCode tier until they are refreshed. Update the host's lane-control checkout
+   and install it (`git pull && scripts/lane-control install`), run `core/scripts/project-setup <repo> --refresh`
+   from it for each project (it links the lane tools, reinstalls the skills
    and re-renders the personas), then restart the coordinator (`core/scripts/project-pause stop <repo>`, then `start <repo>`), so it
    reads the new persona. The suggestion below warns while the installed lane-tier is not the checkout's.
 1. OpenCode's own config on the machine that runs the agents (`~/.config/opencode/opencode.json`) names the gateway
@@ -108,7 +134,7 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    setup run keeps the table.
 3. A machine without Claude: `core/scripts/machine-setup --machine-coordinator opencode/litellm/chat` (the
    automations follow the machine coordinator's harness; `--automation-provider opencode` says it outright). The
-   three automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
+   four automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
    model to an OpenCode automation. With no usage feed (every budget's feed empty in the playbook config) no budget
    is metered: the caps are the limit, and night check-ins still go out.
 4. Setting a project up on such a machine: the onboarding agents run on either harness, so pass OpenCode ones,
@@ -181,9 +207,102 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
 The URL, the key's variable and the model names stay in OpenCode's config and the project's settings store: no key,
 host or gateway URL in any repo.
 
+## The model environment (Claude through a gateway)
+What lane-control writes itself: each role's model in the project's settings store and tier table, the persona and the
+start command (`claude --model <model>`), and each automation's `--model` in its record. In a checkout's
+`.claude/settings.local.json` it writes hooks and away-improve's deny rules, never a model and no `env` block. The
+model environment is written by one tool, and only when you run it:
+
+```bash
+core/scripts/model-env --set ANTHROPIC_BASE_URL=<gateway URL> \
+  --set ANTHROPIC_DEFAULT_SONNET_MODEL=<name> --set CLAUDE_CODE_AUTO_MODE_MODEL=<name>
+core/scripts/model-env --check
+```
+
+Or run it with no arguments in a terminal and answer its questions. On a box, run it there.
+
+- **One source**, `~/.config/lane-control/model-env.conf`: `NAME=value` lines (mode 0600). It takes
+  `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`, `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL`,
+  `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL` and
+  `CLAUDE_CODE_DISABLE_THINKING`. **Never a key or a token** (it refuses them): the key stays where your shell or
+  login starts agents.
+- **Three homes written from it:** `~/.config/lane-control/model-env.sh` (add one `. <that file>` line to your shell
+  profile; no startup file is ever edited), `~/.config/fish/conf.d/lane-control-models.fish` (when `~/.config/fish`
+  exists) and the `env` block of Claude's user settings (`$CLAUDE_CONFIG_DIR/settings.json`, else
+  `~/.claude/settings.json`). A file or a value it did not write, or one edited since, is reported and left as it is.
+- **`--check`** compares each home with the source, value by value, and changes nothing: those three, hand-written
+  lines in shell startup files and `~/.config/environment.d`, the `env` blocks of set-up projects' Claude settings, the
+  systemd user manager's environment and the shell it runs in. Exit 1 when something differs, is missing or only a
+  shell could work out.
+- **A running agent keeps the environment it was born with.** After a change, restart each agent session, and whatever
+  starts them (Orca, its server on a box) when it had the old values from a shell or the systemd user manager.
+
+**The auto-mode classifier model is set explicitly** (field report 2026-11-26: a session died mid-turn with a 400
+naming the classifier's model group). With a gateway, `model-env` writes nothing until
+`CLAUDE_CODE_AUTO_MODE_MODEL` names one, and has no default. Give it a **non-reasoning** model your gateway serves, by
+its own name (Claude Code 2.1.302 or newer reads it). Claude Code's docs say it ignores the variable for Claude Opus 5,
+Sonnet 5.5 and Opus 5.5 (`model-env` warns), and that when your provider cannot serve the model, auto mode denies each
+action it checks; hence the served-model check. Whether an alias reasons is something only you know: lane-control can
+warn from its name and no more. To see which model reviewed, their docs give `claude --permission-mode auto
+--debug-file <log>` and `classifier_request_started` in that log. **A classifier model configured by the server wins
+over the variable:** Claude Code 2.1.332 then ignores it and logs `ignoring CLAUDE_CODE_AUTO_MODE_MODEL`.
+
+`CLAUDE_CODE_BG_CLASSIFIER_MODEL` is **not** set or checked. Claude Code 2.1.329 to 2.1.332 declare the name, but in
+those four binaries no code that reads its value was found (`CLAUDE_CODE_AUTO_MODE_MODEL`, the control, is read), and
+their docs do not name it. In 2.1.332's code, the classifier of a background session's state asks the small fast model
+with thinking off: `ANTHROPIC_SMALL_FAST_MODEL` when set, else usually `ANTHROPIC_DEFAULT_HAIKU_MODEL`, both of which
+`model-env` takes. A server setting can change that, and none of this was run live. Look again after a Claude Code
+update.
+
+**A `--model` with a Claude name turns extended thinking on, and some gateway backends reject it** (the field report).
+Claude Code decides from the model's name which request fields to send. Its gateway docs also say that on an
+Anthropic-format gateway it treats a name it does not recognise, a gateway alias too, as a current model that gets the
+thinking field, so renaming alone is not proof. If a backend answers 400 naming `thinking`, their compatibility switch
+is `CLAUDE_CODE_DISABLE_THINKING=1` (`model-env --set` takes it); on a model that thinks by default it may still think.
+
+**The settings `env` block may not reach the process** (the field report saw it not arrive). It is Claude Code that
+reads it, so it reaches Claude Code and what Claude Code starts: not the terminal it was started from, not Orca, not
+OpenCode. Its docs also list cases where the launch environment wins (sessions started by the desktop app or a
+self-hosted runner), and variables a project's settings cannot set. That is why the same values also go in the shell
+files, and why `--check` looks at every place rather than at one.
+
+**The served-model check.** Before a model is written (`model-env`, `machine-setup`'s coordinator and automation
+models, `project-setup`'s role pins and tier table), the gateway it goes through is asked once for
+`<base>/v1/models`. **Nothing is written blindly:**
+
+| The check says | Meaning | What happens |
+|---|---|---|
+| `ok` | the gateway lists the name | written |
+| `not served` | the gateway answered and does not list it | not written |
+| `could not check` | no answer, a refused key, a bare alias such as `opus` with no `ANTHROPIC_DEFAULT_OPUS_MODEL`, a paged list, a key that is for another URL | in a terminal you are asked, once per run for the same doubt, and only `y` writes; without a terminal, not written |
+| `not proven` | only a wildcard in the list matches | the same |
+
+`--no-model-check` writes without asking the gateway. A script or a box setup with no terminal needs that flag, or the
+doubt fixed: for an alias, name its model first with `model-env --set ANTHROPIC_DEFAULT_<ALIAS>_MODEL=<name>`.
+`ok` is not proof that the model works: only a request to it is. With no gateway nothing is asked.
+
+**Which URL and which key.** For Claude the URL is `ANTHROPIC_BASE_URL` from `model-env`'s source (or the value being
+written), else your Claude user settings, else the shell; never a repo's settings. For OpenCode it is the provider's
+`baseURL` in OpenCode's config. The key comes only from the environment (`ANTHROPIC_AUTH_TOKEN` or
+`ANTHROPIC_API_KEY`; for OpenCode the variable that same config names), goes in a header to that URL only, and is never
+printed or stored. **When the shell names an `ANTHROPIC_BASE_URL` of its own and it is not the URL to be asked, the key
+is not sent** (nothing is) and the check says `could not check`: to move to another gateway, run the command with its
+URL and its key in the shell. A shell with a key and no URL of its own sends it to the URL above, as Claude Code would.
+
 ## A machine
 `core/scripts/machine-setup [--host <h>]` sets a machine up once, here or on an SSH box (its header has the details;
-every step says `exists` on a re-run):
+every step says `exists` on a re-run).
+
+**No model is built in.** The machine coordinator's: `--machine-coordinator claude/<model>` (or
+`opencode/<provider>/<model>`), else `MACHINE_COORDINATOR=` in `machine.conf`, else what its persona already names,
+else it asks in a terminal. The automations' (only when Claude runs them): `--automation-model <model>`, else
+`AUTOMATION_MODEL=`; with neither, a new automation takes the model the existing Claude automations' records agree on
+(so a machine that has them is not asked again), and where they name none or differ it is asked in a terminal. A re-run
+never changes the model an existing
+automation's record names; `--automation-model <model> --replace-automation-model` does, and changes only the
+`--model` in its extra arguments. Without a terminal and without a model it stops and says what to write;
+`machine.conf` is already there to write it in.
+
 - `~/.config/lane-control/machine.conf` from `core/templates/machine.conf.example`: this machine's coordinators
   (`<name> <checkout>` each: the owner's list of whom the night manager may wake; Orca gives each one's harness and
   session name, the single agent terminal in that checkout, and a harness and terminal title written after the checkout
@@ -192,11 +311,16 @@ every step says `exists` on a re-run):
   `machine-setup` existed has no `machine.conf`: create it (run `machine-setup`, which writes it from the example, or
   copy the example there by hand), since `lane-improve` and `night-precheck` need the file.
 - The machine coordinator, in its own private folder (`--folder`, default `~/machine-coordinator`), started in an
-  Orca terminal titled `machine coordinator` with its persona and hook.
-- Three Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
+  Orca terminal titled `machine coordinator` with its persona and hook, unless it runs already or that cannot be told
+  (above: the same proof). The folder's `CLAUDE.local.md` gets the same persona anchor, which the automations' sessions
+  there are told to ignore; `machine-setup --check` reads it. The folder may be your own git repo: git does not see
+  the file (listed in `.git/info/exclude` unless already ignored; a committed one is left alone).
+- Four Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
   manager` hourly (`night-precheck`; the agent follows `night-manager.md`), `lane sweep` every 3 hours
   (`lane-sweep --precheck`, report only, waking its agent only for findings new since the last run) and `machine check` every 30 minutes (`machine-check`: a budget step,
-  memory or runner state changed; it also keeps the `budget-stopped` marker for the CI limits).
+  memory or runner state changed; it also keeps the `budget-stopped` marker for the CI limits) and `away watchdog` every 15
+  minutes (`away-watchdog`: while away-improve mode is on its precheck finds a stalled cycle, and its agent sends the
+  messages to that coordinator and the machine coordinator from its own terminal; [the watchdog](../../docs/away-improve.md#the-watchdog)).
 - The `ci-presence` user timer: the CI slice's CPU and memory follow presence (`lane-limits.sh`).
 - On a machine set up by hand before: automations named `night-manager` or `lane-sweep` and an older CI timer
   (`ci-cpu`) are reported with the commands to remove them; nothing is doubled or replaced without the owner.

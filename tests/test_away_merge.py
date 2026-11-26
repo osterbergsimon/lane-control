@@ -528,7 +528,27 @@ class AwayMergeTests(AwayMergeTest):
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.merged(), [])
 
+    def test_the_merge_closes_the_cycle_into_the_ledger(self):  # field report B1/F6: item, PR, sha, metric, rounds
+        r = self.run_script("lane-improve", "cycle", "shop", "--phase", "review", "--item", "Add the x feature", "--pr", "7",
+                            "--round", "2", "--address", "term_shop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.merge("--metric", "tests 412 -> 431")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (row,) = [json.loads(x) for x in (self.conf_dir / "improve-ledger.jsonl").read_text().splitlines()]
+        self.assertEqual((row["outcome"], row["item"], row["pr"], row["rounds"], row["metric"], row["project"]),
+                         ("merged", "Add the x feature", 7, 2, "tests 412 -> 431", "shop"))
+        self.assertTrue(row["sha"])
+        cyc = json.loads(self.run_script("lane-improve", "cycle", "shop", "--json").stdout)
+        self.assertEqual((cyc["phase"], cyc["address"]), ("idle", "term_shop"))
+
+    def test_a_refused_merge_leaves_the_ledger_alone(self):
+        self.pr(comments=[])
+        self.assertRefused(self.merge(), "review")
+        self.assertFalse((self.conf_dir / "improve-ledger.jsonl").exists())
+
     def test_usage(self):
+        self.assertEqual(self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "x", "--metric",
+                                         "y" * 300).returncode, 2)
         self.assertEqual(self.run_script("away-merge").returncode, 2)
         self.assertEqual(self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "  ").returncode, 2)
 
@@ -536,6 +556,7 @@ class AwayMergeTests(AwayMergeTest):
         self.merge()
         for c in self.gh_calls():
             self.assertTrue(c.startswith(("pr view", "pr diff", "pr merge", "pr ready", "repo view", "api user -q", "api graphql", "pr list --head", "pr edit",
+                                          "api --method PATCH repos/{owner}/{repo}/pulls/",
                                           "pr create --draft")), c)
 
 
@@ -818,7 +839,7 @@ class AwayMergeSummaryTests(AwayMergeTest):
         self.pr(comments=[])
         self.assertRefused(self.merge(), "review")
         self.assertEqual(self.body(), before)
-        self.assertEqual([c for c in self.gh_calls() if c.startswith("pr edit")], [])
+        self.assertEqual([c for c in self.gh_calls() if c.startswith(("pr edit", "api --method PATCH"))], [])
 
     def test_a_refresh_that_fails_does_not_undo_the_merge(self):
         r = self.run_script("away-merge", "--project", "shop", "--pr", "7", "--item", "Add the x feature",
@@ -860,7 +881,7 @@ class AwayMergeSummaryTests(AwayMergeTest):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("closed", r.stderr)
         self.assertEqual(self.body(), before)
-        self.assertEqual([c for c in self.gh_calls() if c.startswith(("pr edit", "pr create"))], [])
+        self.assertEqual([c for c in self.gh_calls() if c.startswith(("pr edit", "api --method PATCH", "pr create"))], [])
 
     def test_a_merge_while_draining_refreshes_too(self):
         f = self.tmp / "summary.md"

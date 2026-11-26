@@ -21,8 +21,9 @@ HERE = Path(__file__).resolve().parent
 LANE_LIMITS = HERE / "scripts" / "lane-limits.sh"
 EXAMPLE = HERE / "templates" / "machine.conf.example"
 NUMBERS = {"NIGHT_START": 23, "NIGHT_END": 7, "IDLE_MIN": 45, "RECHECK_MIN": 120, "AWAY_HOURS": 14,
-           "IMPROVE_IDLE_MIN": 30}
-KEYS = ("COORDINATORS", "RUNNER_REPOS", *NUMBERS)
+           "IMPROVE_IDLE_MIN": 30, "WATCHDOG_MIN": 45, "WATCHDOG_ESCALATE_MIN": 120}
+MODELS = ("MACHINE_COORDINATOR", "AUTOMATION_MODEL")  # machine-setup's models; there is no default (lc-l78.18)
+KEYS = ("COORDINATORS", "RUNNER_REPOS", "MACHINE_COORDINATOR_TO", "MACHINE_COORDINATOR_FOLDER", *MODELS, *NUMBERS)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
@@ -59,8 +60,9 @@ def load(p: "Path | None" = None) -> dict:
     if not p.is_file():
         raise ConfError(f"{p}: no machine config (machine-setup writes one from {EXAMPLE.name}; fill in COORDINATORS)")
     dump = 'for k in "$@"; do printf "%s\\0%s\\0" "$k" "${!k-}"; done'
+    env = {k: v for k, v in os.environ.items() if k not in MODELS}  # a model comes from the file, never the shell
     r = subprocess.run(["bash", "-c", f'set -e; . "$0" >/dev/null; {dump}', str(p), *KEYS],
-                       capture_output=True, text=True, env={**os.environ, "BASH_ENV": ""})
+                       capture_output=True, text=True, env={**env, "BASH_ENV": ""})
     if r.returncode != 0:
         raise ConfError(f"{p}: could not be read ({(r.stderr.strip() or 'bash failed').splitlines()[-1]})")
     parts = r.stdout.split("\0")

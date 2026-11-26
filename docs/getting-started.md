@@ -15,6 +15,8 @@ gateway. Replace them with yours.
 - A **lane** is a worker agent with one issue, one branch, one PR and its own worktree, on a **tier**.
 - Tiers are roles (swift, standard, deep, top). Each project's tier table says which engine and model fills each one.
 
+Every part and how they connect, on one page: [How the parts fit](how-it-fits.md).
+
 More in the [README](../README.md) and in [core/roles.md](../core/roles.md).
 
 ## 1. Requirements
@@ -52,9 +54,11 @@ lane-room
 You should see four lines (`memory`, `load`, `lanes`, `limits`) and last `room for another lane`, exit code 0.
 `lane-room` is the check a coordinator runs before it opens a lane.
 
-The lane tools (`lane-heavy`, `lane-room`, `lane-tier`, `lane-limits.sh`, `design-shots`) are also copied to
-`~/.agents/bin`, where agents call them. `project-setup` does that copy on its first run (step 4) and says
-`lane-tools: created`; there is no separate installer.
+Then install it: `~/code/lane-control/scripts/lane-control install` prints `installed <sha>`. That puts the repo at its
+last commit in `~/.local/share/lane-control/<sha>/` with a `current` link, and links the lane tools (`lane-heavy`,
+`lane-room`, `lane-tier`, `lane-limits.sh`, `design-shots`) and `lane-control` into `~/.agents/bin`, where agents call
+them. Personas and hooks name `.../lane-control/current`, never this checkout. (`project-setup`, step 4, also installs
+when nothing is installed yet and says `lane-control: installed <sha>`.)
 
 If not: `lane-room: command not found` means the PATH line did not take effect in this shell. `lane-room` exiting
 non-zero says why: memory or load is too high, or the lane count is reached. That is a real answer, not a fault.
@@ -115,7 +119,7 @@ named here. Models are named by the gateway's aliases, such as `chat` and `code`
    ```
 
    The alias `chat` is then `litellm/chat` in OpenCode. The `"model"` line matters: Orca passes no model to an
-   OpenCode automation, so the three machine automations (night manager, lane sweep, machine check) run on whatever
+   OpenCode automation, so the four machine automations (night manager, lane sweep, machine check, away watchdog) run on whatever
    OpenCode's default is. Without that line OpenCode picks a model itself, and on a machine that has only the gateway
    it may pick one that does not exist.
 
@@ -147,14 +151,27 @@ named here. Models are named by the gateway's aliases, such as `chat` and `code`
 
 ## 3. Set up the machine
 
-Once per machine. It makes the machine coordinator and three small automations (night manager, lane sweep, machine
-check), and checks the usage feed.
+Once per machine. It makes the machine coordinator and four small automations (night manager, lane sweep, machine
+check, away watchdog), and checks the usage feed.
 
 Claude on this machine:
 
 ```bash
 machine-setup
 ```
+
+No model is built in, so the first run asks two things: the machine coordinator's model, as `claude/<model>` (for
+example `claude/sonnet`), and the model for the automations (for example `sonnet`). To answer up front:
+`machine-setup --machine-coordinator claude/sonnet --automation-model sonnet`, or set `MACHINE_COORDINATOR=` and
+`AUTOMATION_MODEL=` in `machine.conf`. A later run keeps what the machine has and changes no automation's model unless
+you add `--replace-automation-model`.
+
+Claude through a gateway: **do this before `machine-setup`.** An alias such as `sonnet` can only be checked once it is
+mapped to a name your gateway lists; unmapped, `machine-setup` asks whether to write it unchecked, and without a
+terminal writes nothing. First run `model-env` (it asks for the gateway, its model names and the auto-mode classifier
+model), with your gateway key set in that shell. Add the line it prints to your shell profile, restart Orca from a
+shell that has the values, and check with `model-env --check`. Details:
+[the model environment](../orchestrators/native-orca/setup.md#the-model-environment-claude-through-a-gateway).
 
 OpenCode only, on a gateway (the machine coordinator and the automations then run on OpenCode; step 2.3 comes first):
 
@@ -371,7 +388,8 @@ You do not need to poll. The lane's report wakes the coordinator, and the coordi
 - `NEEDS_STANDARD` or `NEEDS_DEEP` means the lane stopped instead of guessing. The coordinator reopens it one tier up.
 - The coordinator does not trust the numbers. It reads the diff and reruns the fast checks. When the project's risk rules
   call for it, or whenever you ask, a reviewer on a different model reviews the exact commit. Its findings come back as
-  `### <ID> [blocker|major|minor|nit] <title>`, and the lane fixes every blocker and major one (two rounds at most).
+  `### <ID> [blocker|major|minor|nit] <title>`, and the lane fixes every blocker and major one (two rounds at most; if the second still holds one, the findings
+  become issues, the PR is parked with them quoted and you are asked what to do).
 - Read the PR yourself: `gh pr view <n> --web`, or ask the coordinator for its summary.
 
 If a report does not come: ask the coordinator, in its terminal, what the lane waits for. A lane that cannot report
@@ -403,8 +421,18 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
 
 - **Let it work while you are away:** [docs/away-improve.md](away-improve.md). It is off until you run `lane-improve on`.
   Presence alone is `lane-away on` (night hours check in on idle coordinators); it never starts improve mode.
-- **Put a project on an SSH host:** `project-setup ~/code/<project> example-host`, driven from this machine's Orca
-  ([orchestrators/native-orca/remote.md](../orchestrators/native-orca/remote.md)). Run `ssh example-host` once by hand first.
+- **Put a project on an SSH host:** run `ssh example-host` once by hand, then
+  `project-setup --check ~/code/<project> example-host`: it lists every prerequisite (ssh, Orca on both sides and their
+  versions, pairing both ways, the tunnel, the agent and the gateway key on the host) and changes nothing. Then
+  `project-setup ~/code/<project> example-host`, driven from this machine's Orca
+  ([orchestrators/native-orca/remote.md](../orchestrators/native-orca/remote.md)). For the host's coordinator to run
+  lanes here it needs a link to this desktop's Orca. Setup makes it for you with `orca pair`, once you say yes: first
+  it says what the link grants (terminals here, so any command as you on this computer, which can reach your screen
+  too), that its `--rotate` ends every other unused access link of this Orca, that this desktop's Orca will then
+  listen on every network interface (revoking does not narrow that; restarting Orca does), and how to revoke it. To
+  keep the desktop on loopback, answer no (or pass `--pair-by-hand`) and make the link by hand in Orca instead:
+  Settings > Servers > "Share this computer", choosing 127.0.0.1, then paste it at setup's hidden prompt (with
+  `--pair-by-hand` setup gives these steps before it starts, so you can make it while it runs).
 - **Cleanup and branches:** [docs/orca-cleanup.md](orca-cleanup.md).
 - **More projects and models:** repeat step 4 per repo; tiers and routing are in [core/model-routing.md](../core/model-routing.md).
 - **Switch orchestrators:** `scripts/orch status ~/code/<project>`, then follow [the switch guide](../orchestrators/switching.md).
@@ -412,26 +440,46 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
 
 ## Updating an existing host
 
-A host set up before a change keeps old copies: the lane tools in `~/.agents/bin`, the skills, and the personas
-rendered into each project. A running coordinator also keeps the persona text it started with. So an old host can
-refuse what a new checkout allows, for example an OpenCode tier (`lane-tier` there refuses it until it is refreshed).
-Pick the case that fits.
+Each machine and each box has one installed lane-control: the whole repo at one commit, in
+`~/.local/share/lane-control/<sha>/` (`$XDG_DATA_HOME` when set), with a `current` link to the one in use. Personas
+name `~/.local/share/lane-control/current`, and the lane tools in `~/.agents/bin` (with `lane-control` itself) are
+links into it, so nothing points at a checkout or a lane worktree that may go away. Old trees are kept: a running lane
+may still read one. A project records the sha it was set up with. Installing a new commit moves the tools at once;
+the skills and each project's personas follow at that project's `--refresh`. A running coordinator also keeps the
+persona text it started with. Pick the case that fits.
+
+```bash
+lane-control status                            # the installed sha, the checkout's, and whether they differ
+lane-control doctor                            # every project, link, skill and box against the install, with what to run
+project-setup ~/code/<project> --show          # says "lane-control <a> installed, project set up with <b>: run project-setup --refresh"
+```
 
 ### A machine with its own lane-control checkout, project stays on its engine
 
 ```bash
 cd ~/code/lane-control && git pull
+scripts/lane-control install                   # prints "installed <sha>" (or "exists <sha>")
 project-setup ~/code/<project> --refresh      # once per project
 project-pause stop ~/code/<project>
 project-pause start ~/code/<project>
 ```
 
 Why each step:
-- `git pull` updates the checkout the scripts run from.
-- `--refresh` copies the current lane tools and skills over the old ones and renders the personas again. It keeps each
+- `git pull` updates the checkout; `lane-control install` lays its last commit as the machine's tree and switches
+  `current` to it (no network; `--version <sha or tag>` installs another commit, `--from <checkout>` names the
+  checkout). After the first one, `~/.agents/bin/lane-control install` works from anywhere: it remembers the main
+  checkout (never a lane worktree). `project-setup` run from the main checkout on its default branch installs that
+  checkout's last commit itself too, so a forgotten install is not a problem. Run from a lane worktree, another branch
+  or a commit not shown to be newer, it keeps the installed one (`lane-control: kept ...`) and runs that tree's own
+  setup, so skills and personas come from it, unless you answer yes in a terminal.
+  Uncommitted changes are never installed (it says so). A failed install exits 1 and changes nothing.
+- `--refresh` renders the skills and the personas again from the installed tree and records its sha. It keeps each
   persona's engine and model and the project's tier table, starts nothing and commits nothing, and says which running
   agents need a restart. It refuses `--coordinator` and `--permission-mode` (exit 2): to change engines, see
   [moving a project to the gateway](#a-project-that-runs-on-claude-and-should-move-to-the-gateway).
+- A machine set up before the install moves to it with the first install: `note: this machine moves to the install
+  ...` (from `lane-control install`, or `project-setup: note: ...` when setup installs first), and per project, at
+  its `--refresh`, `lane-control: moved ...`. Nothing else to do.
 - `project-pause stop` asks the coordinator for its handover, waits for it (up to 10 minutes) and closes its terminal. It
   refuses while a lane or reviewer runs, and it runs from an Orca terminal. `start` opens the coordinator again,
   resuming its session, with the new persona.
@@ -465,27 +513,31 @@ project-pause start ~/code/<project>
 
 ### A box driven from a desktop
 
-A box set up with `project-setup <repo> <host>` has no lane-control checkout of its own. Its copy is
-`~/.local/share/lane-control`, not a git repo, and every `project-setup <repo> <host>` run replaces it
-([the remote doc](../orchestrators/native-orca/remote.md)). So update it from the desktop:
+A box has two connections, both tunnels started on the desktop ([how the parts fit](how-it-fits.md#a-box-two-directions)):
+`orca-tunnel-<host>` (`ssh -L`, direction 1: the desktop controls the box, made by `orca-host-install --pair`) and
+`lane-tunnel@<host>` (`ssh -R`, direction 2: the box's coordinator starts lanes on the desktop, made by
+`project-setup` before it sends the box its link to the desktop).
+
+A box set up with `project-setup <repo> <host>` has no lane-control checkout of its own. It gets the desktop's installed
+tree, whole and at the same sha, in its own `~/.local/share/lane-control/<sha>/` with its own `current` link, on every
+`project-setup <repo> <host>` run (sent over ssh; kept when the box has that sha already;
+[the remote doc](../orchestrators/native-orca/remote.md)). So update it from the desktop:
 
 ```bash
-cd ~/code/lane-control && git pull
+cd ~/code/lane-control && git pull && scripts/lane-control install
+project-setup --check <repo on the host> example-host     # what is missing; changes nothing
 project-setup <repo on the host> example-host --refresh
 ```
 
-The box's copy is refreshed and the box's own `--refresh` runs there (lane tools, skills, personas). That copy holds
-only what `project-setup` needs. A full `project-setup <repo> example-host` run also runs `machine-setup --host
-example-host` (unless `--no-machine-setup`), which adds all of lane-control's `core` to the same folder, `project-pause`
-and the `--suggest-tiers` code among them. `--refresh` does not run it, so those are from the last `machine-setup`,
-and missing on a box set up with `--no-machine-setup`. `machine-setup --host example-host` updates them, but on a box
-set up with `--no-machine-setup` it also does the rest of a machine setup for the first time: it starts a machine
-coordinator (default `claude/sonnet`: pass `--machine-coordinator opencode/<provider>/<model>` on a gateway box, or
-`--no-start`, which skips only that coordinator) and adds the Orca automations and the CI timer. Then from an Orca
-terminal of the box, `~/.local/share/lane-control/core/scripts/project-pause stop <repo>` and `start
-<repo>` restart its coordinator. Without them: tell the coordinator in its terminal to write its handover, close its
-terminal in Orca (it shows in your window), then run `project-setup <repo on the host> example-host` again: it starts
-the missing coordinator, which reads `handover-latest`. (From the source; not run.) Without a restart the coordinator reads the new persona at its next
+`--check` also says when the box's Orca and this desktop's differ (`check versions: warn`): keep them on one version.
+
+The box gets the tree (`lane-control: copied <sha> on example-host`) and the box's own `--refresh` runs there (lane
+tools as links, skills, personas naming the box's own `current`). A box set up before has its old copy in the same
+folder; it stays and is no longer used. The box has the whole tree, so `project-pause` and `--suggest-tiers` are there
+too, under `~/.local/share/lane-control/current/scripts/`. To restart the box's
+coordinator, tell it in its terminal to write its handover, close its terminal in Orca (it shows in your window), then
+run `project-setup <repo on the host> example-host` again: it starts the missing coordinator, which reads
+`handover-latest`. (From the source; not run.) Without a restart the coordinator reads the new persona at its next
 compaction. To move a box to a gateway, the simpler way is a lane-control checkout on the box itself: clone it there and
 use the second case.
 
@@ -500,8 +552,8 @@ or park it. Never stop a live lane without your word.
 - **A running lane:** ask its coordinator. It stops a live lane only on your word, and puts the issue back to open.
 - **Away modes:** `lane-away off` says you are back. `lane-improve off` ends away-improve mode; what is running drains
   first ([docs/away-improve.md](away-improve.md)).
-- **The machine coordinator and the automations:** close the `machine coordinator` terminal in Orca. The three
+- **The machine coordinator and the automations:** close the `machine coordinator` terminal in Orca. The four
   automations wake coordinators at night, so remove them to stop that: `orca-ide automations list`, then
-  `orca-ide automations remove <id>` for `night manager`, `lane sweep` and `machine check`. Running `machine-setup`
+  `orca-ide automations remove <id>` for `night manager`, `lane sweep`, `machine check` and `away watchdog`. Running `machine-setup`
   again makes them again. The CI limits follow presence through a user timer: `systemctl --user disable --now
   ci-presence.timer`.

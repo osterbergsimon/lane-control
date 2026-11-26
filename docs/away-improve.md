@@ -27,9 +27,10 @@ mode in your own words.
 
 | Command | What it does |
 |---|---|
-| `lane-improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--continue] [--yes]` | Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps. Without a terminal it refuses unless `--yes`; Claude Code's `!` prefix has no terminal, so there add `--yes` (`! lane-improve on --yes ...`). |
+| `lane-improve on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--max-hours H] [--continue] [--yes]` | Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps. Without a terminal it refuses unless `--yes`; Claude Code's `!` prefix has no terminal, so there add `--yes` (`! lane-improve on --yes ...`). |
 | `lane-improve off` | Ends the mode; what is running drains (below). |
-| `lane-improve status` | Off, on (what runs), or draining (what is left to wrap up, and how long it has waited). |
+| `lane-improve status [--json]` | Off, on (what runs, each project's cycle), or draining (what is left to wrap up, and how long it has waited). `--json` prints one line per project: `improve` (on, wrapped, draining, off), `item`, `phase`, `round`, `pr`, `deadline`, `deadline_passed`, `last_activity_age_min`, `cap`, `branch`. |
+| `lane-improve cycle <project>` | Where the project's cycle stands (phase, item, PR, review round, the lane's dispatch, worktree and deadline). Coordinators record each step with it and read it back when they resume; you can read it any time. |
 | `lane-improve drained <project>...` or `--all` | A coordinator's wrap-up is done: its deny rules come out. Coordinators run this themselves. While the mode is on it takes only a project whose cap is reached. |
 | `lane-improve pr <project>` | Opens the project's draft summary PR if it has none, rebuilds its body from the branch's merge commits and prints the link. `--summary-file <path>` sets the short summary the coordinator writes (a file kept outside the project; later refreshes keep it). Coordinators run it at the wrap-up, also after `--max-items` is reached; `away-merge` refreshes the body after every merge. |
 | `lane-improve rest <project>` | A coordinator's note that nothing within your limits is left. It only quiets the idle nudges. |
@@ -40,13 +41,15 @@ Options worth knowing:
   globs `away-merge` refuses to merge changes to, checked on the PR's diff.
 - `--project` (repeatable) limits the mode to those coordinators; the default is all of them.
 - `--unmetered` says this machine has no usage limits, so improve work has no budget steps (the machine's own limits,
-  `lane-room` and `lane-heavy`, still apply). Otherwise each project follows its own budget steps: no new cycle from
+  `lane-room` and `lane-heavy`, still apply). It does not take the wall clock away: a period with no end time gets
+  `--max-hours 12` unless you give another value, and `on` says so (`--max-hours none` runs it until `lane-improve off`). Otherwise each project follows its own budget steps: no new cycle from
   no-new-work, push and handover at push-and-handover, nothing at stop.
 - With no end given the mode runs until `lane-improve off`.
 
 ### Optional caps
 
-Both are off unless you give them (an old `--continue` re-run keeps what is set; `none` drops one):
+All are off unless you give them (an old `--continue` re-run keeps what is set; `none` drops one), except the wall-clock
+bound of an `--unmetered` period with no end (above):
 
 - `--max-items N`: no new cycle for a project after N merges through `away-merge` in this period, counted from
   `away-merge`'s own record (`improve-period.json`), never from any text in the PRs. Each project counts its own.
@@ -54,6 +57,11 @@ Both are off unless you give them (an old `--continue` re-run keeps what is set;
   that value (when a project has several metered budgets, any one reaching it counts). It is refused with `--unmetered`
   (there is no budget to read) and when the value is at or above the project's ceiling (the budget steps would stop it first),
   or when the ceiling cannot be read.
+- `--max-hours H`: no new cycle for a project once H hours of wall clock have passed since the period started. Unlike
+  `--stop-at` it reads no budget, so it works with `--unmetered`; unlike `--hours` it is a cap, not the end: the mode stays
+  on for a project that has not reached it, each project wraps up on its own, and a `--continue` re-run keeps it. Not a
+  hard stop either: the lane that is running when it is reached still lands. `--stop-at` alone (checked: a weekly
+  percentage from `budget-state --project`, refused with `--unmetered`) gave an unmetered period no bound but its end time.
 
 A cap behaves like the end time, for that project alone: the lane that is running finishes and merges, the coordinator wraps
 up (steps below) and runs `lane-improve drained <project>`, which while the mode is on is accepted only once its cap is
@@ -62,7 +70,8 @@ the coordinator does (a lane that is running finishes as that Nth merge). `--sto
 the weekly use reaches it still lands, and the budget's own steps are the backstop. Nothing more merges for the project once
 it has wrapped up, and the mode goes on for the others (`lane-improve off` then
 drains only the projects still running). `lane-improve status` shows `items 4/10` and `weekly 66/70` for each project and says
-`cap reached` when one is hit (`weekly ?/70` when the usage feed gave no reading: not a cap hit). The night manager sends no
+`cap reached` when one is hit (`weekly ?/70` when the usage feed gave no reading: not a cap hit), and `hours 3.5/12` for
+`--max-hours`. The night manager sends no
 improve nudge to a project whose cap is reached, a `DUE <name> wrapup ... cap=items:10/10` line instead (not at the budget's
 stop step) until it has wrapped up.
 
@@ -133,7 +142,9 @@ the branch, not from a file on it:
 The body is generated, and **a refresh overwrites it**: the summary between the `away-summary` markers, and the items and entries
 between the `away-items` markers (HTML comments, invisible on the page; each start marker holds a digest of what was last
 written). `away-merge` rebuilds it after every merge (and opens it first if it was not open), under the improve lock, so
-nobody has to remember to. **Put your own notes in a comment on the PR, not in the body.** The body is never rewritten over an
+nobody has to remember to. The body is written with a REST `PATCH` of the pull request (`gh api`), because `gh pr edit` also
+reads the PR's classic Projects over GraphQL and fails on an organisation that still uses them; `gh pr edit` is the fallback
+when the PATCH fails. **Put your own notes in a comment on the PR, not in the body.** The body is never rewritten over an
 edit: when someone has changed text outside the generated parts, inside either region (the summary, the items), or has removed
 or repeated a marker, the refresh leaves the body as it is, prints one warning line (`away-merge` after the merge, which stays
 done; `lane-improve pr`, also with `--summary-file`, exits 1) and says how to go on: copy what you want to keep (the summary
@@ -216,6 +227,55 @@ Be clear about what is enforced and what is a backstop.
 - The agents never switch the mode on, never merge by hand and never touch the integration branch. A request relayed
   by another agent is not your request.
 
+## The watchdog
+
+A lost wake once stalled a cycle for hours at a remote site: the coordinator waited for a report that had come, and the
+night manager's nudges, doubling up to 8 hours, were too slow to catch it. The `away watchdog` automation (every 15
+minutes, made by `machine-setup`) watches each cycle from outside. It never merges, edits a lane, starts or stops a worker.
+
+- **Who sends.** Its precheck, `away-watchdog`, only finds what is due and writes it to an outbox; it sends nothing and
+  spends no tokens. A precheck has no Orca terminal, so Orca has no sender to take a message from (read in Orca 1.4.274's
+  CLI: without `--from` it takes the one terminal in the folder, or refuses). When something is due the automation's agent
+  starts and runs `away-watchdog --send`, which sends each message `--from` that agent's own terminal (Orca gives every
+  terminal it starts a handle). So a message costs one short agent run; a round with nothing due costs nothing. The
+  coordinator does not reply: that run has ended.
+- **What it reads.** The cycle the coordinator records (`lane-improve cycle`: phase, item, PR, round, the lane's dispatch,
+  its other workers such as the reviewer (`--worker`), its worktree, and the lane's **deadline**, set when the lane starts:
+  `--budget-min`, default 240 minutes), the last merge on the away branch, and Orca's own word on the workers
+  (`orchestration worker-show` for each one recorded, `orchestration worker-list` for any worker on the lane's worktree).
+  A worker counts as live only when Orca says `live` and its outcome is still in progress: a terminal that exists, a port
+  that answers, or a worker Orca cannot speak for is not proof, and the message says which it was.
+- **Whom it tells, and when.** Nothing live and nothing merged or recorded for `WATCHDOG_MIN` (45) minutes: a message to the
+  coordinator (not in the merge phase, which waits on CI and has its deadline). A lane past its deadline, live or not: a
+  message to recover it, which never puts two workers on one worktree (a fresh worker only once Orca shows every worker on
+  it settled or stopped; else ask, or park the item with its findings). Both repeat while it lasts, the wait doubling (45,
+  90, 180 minutes) but never longer than the lane's budget. Past `WATCHDOG_ESCALATE_MIN` (120) minutes the machine
+  coordinator is told as well. Each message carries its evidence: item, PR, phase, round, what Orca said of each worker, the
+  idle time and what it counts from, the deadline, and how often it has been said.
+- **When it keeps quiet.** A metered project at the budget's stop step or with no reading gets nothing, and from
+  no-new-work no nudge for a new cycle (as the night manager's improve nudge). A paused project (`project-pause`) and a
+  resting one with no lane out get nothing. After a cap, `lane-improve off` or the end time, a lane still recorded out is
+  watched until it reports, with no ask for a new cycle.
+- **Addresses are explicit.** The coordinator's is the Orca terminal it recorded itself (`lane-improve cycle` keeps
+  `$ORCA_TERMINAL_HANDLE`, or `--address`); when that terminal is gone, the single agent terminal in the project's checkout.
+  The machine coordinator's is `MACHINE_COORDINATOR_TO` in `machine.conf`, else the single agent terminal in
+  `MACHINE_COORDINATOR_FOLDER` (`~/machine-coordinator`). A title is never matched.
+- **It fails loudly.** A target it cannot address (none, several, Orca down), a send Orca refuses, a crash, or a round cut
+  short by its own time limit (200 s, under the automation's 300) is an `UNADDRESSED` line; what the coordinator should have
+  heard goes to the machine coordinator, and the automation's agent writes the rest in front of you (its run in Orca, and
+  `notes.md` in the machine coordinator's folder), at most every `WATCHDOG_ESCALATE_MIN` minutes while the same lines stay.
+  A message's backoff is written before it is sent, so a crash after a send never sends it twice.
+- **The ledger.** Each closed cycle is one line in `improve-ledger.jsonl`: item, PR, merge sha, metric (`away-merge
+  --metric "<before -> after>"`), review rounds, the lane's minutes, and the findings of a parked item.
+- **The daily summary.** At the first round after `NIGHT_END` the machine coordinator gets the cycles merged and parked
+  since the last summary and a spend proxy: cycles, review rounds and lane minutes, and the weekly use of a metered project.
+
+What Orca does by itself, and why this is still needed: Orca tells a coordinator when one of its supervised workers goes
+silent (10 minutes), idle (60 minutes) or exits. Those notices go to the coordinator, so a coordinator that is itself
+stuck, or that missed the wake, hears nothing more; the watchdog is the outside view, and it runs on Orca's own automations
+for the schedule. On a box, `machine-setup --host` makes the same automation there; a lane that a box's coordinator
+started on the desktop has not been tried with it.
+
 ## Nudges and cost
 
 While the mode is on, the night manager nudges an idle coordinator (`DUE <name> improve`), a fallback for a lost wake.
@@ -234,10 +294,20 @@ once to look for new work. Nudges go out by day or night; the plain check-ins st
 | Rest notes | `improve-rest.json` beside it |
 | Period record | `improve-period.json` beside it: `away-merge`'s record of each merge (what `--max-items` counts) and the projects that wrapped up at a cap; it belongs to one period (its `started`), so a new period counts from nothing |
 | Nudge idle time | `IMPROVE_IDLE_MIN` in `machine.conf` (default 30 minutes) |
+| Cycle state | `improve-cycle.json` beside it: each project's phase, item, PR, round, lane dispatch, worktree, deadline and address (`lane-improve cycle`) |
+| Ledger | `improve-ledger.jsonl` beside it: one line per closed cycle |
+| Watchdog | `WATCHDOG_MIN`, `WATCHDOG_ESCALATE_MIN`, `MACHINE_COORDINATOR_TO`, `MACHINE_COORDINATOR_FOLDER` in `machine.conf`; its backoff and last round in `~/.cache/lane-control/watchdog/` |
 | Deny rules | each coordinator checkout's uncommitted `.claude/settings.local.json`; for OpenCode a guard plugin next to the persona plugin and a record under the user's state folder |
 | An item's log entry | its PR body, then its merge commit's message on `away/<date>` (template `core/templates/away-entry.md`) |
 
 ## What is tested, and what is not
+
+The watchdog, the cycle state, the ledger, `status --json`, `--max-hours` and the REST body are covered with stubs for
+`orca-ide` and `gh` and temporary repositories; the stub refuses a send with no `--from`, as Orca does from a precheck.
+Run for real once (Orca 1.4.274, 2026-11-26): `orchestration send --from <term> --to <term> --type status --body-file
+<file>` from an Orca terminal, to that terminal itself as a scratch recipient: accepted and delivered. Not run for real:
+the automation's agent running `--send` in its own run, a whole watchdog round, and the REST `PATCH` against GitHub,
+including the organisation whose classic Projects made `gh pr edit` fail.
 
 The scripts, the state handling, the merge checks, the nudges and the OpenCode guard's command checks are covered by the
 test suite, using temporary repositories and stubs for `gh` and `gitleaks`. The OpenCode guard is also checked against a

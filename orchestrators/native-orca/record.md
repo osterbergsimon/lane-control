@@ -18,6 +18,9 @@ Orca worktrees and Orca's own orchestration (run, task, worker, check), with no 
   design reviewer (on every frontend lane), the `component-gallery` skill and `design-shots`
   (`docs/superpowers/specs/2026-11-21-design-kit-design.md`). `--design-lead` is refused and `--no-design-lead` does
   nothing. OpenCode lanes may do frontend work, and setup installs the design skills for OpenCode as well as Claude.
+- 2026-11-25: "lets use orca where we can": prefer Orca's own feature over lane-control code. The doctrine is in the
+  README (Doctrines, "Use Orca where we can"); the audit of what overlaps, as of 1.4.274, is
+  `docs/research/2026-11-25-orca-overlap.md`.
 
 ## History
 - 2026-11-15 trial (ORCH-1, Orca 1.4.250): adopt with changes for Claude lanes.
@@ -108,4 +111,6 @@ Run was touched. The Run cannot be deleted (`reset` is global), so its tasks wer
   and a second dispatch of the task reported and completed. Not tested: a real runtime restart (it would have
   restarted the owner's Orca), `worker-start --retry-of` (it starts an agent), and any second Orca server.
 - A `worker_done` from a lane on a paired server to a coordinator on the box, and whether it wakes an agent there:
-  still not run (needs a box with a signed-in agent and the owner's share link). `remote.md` says poll-only until it is.
+  still not run (needs a box with a signed-in agent and the owner's share link). `remote.md` said poll-only until it
+  was. 2026-11-26: a field report measured the wake on two servers at the same version, for that direction (box
+  coordinator, lane on the desktop); `remote.md` (Reports across hosts) now says so. lane-control has not repeated it.

@@ -251,7 +251,8 @@ and the answers' changes and asks only the questions still on the list.)
    so). `--design-lead` is refused; `--no-design-lead` does nothing.
 9. Verifies that the coordinator is live.
 
-With `--host`, it copies itself to `~/.local/share/lane-control/` on the host and runs there; paths are host paths.
+With `--host`, it sends the installed lane-control tree (the same sha) to `~/.local/share/lane-control/<sha>/` on the
+host, switches the host's `current` to it and runs there; paths are host paths.
 
 **Private files during onboarding.** The adapting agent and its reviewer are denied, by name: a `.git` folder or file at
 any depth, every git-ignored path (found at launch with `git ls-files -o -i --exclude-standard --directory`, also inside

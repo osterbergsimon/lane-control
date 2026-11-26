@@ -7,9 +7,11 @@ spec.json: {"key": <the bearer key it wants, or null>, "models": [<alias>, ...],
             "info": {<alias>: <model behind it> or {"model": ..., "mode": ...}} or null (null: no /model/info route,
                      as on a gateway that is not LiteLLM),
             "redirect": <a URL every GET is sent on to with 302>, "garbage": true (answer with a line that is not HTTP),
-            "drip": true (send the headers, then one byte of body a second, forever)}
+            "drip": true (send the headers, then one byte of body a second, forever),
+            "more": true (the model list says it has further pages)}
 Prints its port on the first line, then serves until killed. Each request is appended to the log as one JSON line
 ({"path": ..., "auth": "ok" | "missing" | "wrong"}); the key itself is never logged. A wrong or missing key gets 401.
+The key is taken from `Authorization: Bearer` or from `x-api-key`.
 """
 import http.server
 import json
@@ -34,8 +36,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         got = self.headers.get("Authorization")
+        alt = self.headers.get("x-api-key")
         want = SPEC.get("key")
-        auth = "missing" if not got else "ok" if want and got == f"Bearer {want}" else "wrong"
+        auth = "missing" if not (got or alt) else "ok" if want and (got == f"Bearer {want}" or alt == want) else "wrong"
         with open(LOG, "a") as f:
             f.write(json.dumps({"path": self.path, "auth": auth}) + "\n")
         if SPEC.get("garbage"):
@@ -62,7 +65,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if want and auth != "ok":
             return self.reply(401, {"error": "unauthorized"})
         if self.path == "/v1/models":
-            return self.reply(200, {"object": "list", "data": [{"id": m, "object": "model"} for m in SPEC["models"]]})
+            return self.reply(200, {"object": "list", "has_more": bool(SPEC.get("more")),
+                                    "data": [{"id": m, "object": "model"} for m in SPEC["models"]]})
         if self.path == "/model/info" and SPEC.get("info") is not None:
             rows = []
             for a, m in SPEC["info"].items():

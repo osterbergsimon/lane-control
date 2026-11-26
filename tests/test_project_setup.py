@@ -75,7 +75,15 @@ class Env:
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.state),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
         self.env.pop("XDG_CONFIG_HOME", None)  # the store is under the temp HOME
+        # The install goes under the temp HOME too, never a real XDG_DATA_HOME (INST-1 review M1). Tests run from a lane
+        # worktree or CI's detached merge, so they say yes to switching the scratch install (LANE_CONTROL_SWITCH).
+        self.env["XDG_DATA_HOME"] = str(self.home / ".local" / "share")
+        self.env["LANE_CONTROL_SWITCH"] = "1"
         self.env.pop("OPENCODE_API_KEY", None)  # a machine set up as docs/orca.md says has it
+        for k in [k for k in self.env if k.startswith("ANTHROPIC_") or k in ("OPENCODE_CONFIG", "CLAUDE_CONFIG_DIR",
+                                                                            "CLAUDE_CODE_AUTO_MODE_MODEL",
+                                                                            "CLAUDE_CODE_SUBAGENT_MODEL")]:
+            del self.env[k]  # a developer's own gateway is never asked by a test (core/modelenv.py)
         (self.home / ".gitconfig").write_text("[user]\n\tname = t\n\temail = t@t\n")
         # The design skills table (core/design-skills.tsv) names upstream repos: tests install none unless they ask.
         (self.home / "design-skills.tsv").write_text("# none\n")
@@ -2171,21 +2179,10 @@ class OnboardingTests(unittest.TestCase):
         self.assertNotIn("wrong test command", first["prompt"])
         self.assertIn("wrong test command", second["prompt"])
 
-    def test_host_mode_carries_what_onboarding_reads(self):
-        m = load()
-        self.assertIn("orchestrators/orca-cotal/templates", m.HOST_FILES)  # templates/adapt/ with it
-        self.assertIn("core/model-routing.md", m.HOST_FILES)
-        for path in m.HOST_FILES:
-            self.assertTrue((ROOT / path).exists(), path)
-
-    def test_host_mode_carries_the_root_lookup(self):
-        files = load().HOST_FILES  # the copy on the host finds its own root, like a checkout
-        self.assertIn(".lane-control-root", files)
-        self.assertIn("core/lcroot.py", files)
-
-    def test_host_mode_carries_the_machine_tools(self):
-        for name in ("lane-heavy", "lane-room", "lane-limits.sh"):
-            self.assertIn(f"scripts/{name}", load().HOST_FILES)
+    def test_host_mode_sends_the_whole_tree_not_a_file_list(self):
+        m = load()  # INST-1: a host gets the installed tree at one sha (core/install.py), so it never lacks a file
+        self.assertFalse(hasattr(m, "HOST_FILES"))
+        self.assertEqual(m.INSTALL.tar_tree(Path("/t"))[-1], ".")
 
 
 
@@ -2570,6 +2567,7 @@ class RunTests(unittest.TestCase):
         repo = self.e.repo()
         self.e.run(str(repo), "--no-start")
         tool = self._tools() / "lane-heavy"
+        tool.unlink()  # a copy from before the install (INST-1)
         tool.write_text("#!/bin/sh\necho old\n")
         with open(tool) as running:  # bash reads a running script as it goes: the old file must stay whole
             r = self.e.run(str(repo), "--no-start")
@@ -2578,7 +2576,8 @@ class RunTests(unittest.TestCase):
             self.assertEqual(running.read(), "#!/bin/sh\necho old\n")
         self.assertEqual(tool.read_bytes(), (ROOT / "scripts" / "lane-heavy").read_bytes())
         self.assertTrue(os.access(tool, os.X_OK))
-        self.assertEqual(sorted(p.name for p in self._tools().iterdir()),
+        self.assertTrue(tool.is_symlink())
+        self.assertEqual(sorted(p.name for p in self._tools().iterdir() if p.name != "lane-control"),
                          ["design-shots", "lane-heavy", "lane-limits.sh", "lane-room", "lane-tier"])
 
     def test_host_mode_copies_and_reexecs(self):
@@ -2589,9 +2588,10 @@ class RunTests(unittest.TestCase):
         calls = [c for c in self.e.calls() if c.startswith("ssh ")]
         self.assertEqual(len(calls), 2, calls)
         self.assertIn("dev@box", calls[0])
-        self.assertIn("tar -C ~/.local/share/lane-control -xf -", calls[0])
+        self.assertIn('tar -C "$t" -xf -', calls[0])
+        self.assertIn('mv -fT "$d/.current.$$.tmp" "$d/current"', calls[0])
         self.assertIn("dev@box", calls[1])
-        self.assertIn(".local/share/lane-control/scripts/project-setup", calls[1])
+        self.assertIn('p="$d/current/scripts/project-setup"', calls[1])
         self.assertIn("https://example.com/acme/shop.git", calls[1])
         self.assertIn("bypassPermissions", calls[1])
         self.assertNotIn("--host", calls[1])
@@ -2889,7 +2889,9 @@ class RunTests(unittest.TestCase):
         r = self.e.run("~/My Repo;touch x", "--host", "dev@box")
         self.assertEqual(r.returncode, 0, r.stderr)
         remote = [c for c in self.e.calls() if c.startswith("ssh ")][1]
-        self.assertIn("~/'My Repo;touch x'", remote)
+        import shlex
+        inner = shlex.split(remote.split(" ", 2)[2])[2]  # ssh dev@box sh -c '<inner>' (INST-1 review M3)
+        self.assertIn("~/'My Repo;touch x'", inner)
 
     def test_bad_permission_mode(self):
         repo = self.e.repo()
@@ -2925,11 +2927,14 @@ class RefreshTests(unittest.TestCase):
     def test_refresh_reinstalls_the_machine_tools(self):
         self.setup_project()
         tool = self.e.home / ".agents" / "bin" / "lane-heavy"
+        tool.unlink()  # a copy from before the install (INST-1): replaced by a link into the installed tree
         tool.write_text("#!/bin/sh\necho old\n")
         r = self.refresh()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertRegex(r.stdout, r"lane-tools.*updated")
-        self.assertEqual(tool.read_bytes(), (ROOT / "scripts" / "lane-heavy").read_bytes())
+        self.assertTrue(tool.is_symlink())
+        self.assertEqual(os.readlink(tool), str(self.e.home / ".local" / "share" / "lane-control" / "current" / "core"
+                                                / "scripts" / "lane-heavy"))
 
     def test_stale_persona_is_rewritten_and_its_running_agent_named(self):
         self.setup_project()

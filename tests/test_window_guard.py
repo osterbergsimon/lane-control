@@ -392,6 +392,7 @@ class MachineCoordinatorSetupTests(unittest.TestCase):
                     "STUB_LOG": str(self.log), "STUB_STATE": str(self.home / "stub.json"),
                     "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
         self.env.pop("XDG_CONFIG_HOME", None)
+        self.env.update(XDG_DATA_HOME=str(self.home / ".local" / "share"), LANE_CONTROL_SWITCH="1")  # INST-1 M1
 
     def run_setup(self, *args):
         return subprocess.run([sys.executable, str(SETUP), "--folder", str(self.folder), *args], env=self.env,

@@ -15,6 +15,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fake_proc import keep_running  # noqa: E402
+
 tool = Path(sys.argv[0]).name
 args = sys.argv[1:]
 # an OpenCode onboarding run gets a minimal environment: the stub's own settings are also beside its link
@@ -23,6 +26,8 @@ given_env = sorted(os.environ)  # as the caller started it
 if "STUB_STATE" not in os.environ and side.is_file():
     os.environ.update({k: v for k, v in json.loads(side.read_text()).items() if k not in os.environ})
 opencode = tool in ("opencode", "opencode2")
+if ("run" not in args) if opencode else ("-p" not in args):  # a started session, not a headless run: it stays running
+    keep_running(tool)
 model = args[args.index("--model") + 1]
 state_path = Path(os.environ["STUB_STATE"])
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
