@@ -49,8 +49,9 @@ says whether model-env, which sets the auto-mode classifier model explicitly, st
    automation model above, or on a machine without Claude --automation-provider opencode, the default when the machine coordinator runs on OpenCode:
    OpenCode v2 on OpenCode's own default model, since Orca takes no model or other extra arguments for it):
    `night manager` hourly at :37 (night-precheck), `lane sweep` every 3 hours (lane-sweep --precheck: new findings
-   only, report only) and `machine check` every 30 minutes (machine-check: budget step, memory or runner state
-   changed). The machine check's session passes the change on to the machine coordinator, since an automation
+   only, report only), `machine check` every 30 minutes (machine-check: budget step, memory or runner state
+   changed) and `away watchdog` every 15 minutes (away-watchdog: finds a stalled away-improve cycle; its agent
+   sends the messages with `away-watchdog --send` from its own terminal, since a precheck has none). The machine check's session passes the change on to the machine coordinator, since an automation
    cannot wake a session it did not start. An automation of ours whose precheck or prompt points elsewhere (a moved
    checkout) is repaired in place. One an earlier hand-made setup made (`night-manager`, `lane-sweep`) is reported
    with the command to remove it, and no second one is added.
@@ -442,15 +443,22 @@ def automation_specs() -> list:
              f"section of {NIGHT_DOC} says; a line without an owner goes to the machine coordinator. Then end.")
     check = (f"Run {q(str(s / 'machine-check'))} --last and send its lines, unchanged, to the machine coordinator "
              f"(session `{TITLE}`), the way the Messages section of {NIGHT_DOC} says. Do nothing else. Then end.")
-    # Orca's default precheck timeout is 60 s and a timeout skips the run; the sweep asks gh about every lane.
+    watch = (f"Run {q(str(s / 'away-watchdog'))} --send once: it sends, from your own Orca terminal, the messages its "
+             "precheck found (a precheck has no terminal to send from). Its UNADDRESSED lines, and those of "
+             f"`{q(str(s / 'away-watchdog'))} --last`, are away-improve problems that reached nobody who can act: add them, "
+             "dated, to notes.md in this folder and end your answer with them unchanged, so the owner sees them in this run. "
+             "Send nothing yourself, to anyone, by a name or a title; merge, start or stop nothing. Then end.")
+    # Orca's default precheck timeout is 60 s and a timeout skips the run; the sweep asks gh about every lane, the watchdog
+    # Orca and git about each project in away-improve mode.
     return [("night manager", "37 * * * *", q(str(s / "night-precheck")), 120, night),
             ("lane sweep", "17 */3 * * *", q(str(s / "lane-sweep")) + " --precheck", 600, sweep),
-            ("machine check", "*/30 * * * *", q(str(s / "machine-check")), 120, check)]
+            ("machine check", "*/30 * * * *", q(str(s / "machine-check")), 120, check),
+            ("away watchdog", "*/15 * * * *", q(str(s / "away-watchdog")), 300, watch)]
 
 
 # Names an earlier hand-made setup used: found, reported with the commands to switch, never doubled.
 OLDER_AUTOMATIONS = {"night manager": ("night-manager",), "lane sweep": ("lane-sweep",),
-                     "machine check": ("machine-check",)}
+                     "machine check": ("machine-check",), "away watchdog": ()}
 OLDER_CI_TIMERS = ("ci-cpu.timer", "ci-cpu-mode.timer")
 
 
@@ -704,7 +712,7 @@ def main(argv) -> int:
     ap.add_argument("--machine-coordinator", metavar="HARNESS/MODEL", help="no default (see above)")
     ap.add_argument("--permission-mode", default="auto")
     ap.add_argument("--automation-provider", choices=AUTOMATION_PROVIDERS,
-                    help="the harness the three automations run on (default: the machine coordinator's)")
+                    help="the harness the four automations run on (default: the machine coordinator's)")
     ap.add_argument("--automation-model", metavar="MODEL",
                     help="the model new Claude automations are created with; no default")
     ap.add_argument("--replace-automation-model", action="store_true",
@@ -814,7 +822,7 @@ def main(argv) -> int:
         print(f"machine-setup: {e}", file=sys.stderr)
         return 1
     print(f"summary: machine coordinator folder {folder} · {harness}/{model} · automations night manager, lane sweep, "
-          f"machine check on {provider}")
+          f"machine check, away watchdog on {provider}")
     return 0
 
 

@@ -15,6 +15,9 @@ night and a changed budget never do, and the mode never changes presence. Fields
   stop_at    weekly % (a number above 0 and below 100) or null: no new cycle for a project once `budget-state --project`
              gives weekly >= it; metered periods only (optional, null = off)
   max_items  whole number or null: no new cycle for a project after this many away-merges in the period (optional)
+  max_hours  number or null: no new cycle for a project once this many hours have passed since `started`, the wall clock;
+             the one cap an --unmetered period keeps by default (UNMETERED_DEFAULT_HOURS when it has no end and the owner
+             gave none; `--max-hours none` drops it). Not a hard stop: the running lane still lands (optional)
   prs        {project: number}: the draft summary PR (away/<date> -> the integration branch), opened at `on` or, when gh
              could not then, by away-merge after the first merge; its body is built from the branch's merge commits (each
              carries its item's log entry) plus the coordinator's summary, refreshed by away-merge after every merge.
@@ -55,6 +58,8 @@ sys.path.insert(0, str(HERE))
 UNTIL_BACK = "until-back"
 DRAIN_NOTICE_HOURS = 12   # `status` says so when a drain has waited this long
 REST_HOURS = 12           # `lane-improve rest` quiets a project's nudges this long, then one nudge looks for new work
+MAX_HOURS_LIMIT = 24 * 366   # --max-hours: at most a year
+UNMETERED_DEFAULT_HOURS = 12  # --max-hours an --unmetered period with no end gets unless the owner gives one (or `none`)
 FIELDS = ("started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration")
 
 
@@ -64,6 +69,13 @@ def path() -> Path:
 
 
 def now() -> dt.datetime:
+    """The time now; LANE_NOW (seconds since the epoch) stands in for it in tests (as LANE_HOUR does for lane-limits.sh)."""
+    v = os.environ.get("LANE_NOW")
+    if v:
+        try:
+            return dt.datetime.fromtimestamp(float(v)).astimezone()
+        except (ValueError, OverflowError, OSError):
+            pass
     return dt.datetime.now().astimezone()
 
 
@@ -112,6 +124,11 @@ def _problem(state, drain: bool = False) -> "str | None":
     mx = state.get("max_items")
     if mx is not None and not (isinstance(mx, int) and not isinstance(mx, bool) and mx >= 1):
         return "max_items is not a whole number above 0"
+    if not isinstance(state.get("max_hours_off", False), bool):
+        return "max_hours_off is not true or false"
+    mh = state.get("max_hours")
+    if mh is not None and not (isinstance(mh, (int, float)) and not isinstance(mh, bool) and 0 < mh <= MAX_HOURS_LIMIT):
+        return f"max_hours is not a number of hours above 0 and at most {MAX_HOURS_LIMIT}"
     prs = state.get("prs", {})
     if not (isinstance(prs, dict) and all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
                                            for k, v in prs.items())):
@@ -146,6 +163,21 @@ def _read(f: Path, drain: bool, quiet: bool) -> "dict | None":
             print(f"improve: {f} ignored ({why}); improve is off", file=sys.stderr)
         return None
     return state
+
+
+def file_problem(f: Path, drain: bool) -> "str | None":
+    """Why a state file that is there cannot be used, or None (no file, or a good one)."""
+    try:
+        text = f.read_text()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"{f.name} cannot be read ({e.strerror})"
+    try:
+        why = _problem(json.loads(text), drain)
+    except ValueError:
+        why = "not valid JSON"
+    return f"{f.name}: {why}" if why else None
 
 
 def _ended(state: dict) -> bool:
@@ -297,7 +329,7 @@ def _locked():
 
 
 def _has_caps(state: dict) -> bool:
-    return bool(state.get("max_items")) or state.get("stop_at") is not None
+    return bool(state.get("max_items")) or state.get("stop_at") is not None or bool(state.get("max_hours"))
 
 
 def _fresh_period(state: dict) -> dict:
@@ -474,7 +506,18 @@ def caps(state: dict, project: str) -> "tuple[list, str | None]":
         parts.append(f"weekly {w if w is not None else '?'}/{_pct(sa)}")
         if w is not None and w >= sa and not hit:
             hit = f"weekly:{w}/{_pct(sa)}"
+    mh = state.get("max_hours")
+    if mh:
+        h = hours_elapsed(state)
+        parts.append(f"hours {h:.1f}/{_pct(mh)}")
+        if h >= mh and not hit:
+            hit = f"hours:{h:.1f}/{_pct(mh)}"
     return parts, hit
+
+
+def hours_elapsed(state: dict) -> float:
+    """Hours of wall clock since the period started (what --max-hours counts)."""
+    return max((now() - dt.datetime.fromisoformat(state["started"]).astimezone()).total_seconds() / 3600, 0.0)
 
 
 def cap_text(state: dict) -> str:
@@ -483,10 +526,27 @@ def cap_text(state: dict) -> str:
         bits.append(f"{state['max_items']} away-merges in the period")
     if state.get("stop_at") is not None:
         bits.append(f"weekly budget use at {_pct(state['stop_at'])}%")
+    if state.get("max_hours"):
+        bits.append(f"{_pct(state['max_hours'])} hours of wall clock since the start")
     return "no new cycle for a project after " + " or ".join(bits) if bits else ""
 
 
 CLEAR = object()
+
+
+def parse_hours(text: "str | None"):
+    """None (not given), CLEAR (`none`) or the hours of --max-hours (a number above 0, at most MAX_HOURS_LIMIT)."""
+    if text is None:
+        return None
+    if text.strip().lower() == "none":
+        return CLEAR
+    try:
+        v = float(text)
+    except ValueError:
+        v = None
+    if v is None or v != v or not 0 < v <= MAX_HOURS_LIMIT:
+        raise ValueError(f"--max-hours {text!r}: use a number of hours above 0 (at most {MAX_HOURS_LIMIT}), or `none` to drop it")
+    return int(v) if v.is_integer() else v
 
 
 def parse_cap(flag: str, text: "str | None", whole: bool):
@@ -504,6 +564,300 @@ def parse_cap(flag: str, text: "str | None", whole: bool):
         raise ValueError(f"{flag} {text!r}: use " + ("a whole number above 0" if whole else "a weekly percentage above 0 and below 100")
                          + ", or `none` to drop it")
     return v if whole or not float(v).is_integer() else int(v)
+
+
+# --- the cycle: where each project's away-improve cycle stands, and the ledger of the cycles it closed ----------------
+# The coordinator writes its cycle's phase with `lane-improve cycle <project> --phase ...` at each step (field report B4: a
+# coordinator restart mid-cycle lost the phase and risked an orphaned or a second lane). It reads it back on resume, and
+# away-watchdog reads it for the lane's deadline, its dispatch and the coordinator's own address. One file for all
+# projects, improve-cycle.json beside the improve file, keyed to the period's `started` like the period record; written under
+# the improve lock. The ledger, improve-ledger.jsonl, gets one line per closed cycle (merged by away-merge, or parked).
+
+PHASES = ("queued", "scout", "build", "review", "merge", "idle")
+LANE_PHASES = ("queued", "scout", "build", "review", "merge")   # a lane is out: its deadline counts
+NEW_LANE_PHASES = ("queued", "scout", "build")                  # a lane starts here: lane_started and the deadline are set
+WORKERS_KEPT = 8   # the other dispatches a cycle records (`--worker`: a reviewer, a queued lane), newest last
+DEFAULT_LANE_BUDGET_MIN = 240
+ADDRESS = re.compile(r"(?:term_[A-Za-z0-9-]{1,80}|run:[A-Za-z0-9_-]{1,80}|dispatch:[A-Za-z0-9_-]{1,80})")
+DISPATCH = re.compile(r"[A-Za-z0-9_-]{1,80}")
+FINDINGS_LIMIT = 4000
+ITEM_LIMIT = 200
+
+
+def cycle_path() -> Path:
+    return path().with_name("improve-cycle.json")
+
+
+def ledger_path() -> Path:
+    return path().with_name("improve-ledger.jsonl")
+
+
+def read_cycles(state: dict) -> dict:
+    """{project: record} of this period (a file of another period, a missing or an unreadable one: {})."""
+    try:
+        d = json.loads(cycle_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict) or d.get("period") != state["started"] or not isinstance(d.get("projects"), dict):
+        return {}
+    return {k: v for k, v in d["projects"].items() if isinstance(k, str) and isinstance(v, dict)}
+
+
+def cycle(state: dict, project: str) -> dict:
+    return read_cycles(state).get(project, {})
+
+
+def _iso(t: dt.datetime) -> str:
+    return t.isoformat(timespec="seconds")
+
+
+def _when(v) -> "dt.datetime | None":
+    try:
+        return dt.datetime.fromisoformat(v).astimezone()
+    except (TypeError, ValueError):
+        return None
+
+
+def set_cycle(state: dict, project: str, changes: dict, budget_min: "int | None" = None) -> dict:
+    """Merge `changes` into the project's cycle record, under the lock, and return it. A move into scout or build with a new
+    dispatch (or from another phase) is a new lane: lane_started is now and the deadline is now + its budget (`budget_min`,
+    else DEFAULT_LANE_BUDGET_MIN); a new scout clears the item, PR and round it does not give. A budget given later sets the
+    deadline again from now. `updated` is now."""
+    with _locked():
+        allc = read_cycles(state)
+        rec = dict(allc.get(project, {}))
+        t = now()
+        phase = changes.get("phase")
+        # a new lane: a scout after anything else, a build that does not follow its own build/review/merge rounds, or
+        # any new dispatch; a build round after a review (the same worker fixing findings) keeps its deadline
+        same_lane = (phase,) if phase in ("scout", "queued") else ("build", "review", "merge")
+        new_lane = phase in NEW_LANE_PHASES and (rec.get("phase") not in same_lane or
+                                                 ("dispatch" in changes and changes["dispatch"] != rec.get("dispatch")))
+        worker = changes.pop("worker", None)
+        if new_lane:
+            if phase in ("scout", "queued"):
+                for k in ("item", "pr", "round"):
+                    rec.pop(k, None)
+            elif "round" not in changes and changes.get("item", rec.get("item")) != rec.get("item"):
+                rec["round"] = 0   # a new item; a fresh worker on the same item (a recovery) keeps its rounds
+            rec.setdefault("round", 0)
+            rec["lane_started"] = _iso(t)
+        rec.update(changes)
+        if worker:  # another dispatch working for this cycle (a reviewer, say): watched as live, never a new lane
+            rec["workers"] = [w for w in rec.get("workers", []) if w != worker][-(WORKERS_KEPT - 1):] + [worker]
+        if new_lane or budget_min is not None:
+            b = budget_min if budget_min is not None else int(rec.get("budget_min") or DEFAULT_LANE_BUDGET_MIN)
+            rec["budget_min"] = b
+            rec["deadline"] = _iso(t + dt.timedelta(minutes=b))
+        if rec.get("phase") == "idle":
+            for k in ("deadline", "lane_started", "dispatch", "workers"):
+                rec.pop(k, None)
+        rec["updated"] = _iso(t)
+        allc[project] = rec
+        _atomic(cycle_path(), json.dumps({"period": state["started"], "projects": allc}, indent=2, sort_keys=True) + "\n")
+        return rec
+
+
+def close_cycle(state: dict, project: str, outcome: str, sha: str = "", metric: str = "", findings: str = "",
+                pr: "int | None" = None, item: "str | None" = None) -> dict:
+    """The cycle ends (`merged` by away-merge, or `parked` with its findings): one ledger line (item, PR, merge sha, metric
+    delta, review rounds, parked findings, the lane's minutes), and the phase goes back to idle (the address is kept).
+    Returns the ledger record."""
+    with _locked():
+        rec = cycle(state, project)
+        started = _when(rec.get("lane_started"))
+        row = {"at": _iso(now()), "period": state["started"], "project": project, "outcome": outcome,
+               "item": item if item is not None else rec.get("item", ""), "pr": pr if pr is not None else rec.get("pr"),
+               "sha": sha, "metric": metric, "rounds": int(rec.get("round") or 0), "findings": findings,
+               "lane_minutes": int((now() - started).total_seconds() // 60) if started else None}
+        f = ledger_path()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with open(f, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+        keep = {k: rec[k] for k in ("address",) if k in rec}
+        allc = read_cycles(state)
+        allc[project] = {**keep, "phase": "idle", "last_outcome": outcome, "updated": _iso(now())}
+        _atomic(cycle_path(), json.dumps({"period": state["started"], "projects": allc}, indent=2, sort_keys=True) + "\n")
+        return row
+
+
+def read_ledger(since: "dt.datetime | None" = None, project: "str | None" = None) -> list:
+    """The ledger's records, oldest first (a line that is not a record is skipped), at or after `since`, for `project`."""
+    try:
+        lines = ledger_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or (project and r.get("project") != project):
+            continue
+        if since is not None and ((_when(r.get("at")) or since) < since):
+            continue
+        out.append(r)
+    return out
+
+
+def last_activity(state: dict, project: str) -> dt.datetime:
+    """The newest sign of the project's cycle: its cycle record's `updated`, its last away-merge in the period record, else
+    the period's start."""
+    times = [_when(state["started"])]
+    times.append(_when(cycle(state, project).get("updated")))
+    rec, _ = _read_period(state)
+    m = (rec or {"merges": {}})["merges"].get(project)
+    if isinstance(m, list) and m and isinstance(m[-1], dict):
+        times.append(_when(m[-1].get("at")))
+    return max(t for t in times if t is not None)
+
+
+def cycle_text(project: str, rec: dict) -> str:
+    if not rec:
+        return f"{project}: no cycle recorded in this period (start one: `lane-improve cycle {project} --phase scout ...`)"
+    bits = [f"phase {rec.get('phase', '?')}"]
+    if rec.get("item"):
+        bits.append(f"item {rec['item']!r}")
+    if rec.get("pr"):
+        bits.append(f"PR #{rec['pr']}")
+    if rec.get("phase") in ("build", "review", "merge"):
+        bits.append(f"round {rec.get('round', 0)}")
+    for k in ("dispatch", "worktree", "address"):
+        if rec.get(k):
+            bits.append(f"{k} {rec[k]}")
+    if rec.get("workers"):
+        bits.append("other workers " + " ".join(rec["workers"]))
+    d = _when(rec.get("deadline"))
+    if d:
+        bits.append(f"deadline {d.strftime('%a %d %b %H:%M')}" + (" (passed)" if d <= now() else ""))
+    if rec.get("updated"):
+        bits.append(f"updated {_when(rec['updated']).strftime('%a %d %b %H:%M')}")
+    return f"{project}: " + ", ".join(bits)
+
+
+def cmd_cycle(a) -> int:
+    """`cycle <project>`: print where the cycle stands (read it on resume; --json for the record). With --phase (and the
+    rest) record a step; with --close merged|parked end the cycle into the ledger. Mode on or draining only."""
+    s, mode = mode_state(a.project)
+    if s is None:
+        print(f"lane-improve: {mode}", file=sys.stderr)
+        return 1
+    changes = {}
+    try:
+        if a.phase is not None:
+            if a.phase not in PHASES:
+                raise ValueError(f"--phase {a.phase!r}: one of {', '.join(PHASES)}")
+            changes["phase"] = a.phase
+        if a.item is not None:
+            item = " ".join(a.item.split())
+            if not item or len(item) > ITEM_LIMIT:
+                raise ValueError(f"--item: a title of 1 to {ITEM_LIMIT} characters")
+            changes["item"] = item
+        if a.pr is not None:
+            if a.pr < 1:
+                raise ValueError("--pr: a pull request number")
+            changes["pr"] = a.pr
+        if a.round is not None:
+            if a.round < 0:
+                raise ValueError("--round: 0 or more")
+            changes["round"] = a.round
+        if a.dispatch is not None:
+            if not DISPATCH.fullmatch(a.dispatch):
+                raise ValueError("--dispatch: the lane's Orca dispatch id (ctx_...)")
+            changes["dispatch"] = a.dispatch
+        if a.worker is not None:
+            if not DISPATCH.fullmatch(a.worker):
+                raise ValueError("--worker: another Orca dispatch id (ctx_...) working for this cycle, such as its reviewer")
+            changes["worker"] = a.worker
+        if a.worktree is not None:
+            if not os.path.isabs(a.worktree):
+                raise ValueError("--worktree: the lane worktree's absolute path")
+            changes["worktree"] = a.worktree
+        if a.budget_min is not None and a.budget_min < 1:
+            raise ValueError("--budget-min: minutes, 1 or more")
+        address = a.address
+        if address is None and (changes or a.close) and ADDRESS.fullmatch(os.environ.get("ORCA_TERMINAL_HANDLE", "")):
+            address = os.environ["ORCA_TERMINAL_HANDLE"]  # the caller's own terminal: the coordinator's explicit address
+        if address is not None:
+            if not ADDRESS.fullmatch(address):
+                raise ValueError("--address: term_<id>, run:<id> or dispatch:<id> (an Orca address, never a title)")
+            changes["address"] = address
+        findings = ""
+        if a.findings_file:
+            if a.close != "parked":
+                raise ValueError("--findings-file goes with --close parked")
+            try:
+                findings = Path(a.findings_file).read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as e:
+                raise ValueError(f"--findings-file {a.findings_file} cannot be read ({getattr(e, 'strerror', None) or e})")
+            if len(findings) > FINDINGS_LIMIT:
+                raise ValueError(f"--findings-file is {len(findings)} characters; at most {FINDINGS_LIMIT} (the issues hold the rest)")
+        if a.close == "parked" and not findings:
+            raise ValueError("--close parked needs --findings-file: a parked item carries the findings it stopped on")
+        if a.metric is not None and len(a.metric) > ITEM_LIMIT:
+            raise ValueError(f"--metric: at most {ITEM_LIMIT} characters")
+    except ValueError as e:
+        print(f"lane-improve: {e}", file=sys.stderr)
+        return 2
+    if a.close:
+        if changes.get("address"):
+            set_cycle(s, a.project, {"address": changes["address"]})
+        row = close_cycle(s, a.project, a.close, metric=a.metric or "", findings=findings, pr=changes.get("pr"),
+                          item=changes.get("item"))
+        print(f"lane-improve: {a.project}: cycle closed, {a.close}: {row['item'] or '(no item)'}"
+              + (f" (PR #{row['pr']})" if row["pr"] else "") + f", {row['rounds']} review round(s); in the ledger")
+        return 0
+    if not changes and a.budget_min is None:
+        rec = cycle(s, a.project)
+        print(json.dumps(rec, sort_keys=True) if a.json else cycle_text(a.project, rec))
+        return 0
+    if changes.get("phase") == "scout" and cycle(s, a.project).get("phase") != "scout":
+        # a new cycle: refused once the project's cycles have ended (a cap, `off`, the end time); a lane already out finishes
+        stop = ("the period is draining (`lane-improve off` or its end time)" if mode == "draining"
+                else hard_stop(s, a.project) or (("a cap is reached (" + caps(s, a.project)[1] + ")") if caps(s, a.project)[1] else None))
+        if stop:
+            print(f"lane-improve: no new cycle for {a.project}: {stop}; wrap up (the away-improve skill, section 3)",
+                  file=sys.stderr)
+            return 1
+    rec = set_cycle(s, a.project, changes, a.budget_min)
+    print(json.dumps(rec, sort_keys=True) if a.json else "lane-improve: " + cycle_text(a.project, rec))
+    return 0
+
+
+def status_rows() -> list:
+    """One record per project for `status --json` (field report B5): this machine's coordinators and the projects the state
+    files name. improve: on | wrapped | draining | off, or unknown with `error` saying why (an improve or drain file that
+    cannot be used, a period record that cannot be trusted); with the cycle's item, phase, round, PR, deadline and the
+    minutes since its last activity (cycle record, last away-merge, period start), and the cap reached, if any."""
+    broken = file_problem(path(), False) or file_problem(drain_path(), True)
+    s = load(quiet=True)
+    d = None if s else (load_drain(quiet=True) or (_to_drain(e) if (e := ended_state()) is not None else None))
+    names = [c.name for c in _coordinator_list()]
+    for st in (s, d):
+        if st:
+            names += list(st["branches"]) + ([] if st["projects"] == "all" else list(st["projects"]))
+    rows = []
+    for p in dict.fromkeys(names):
+        row = {"project": p, "improve": "off", "item": None, "phase": None, "round": None, "pr": None, "deadline": None,
+               "deadline_passed": False, "last_activity_age_min": None, "cap": None, "branch": None, "error": None}
+        st = s if s and covers(s, p) else (d if d and p in d["pending"] else None)
+        if st is None and broken:
+            row.update(improve="unknown", error=broken)
+        if st is not None:
+            lost = period_problem(st)
+            row["improve"] = "draining" if st is d else ("unknown" if lost else "wrapped" if is_wrapped(st, p) else "on")
+            row["error"] = lost
+            row["branch"] = st["branches"].get(p)
+            rec = cycle(st, p)
+            row.update({k: rec.get(k) for k in ("item", "phase", "round", "pr", "deadline")})
+            dl = _when(rec.get("deadline"))
+            row["deadline_passed"] = bool(dl and dl <= now() and rec.get("phase") in LANE_PHASES)
+            row["last_activity_age_min"] = int((now() - last_activity(st, p)).total_seconds() // 60)
+            if row["improve"] == "on" and not period_problem(st):
+                row["cap"] = caps(st, p)[1]
+        rows.append(row)
+    return rows
 
 
 # --- the command line ----------------------------------------------------------------------------------------------
@@ -1056,7 +1410,8 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
     branch: a number that points elsewhere is never edited) and edited; a closed or merged one is left alone (ClosedPr, the
     owner's call). Without a number the open PR of the branch is looked for, and only a PR from this repository into the
     integration branch counts (`gh pr list --head` matches the branch NAME, forks' PRs included), else a draft one is
-    opened. The only gh writes in the whole mode besides away-merge's merge: `pr create --draft` and `pr edit --body`.
+    opened. The only gh writes in the whole mode besides away-merge's merge: `pr create --draft` and the body (edit_body:
+    a REST PATCH, `pr edit --body-file` when that fails).
     PrError says why it could not be done."""
     items = merged_items(repo, branch, integration)
     old_body = None
@@ -1097,8 +1452,30 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
     if summary and len(summary) > SUMMARY_LIMIT:
         raise BodyKept(f"summary PR #{number}'s body is left as it is: its summary is {len(summary)} characters, over the "
                        f"limit of {SUMMARY_LIMIT}; shorten it", number, url)
-    _gh_body(repo, ["pr", "edit", str(number)], pr_body(project, branch, integration, summary, items))
+    edit_body(repo, number, pr_body(project, branch, integration, summary, items))
     return number, url, what
+
+
+def edit_body(repo: Path, number: int, body: str) -> str:
+    """Write a PR's body: a REST PATCH of the pull request by default (`gh api --method PATCH repos/{owner}/{repo}/pulls/<n>
+    --input <file>`, the body in a JSON file, never argv), because `gh pr edit` also reads the PR's Projects (classic) over
+    GraphQL and fails on an organisation that still uses them (field report B6). `gh pr edit --body-file` is the fallback
+    when the PATCH fails. Returns "rest" or "pr edit"; PrError names both failures."""
+    with tempfile.NamedTemporaryFile("w", prefix="away-body-", suffix=".json", delete=False, encoding="utf-8") as fh:
+        json.dump({"body": body.replace("\x00", "")}, fh)
+    try:
+        _gh(repo, "api", "--method", "PATCH", f"repos/{{owner}}/{{repo}}/pulls/{number}", "--input", fh.name, "--silent")
+        return "rest"
+    except PrError as e:
+        rest = str(e)
+    finally:
+        Path(fh.name).unlink(missing_ok=True)
+    try:
+        _gh_body(repo, ["pr", "edit", str(number)], body)
+    except PrError as e:
+        raise PrError(f"PR #{number}'s body could not be written: the REST PATCH failed {rest.split(' failed ', 1)[-1]}, "
+                      f"and then {e}") from None
+    return "pr edit"
 
 
 def _update(fn) -> bool:
@@ -1267,6 +1644,7 @@ def cmd_on(a) -> int:
             end = UNTIL_BACK if a.until_back else None  # none given: a re-run keeps the current end, a first run has none
         stop_at = parse_cap("--stop-at", a.stop_at, False)
         max_items = parse_cap("--max-items", a.max_items, True)
+        max_hours = parse_hours(a.max_hours)
     except ValueError as e:
         print(f"lane-improve: {e}", file=sys.stderr)
         return 2
@@ -1314,18 +1692,20 @@ def cmd_on(a) -> int:
     if prev:  # what a re-run leaves as it was, and what it changes
         eff_stop = prev.get("stop_at") if stop_at is None else (None if stop_at is CLEAR else stop_at)
         eff_max = prev.get("max_items") if max_items is None else (None if max_items is CLEAR else max_items)
+        eff_hours = prev.get("max_hours") if max_hours is None else (None if max_hours is CLEAR else max_hours)
         keep = prev["projects"] == "all" or projects == "all"
         period_projects = "all" if keep else list(dict.fromkeys([*prev["projects"], *projects]))
     else:
         eff_stop = None if stop_at in (None, CLEAR) else stop_at
         eff_max = None if max_items in (None, CLEAR) else max_items
+        eff_hours = None if max_hours in (None, CLEAR) else max_hours
         period_projects = projects
     # a project that wrapped up at its cap stays wrapped up (a wrap-up is final for the period) unless the owner names it
     # again with the cap raised: then it resumes. Named with the cap still reached, it is refused, before anything is cut.
     resumes, still_wrapped = [], []
     if prev:
         wrapped_now = [p for p in prev["branches"] if covers(prev, p) and is_wrapped(prev, p)]
-        later = {**prev, "stop_at": eff_stop, "max_items": eff_max}
+        later = {**prev, "stop_at": eff_stop, "max_items": eff_max, "max_hours": eff_hours}
         for p in wrapped_now:
             if p in [c.name for c in chosen]:
                 hit = caps(later, p)[1]
@@ -1337,6 +1717,17 @@ def cmd_on(a) -> int:
                 resumes.append(p)
             else:
                 still_wrapped.append(p)
+    # --unmetered takes the budget steps away, never the wall clock: every run that leaves the period unmetered with no end
+    # and no --max-hours gives it the default, unless the owner dropped it by name (`--max-hours none`), which is kept as
+    # max_hours_off so a later re-run does not put it back; a value given later clears that.
+    hours_default = ""
+    hours_off = max_hours is CLEAR or (max_hours is None and bool((prev or {}).get("max_hours_off")))
+    eff_unmetered = bool(a.unmetered) or bool((prev or {}).get("unmetered"))
+    eff_end = end or (prev or {}).get("end") or UNTIL_BACK
+    if eff_unmetered and eff_end == UNTIL_BACK and eff_hours is None and not hours_off:
+        eff_hours = UNMETERED_DEFAULT_HOURS
+        hours_default = (f"  wall clock: --unmetered has no budget steps, so a bound of {UNMETERED_DEFAULT_HOURS} h applies "
+                         "(--max-hours; give another value, or `--max-hours none` to run until `lane-improve off`)")
     cut_warns: list = []
     added = [c.name for c in chosen if prev is None or c.name not in prev["branches"]]
     if eff_stop is not None and (stop_at is not None or added):
@@ -1365,6 +1756,8 @@ def cmd_on(a) -> int:
             "prs": {**prev.get("prs", {}), **prs},
             "stop_at": eff_stop,
             "max_items": eff_max,
+            "max_hours": eff_hours,
+            "max_hours_off": bool(hours_off and eff_hours is None),
         }
     else:
         state = {
@@ -1379,6 +1772,8 @@ def cmd_on(a) -> int:
             "prs": prs,
             "stop_at": eff_stop,
             "max_items": eff_max,
+            "max_hours": eff_hours,
+            "max_hours_off": bool(hours_off and eff_hours is None),
         }
     lost = period_problem(state) if prev else None  # the period's record cannot be trusted: this run makes it again
     write(state)
@@ -1394,6 +1789,8 @@ def cmd_on(a) -> int:
     notes, warns = install_denies(targets, tinteg)
     print("lane-improve: improve mode on")
     print("\n".join(describe(state, how) + notes))
+    if hours_default:
+        print(hours_default)
     for p in resumes:
         print(f"lane-improve: {p} resumes (its cap is no longer reached; its deny rules are back)")
     if still_wrapped:
@@ -1600,6 +1997,10 @@ def cmd_rest(a) -> int:
 
 
 def cmd_status(a) -> int:
+    if getattr(a, "json", False):
+        for row in status_rows():
+            print(json.dumps(row, sort_keys=True))
+        return 0
     s = load()
     if s:
         print(f"improve: on (since {dt.datetime.fromisoformat(s['started']).strftime('%a %d %b %H:%M')})")
@@ -1607,7 +2008,7 @@ def cmd_status(a) -> int:
         why = period_problem(s)
         if why:
             print(f"  period record: {why}; counts and wrap-ups are unknown and merges are refused. {FIX_PERIOD}")
-        elif s.get("max_items") or s.get("stop_at") is not None:
+        elif s.get("max_items") or s.get("stop_at") is not None or s.get("max_hours"):
             for p in sorted(s["branches"]):
                 if not covers(s, p):
                     continue
@@ -1621,6 +2022,10 @@ def cmd_status(a) -> int:
                 else:
                     tail = ""
                 print(f"  {p}: {', '.join(parts)}{tail}")
+        cyc = read_cycles(s)
+        for p in sorted(cyc):
+            if covers(s, p):
+                print(f"  cycle: {cycle_text(p, cyc[p])}")
         return 0
     d = load_drain(quiet=True)
     if d is None and (e := ended_state()) is not None:
@@ -1670,13 +2075,30 @@ def main(argv=None) -> int:
     on.add_argument("--unmetered", action="store_true")
     on.add_argument("--stop-at", dest="stop_at")
     on.add_argument("--max-items", dest="max_items")
+    on.add_argument("--max-hours", dest="max_hours")
     on.add_argument("--continue", dest="cont", action="store_true")
     on.add_argument("--yes", action="store_true")
     sub.add_parser("off")
     dr = sub.add_parser("drained")
     dr.add_argument("projects", nargs="*")
     dr.add_argument("--all", action="store_true")
-    sub.add_parser("status")
+    stp = sub.add_parser("status")
+    stp.add_argument("--json", action="store_true")
+    cy = sub.add_parser("cycle")
+    cy.add_argument("project")
+    cy.add_argument("--phase")
+    cy.add_argument("--item")
+    cy.add_argument("--pr", type=int)
+    cy.add_argument("--round", type=int)
+    cy.add_argument("--dispatch")
+    cy.add_argument("--worker")
+    cy.add_argument("--worktree")
+    cy.add_argument("--budget-min", dest="budget_min", type=int)
+    cy.add_argument("--address")
+    cy.add_argument("--close", choices=("merged", "parked"))
+    cy.add_argument("--findings-file", dest="findings_file")
+    cy.add_argument("--metric")
+    cy.add_argument("--json", action="store_true")
     pr = sub.add_parser("pr")
     pr.add_argument("project")
     pr.add_argument("--summary-file", dest="summary_file")
@@ -1690,7 +2112,7 @@ def main(argv=None) -> int:
     except SystemExit as e:
         return 2 if e.code else 0
     return {"on": cmd_on, "off": cmd_off, "drained": cmd_drained, "status": cmd_status, "is-on": cmd_is_on,
-            "unmetered": cmd_unmetered, "rest": cmd_rest, "pr": cmd_pr}[a.cmd](a)
+            "unmetered": cmd_unmetered, "rest": cmd_rest, "pr": cmd_pr, "cycle": cmd_cycle}[a.cmd](a)
 
 
 if __name__ == "__main__":

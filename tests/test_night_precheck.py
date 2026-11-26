@@ -758,7 +758,7 @@ class NightManagerImproveDocTests(unittest.TestCase):
     def test_night_manager_knows_the_cap_wrapup_line(self):
         text = " ".join((Path(__file__).resolve().parent.parent / "orchestrators" / "native-orca" / "night-manager.md")
                         .read_text().split())
-        self.assertIn("cap=<items|weekly>:<n>/<max>", text)
+        self.assertIn("cap=<items|weekly|hours>:<n>/<max>", text)
 
 
 if __name__ == "__main__":

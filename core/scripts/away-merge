@@ -2,11 +2,13 @@
 """away-merge: the only way a project coordinator merges into its away branch (away-improve mode; design:
 docs/superpowers/specs/2026-11-23-away-improve-design.md).
 
-  away-merge --project NAME --pr N --item "<title>" [--local-suite-ok LOG]
+  away-merge --project NAME --pr N --item "<title>" [--local-suite-ok LOG] [--metric "<text>"]
 
 Merges PR N into the project's active away/<date> branch as a merge commit titled `away: <item>` (never squashed), whose
 message body is `Pull request #N` and the item's log entry, copied from the PR's body, and prints the merge commit; a PR that is
-still a draft is marked ready first (GitHub refuses to merge a draft), never the summary PR; it also records the merge (what --max-items counts) and refreshes the draft summary PR. It refuses,
+still a draft is marked ready first (GitHub refuses to merge a draft), never the summary PR; it also records the merge (what --max-items counts),
+closes the project's cycle into the ledger (`lane-improve cycle`: item, PR, merge sha, review rounds, and --metric, a short
+measured change such as "tests 412 -> 431") and refreshes the draft summary PR. It refuses,
 merging nothing, with one line per failed check, unless all of these hold:
   improve    improve mode is on for NAME (core/improve.py), which names the project's away branch; or it is draining
              (`lane-improve off` or the end time, until `lane-improve drained NAME`): the running lane's last PR still merges
@@ -43,7 +45,7 @@ merging nothing, with one line per failed check, unless all of these hold:
 The merge is `--match-head-commit <the head that was reviewed and scanned>`, and the head is read again after the diff,
 so a push in between is refused. The project's checkout is its coordinator's, from machine.conf. gh is called read-only
 except for the merge itself and, after it, the project's draft summary PR (away/<date> -> the integration branch): its body is
-rebuilt from the branch's merge commits, keeping the coordinator's summary (`gh pr edit`), and it is opened as a draft (`gh pr create --draft`) when it does not exist.
+rebuilt from the branch's merge commits, keeping the coordinator's summary (a REST PATCH, `gh pr edit` only when that fails), and it is opened as a draft (`gh pr create --draft`) when it does not exist.
 That PR is never merged by an agent; a failure there does not undo the merge (stderr says so, and names `lane-improve pr`).
 Exit: 0 merged; 1 refused or could not be checked; 2 usage.
 """
@@ -143,6 +145,9 @@ def run(a) -> int:
     item = " ".join(a.item.split())
     if not item:
         print("away-merge: --item needs a title", file=sys.stderr)
+        return 2
+    if a.metric is not None and len(a.metric) > improve.ITEM_LIMIT:
+        print(f"away-merge: --metric is a short line (at most {improve.ITEM_LIMIT} characters)", file=sys.stderr)
         return 2
     failed = []
 
@@ -308,6 +313,11 @@ def run(a) -> int:
         except OSError as e:
             print(f"away-merge: the merge is done, but it could not be recorded for --max-items ({e.strerror or e})",
                   file=sys.stderr)
+        try:
+            improve.close_cycle(state, a.project, "merged", sha=sha, metric=a.metric or "", pr=a.pr, item=item)
+        except OSError as e:
+            print(f"away-merge: the merge is done, but its cycle was not closed in the ledger ({e.strerror or e}); run "
+                  f"`lane-improve cycle {a.project} --phase idle`", file=sys.stderr)
     refresh_summary_pr(checkout, state, a.project)
     return 0
 
@@ -361,6 +371,7 @@ def main(argv=None) -> int:
     ap.add_argument("--pr", required=True, type=int)
     ap.add_argument("--item", required=True)
     ap.add_argument("--local-suite-ok", metavar="RUN_REF")
+    ap.add_argument("--metric", help="a short measured change for the ledger, such as 'tests 412 -> 431'")
     try:
         a = ap.parse_args(argv)
     except SystemExit as e:

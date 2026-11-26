@@ -1674,17 +1674,19 @@ class MachineSetupTests(MachineSetupBase):
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("project-setup --check", r.stderr)
 
-    def test_creates_three_automations(self):
+    def test_creates_four_automations(self):
         r = self.setup_machine("--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         a = self.automations()
-        self.assertEqual(set(a), {"night manager", "lane sweep", "machine check"})
-        triggers = {"night manager": "37 * * * *", "lane sweep": "17 */3 * * *", "machine check": "*/30 * * * *"}
+        self.assertEqual(set(a), {"night manager", "lane sweep", "machine check", "away watchdog"})
+        triggers = {"night manager": "37 * * * *", "lane sweep": "17 */3 * * *", "machine check": "*/30 * * * *",
+                    "away watchdog": "*/15 * * * *"}
         import shlex
         s = self.home / ".local" / "share" / "lane-control" / "current" / "core" / "scripts"  # INST-1: the install
         prechecks = {"night manager": shlex.quote(f"{s}/night-precheck"),
                      "lane sweep": shlex.quote(f"{s}/lane-sweep") + " --precheck",
-                     "machine check": shlex.quote(f"{s}/machine-check")}
+                     "machine check": shlex.quote(f"{s}/machine-check"),
+                     "away watchdog": shlex.quote(f"{s}/away-watchdog")}
         for name, c in a.items():
             with self.subTest(name=name):
                 def opt(k):
@@ -1699,6 +1701,11 @@ class MachineSetupTests(MachineSetupBase):
                 self.assertIn("--enabled", c)
                 self.assertNotIn("--apply", opt("--prompt"))
         self.assertIn("night-manager.md", a["night manager"][a["night manager"].index("--prompt") + 1])
+        watch = a["away watchdog"][a["away watchdog"].index("--prompt") + 1]
+        self.assertIn("away-watchdog", watch)
+        self.assertIn("--send once", watch)
+        self.assertIn("--last", watch)
+        self.assertIn("by a name or a title", watch)
 
     def test_automations_take_the_opencode_form_on_a_machine_without_claude(self):
         # lc-mrz: Orca takes no extra agent args for OpenCode, so the model is OpenCode's own default (and no
@@ -1709,7 +1716,7 @@ class MachineSetupTests(MachineSetupBase):
                 r = self.setup_machine("--no-start", *args)
                 self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
                 a = self.automations()
-                self.assertEqual(set(a), {"night manager", "lane sweep", "machine check"})
+                self.assertEqual(set(a), {"night manager", "lane sweep", "machine check", "away watchdog"})
                 for name, c in a.items():
                     self.assertEqual(c[c.index("--provider") + 1], "opencode2", name)
                     self.assertFalse([x for x in c if x.startswith("--extra-agent-args")], name)
@@ -1755,12 +1762,12 @@ class MachineSetupTests(MachineSetupBase):
         self.agent_process(4001, ["claude", "--name", "machine coordinator"],  # the one it started runs
                            {"LANE_ROLE": "machine-coordinator"})
         n = len(self.orca_calls())
-        self.assertEqual(len(self.automations()), 3)
+        self.assertEqual(len(self.automations()), 4)
         r = self.setup_machine()
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         later = self.orca_calls()[n:]
         self.assertEqual([c for c in later if c[1:2] in (["create"], ["add"])], [])
-        for line in ("night manager: exists", "lane sweep: exists", "machine check: exists",
+        for line in ("night manager: exists", "lane sweep: exists", "machine check: exists", "away watchdog: exists",
                      "machine coordinator: exists", "ci-presence timer: exists"):
             self.assertIn(line, r.stdout)
 
@@ -1783,7 +1790,7 @@ class MachineSetupTests(MachineSetupBase):
         r = self.setup_machine("--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("ci-presence timer: skipped", r.stdout)
-        self.assertEqual(len(self.automations()), 3)
+        self.assertEqual(len(self.automations()), 4)
         self.assertFalse((self.home / ".config" / "systemd" / "user" / "ci-presence.timer").exists())
 
     def test_no_start(self):
@@ -1866,7 +1873,7 @@ class MachineSetupTests(MachineSetupBase):
                                    {"id": "old-ls", "name": "lane-sweep", "prompt": "x", "precheck": None}]})
         r = self.setup_machine("--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        self.assertEqual(set(self.automations()), {"machine check"})
+        self.assertEqual(set(self.automations()), {"machine check", "away watchdog"})
         self.assertEqual(self.creates(["automations", "edit"]), [])
         self.assertIn("orca-ide automations remove old-nm", r.stdout)
         self.assertIn("orca-ide automations remove old-ls", r.stdout)
@@ -1969,7 +1976,7 @@ class MachineModelTests(MachineSetupBase):
 
     def test_a_new_automation_takes_the_model_the_existing_records_agree_on(self):
         self.assertEqual(self.setup_machine("--no-start").returncode, 0)
-        for name in ("night manager", "lane sweep"):
+        for name in ("night manager", "lane sweep", "away watchdog"):
             self.edit_record(name, extraAgentArgs="--model m-agreed")
         self.drop_record("machine check")
         r = self.bare_setup("--no-start")
@@ -2040,7 +2047,7 @@ class MachineModelTests(MachineSetupBase):
         rc, out = run_pty(argv, self.env, answer="y", prompt="anyway? [y/N]")
         self.assertEqual(rc, 0, out)
         self.assertEqual(out.count("anyway? [y/N]"), 1, out)
-        self.assertEqual(len(self.records()), 3)
+        self.assertEqual(len(self.records()), 4)
 
     def test_no_automation_model_creates_no_automation_and_the_rest_still_runs(self):
         r = self.bare_setup("--no-start", "--machine-coordinator", "claude/m-coord")
@@ -2133,7 +2140,7 @@ class MachineModelTests(MachineSetupBase):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         got = {n: a["extraAgentArgs"] for n, a in self.records().items()}
         self.assertEqual(got, {"lane sweep": "--model m-new --verbose --name 'a b'", "night manager": "--model m-new",
-                               "machine check": "--model m-new"})
+                               "machine check": "--model m-new", "away watchdog": "--model m-new"})
         self.assertIn("was", r.stdout)
         n = len(self.edits())
         r = self.bare_setup("--no-start", "--automation-model", "m-new", "--replace-automation-model")

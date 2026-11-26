@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""away-watchdog: watches each away-improve cycle from outside (field report B1, F3, F6), so a lost wake no longer stalls the
+loop for hours. It is the `away watchdog` automation's precheck (every 15 minutes) and the one command its agent runs. It never
+merges, edits a lane, starts or stops a worker.
+
+  away-watchdog           the precheck: find what is due and write it to the outbox; sends nothing (a precheck has no Orca
+                          terminal, so it has no sender identity Orca accepts). Exit 0 when something is to be sent or
+                          reached nobody (the automation's agent starts), 1 when nothing is due (skipped: nothing spent)
+  away-watchdog --send    the agent: send the outbox, each message `--from` its own Orca terminal ($ORCA_TERMINAL_HANDLE,
+                          which Orca gives every terminal it starts); prints SENT and UNADDRESSED lines
+  away-watchdog --last    the last round's lines again (sends nothing)
+
+Which projects: improve mode on, not wrapped up, not resting, not paused (project-pause); and a project whose cap is reached
+or whose period is draining (`off`, the end time) while a lane is still recorded out: that lane is watched until it reports.
+What it reads per project: its cycle (`lane-improve cycle`: phase, item, PR, round, the lane's dispatch and worktree, the other
+dispatches working for it such as its reviewer, its deadline and the coordinator's own address), the last merge on origin's
+away/<date> (git), and Orca's own word on the workers: `orchestration worker-show` for each recorded dispatch and
+`orchestration worker-list` for any worker on the lane's worktree. A worker is live only when Orca says `live` with the
+outcome in progress. A terminal that exists, a port that answers or a worker Orca cannot speak for is not proof: "cannot
+tell" counts as not live, and the message says so.
+What is due:
+  NUDGE     to the coordinator: nothing live and nothing merged or recorded for WATCHDOG_MIN (45) minutes. Not in the merge
+            phase (it waits on CI; its deadline covers it), not for a new cycle once a cap is reached or the period drains.
+  DEADLINE  to the coordinator: the lane is past its deadline, live or not. Recovery never puts two workers on one worktree.
+  ESCALATE  to the machine coordinator: quiet for WATCHDOG_ESCALATE_MIN (120) minutes, or a deadline passed that long ago.
+  RELAY     to the machine coordinator: what the coordinator could not be sent (no address, several, Orca refusing).
+  SUMMARY   to the machine coordinator, once a day at the first round after NIGHT_END: merged and parked cycles since the
+            last summary (the ledger), and a spend proxy.
+A metered project follows its budget like night-precheck's improve nudge: nothing at the stop step or with no reading; from
+no-new-work no nudge for a new cycle (a lane that is out is still watched). Each message repeats while it lasts, the wait
+doubling (45, 90, 180 minutes) but never beyond the lane's budget, and carries its evidence: item, phase, PR, round, what
+Orca said of each worker, the idle time and what it counts from, the deadline, how often it has been said.
+
+Addresses are explicit, never a display name. The coordinator's is the one it recorded itself (`lane-improve cycle` keeps
+$ORCA_TERMINAL_HANDLE; --address overrides), checked against Orca's agent terminals; when that terminal is gone, the single
+agent terminal whose folder is the project's checkout. The machine coordinator's is MACHINE_COORDINATOR_TO in machine.conf,
+else the single agent terminal in MACHINE_COORDINATOR_FOLDER (~/machine-coordinator). A title is never matched.
+It fails loudly: a target it cannot address, a send Orca refuses, a crash, or a round cut short by its time limit is an
+`UNADDRESSED` line, and the agent puts it in front of the owner (at most every WATCHDOG_ESCALATE_MIN minutes while the same
+lines stay). A message's backoff is written before it is sent, so a crash after a send never sends it again.
+State: ~/.cache/lane-control/watchdog/ (outbox, backoff per project and kind, summary stamp, `last`).
+Exit (--send): 0 all sent; 1 something reached nobody; 2 usage or no Orca terminal to send from.
+"""
+import contextlib
+import datetime as dt
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import improve  # noqa: E402
+import machineconf  # noqa: E402
+
+ORCA_TIMEOUT = 20
+GIT_TIMEOUT = 30
+ROUND_LIMIT_S = 200     # the automation's precheck timeout is 300 s, and a timeout skips the run silently
+OUTBOX_STALE_MIN = 30   # an outbox older than this is the round before last: --send drops it
+
+
+def cache_dir() -> Path:
+    v = os.environ.get("XDG_CACHE_HOME")
+    base = Path(v) if v and os.path.isabs(v) else Path.home() / ".cache"
+    return base / "lane-control" / "watchdog"
+
+
+def err(msg: str):
+    print(f"away-watchdog: {msg}", file=sys.stderr)
+
+
+@contextlib.contextmanager
+def locked():
+    d = cache_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / "lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
+def orca_json(*args) -> "tuple[dict | None, str]":
+    """(result, "") from `<orca> <args> --json`, or (None, why)."""
+    cli = machineconf.orca_cli()
+    try:
+        r = subprocess.run([cli, *args, "--json"], capture_output=True, text=True, timeout=ORCA_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"{Path(cli).name} did not answer ({e})"
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        data = None
+    if r.returncode or not isinstance(data, dict) or data.get("ok") is False:
+        e = data.get("error") if isinstance(data, dict) else None
+        msg = e.get("message") if isinstance(e, dict) else None
+        return None, msg or (r.stderr.strip() or r.stdout.strip() or "no usable answer").splitlines()[-1][:200]
+    res = data.get("result")
+    return (res if isinstance(res, dict) else {}), ""
+
+
+def worker(dispatch: str) -> "tuple[bool, str]":
+    """(live, what Orca said) for one dispatch: live only on Orca's own verdict `live` with the outcome in progress."""
+    res, why = orca_json("orchestration", "worker-show", "--dispatch", dispatch, "--full")
+    if res is None:
+        return False, f"Orca could not say ({why}), so it does not count as live"
+    proj = res.get("projection") if isinstance(res.get("projection"), dict) else {}
+    lv = proj.get("liveness")
+    verdict = lv.get("verdict") if isinstance(lv, dict) else (lv or res.get("liveness"))
+    outcome = proj.get("outcome") or res.get("outcome")
+    stage = proj.get("stage") if isinstance(proj.get("stage"), dict) else {}
+    activity = stage.get("activity") or res.get("activity")
+    said = f"liveness {verdict or '?'}, outcome {outcome or '?'}" + (f", activity {activity}" if activity else "")
+    return verdict == "live" and outcome == "in_progress", said
+
+
+class Workers:
+    """Orca's worker list, read once a round: the live workers on a worktree."""
+
+    def __init__(self):
+        self.rows, self.why = None, ""
+
+    def on(self, worktree: str) -> "tuple[list, str]":
+        if self.rows is None and not self.why:
+            res, why = orca_json("orchestration", "worker-list", "--limit", "100")
+            if res is None or not isinstance(res.get("workers"), list):
+                self.why = f"Orca's worker list could not be read ({why or 'no list'})"
+            else:
+                self.rows = [w for w in res["workers"] if isinstance(w, dict)]
+        if self.rows is None:
+            return [], self.why
+        live = [str(w.get("dispatchId")) for w in self.rows if w.get("liveness") == "live"
+                and w.get("outcome") == "in_progress" and machineconf._same_dir(str(w.get("workspace", "")).split("::")[-1], worktree)]
+        return live, ""
+
+
+def last_merge(checkout: Path, branch: str) -> "tuple[dt.datetime | None, str]":
+    """(time, short sha) of the newest first-parent merge on origin's away branch, fetched now; (None, why) when unreadable."""
+    ref = f"refs/remotes/origin/{branch}"
+    try:
+        f = subprocess.run(["git", "-C", str(checkout), "fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}"],
+                           capture_output=True, text=True, timeout=GIT_TIMEOUT)
+        if f.returncode:
+            return None, (f.stderr.strip() or "git fetch failed").splitlines()[-1][:160]
+        r = subprocess.run(["git", "-C", str(checkout), "log", "-1", "--first-parent", "--merges", "--format=%ct %h", ref],
+                           capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, str(e)
+    if r.returncode:
+        return None, (r.stderr.strip() or "git log failed").splitlines()[-1][:160]
+    parts = r.stdout.split()
+    if len(parts) != 2:
+        return None, ""
+    return dt.datetime.fromtimestamp(int(parts[0])).astimezone(), parts[1]
+
+
+def budget_gate(project: str) -> "tuple[str, str]":
+    """night-precheck's own budget gate for the project: ok, push, stopped or unknown, and why."""
+    loader = importlib.machinery.SourceFileLoader("night_precheck", str(HERE / "night-precheck"))
+    spec = importlib.util.spec_from_loader("night_precheck", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod.budget_gate(project)
+
+
+class Addresser:
+    """Explicit Orca addresses: recorded ones checked against Orca's agent terminals, else the one agent terminal in a folder.
+    Never a title."""
+
+    def __init__(self):
+        self.terms, self.why = None, ""
+
+    def terminals(self) -> "list | None":
+        if self.terms is None and not self.why:
+            try:
+                self.terms = machineconf.agent_terminals()
+            except machineconf.OrcaError as e:
+                self.why = f"Orca could not list its terminals ({e})"
+        return self.terms
+
+    def find(self, recorded: str, folder: "Path | None") -> "tuple[str, str]":
+        """(address, "") or ("", why)."""
+        if recorded and not recorded.startswith("term_"):
+            return recorded, ""  # run:<id> / dispatch:<id>: Orca routes it, and refuses a stale one on send
+        terms = self.terminals()
+        if terms is None:
+            return "", self.why
+        if recorded and any(t.get("handle") == recorded for t in terms):
+            return recorded, ""
+        gone = f"its recorded terminal {recorded} is gone; " if recorded else ""
+        if folder is None:
+            return "", gone + "no address recorded and no folder to look in"
+        here = [t for t in terms if machineconf._same_dir(t["worktreePath"], folder)]
+        if len(here) == 1 and here[0].get("handle"):
+            return str(here[0]["handle"]), ""
+        if not here:
+            return "", f"{gone}no agent terminal in {folder}"
+        return "", (f"{gone}{len(here)} agent terminals in {folder}; which one is meant is not guessed (record it: "
+                    "`lane-improve cycle <project> --address <term_id>`, or MACHINE_COORDINATOR_TO)")
+
+
+# --- backoff: per project and kind, keyed to what the quiet spell counts from ------------------------------------------
+
+def backoff_file(project: str, kind: str) -> Path:
+    return cache_dir() / f"{project}.{kind.lower()}.json"
+
+
+def due(project: str, kind: str, key: str, first_min: int, cap_min: int, now: dt.datetime) -> "tuple[bool, int]":
+    """(due, times said before) for a message about one quiet spell (`key`: what it counts from). The first goes out at once,
+    then the wait doubles from `first_min`, never beyond `cap_min` (the lane's budget). A new key (activity) starts over."""
+    try:
+        b = json.loads(backoff_file(project, kind).read_text())
+    except (OSError, ValueError):
+        b = {}
+    if not isinstance(b, dict) or b.get("key") != key:
+        return True, 0
+    n = int(b.get("sent") or 0)
+    last = improve._when(b.get("last"))
+    wait = min(first_min * 2 ** max(n - 1, 0), max(cap_min, first_min))
+    return (last is None or (now - last).total_seconds() / 60 >= wait), n
+
+
+def mins(td: dt.timedelta) -> int:
+    return max(int(td.total_seconds() // 60), 0)
+
+
+# --- the precheck: what is due ---------------------------------------------------------------------------------------
+
+class Round:
+    def __init__(self, conf: dict, now: dt.datetime):
+        self.conf, self.now = conf, now
+        self.addr, self.workers = Addresser(), Workers()
+        self.coord_msgs = []   # (kind, project, key, cap, body, checkout, recorded address)
+        self.machine_msgs = []  # (kind, project, key, cap, body)
+        self.lines = []
+
+    def evidence(self, p: str, rec: dict, said: list, idle: int, since: str) -> list:
+        dl = improve._when(rec.get("deadline"))
+        out = [f"project: {p}",
+               f"item: {rec.get('item') or '(none recorded)'}",
+               f"phase: {rec.get('phase') or '(no cycle recorded)'}" + (f", review round {rec.get('round', 0)}"
+                                                                        if rec.get("phase") in ("build", "review", "merge") else ""),
+               f"PR: #{rec['pr']}" if rec.get("pr") else "PR: (none recorded)",
+               *(said or ["workers: none recorded as out"]),
+               f"idle: {idle} min, since {since}"]
+        if rec.get("worktree"):
+            out.append(f"worktree: {rec['worktree']}")
+        if dl:
+            out.append(f"deadline: {improve._iso(dl)} (budget {rec.get('budget_min', '?')} min)"
+                       + (f", passed {mins(self.now - dl)} min ago" if dl <= self.now else f", {mins(dl - self.now)} min left"))
+        return out
+
+    def project(self, c, st: dict, cycles_open: bool):
+        """`cycles_open`: the project may start a new cycle (mode on, no cap reached, not draining)."""
+        p, conf, now = c.name, self.conf, self.now
+        rec = improve.cycle(st, p)
+        lane_out = rec.get("phase") in improve.LANE_PHASES
+        if not lane_out and not cycles_open:
+            return  # nothing out and no new cycle to start: the night manager's wrap-up nudge covers it
+        if not st["unmetered"]:
+            gate, why = budget_gate(p)
+            if gate in ("stopped", "unknown"):
+                err(f"{p}: budget {gate} ({why}): no message for it")
+                return
+            if gate == "push" and not lane_out:
+                err(f"{p}: budget at push-and-handover ({why}): no nudge for a new cycle")
+                return
+        acts = [(improve.last_activity(st, p), "the last recorded step")]
+        branch = st["branches"].get(p)
+        if branch:
+            t, sha = last_merge(c.checkout, branch)
+            if t is not None:
+                acts.append((t, f"the last merge on {branch} ({sha})"))
+            elif sha:
+                err(f"{p}: {branch} could not be read ({sha}); counting from the period's own record")
+        when, since_what = max(acts, key=lambda x: x[0])
+        idle = mins(now - when)
+        since = f"{since_what} at {when.strftime('%a %d %b %H:%M')}"
+        live, said = False, []
+        if lane_out:
+            for d in [rec.get("dispatch"), *rec.get("workers", [])]:
+                if d:
+                    ok, what = worker(d)
+                    live = live or ok
+                    said.append(f"worker {d}: {what}")
+        on_tree = []
+        if lane_out and rec.get("worktree"):
+            on_tree, why = self.workers.on(rec["worktree"])
+            said.append(f"live workers on the worktree (Orca's worker list): {', '.join(on_tree) or 'none'}"
+                        if not why else f"workers on the worktree: unknown ({why})")
+            live = live or bool(on_tree)
+        dl = improve._when(rec.get("deadline")) if lane_out else None
+        budget = int(rec.get("budget_min") or improve.DEFAULT_LANE_BUDGET_MIN)
+        key = improve._iso(when)
+        ev = self.evidence(p, rec, said, idle, since)
+        late = mins(now - dl) if dl and dl <= now else None
+        tail = ("This message is from the away watchdog's automation run, which ends now: do not reply to it; act on it. "
+                "It merges nothing and changes no lane.")
+        if late is not None:
+            self.coord_msgs.append(("DEADLINE", p, "deadline:" + (rec.get("deadline") or ""), budget, [
+                f"away watchdog: the lane of {p} is past its deadline ({late} min). Recover it as the away-improve skill says "
+                "(section 1a): if Orca shows a worker live and working, ask it where it stands and record a new budget "
+                "(`--budget-min`). Start a fresh worker on the same worktree and PR only once Orca shows every worker on it "
+                "settled or stopped (`orchestration worker-list`; stopping a live one is the owner's word). While that is "
+                "unknown, or a worker waits, never reuse the worktree: ask the worker, ask the owner, or park the item "
+                "(`lane-improve cycle <project> --close parked --findings-file <path>`). " + tail, "", *ev], c.checkout,
+                rec.get("address", "")))
+        elif not live and idle >= conf["WATCHDOG_MIN"] and rec.get("phase") != "merge":
+            nxt = ("act on a lane that reported, or start the next cycle if none is out and the limits allow"
+                   if cycles_open else "act on the lane that is still out (no new cycle: the project is wrapping up)")
+            self.coord_msgs.append(("NUDGE", p, key, budget, [
+                f"away watchdog: {p} has had nothing live and nothing merged or recorded for {idle} min. Resume (load the "
+                f"away-improve skill): `lane-improve cycle <project>` shows where it stands; {nxt}. " + tail, "", *ev],
+                c.checkout, rec.get("address", "")))
+        if not live and idle >= conf["WATCHDOG_ESCALATE_MIN"] and rec.get("phase") != "merge" or (
+                late is not None and late >= conf["WATCHDOG_ESCALATE_MIN"]):
+            self.machine_msgs.append(("ESCALATE", p, key if late is None else "deadline:" + (rec.get("deadline") or ""), budget, [
+                f"away watchdog: {p}'s away-improve cycle is stalled ({'past its deadline' if late is not None else 'quiet'}); "
+                "its coordinator has been told. Look at it, tell the owner if it stays so. The watchdog merges nothing and "
+                "changes no lane.", "", *ev]))
+
+    def summary(self, st: "dict | None"):
+        conf, now = self.conf, self.now
+        if now.hour < conf["NIGHT_END"]:
+            return
+        stamp = cache_dir() / f"summary.{now.date().isoformat()}"
+        if stamp.exists():
+            return
+        prev = sorted(cache_dir().glob("summary.*"))
+        since = dt.datetime.fromtimestamp(prev[-1].stat().st_mtime).astimezone() if prev else now - dt.timedelta(hours=24)
+        rows = improve.read_ledger(since=since)
+        if st is None and not rows:
+            return
+        merged = [r for r in rows if r.get("outcome") == "merged"]
+        parked = [r for r in rows if r.get("outcome") == "parked"]
+        lines = [f"away watchdog: the away-improve summary since {since.strftime('%a %d %b %H:%M')}.",
+                 f"merged: {len(merged)}" + "".join(
+                     f"\n  - {r.get('project')}: {r.get('item')} (PR #{r.get('pr')}, {r.get('sha') or '?'}"
+                     + (f", {r['metric']}" if r.get("metric") else "") + ")" for r in merged),
+                 f"parked: {len(parked)}" + "".join(
+                     f"\n  - {r.get('project')}: {r.get('item')} (PR #{r.get('pr')}): "
+                     + " ".join(str(r.get("findings") or "").split())[:300] for r in parked)]
+        rounds = sum(int(r.get("rounds") or 0) for r in rows)
+        lane_min = sum(int(r.get("lane_minutes") or 0) for r in rows)
+        spend = f"spend proxy: {len(rows)} cycles closed, {rounds} review rounds, {lane_min} lane minutes"
+        if st is not None and not st["unmetered"]:
+            weekly = []
+            for p in sorted(st["branches"]):
+                w, _c, _why = improve.budget_reading(p)
+                weekly.append(f"{p} {w if w is not None else '?'}%")
+            spend += "; weekly use now: " + ", ".join(weekly)
+        elif st is not None:
+            spend += " (unmetered: no budget reading)"
+        lines.append(spend)
+        if st is not None:
+            lines.append("improve: on for " + ", ".join(sorted(p for p in st["branches"] if improve.covers(st, p))))
+        self.machine_msgs.append(("SUMMARY", "all", f"summary.{now.date().isoformat()}", 24 * 60, ["\n".join(lines)]))
+
+    def address(self) -> list:
+        """The outbox: every due message with its target, after the backoff. A coordinator that cannot be addressed gets a
+        RELAY to the machine coordinator; one the machine coordinator cannot be addressed for is an UNADDRESSED line."""
+        conf, now, out = self.conf, self.now, []
+        mc = conf.get("MACHINE_COORDINATOR_TO", "").strip()
+        folder = Path(os.path.expanduser(conf.get("MACHINE_COORDINATOR_FOLDER") or "~/machine-coordinator"))
+        mto, mwhy = self.addr.find(mc, folder) if (self.coord_msgs or self.machine_msgs) else ("", "")
+        relays = []
+        for kind, p, key, cap, body, checkout, recorded in self.coord_msgs:
+            ok, n = due(p, kind, key, conf["WATCHDOG_MIN"], cap, now)
+            if not ok:
+                continue
+            body = [*body, f"said before: {n} time(s) about this"]
+            to, why = self.addr.find(recorded, checkout)
+            if to:
+                out.append({"kind": kind, "project": p, "key": key, "n": n, "to": to, "body": "\n".join(body) + "\n",
+                            "relay": {"to": mto, "why": mwhy}})
+            else:
+                self.lines.append(f"UNADDRESSED {p} ({why})")
+                relays.append(("RELAY", p, key, cap, [f"away watchdog: the coordinator of {p} could not be reached ({why}). "
+                                                      "What it was to be told:", "", *body]))
+        for kind, p, key, cap, body in [*self.machine_msgs, *relays]:
+            ok, n = due(p, kind, key, conf["WATCHDOG_MIN"], cap, now)
+            if not ok:
+                continue
+            if mto:
+                out.append({"kind": kind, "project": p, "key": key, "n": n, "to": mto, "body": "\n".join(body) + "\n"})
+            else:
+                self.lines.append(f"UNADDRESSED machine ({mwhy}; {kind.lower()} {p} reached nobody)")
+        for m in out:
+            self.lines.append(f"DUE {m['kind']} {m['project']} to {m['to']}")
+        return out
+
+
+def detect() -> int:
+    started = time.monotonic()
+    now = improve.now()
+    try:
+        conf = machineconf.load()
+        coords = {c.name: c for c in machineconf.coordinators(conf)}
+    except machineconf.ConfError as e:
+        if improve.load(quiet=True) is None and improve.draining() is None:
+            err(f"{e}; improve mode is off: nothing to watch")
+            return finish([], [], [])
+        return finish([], [f"UNADDRESSED machine (machine.conf cannot be read: {e}; improve mode is on and nobody can be told)"],
+                      None)
+    for w in conf["warnings"]:
+        err(w)
+    r = Round(conf, now)
+    st = improve.load(quiet=True)
+    drain = None if st else improve.draining()
+    watch = []  # (state, project, cycles_open)
+    if st is not None:
+        broken = improve.period_problem(st)
+        for p in sorted(st["branches"]):
+            if not improve.covers(st, p) or (not broken and improve.is_wrapped(st, p)):
+                continue
+            open_ = not broken and not improve.rested(p) and not improve.caps(st, p)[1]
+            watch.append((st, p, open_))
+    elif drain is not None:
+        watch = [(drain, p, False) for p in drain["pending"] if p in drain["branches"]]
+    for state, p, open_ in watch:
+        if time.monotonic() - started > ROUND_LIMIT_S:
+            r.lines.append(f"UNADDRESSED machine (the round was cut short at {p}: over {ROUND_LIMIT_S} s; the rest is not "
+                           "checked this time)")
+            break
+        c = coords.get(p)
+        if c is None:
+            r.lines.append(f"UNADDRESSED {p} (not a coordinator in machine.conf, so its away cycle cannot be watched)")
+            continue
+        try:
+            if machineconf.paused(c.checkout):
+                err(f"{p}: paused (project-pause): no message for it")
+                continue
+        except machineconf.ConfError as e:
+            err(f"{p}: its settings cannot be read ({e}): no message for it")
+            continue
+        r.project(c, state, open_)
+    r.summary(st or drain)
+    outbox = r.address()
+    return finish(outbox, r.lines, conf["WATCHDOG_ESCALATE_MIN"], now)
+
+
+def finish(outbox: list, lines: list, quiet_min: "int | None" = 120, now: "dt.datetime | None" = None) -> int:
+    """Write the outbox and the round's lines (for --send and --last), print the lines. Exit 0 (the automation's agent starts)
+    when there is something to send, or something reached nobody that is new or was last made loud `quiet_min` minutes ago
+    (None: always); else 1."""
+    now = now or improve.now()
+    d = cache_dir()
+    with locked():
+        improve._atomic(d / "outbox.json", json.dumps({"made": improve._iso(now), "messages": outbox}, indent=1) + "\n")
+        improve._atomic(d / "last", "".join(f"{x}\n" for x in lines))
+    for line in lines:
+        print(line)
+    stuck = sorted(x for x in lines if x.startswith("UNADDRESSED"))
+    if outbox:
+        return 0
+    if not stuck:
+        (d / "loud").unlink(missing_ok=True)
+        return 1
+    text = "".join(f"{x}\n" for x in stuck)
+    try:
+        old = json.loads((d / "loud").read_text())
+        same, at = old.get("lines") == text, improve._when(old.get("at"))
+    except (OSError, ValueError, AttributeError):
+        same, at = False, None
+    if quiet_min is not None and same and at is not None and (now - at).total_seconds() / 60 < quiet_min:
+        err(f"what reached nobody is unchanged and was made loud less than {quiet_min} min ago: no agent this time")
+        return 1
+    improve._atomic(d / "loud", json.dumps({"lines": text, "at": improve._iso(now)}) + "\n")
+    return 0
+
+
+# --- the agent: send the outbox --------------------------------------------------------------------------------------
+
+def orca_send(sender: str, m: dict, to: str, kind: str, body: str) -> str:
+    """'' when Orca accepted it, else why not. The body goes through a file, never argv."""
+    with tempfile.NamedTemporaryFile("w", prefix="away-watchdog-", suffix=".md", delete=False, encoding="utf-8") as fh:
+        fh.write(body)
+    try:
+        res, why = orca_json("orchestration", "send", "--from", sender, "--to", to, "--type",
+                             "escalation" if kind in ("ESCALATE", "DEADLINE", "RELAY") else "status",
+                             "--subject", f"away watchdog: {kind.lower()} {m['project']}", "--body-file", fh.name)
+    finally:
+        Path(fh.name).unlink(missing_ok=True)
+    return "" if res is not None else f"the send to {to} failed ({why})"
+
+
+def mark(project: str, kind: str, key: str, n: int, now: dt.datetime) -> "str | None":
+    """Write the backoff as said; returns the previous text (to put back if the send fails)."""
+    f = backoff_file(project, kind)
+    try:
+        old = f.read_text()
+    except OSError:
+        old = None
+    f.parent.mkdir(parents=True, exist_ok=True)
+    improve._atomic(f, json.dumps({"key": key, "sent": n + 1, "last": improve._iso(now)}) + "\n")
+    return old
+
+
+def unmark(project: str, kind: str, old: "str | None"):
+    f = backoff_file(project, kind)
+    if old is None:
+        f.unlink(missing_ok=True)
+    else:
+        improve._atomic(f, old)
+
+
+def send_outbox() -> int:
+    sender = os.environ.get("ORCA_TERMINAL_HANDLE", "")
+    if not improve.ADDRESS.fullmatch(sender) or not sender.startswith("term_"):
+        err("--send needs an Orca terminal to send from ($ORCA_TERMINAL_HANDLE, which Orca sets in each terminal it starts): "
+            "the automation's agent runs it; a precheck or a plain shell has none")
+        return 2
+    now = improve.now()
+    lines = []
+    with locked():
+        f = cache_dir() / "outbox.json"
+        try:
+            box = json.loads(f.read_text())
+            msgs = list(box.get("messages") or [])
+            made = improve._when(box.get("made"))
+        except (OSError, ValueError, AttributeError) as e:
+            print(f"UNADDRESSED machine (the outbox cannot be read: {e})")
+            return 1
+        if msgs and (made is None or (now - made).total_seconds() / 60 > OUTBOX_STALE_MIN):
+            lines.append(f"UNADDRESSED machine (the outbox is from {box.get('made')}, too old to send; the next round "
+                         "makes it again)")
+            msgs = []
+        while msgs:
+            m = msgs.pop(0)
+            old = mark(m["project"], m["kind"], m["key"], int(m.get("n") or 0), now)  # before the send: never twice
+            improve._atomic(f, json.dumps({"made": box.get("made"), "messages": msgs}, indent=1) + "\n")
+            if m["kind"] == "SUMMARY":
+                (cache_dir() / m["key"]).touch()
+            problem = orca_send(sender, m, m["to"], m["kind"], m["body"])
+            if not problem:
+                lines.append(f"SENT {m['kind']} {m['project']} to {m['to']}")
+                continue
+            unmark(m["project"], m["kind"], old)
+            if m["kind"] == "SUMMARY":
+                (cache_dir() / m["key"]).unlink(missing_ok=True)
+            lines.append(f"UNADDRESSED {m['project'] if 'relay' in m else 'machine'} ({problem})")
+            relay = m.get("relay") or {}
+            if relay.get("to"):
+                body = (f"away watchdog: the coordinator of {m['project']} could not be reached ({problem}). What it was to "
+                        "be told:\n\n" + m["body"])
+                p2 = orca_send(sender, m, relay["to"], "RELAY", body)
+                lines.append(f"SENT RELAY {m['project']} to {relay['to']}" if not p2 else f"UNADDRESSED machine ({p2})")
+            elif "relay" in m:
+                lines.append(f"UNADDRESSED machine ({relay.get('why') or 'no machine coordinator address'}; "
+                             f"{m['kind'].lower()} {m['project']} reached nobody)")
+        try:
+            improve._atomic(cache_dir() / "last", (cache_dir() / "last").read_text() + "".join(f"{x}\n" for x in lines))
+        except OSError:
+            pass
+    for line in lines:
+        print(line)
+    return 1 if any(x.startswith("UNADDRESSED") for x in lines) else 0
+
+
+def main(argv: list) -> int:
+    if argv in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return 0
+    if argv == ["--last"]:
+        try:
+            sys.stdout.write((cache_dir() / "last").read_text())
+        except OSError:
+            print("away-watchdog: no round has run yet", file=sys.stderr)
+            return 1
+        return 0
+    if argv == ["--send"]:
+        return guarded(send_outbox, sending=True)
+    if argv:
+        err("usage: away-watchdog [--send | --last]")
+        return 2
+    return guarded(detect)
+
+
+def guarded(fn, sending: bool = False) -> int:
+    """A crash is loud, never a silent skip: one UNADDRESSED line (kept for --last when the cache can be written) and exit 0
+    for the precheck (its agent starts), 1 for --send."""
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001: any failure here must reach the owner
+        line = f"UNADDRESSED machine (away-watchdog {'--send ' if sending else ''}failed: {type(e).__name__}: {e})"
+        traceback.print_exc()
+        print(line)
+        try:
+            d = cache_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            with open(d / "last", "a") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+        return 1 if sending else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

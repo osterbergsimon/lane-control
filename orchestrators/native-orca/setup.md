@@ -134,7 +134,7 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    setup run keeps the table.
 3. A machine without Claude: `core/scripts/machine-setup --machine-coordinator opencode/litellm/chat` (the
    automations follow the machine coordinator's harness; `--automation-provider opencode` says it outright). The
-   three automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
+   four automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
    model to an OpenCode automation. With no usage feed (every budget's feed empty in the playbook config) no budget
    is metered: the caps are the limit, and night check-ins still go out.
 
@@ -249,10 +249,12 @@ automation's record names; `--automation-model <model> --replace-automation-mode
   (above: the same proof). The folder's `CLAUDE.local.md` gets the same persona anchor, which the automations' sessions
   there are told to ignore; `machine-setup --check` reads it. The folder may be your own git repo: git does not see
   the file (listed in `.git/info/exclude` unless already ignored; a committed one is left alone).
-- Three Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
+- Four Orca automations in that folder, each behind a precheck that costs nothing when nothing is due: `night
   manager` hourly (`night-precheck`; the agent follows `night-manager.md`), `lane sweep` every 3 hours
   (`lane-sweep --precheck`, report only, waking its agent only for findings new since the last run) and `machine check` every 30 minutes (`machine-check`: a budget step,
-  memory or runner state changed; it also keeps the `budget-stopped` marker for the CI limits).
+  memory or runner state changed; it also keeps the `budget-stopped` marker for the CI limits) and `away watchdog` every 15
+  minutes (`away-watchdog`: while away-improve mode is on its precheck finds a stalled cycle, and its agent sends the
+  messages to that coordinator and the machine coordinator from its own terminal; [the watchdog](../../docs/away-improve.md#the-watchdog)).
 - The `ci-presence` user timer: the CI slice's CPU and memory follow presence (`lane-limits.sh`).
 - On a machine set up by hand before: automations named `night-manager` or `lane-sweep` and an older CI timer
   (`ci-cpu`) are reported with the commands to remove them; nothing is doubled or replaced without the owner.
