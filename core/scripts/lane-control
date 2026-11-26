@@ -12,11 +12,19 @@
   lane-control doctor [--json] [--no-ssh]
         the installed sha against each project's (from its settings store), the ~/.agents/bin links, the lane skills,
         and each box project-setup sent a tree to (its current sha over ssh, unless --no-ssh). Exit 1 when something
-        needs doing; each such line says what to run.
+        needs doing; each such line says what to run. Also, because a listening port is not proof (core/boxhealth.py):
+        each tunnel unit written here (orca-tunnel-<host>, lane-tunnel@<host>) must be active/running, its restart
+        counter must not climb over LANE_CHECK_SETTLE seconds (default 5), its own ssh must own the socket, and its
+        ssh must not multiplex (ControlPath=none); this user must run at most one Orca server, and nothing of an older
+        slot (the pin is named); on a box with orcad.service, the user manager's SHELL must be the login shell; and
+        no Orca automation may name a lane-control path that is not the installed `current` (a flat copy, one sha's
+        tree, a checkout, a gone path). It reads only: Orca's automations through `automations list`, never Orca's
+        settings or a unit.
   lane-control prune [--apply]
         the trees that are not current, that no running process uses (cwd, open file or command line) and that no
         hook, persona, unit, plugin or ~/.agents/bin link names: listed, and removed only with --apply (under the
-        install lock). With no valid `current` it removes nothing.
+        install lock). With no valid `current` it removes nothing. A flat copy from before the versioned install is
+        named in a note, never removed.
 
 After an install, run `project-setup --refresh <project>` for each project: its personas and skills are rendered
 from the tree, and the project records the sha it was set up with."""
@@ -32,14 +40,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parents[2]  # core/scripts/ -> root: a checkout, or an installed tree
 
 
-def _install():
-    spec = importlib.util.spec_from_file_location("lc_install", HERE / "core" / "install.py")
+def _load(name, rel):
+    spec = importlib.util.spec_from_file_location(name, HERE / rel)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-I = _install()
+I = _load("lc_install", "core/install.py")
+H = _load("lc_boxhealth", "core/boxhealth.py")
+OURS = ("night manager", "lane sweep", "machine check")  # machine-setup's automations: it repairs their paths
 
 
 def checkout(given):
@@ -67,6 +77,9 @@ def cmd_install(a) -> int:
               "project-setup --refresh)")
     if before and before != sha:
         print(f"current: was {I.short(before)}, now {I.short(sha)}")
+    left = I.flat_leftovers()
+    if left:
+        print(I.FLAT_NOTE.format(root=I.data_root(), names=", ".join(left)))
     if (a.version or "HEAD") == "HEAD" and I.dirty(src):
         print(f"note: {src} has uncommitted changes; the install is its last commit, without them")
     links = I.link_tools(I.data_root() / "current")
@@ -118,10 +131,79 @@ def project_todos(root: str, sha, cur) -> list:
     return out
 
 
+def tunnels(out: dict) -> None:
+    """Each tunnel unit written here: active/running, not restarting, its own ssh owning the socket, never
+    multiplexed. A listening port is not proof (field report lc-l78)."""
+    found = H.tunnel_units(I.config_home())
+    if not found:
+        return
+    tree = I.data_root() / "current"
+    states = H.health({t["unit"]: t["port"] for t in found})
+    for t in found:
+        state, detail = states[t["unit"]]
+        out["tunnels"].append({"unit": t["unit"], "host": t["host"], "state": state, "detail": detail,
+                               "controlpath": t["controlpath"]})
+        fix = H.repair(t, tree)
+        if state == "broken":
+            out["todo"].append(f"{detail}: run {fix}")
+        if not t["controlpath"]:
+            out["todo"].append(f"{t['unit']} was written before ControlPath=none, so its ssh can ride your "
+                               f"ControlMaster and flap while the port answers: run {fix}")
+
+
+def runtime(out: dict) -> None:
+    """This user's Orca server processes (a box): one server, nothing of an older slot; and the user manager's SHELL
+    where orcad.service runs under it."""
+    procs = H.orcad(I.home())
+    if procs or (I.home() / ".orca-remote").is_dir():
+        state, detail = H.runtimes(procs)
+        out["runtime"] = {"state": state, "detail": detail, "processes": procs}
+        if state == "broken":
+            out["todo"].append(f"Orca's server here: {detail}: from the desktop run orca-host-install <this host> "
+                               "--pair (it stops the stale ones and proves one runtime), or kill the pids named")
+    if (I.config_home() / "systemd" / "user" / "orcad.service").is_file():
+        manager, login = H.shells()
+        out["shell"] = {"manager": manager, "login": login}
+        if manager and login and manager != login:
+            out["todo"].append(f"the systemd user manager has SHELL={manager}, the login shell is {login} (a chsh "
+                               "does not reach a manager that already runs, so Orca's server starts terminals with "
+                               f"the old one): run {H.shell_fix(login)}")
+
+
+def automations(out: dict) -> None:
+    """lane-control paths in Orca's automations (precheck and prompt) that are not the installed `current`."""
+    import subprocess
+    cli = _load("lc_machineconf", "core/machineconf.py").orca_cli()
+    try:
+        r = subprocess.run([cli, "automations", "list", "--json"], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL)
+        rows = json.loads(r.stdout)["result"]["automations"]
+        if r.returncode != 0 or not isinstance(rows, list):
+            raise ValueError
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        out["automations"] = None
+        return
+    out["automations"] = []
+    cur = I.data_root() / "current"
+    for x in rows:
+        if not isinstance(x, dict):
+            continue
+        text = "\n".join(str(v) for v in ((x.get("precheck") or {}).get("command"), x.get("prompt")) if v)
+        bad = H.stale_paths(text, I.data_root(), I.home())
+        out["automations"].append({"id": x.get("id"), "name": x.get("name"), "stale": [p for p, _ in bad]})
+        if not bad:
+            continue
+        fix = ("run machine-setup from the main checkout (it repairs its own automations' precheck and prompt)"
+               if x.get("name") in OURS else
+               f"orca-ide automations edit {x.get('id')} --precheck <command> --prompt <text>, with paths under {cur}")
+        out["todo"].append(f"Orca automation {x.get('name')!r} ({x.get('id')}): " +
+                           "; ".join(f"{p} {why}" for p, why in bad) + f": {fix}")
+
+
 def doctor(a) -> dict:
     cur = I.installed()
     out = {"current": cur, "root": str(I.data_root()), "projects": [], "links": {}, "skills": {}, "boxes": [],
-           "todo": []}
+           "tunnels": [], "runtime": None, "shell": None, "automations": None, "todo": []}
     if not cur:
         out["todo"].append("lane-control is not installed: run lane-control install (from a checkout)")
     for root, sha, dirty in I.projects(with_dirty=True):
@@ -167,6 +249,10 @@ def doctor(a) -> dict:
             out["todo"].append(f"box {host}: has {I.short(b['current'] or sent)}, here {I.short(cur)}: "
                                f"run project-setup <repo on the host> {host} --refresh")
         out["todo"] += [f"box {host}: {t}" for t in b["todo"]]
+        b["runtime"] = (there or {}).get("runtime")
+    tunnels(out)
+    runtime(out)
+    automations(out)
     return out
 
 
@@ -181,8 +267,21 @@ def cmd_doctor(a) -> int:
     print("links: " + ", ".join(f"{n} {s}" for n, s in d["links"].items()))
     print("skills: " + ", ".join(f"{n} {state}" for n, state in d["skills"].items()))
     for b in d["boxes"]:
+        rt = b.get("runtime") or {}
         print(f"box {b['host']}: sent {b['sent'] or 'none'}, current there "
-              f"{b['current'] or ('not checked' if not b['checked'] else 'unknown')}")
+              f"{b['current'] or ('not checked' if not b['checked'] else 'unknown')}" +
+              (f"; orca server: {rt['detail']}" if rt.get("detail") else ""))
+    for t in d["tunnels"]:
+        print(f"tunnel {t['unit']}: {t['state']} ({t['detail']})")
+    if d["runtime"]:
+        print(f"orca server: {d['runtime']['detail']}")
+    if d["shell"]:
+        print(f"shell: user manager {d['shell']['manager'] or 'none'}, login {d['shell']['login'] or 'unknown'}")
+    if d["automations"] is None:
+        print("automations: not checked (Orca's CLI did not list them)")
+    else:
+        print(f"automations: {len(d['automations'])} read, "
+              f"{sum(1 for x in d['automations'] if x['stale'])} name a path that is not current")
     for t in d["todo"]:
         print(f"todo: {t}")
     if not d["todo"]:
@@ -205,6 +304,9 @@ def cmd_prune(a) -> int:
                 print(f"{'would remove' if what == 'remove' else 'keep'} {sha} ({why})")
     if not a.apply and any(w == "remove" for _, w, _ in plan):
         print("dry run: nothing removed; lane-control prune --apply removes them")
+    left = I.flat_leftovers(root)
+    if left:
+        print(I.FLAT_NOTE.format(root=root, names=", ".join(left)))
     return 0
 
 

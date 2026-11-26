@@ -35,8 +35,11 @@ class Scratch(unittest.TestCase):
         self.home = self.tmp / "home"
         self.home.mkdir()
         self.data = self.tmp / "data"
+        orca = self.tmp / "orca-stub"  # doctor lists Orca's automations: never the real Orca's (BOX-1)
+        orca.write_text("#!/bin/sh\necho '{\"ok\": true, \"result\": {\"automations\": []}}'\n")
+        orca.chmod(0o755)
         self.env = {**os.environ, "HOME": str(self.home), "XDG_DATA_HOME": str(self.data),
-                    "XDG_CONFIG_HOME": str(self.home / ".config")}
+                    "XDG_CONFIG_HOME": str(self.home / ".config"), "ORCA_CLI": str(orca)}
         self.env.pop("LANE_CONTROL_SWITCH", None)  # these tests check when a setup may switch by itself
         self.old_env = dict(os.environ)
         os.environ.update(HOME=str(self.home), XDG_DATA_HOME=str(self.data))

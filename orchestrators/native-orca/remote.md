@@ -24,7 +24,10 @@ no install, no pairing, no tunnel, no file); with a flag that acts (`--remove-ho
 (`desktop listener`), ssh without a prompt, direction 1 (the box's server saved here and answering) and the Orca
 versions on both sides, the `--orca-from`/`--orca-bundle` source, systemd here, direction 2 (read from the box's Orca
 CLI: has it this desktop as an environment, and can it reach it), the tunnel, the coordinator's agent CLI on the box,
-the gateway key's variable there (its name only, never its value) and lane-control on the box. Each line is
+the gateway key's variable there (its name only, never its value), lane-control on the box, and three that a
+listening port does not answer (below, [A listening port is not proof](#a-listening-port-is-not-proof-lc-l78)): each
+tunnel unit as a unit (`direction 1 tunnel` when `orca-tunnel-<host>` is written here, and `tunnel`), `runtimes on
+box` (one Orca server, the pin it serves; with `--orca-version`, that one) and `shell on box`. Each line is
 `check <what>: ok|missing|warn|to do|could not check|skipped`, a missing one with what fixes it. `to do` is a step
 setup does itself, or the desktop's link that it asks for; it passes. `could not check (<why>)` is a row it could not
 read (ssh down, Python or Orca's CLI on the box failing, a version Orca did not say); it never counts as a yes or a
@@ -88,6 +91,32 @@ prompt comes.
 4. `core/scripts/machine-setup --host <host>` (skipped with `--no-machine-setup`): the box's own machine coordinator,
    night manager, lane sweep and machine check.
 5. `seen here`: the coordinator's terminal is listed through `--environment <host>` from this machine.
+
+### A listening port is not proof (lc-l78)
+A site that ran boxes for weeks found four failures in one evening that a port answering hid (field report lc-l78).
+So lane-control checks what owns a port and how it got there:
+
+- **Tunnels never multiplex.** Both tunnel units run ssh with `-o ControlPath=none -o ControlMaster=no`. With your own
+  `ControlMaster auto` in `~/.ssh/config`, the unit's ssh would hand the forward to your master connection and exit:
+  the unit restarts for ever (127 restarts seen) while the port still answers. A unit counts as up only when it is
+  `active/running`, its restart counter does not climb, and its own ssh owns the socket (`ssh -L`: the listener on
+  127.0.0.1:`<port>`; `ssh -R`: a TCP connection of its own). An old unit is rewritten by `orca-host-install <host>
+  --tunnel` (direction 1) or the next `lane-tunnel start` (direction 2), and a running one restarted.
+- **`orca-host-install <host> --tunnel [--port N]`** restores only direction 1's unit for a box paired before (after a
+  reboot, a cleaned `~/.config/systemd/user`, or a unit from before `ControlPath=none`): nothing is installed or
+  started on the box and no environment is removed or added. It needs the box's server on that port and the
+  environment saved here; when that does not answer through the restored tunnel, it points at `--pair`.
+- **One runtime per host.** After an Orca upgrade, `orca-host-install --pair` stops every process of an older server
+  slot on the box (a server, or a node helper still holding terminals with the old environment) and names each, then
+  proves that exactly one server runs: this slot, this port, owning the listener. Another server of the same build
+  is named, not stopped, and fails the run. `--check` and the box's `lane-control doctor` fail on more than one.
+- **SHELL.** A `chsh` changes passwd, not a systemd user manager that already runs, and Orca's server under that
+  manager keeps launching terminals with the old shell and its environment. `orca-host-install` sets the manager's
+  `SHELL` to the passwd one before it starts the server. Where the server already ran, do it on the box yourself:
+  `systemctl --user set-environment SHELL=<login shell>`, then `systemctl --user restart orcad.service` (its terminals
+  end; a running agent keeps the environment it started with). `--check` and `lane-control doctor` compare the two.
+- **`lane-control doctor`** on the desktop reads each tunnel unit the same way, and each box's own doctor (over ssh)
+  its runtimes, the pin and its SHELL. It changes nothing.
 
 ### Beads on a box (lc-5c1)
 What reaches a box today: nothing of beads. The project's `.beads` is a git-ignored link, so a clone of the project has

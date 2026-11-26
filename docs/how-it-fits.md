@@ -121,7 +121,9 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
   reads the new persona.
 - Both say `exists` for what is already done, so running them again is safe.
 - **`project-setup --check <repo> <host>`**: run it before a box setup. It lists every prerequisite, says what is
-  missing or could not be checked, and changes nothing.
+  missing or could not be checked, and changes nothing. A listening port is not proof: it also checks each tunnel
+  unit's state, restart counter and socket owner, that the box runs one Orca server (and which), and the box's SHELL
+  ([remote.md](../orchestrators/native-orca/remote.md#a-listening-port-is-not-proof-lc-l78)).
 
 More: [getting started](getting-started.md), [native Orca setup](../orchestrators/native-orca/setup.md).
 
@@ -189,6 +191,11 @@ bot on the desktop, and a person approves it once. It reaches a bot, not a lane,
 but cannot start a supervised lane there ([pairing research](research/2026-11-25-orca-pairing.md), section 6; not run
 there). lane-control has not built it, and setup does not fall back to it by itself. Also pending (PAIN-1, lc-bmk):
 making the share-link step as painless as possible.
+
+**After a reboot or an upgrade:** `orca-host-install <host> --tunnel` brings direction 1's unit back without pairing
+again; `lane-tunnel start` with the same options brings direction 2's back. Neither tunnel's ssh rides your own ssh
+ControlMaster (`ControlPath=none`), and `lane-control doctor` says when a unit flaps, a box runs two Orca servers, or a
+box's user manager kept an old SHELL after a `chsh`.
 
 **The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; run `project-setup
 --check <repo> <host>`; make sure ssh can log in without asking anything (for a smartcard or agent key, `lane-tunnel`

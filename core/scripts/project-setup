@@ -141,6 +141,18 @@ def _install():
 
 
 INSTALL = _install()
+
+
+def _boxhealth():
+    """core/boxhealth.py: tunnel units, Orca server runtimes and the user manager's SHELL, read-only."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lc_boxhealth", HERE / "core" / "boxhealth.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+HEALTH = _boxhealth()  # a listening port is not proof (BOX-1, lc-l78): --check reads units, sockets, runtimes, SHELL
 LC = HERE  # the path personas and ~/.agents/bin name: .../lane-control/current once use_install() ran
 TREE = HERE  # the installed tree it points at (what a box is sent)
 LC_SHA = None  # its sha; None for a plain copy that is neither a checkout nor an install
@@ -3848,8 +3860,32 @@ for f in (conf + "/opencode/opencode.json", conf + "/opencode/opencode.jsonc"):
         break
 out["gateway_key_env"] = key
 out["gateway_key_set"] = bool(key and os.environ.get(key))
+# Orca's server runtimes (core/boxhealth.py, sent ahead of this probe): one server, nothing of an older slot; the pin
+# it serves (its slot's name, .version and app version); the user manager's SHELL against passwd.
+procs = orcad(home)
+out["runtime"] = list(runtimes(procs)) + [procs]
+srv = [p for p in procs if p["role"] == "server"]
+if len(srv) == 1:
+    d = os.path.join(home, ".orca-remote", "orcad-" + srv[0]["slot"])
+    pin = {"slot": srv[0]["slot"]}
+    try:
+        pin["version"] = open(os.path.join(d, ".version")).read().strip()
+    except OSError:
+        pass
+    try:
+        pin["app"] = str(json.load(open(os.path.join(d, "out", "package.json"))).get("version") or "")
+    except (OSError, ValueError, AttributeError):
+        pass
+    out["pin"] = pin
+out["shell"] = list(shells())
+out["orcad_unit"] = os.path.isfile(os.path.join(conf, "systemd", "user", "orcad.service"))
 print(json.dumps(out))
 '''  # what --check asks the box in one ssh call: names and yes/no only, never a value
+
+
+def box_probe() -> str:
+    """The probe --check sends: core/boxhealth.py's functions, then BOX_PROBE."""
+    return (HERE / "core" / "boxhealth.py").read_text() + "\n" + BOX_PROBE
 CHECK_REFUSES = ("--remove-host", "--suggest-tiers", "--refresh", "--readapt", "--show", "--write-orca-yaml",
                  "--trust-folder", "--with", "--private", "--beads-repo", "--via-host", "--desktop-environment")
 UNCHECKED = "could not check"  # a row whose answer was not read: --check is then not ok
@@ -3898,7 +3934,7 @@ def check_host(a, host: str) -> int:
     provider = rest.split("/", 1)[0] if harness == "opencode" and "/" in rest else ""
     me, probe, no_probe = this_machine(), None, None
     try:
-        r = place.ssh(f"python3 - {shlex.quote(me)} {shlex.quote(provider)}", input=BOX_PROBE, timeout=90)
+        r = place.ssh(f"python3 - {shlex.quote(me)} {shlex.quote(provider)}", input=box_probe(), timeout=90)
         if r.returncode == 255:
             no_probe = f"ssh {host} did not answer"
             row("ssh", "missing", f"(ssh {host} needs a prompt or fails: run `ssh {host}` once by hand for its host "
@@ -3969,13 +4005,38 @@ def check_host(a, host: str) -> int:
             f"step of yours that setup asks for. {PAIR_STEPS_SHORT})")
     else:
         unread("direction 2", f"the answer from {host} named no state")
+    # The tunnels, as units: a listening port is not proof (lc-l78). Active/running, the restart counter not climbing,
+    # the unit's own ssh owning the socket, and never multiplexed onto a ControlMaster (ControlPath=none).
+    found = {t["unit"]: t for t in HEALTH.tunnel_units(config_home())}
+    d1 = found.get(f"orca-tunnel-{place.env}.service")
+    d2 = found.get(f"lane-tunnel@{env_name(host)}.service") if not a.no_desktop_lanes and ports else None
+    if not a.no_desktop_lanes and ports and d2 is None:  # recorded, but no env file: the unit was stopped
+        d2 = {"unit": f"lane-tunnel@{env_name(host)}.service", "host": host, "port": None, "controlpath": True,
+              "kind": "lane-tunnel", "env": {"PORT": str(ports[0]), "REMOTE_PORT": str(ports[1])}}
+    states = HEALTH.health({t["unit"]: t["port"] for t in (d1, d2) if t})
+
+    def tunnel_row(label, t):
+        state, detail = states[t["unit"]]
+        fix = HEALTH.repair(t)
+        if t["kind"] == "lane-tunnel":
+            fix = "core/scripts/" + fix + (" (with the options it was started with)" if not t.get("env", {}).get(
+                "SSH_HOST") else "")
+        else:
+            fix = "scripts/" + fix
+        if state == "not checked":
+            return unread(label, f"{t['unit']}: {detail}")
+        if state != "ok":
+            return row(label, "missing", f"({detail}: {fix})")
+        if not t["controlpath"]:
+            return row(label, "missing", f"({t['unit']} was written before ControlPath=none, so its ssh can ride your "
+                       f"ControlMaster and flap while the port answers: {fix})")
+        row(label, "ok", f"({detail})")
+
+    if d1:
+        tunnel_row("direction 1 tunnel", d1)
     if not a.no_desktop_lanes:
         if ports:
-            up = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "status", host],
-                                capture_output=True, stdin=subprocess.DEVNULL).returncode == 0
-            row("tunnel", "ok" if up else "missing", f"(lane-tunnel@{env_name(host)} is running)" if up else
-                f"(lane-tunnel@{env_name(host)} is not running: core/scripts/lane-tunnel start <options> "
-                f"--remote-port {ports[1]} {host} {ports[0]})")
+            tunnel_row("tunnel", d2)
         else:
             row("tunnel", "to do", "(setup starts it once you give the link)")
     program = BINARIES.get(harness, harness)
@@ -4015,6 +4076,41 @@ def check_host(a, host: str) -> int:
             row("lane-control on box", "to do", "(a copy from before the install; setup sends the whole tree)")
         else:
             row("lane-control on box", "to do", "(setup sends this machine's installed tree)")
+    if probe is None:
+        unread("runtimes on box", no_probe)
+    else:
+        state, detail = (probe.get("runtime") or [None, ""])[:2]
+        pin = probe.get("pin") or {}
+        if state == "ok":
+            want = a.orca_version
+            if want and want not in (pin.get("slot"), pin.get("version"), pin.get("app")):
+                row("runtimes on box", "missing", f"({detail}, but --orca-version asks for {want}: "
+                    f"scripts/orca-host-install {host} --pair --version {want})")
+            else:
+                row("runtimes on box", "ok", f"({detail}" + (f", Orca {pin['app']}" if pin.get("app") else "") + ")")
+        elif state == "broken":
+            row("runtimes on box", "missing", f"({detail}. One runtime per host: scripts/orca-host-install {host} "
+                "--pair stops an older build's and proves one; another of the same build, stop it on "
+                f"{host}: kill <pid>)")
+        elif state == "none":
+            row("runtimes on box", "to do" if d1_todo else "warn",
+                "(no Orca server runs there yet: setup starts one)" if d1_todo else
+                f"({detail} on {host}, though direction 1 answers: a server started some other way is not checked)")
+        else:
+            unread("runtimes on box", f"the answer from {host} named no runtime")
+        manager, login = (probe.get("shell") or [None, None])[:2]
+        if not manager:
+            row("shell on box", "skipped", f"(no systemd user manager answered on {host}; a detached server starts "
+                "with the login shell)")
+        elif not login or manager == login:
+            row("shell on box", "ok", f"(the user manager's SHELL is {manager})")
+        elif not probe.get("orcad_unit"):
+            row("shell on box", "to do", f"(the user manager has SHELL={manager}, the login shell is {login}: "
+                "orca-host-install sets it before it starts Orca's server)")
+        else:
+            row("shell on box", "missing", f"(the user manager has SHELL={manager}, the login shell is {login}: a "
+                f"chsh does not reach a manager that already runs, so Orca's server starts terminals with the old "
+                f"one. On {host}: {HEALTH.shell_fix(login)})")
     missing = [n for n, s in rows if s == "missing"]
     unchecked = [n for n, s in rows if s == UNCHECKED]
     todo = [n for n, s in rows if s == "to do"]

@@ -9,11 +9,15 @@ After=network-online.target
 # a network that is down for an hour, or a host that still holds the old forward (ExitOnForwardFailure); neither may
 # leave the unit failed for good. The delay between tries grows instead (RestartSteps, RestartMaxDelaySec: systemd 254 or
 # later; lane-tunnel writes a fixed RestartSec=30 for an older one). lane-tunnel start says when the first try fails.
+# ControlPath=none and ControlMaster=no: the unit's ssh never rides (or becomes) the user's ControlMaster. A multiplexed
+# ssh hands the forward to the master and exits, so the unit restarts for ever while the port still answers (field
+# report lc-l78, C2: 127 restarts). lane-control doctor and project-setup --check read the restart counter and the
+# unit's own connection, not the port.
 StartLimitIntervalSec=0
 
 [Service]
 EnvironmentFile=@TUNNELS@/%i.env
-ExecStart=/bin/sh -c 'exec "$${LANE_TUNNEL_SSH:-ssh}" $${SSH_CONFIG:+-F "$$SSH_CONFIG"} -N -o BatchMode=yes -o ConnectTimeout=15 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R "127.0.0.1:$${REMOTE_PORT:-$${PORT}}:127.0.0.1:$${PORT}" "$$SSH_HOST"'
+ExecStart=/bin/sh -c 'exec "$${LANE_TUNNEL_SSH:-ssh}" $${SSH_CONFIG:+-F "$$SSH_CONFIG"} -N -o BatchMode=yes -o ControlPath=none -o ControlMaster=no -o ConnectTimeout=15 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R "127.0.0.1:$${REMOTE_PORT:-$${PORT}}:127.0.0.1:$${PORT}" "$$SSH_HOST"'
 Restart=always
 RestartSec=10
 RestartSteps=6

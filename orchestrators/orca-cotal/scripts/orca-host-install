@@ -4,6 +4,7 @@
 #
 #   orca-host-install <ssh-host> [--from DIR | --bundle TAR] [--version V] [--pair [--no-tunnel]] [--port N]
 #                     [--allow-root] [--appimage-root DIR]
+#   orca-host-install <ssh-host> --tunnel [--port N]
 #
 # Without --pair: add the host in Orca (Settings > SSH, or import ~/.ssh/config) and connect; Orca finds this
 # install and reuses it. With --pair: orcad runs on the host on 127.0.0.1:<port> (a systemd user unit when the host
@@ -30,19 +31,37 @@
 # connect a host once from that Orca and give --from its ORCA_ARTIFACTS/<platform> folder.
 #
 # --no-tunnel: start orcad and print its pairing code, but set up no tunnel and save no environment.
+# --tunnel: restore only the direction-1 tunnel (orca-tunnel-<host>) for a host this desktop has paired: the unit is
+#   written again (as --pair writes it) and restarted, and proven; nothing is installed or started on the host, and no
+#   environment is removed or added. The port is --port, else the one the unit here names. It needs Orca's server on
+#   the host on that port and the environment saved here; when that environment does not answer through the restored
+#   tunnel, it says so and points at --pair.
+#
+# A listening port is not proof (field report lc-l78). After --pair starts or finds orcad, every process of an older
+# slot (a server, or a node helper holding old terminals) is stopped and named ("stopped stale orcad-<ver> pid <pid>"),
+# and the host must then run exactly one server: of this slot, on this port, and owning the listener ("one runtime
+# orcad-<ver> pid <pid> on 127.0.0.1:<port>"); another server of the same build is named, not stopped, and fails the
+# run. Where the host's systemd user manager has another SHELL than its passwd entry (a chsh does not reach a running
+# manager), it is set to the passwd one before orcad starts ("SHELL <shell> (was <old>)"); a server that already ran is
+# not restarted for it, and the line says how. The tunnel unit's ssh never multiplexes (ControlPath=none,
+# ControlMaster=no), and it is proven by its own process owning the port, active/running, its restart counter not
+# climbing over LANE_CHECK_SETTLE seconds (default 5).
 # Output lines: "installed|exists orcad-<ver> - from <source>" (the slot folder, or the bundle; exists means a
 # complete slot of that version is already on the host, not that its files were compared), "started|running orcad
-# <port>", "paired|already-paired <host>".
-# Env: LANE_SSH_CONFIG (a separate ssh config, passed as ssh -F), ORCA_CLI (default orca-ide on PATH, else ~/.config/orca/linux-orca-cli-shim/orca), ORCA_ARTIFACTS (default ~/.config/orca/orcad-artifacts).
+# <port>", "stopped stale ...", "one runtime ...", "tunnel orca-tunnel-<host>.service ...", "paired|already-paired
+# <host>".
+# Env: LANE_SSH_CONFIG (a separate ssh config, passed as ssh -F), LANE_TUNNEL_WAIT (seconds for the tunnel to come up, default 20), ORCA_CLI (default orca-ide on PATH, else ~/.config/orca/linux-orca-cli-shim/orca), ORCA_ARTIFACTS (default ~/.config/orca/orcad-artifacts).
 set -eu
 
 die() { echo "orca-host-install: $*" >&2; exit "${2:-1}"; }
-host=""; pair=0; tunnel=1; port=6768; allow_root=0; appimage_root=""; from=""; bundle=""; want=""; want_set=0
+host=""; pair=0; tunnel=1; tunnel_only=0; port=6768; port_set=0; allow_root=0; appimage_root=""; from=""; bundle=""; want=""; want_set=0
 while [ $# -gt 0 ]; do
   case $1 in
     --pair) pair=1 ;;
     --no-tunnel) tunnel=0 ;;
-    --port) port=$2; shift ;;
+    --tunnel) tunnel_only=1 ;;
+    --port) [ $# -ge 2 ] || die "--port needs a port" 2; port=$2; port_set=1; shift ;;
+    --audit-script) audit_only=1 ;;
     --allow-root) allow_root=1 ;;
     --appimage-root) appimage_root=$2; shift ;;
     --from) [ $# -ge 2 ] || die "--from needs a folder" 2; from=$2; shift ;;
@@ -54,6 +73,104 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+case $port in ''|*[!0-9]*) die "bad port: $port" 2 ;; esac
+{ [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "bad port: $port" 2
+
+# The host's audit, run there with sh (any login shell runs `sh -s`): $1 the slot that should serve, $2 its port, $3
+# list | stop | prove | shell | owns <pid>. It reads /proc and changes nothing but what stop and shell say.
+audit_sh=$(cat <<'AUDIT'
+ver=$1 port=$2 act=$3 me=$$
+# "<pid> <slot> server|helper <port or ->" for each process of this user that runs from a slot under ~/.orca-remote: a
+# server has an argv word ending in orcad.js, a helper is node with a slot's path in its argv (not an editor on a log).
+list() {
+  for d in /proc/[0-9]*; do
+    p=${d#/proc/}
+    [ "$p" != "$me" ] && [ -O "$d" ] || continue
+    c=$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null) || continue
+    [ -n "$c" ] || continue
+    w=$(readlink "$d/cwd" 2>/dev/null || true)
+    s=$(printf '%s\n%s/\n' "$c" "$w" | awk -v pre="$HOME/.orca-remote/orcad-" 'index($0, pre) == 1 {
+      r = substr($0, length(pre) + 1); sub(/\/.*/, "", r); if (r ~ /^[A-Za-z0-9._+-]+$/) { print r; exit } }')
+    [ -n "$s" ] || continue
+    if printf '%s\n' "$c" | grep -q -e '/orcad[.]js$' -e '^orcad[.]js$'; then role=server
+    else
+      case $(printf '%s\n' "$c" | head -n 1) in node|*/node) role=helper ;; *) continue ;; esac
+    fi
+    pt=$(printf '%s\n' "$c" | awk 'f { print; exit } $0 == "--port" { f = 1 }')
+    printf '%s %s %s %s\n' "$p" "$s" "$role" "${pt:--}"
+  done
+}
+gone() { [ -z "$(tr -d '\0' < "/proc/$1/cmdline" 2>/dev/null)" ]; }  # exited (a zombie has no command line)
+# Whether pid $1 owns the listener on 127.0.0.1:$port; else say who does.
+owns() {
+  hex=$(printf ':%04X' "$port")
+  inos=$(awk -v h="$hex" 'FNR > 1 && $4 == "0A" && substr($2, length($2) - 4) == h { print $10 }' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+  [ -n "$inos" ] || { echo "not listening at all"; return 1; }
+  for i in $inos; do
+    if ls -l "/proc/$1/fd" 2>/dev/null | grep -q "socket:\[$i\]"; then return 0; fi
+  done
+  for d in /proc/[0-9]*; do
+    [ -O "$d" ] || continue
+    for i in $inos; do
+      if ls -l "$d/fd" 2>/dev/null | grep -q "socket:\[$i\]"; then
+        echo "held by pid ${d#/proc/} ($(tr '\0' ' ' < "$d/cmdline" 2>/dev/null | cut -c1-80))"; return 1
+      fi
+    done
+  done
+  echo "held by a process of another user"; return 1
+}
+case $act in
+  list) list ;;
+  stop)  # every process of another slot than $ver: TERM, then KILL
+    stale=$(list | awk -v v="$ver" '$2 != v')
+    [ -n "$stale" ] || exit 0
+    printf '%s\n' "$stale" | while read -r p s role pt; do kill -TERM "$p" 2>/dev/null || true; done
+    i=0
+    while [ $i -lt 5 ]; do
+      left=$(printf '%s\n' "$stale" | while read -r p s role pt; do gone "$p" || echo "$p"; done)
+      [ -n "$left" ] || break
+      i=$((i + 1)); sleep 1
+    done
+    for p in $left; do kill -KILL "$p" 2>/dev/null || true; done
+    [ -z "$left" ] || sleep 1
+    rc=0
+    while read -r p s role pt; do
+      desc=$role; [ "$pt" = - ] || desc="$role, port $pt"
+      if gone "$p"; then echo "stopped stale orcad-$s pid $p ($desc)"
+      else echo "could not stop stale orcad-$s pid $p ($desc)"; rc=1; fi
+    done <<STALE
+$stale
+STALE
+    exit $rc ;;
+  prove)  # exactly one server: this slot, this port, owning the listener
+    servers=$(list | awk '$3 == "server"')
+    n=$(printf '%s\n' "$servers" | grep -c . || true)
+    if [ "$n" -ne 1 ]; then
+      echo "$n Orca server processes run on this host, one is the rule:"
+      printf '%s\n' "$servers" | awk 'NF { print "  pid " $1 " orcad-" $2 " port " $4 }'
+      exit 1
+    fi
+    set -- $servers
+    [ "$2" = "$ver" ] || { echo "the one server is orcad-$2 (pid $1), not orcad-$ver"; exit 1; }
+    [ "$4" = "$port" ] || { echo "the one server, orcad-$2 (pid $1), is on port $4, not $port"; exit 1; }
+    why=$(owns "$1") || { echo "orcad-$ver (pid $1) does not own 127.0.0.1:$port: it is $why"; exit 1; }
+    echo "one runtime orcad-$ver pid $1 on 127.0.0.1:$port" ;;
+  owns) owns "$4" ;;
+  shell)  # the user manager's SHELL as passwd says (a chsh does not reach a manager that already runs)
+    command -v systemctl >/dev/null 2>&1 || exit 0
+    m=$(systemctl --user show-environment 2>/dev/null) || exit 0
+    cur=$(printf '%s\n' "$m" | sed -n 's/^SHELL=//p')
+    u=$(id -un)
+    login=$(getent passwd "$u" 2>/dev/null | cut -d: -f7)
+    [ -n "$login" ] || login=$(awk -F: -v u="$u" '$1 == u { print $7 }' /etc/passwd)
+    case $login in ''|*[!A-Za-z0-9/._+-]*) exit 0 ;; esac
+    [ "$cur" != "$login" ] || exit 0
+    systemctl --user set-environment "SHELL=$login" || { echo "could not set SHELL=$login in the user manager"; exit 1; }
+    echo "SHELL $login (was ${cur:-unset}) in the user manager: Orca's server starts its terminals with it" ;;
+esac
+AUDIT
+)
+if [ "${audit_only:-0}" = 1 ]; then printf '%s\n' "$audit_sh"; exit 0; fi
 [ -n "$host" ] || die "usage: orca-host-install <ssh-host> [--from DIR | --bundle TAR] [--version V] [--pair] [--port N]" 2
 [ -z "$from" ] || [ -z "$bundle" ] || die "--from and --bundle exclude each other: give one source" 2
 if [ "$want_set" = 1 ]; then
@@ -74,6 +191,78 @@ if [ -n "${LANE_SSH_CONFIG:-}" ]; then
   sshf="-F $sshcfg"
 fi
 r() { ssh $sshf -o BatchMode=yes "$host" "$@"; }
+audit() { printf '%s\n' "$audit_sh" | r sh -s -- "$@"; }  # the audit on the host: <slot> <port> <action>
+
+# --- the direction-1 tunnel: unit orca-tunnel-<host>, ssh -L, the same port at both ends ---
+name=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
+unit=orca-tunnel-$name.service
+unitfile=$HOME/.config/systemd/user/$unit
+# The unit's ssh never multiplexes: one that rides the user's ControlMaster hands the forward to the master and exits,
+# so the unit restarts for ever while the port answers (field report lc-l78, C2).
+write_tunnel() {
+  mkdir -p "$HOME/.config/systemd/user"
+  old=$(cat "$unitfile" 2>/dev/null || true)
+  cat > "$unitfile" <<UNIT
+[Unit]
+Description=Orca tunnel to $host:$port
+[Service]
+ExecStart=/usr/bin/env ssh $sshf -N -o BatchMode=yes -o ControlPath=none -o ControlMaster=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:$port:127.0.0.1:$port $host
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=default.target
+UNIT
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$unit" >/dev/null 2>&1
+  # A changed unit (other port or host, or one from before ControlPath=none) must replace a tunnel that runs.
+  [ "$old" = "$(cat "$unitfile")" ] || systemctl --user restart "$unit"
+}
+# Proof that the tunnel is the unit's: active/running, its own ssh owning 127.0.0.1:<port>, and its restart counter not
+# climbing. A port that answers is not proof: a ControlMaster or a stale ssh can hold it while the unit flaps.
+unit_state() { systemctl --user show "$unit" -p ActiveState -p SubState -p NRestarts -p MainPID --value 2>/dev/null | tr '\n' ' '; }
+prove_tunnel() {
+  i=0
+  while :; do
+    set -- $(unit_state)
+    if [ "${1:-} ${2:-}" = "active running" ] && [ "${4:-0}" != 0 ]; then
+      why=$(printf '%s\n' "$audit_sh" | sh -s -- - "$port" owns "$4") && break
+    else
+      why="the unit is ${1:-unknown}/${2:-unknown}"
+    fi
+    [ $i -lt "${LANE_TUNNEL_WAIT:-20}" ] || die "tunnel $unit is not up: ${why:-?}${4:+, not by $unit (pid $4)} (journalctl --user -u $unit)"
+    i=$((i + 1)); sleep 1
+  done
+  n0=${3:-0}; pid=$4
+  sleep "${LANE_CHECK_SETTLE:-5}"
+  set -- $(unit_state)
+  [ "${3:-0}" = "$n0" ] && [ "${4:-0}" = "$pid" ] || die "tunnel $unit restarted while it was watched ($n0, then ${3:-?} restarts): it flaps (journalctl --user -u $unit)"
+  echo "tunnel $unit: its ssh (pid $pid) owns 127.0.0.1:$port, restarted $n0 times, not climbing"
+}
+saved_here() {
+  "$orca" environment list --json 2>/dev/null | python3 -c '
+import json,sys; n=sys.argv[1]
+envs=json.load(sys.stdin).get("result",{}).get("environments",[])
+sys.exit(0 if any(e.get("name")==n for e in envs) else 1)' "$name"
+}
+answers() { "$orca" status --environment "$name" --json 2>/dev/null | grep -q '"reachable": true'; }
+
+if [ "$tunnel_only" = 1 ]; then  # restore the direction-1 tunnel of a paired host, and nothing else
+  [ "$pair" = 0 ] && [ -z "$from$bundle$want" ] || die "--tunnel restores the tunnel only: it takes --port, not --pair, --from, --bundle or --version" 2
+  if [ "$port_set" = 0 ]; then
+    port=$(sed -n 's/^ExecStart=.* -L 127\.0\.0\.1:\([0-9][0-9]*\):127\.0\.0\.1:[0-9]* .*/\1/p' "$unitfile" 2>/dev/null | head -n 1)
+    [ -n "$port" ] || die "no $unit here to read the port from: give --port <the port orca-host-install --pair used>" 2
+  fi
+  [ -x "$orca" ] || die "Orca CLI not found at $orca (open Orca once, or set ORCA_CLI)"
+  saved_here || die "$host was never paired here (no environment $name): run orca-host-install $host --pair"
+  servers=$(audit - "$port" list) || die "cannot ssh to $host"
+  printf '%s\n' "$servers" | awk -v p="$port" '$3 == "server" && $4 == p { f = 1 } END { exit !f }' ||
+    die "no Orca server runs on $host with port $port, so a tunnel has nothing to reach: run orca-host-install $host --pair"
+  write_tunnel
+  prove_tunnel
+  answers || die "the tunnel is up, but environment $name does not answer through it (the server's identity may have changed): run orca-host-install $host --pair"
+  echo "already-paired $name"
+  exit 0
+fi
 
 # --- host facts ---
 facts=$(r 'id -u; uname -m; (ldd --version 2>&1 || true) | head -1') || die "cannot ssh to $host"
@@ -272,8 +461,15 @@ case $state in
   stale) r "systemctl --user stop orcad.service 2>/dev/null; pkill -u \$(id -u) -f 'orcad[.]js .*--port $port\$'; sleep 2"
          echo "stopped older orcad $port" ;;
 esac
+# Every process of an older slot (a server of the build before, or a helper that still holds its terminals) goes.
+stopped=$(audit "$ver" "$port" stop) || { [ -z "$stopped" ] || printf '%s\n' "$stopped"; die "processes of an older Orca server on $host could not be stopped; stop them there by hand"; }
+[ -z "$stopped" ] || printf '%s\n' "$stopped"
+# A chsh does not reach a user manager that already runs: orcad.service would start terminals with the old shell.
+said=$(audit "$ver" "$port" shell) || die "$said"
+[ -z "$said" ] || printf '%s\n' "$said"
 if [ "$state" = current ]; then
   echo "running orcad $port"
+  [ -z "$said" ] || echo "note: the Orca server on $host started before that; to give its terminals the login shell, on $host: systemctl --user restart orcad.service (its terminals end)"
 else
   r "set -e; cd $rslot; rm -f .orcad-readiness-$port
      [ -w \"\${TMPDIR:-/tmp}\" ] || { mkdir -p ~/tmp; export TMPDIR=\$HOME/tmp; }
@@ -297,6 +493,13 @@ UNIT
      fi"
   echo "started orcad $port"
 fi
+# Exactly one server now: this slot, this port, owning its listener (another of the same build is named, not stopped).
+i=0
+until proof=$(audit "$ver" "$port" prove); do
+  [ $i -lt 30 ] || die "the Orca server on $host is not one runtime: $proof"
+  i=$((i + 1)); sleep 1
+done
+printf '%s\n' "$proof"
 # The pairing code is in orcad's first stdout line, kept per port. Only read when it is needed: an orcad that was
 # already running may have no code left to give, and an already-paired desktop does not need one.
 pairing_url() {
@@ -320,39 +523,16 @@ pairing_url() {
 if [ "$tunnel" = 0 ]; then url=$(pairing_url) || exit 1; echo "pairing-code $url"; exit 0; fi
 
 # --- local tunnel (same port both ends, so the pairing endpoint is valid as is) ---
-name=$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '-')
-unit=orca-tunnel-$name.service
-mkdir -p "$HOME/.config/systemd/user"
-unitfile=$HOME/.config/systemd/user/$unit
-old=$(cat "$unitfile" 2>/dev/null || true)
-cat > "$unitfile" <<UNIT
-[Unit]
-Description=Orca tunnel to $host:$port
-[Service]
-ExecStart=/usr/bin/env ssh $sshf -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:$port:127.0.0.1:$port $host
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=default.target
-UNIT
-systemctl --user daemon-reload
-systemctl --user enable --now "$unit" >/dev/null 2>&1
-# A changed unit (other port or host) must replace a tunnel that is already running.
-[ "$old" = "$(cat "$unitfile")" ] || systemctl --user restart "$unit"
-i=0; while [ $i -lt 20 ] && ! ss -ltn | grep -q "127.0.0.1:$port "; do i=$((i + 1)); sleep 1; done
-ss -ltn | grep -q "127.0.0.1:$port " || die "tunnel $unit did not come up (journalctl --user -u $unit)"
+write_tunnel
+prove_tunnel
 
 # --- pair ---
 [ -x "$orca" ] || die "Orca CLI not found at $orca (open Orca once, or set ORCA_CLI)"
-if "$orca" environment list --json 2>/dev/null | python3 -c '
-import json,sys; n=sys.argv[1]
-envs=json.load(sys.stdin).get("result",{}).get("environments",[])
-sys.exit(0 if any(e.get("name")==n for e in envs) else 1)' "$name" &&
-   ! "$orca" status --environment "$name" --json 2>/dev/null | grep -q '"reachable": true'; then
+if saved_here && ! answers; then
   # Saved but unreachable: the host's identity changed (its ~/.orca was reset). Pair afresh.
   "$orca" environment rm --environment "$name" --json >/dev/null 2>&1 || die "cannot remove stale environment $name"
 fi
-if "$orca" status --environment "$name" --json 2>/dev/null | grep -q '"reachable": true'; then
+if answers; then
   echo "already-paired $name"
 else
   url=$(pairing_url) || exit 1
