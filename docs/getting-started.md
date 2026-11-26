@@ -161,6 +161,19 @@ Claude on this machine:
 machine-setup
 ```
 
+No model is built in, so the first run asks two things: the machine coordinator's model, as `claude/<model>` (for
+example `claude/sonnet`), and the model for the automations (for example `sonnet`). To answer up front:
+`machine-setup --machine-coordinator claude/sonnet --automation-model sonnet`, or set `MACHINE_COORDINATOR=` and
+`AUTOMATION_MODEL=` in `machine.conf`. A later run keeps what the machine has and changes no automation's model unless
+you add `--replace-automation-model`.
+
+Claude through a gateway: **do this before `machine-setup`.** An alias such as `sonnet` can only be checked once it is
+mapped to a name your gateway lists; unmapped, `machine-setup` asks whether to write it unchecked, and without a
+terminal writes nothing. First run `model-env` (it asks for the gateway, its model names and the auto-mode classifier
+model), with your gateway key set in that shell. Add the line it prints to your shell profile, restart Orca from a
+shell that has the values, and check with `model-env --check`. Details:
+[the model environment](../orchestrators/native-orca/setup.md#the-model-environment-claude-through-a-gateway).
+
 OpenCode only, on a gateway (the machine coordinator and the automations then run on OpenCode; step 2.3 comes first):
 
 ```bash
