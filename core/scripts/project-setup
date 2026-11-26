@@ -3626,33 +3626,49 @@ def native_main(a, tiers: Path) -> int:
 
 # --- remote hosts (phase 6: orchestrators/native-orca/remote.md) -------------------------------------------------
 
+GRANT = ("{host}'s Orca can open terminals here, so it can run any command as you on this computer. Orca itself "
+         "will not drive this desktop's screen and input for {host} (setup never passes --grant-desktop-control), but a "
+         "command run as you can, as anything with a terminal here can (orca pair --help says the same)")
 SHARE_HELP = """\
 Desktop lanes: {host}'s coordinator can run lanes here (for what {host} lacks: graphics, a browser, a GPU), in this
 desktop's Orca, paired with its share link. Make the link in Orca here: Settings > Servers > "Share this computer",
 and choose this computer's own address (127.0.0.1; a network address would widen what the desktop listens on).
-The link lets {host} run commands as you on this computer (no desktop control) until you revoke it there. It is
-read hidden, passed to {host} over ssh's stdin, and kept only in Orca's own pairing store on {host}: not in
-arguments, logs, other files or the settings store. lane-control keeps only the environment's name."""
-REVOKE_HELP = ("Revoke the link in Orca here: Settings > Servers, the link shared with {host} > revoke. Until then "
-               "anyone holding it can run commands as you on this computer.")
+What it grants, until you revoke it there: """ + GRANT + """. It is read hidden, passed to {host} over ssh's stdin,
+and kept only in Orca's own pairing store on {host}: not in arguments, logs, other files or the settings store.
+lane-control keeps only the environment's name."""
+ENTRY = ('the entry Orca made for the link: Orca names each one "Runtime" and the date it was made ({when}), not '
+         "after the box; with two of one date, it is the one added then and last used after it")
+REVOKE_HELP = ("Revoke the link in Orca here: Settings > Servers, " + ENTRY + " > revoke. Until then anyone holding it "
+               "can run commands as you on this computer.")
+NARROW = ("Revoking ends {host}'s access at once but does not narrow the listener: Orca keeps listening on every "
+          "interface until it restarts, and after a restart too while any other network pairing that was used "
+          "remains. To narrow it: revoke, then quit Orca here and start it again (project-setup --check <repo> {host} "
+          "shows the desktop listener).")
+MINT_REVOKE = ("project-setup --remove-host {host} (the box forgets this desktop, the tunnel stops), then in Orca here "
+               "Settings > Servers, " + ENTRY + " > revoke; only the window revokes a link the box has used. " + NARROW)
 MINT_HELP = """\
 Desktop lanes: {host}'s coordinator can run lanes here (for what {host} lacks: graphics, a browser, a GPU), in this
-desktop's Orca. Setup can make {host}'s link itself: orca pair --address 127.0.0.1:{remote} --json (the address is
-what {host} dials, its own end of the tunnel; it is not what this desktop listens on). The link is held in memory,
-sent to {host} on ssh's stdin and kept only in Orca's own pairing store there: never shown, logged or written, and
-lane-control keeps only the environment's name.
-  What it grants: {host}'s Orca can run commands as you on this computer through Orca (terminals, worktrees,
-    agents: Orca's agent plane), not this desktop's screen and input (no --grant-desktop-control).
-  What it changes here: {listener}
-  How to undo it: project-setup --remove-host {host} (the box forgets this desktop, the tunnel stops), then in Orca
-    here Settings > Servers, the client {host} paired as > revoke. Until then the link works for {host}.
+desktop's Orca. Setup can make {host}'s link itself: orca pair --address 127.0.0.1:{remote} --rotate --json (the
+address is what {host} dials, its own end of the tunnel; it is not what this desktop listens on). The link is held
+in memory, sent to {host} on ssh's stdin and kept only in Orca's own pairing store there: never shown, logged or
+written, and lane-control keeps only the environment's name.
+  What it grants: {grant}.
+  What --rotate ends: every access link of this Orca that nobody has used yet stops working (one from orca pair, or
+    from Settings > Servers > "Share this computer", made for another machine and not added there yet). Links in use
+    are not touched. Setup rotates so that {host} gets a link nobody else holds: without it Orca hands out an unused
+    earlier link again.
+  What it changes here: {listener}{replaces}
+  How to undo it: {revoke}
 Answer no to make the link by hand instead (Settings > Servers > "Share this computer", choosing 127.0.0.1), which
-keeps this desktop on loopback; --pair-by-hand goes there straight away."""
+keeps this desktop on loopback and ends no other link; --pair-by-hand goes there straight away."""
 MINT_WIDENS = ("this desktop's Orca listens on {now} only; making the link makes it listen on every interface "
-               "(0.0.0.0:{port}), also after restarts, until {host}'s access is revoked. Anything that reaches this "
+               "(0.0.0.0:{port}) at once, also after restarts while {host} stays paired. Anything that reaches this "
                "machine can then try the port; the link's token is still needed.")
 MINT_WIDE = ("this desktop's Orca already listens on every interface ({now}), from an earlier network pairing; "
              "making the link keeps it so.")
+REPLACES = ("\n  What it replaces: {host} has this desktop as {me} from an earlier pairing that no longer answers. A new "
+            "link replaces it there; the earlier entry stays valid here until you revoke it too (Settings > Servers, "
+            'the older "Runtime" entry).')
 FALLBACK_HELP = ("If neither link can be made, the box's coordinator can still mail an agent here with orca "
                  "orchestration send --on-client (a person here approves it once; it reaches a bot, not a lane): "
                  "orchestrators/native-orca/remote.md, direction 2, The fallback.")
@@ -4077,9 +4093,9 @@ def pair_steps_short(by_hand: bool) -> str:
     """What --check says setup will do for the desktop's link."""
     if by_hand:
         return f"a step of yours that setup asks for (--pair-by-hand). {PAIR_STEPS_SHORT}"
-    return (f"setup makes the link with orca pair --address 127.0.0.1:<box port> after your yes, which makes this "
-            f"desktop's Orca listen on every interface (port {DESKTOP_PORT}); --pair-by-hand keeps it on loopback: "
-            f"{PAIR_STEPS_SHORT}")
+    return (f"setup makes the link with orca pair --address 127.0.0.1:<box port> --rotate after your yes, which ends "
+            f"every other unused access link of this Orca and makes it listen on every interface (port "
+            f"{DESKTOP_PORT}); --pair-by-hand keeps it on loopback: {PAIR_STEPS_SHORT}")
 
 
 def recorded_desktop_name(host: str) -> "str | None":
@@ -4097,9 +4113,9 @@ def stale_name_steps(host: str, old: str, me: str) -> str:
             f"(removes {old} there and stops the tunnel), then project-setup <repo> {host} again")
 
 
-def listen_addresses(port: int) -> list:
-    """Every address a TCP listener on this port is bound to here, as 127.0.0.1:<port> or [::]:<port> (from
-    /proc/net/tcp*); empty when nothing listens or /proc cannot say."""
+def listeners(port: int) -> list:
+    """(address, socket inode) of every TCP listener on this port here, the address as 127.0.0.1:<port> or
+    [::]:<port> (from /proc/net/tcp*); empty when nothing listens or /proc cannot say."""
     import ipaddress
     found = set()
     for f, v6 in (("/proc/net/tcp", False), ("/proc/net/tcp6", True)):
@@ -4109,7 +4125,7 @@ def listen_addresses(port: int) -> list:
             continue
         for row in rows:
             cols = row.split()
-            if len(cols) < 4 or cols[3] != "0A":  # 0A = LISTEN
+            if len(cols) < 10 or cols[3] != "0A":  # 0A = LISTEN
                 continue
             addr, _, p = cols[1].partition(":")
             try:
@@ -4120,16 +4136,59 @@ def listen_addresses(port: int) -> list:
                 ip = ipaddress.ip_address(raw)
             except ValueError:
                 continue
-            found.add(f"[{ip}]:{port}" if v6 else f"{ip}:{port}")
+            found.add((f"[{ip}]:{port}" if v6 else f"{ip}:{port}", cols[9]))
     return sorted(found)
 
 
+def listen_addresses(port: int) -> list:
+    return sorted({a for a, _ in listeners(port)})
+
+
+def orca_app_pid() -> "int | None":
+    """The pid of this desktop's running Orca app, as `orca status` says it."""
+    try:
+        pid = json.loads(LOCAL.run("status", "--json", check=False, stdin=subprocess.DEVNULL,
+                                   timeout=30).stdout)["result"]["app"]["pid"]
+    except (Fail, ValueError, KeyError, TypeError):
+        return None
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+
+def held_by(pid: int, inodes: set) -> bool:
+    """Whether the process holds one of these sockets (its /proc/<pid>/fd links)."""
+    try:
+        fds = list(Path(f"/proc/{pid}/fd").iterdir())
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            if os.readlink(fd) in {f"socket:[{i}]" for i in inodes}:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def orca_listener(port: int) -> tuple:
+    """(addresses on the port, whether this desktop's Orca app holds them, Orca's pid). Orca's CLI does not say its
+    own port, so setup checks that the listener on the port it expects is the running Orca's."""
+    rows = listeners(port)
+    pid = orca_app_pid() if rows else None
+    return [a for a, _ in rows], bool(pid and held_by(pid, {i for _, i in rows})), pid
+
+
+class OfferUnavailable(Fail):
+    """Orca answered that it makes no offer (it widened nothing: a failed widen is undone)."""
+
+
 def mint_link(remote: int) -> str:
-    """This desktop's Orca makes an access link for the box with `orca pair --address 127.0.0.1:<remote> --json`
-    (owner 2026-11-26; field report H). Its answer is read from a pipe and kept in memory: never printed, logged or
+    """This desktop's Orca makes a fresh access link for the box: `orca pair --address 127.0.0.1:<remote> --rotate
+    --json` (owner 2026-11-26; field report H). --rotate, because Orca hands out an unused earlier offer again
+    otherwise, and the box must not share a link with whoever that was made for; it also ends every other unused one,
+    which setup says before asking. The answer is read from a pipe and kept in memory: never printed, logged or
     written, and no message carries it. The link the box gets dials 127.0.0.1:<remote>."""
-    p = LOCAL.run("pair", "--address", f"127.0.0.1:{remote}", "--json", check=False, stdin=subprocess.DEVNULL,
-                  timeout=60)
+    p = LOCAL.run("pair", "--address", f"127.0.0.1:{remote}", "--rotate", "--json", check=False,
+                  stdin=subprocess.DEVNULL, timeout=60)
     try:
         res = json.loads(p.stdout)
         offer = res.get("result") or {}
@@ -4137,13 +4196,13 @@ def mint_link(remote: int) -> str:
             raise Fail(f"orca pair failed here: {redact((res.get('error') or {}).get('message')) or 'no reason given'}"
                        "; no link was made")
         if not offer.get("available"):
-            raise Fail(f"Orca here made no link: {redact(offer.get('reason')) or 'unavailable'}: "
-                       f"{redact(offer.get('guidance'))}")
+            raise OfferUnavailable(f"Orca here made no link: {redact(offer.get('reason')) or 'unavailable'}: "
+                                   f"{redact(offer.get('guidance'))}")
         link = offer["pairingUrl"]
         if not isinstance(link, str):
             raise TypeError
     except (ValueError, KeyError, TypeError, AttributeError):
-        raise Fail(f"orca pair gave no link it could read (exit {p.returncode}); no link was made") from None
+        raise Fail(f"orca pair gave no link it could read (exit {p.returncode})") from None
     finally:
         p = None  # noqa: F841 (its stdout held the link)
     try:
@@ -4154,8 +4213,8 @@ def mint_link(remote: int) -> str:
 
 
 def retire_offer(remote: int) -> bool:
-    """`orca pair --rotate`: an unused link stops working (one the box used stays until it is revoked). Its answer, a
-    new unused link, is dropped unread."""
+    """`orca pair --rotate`: the link setup made stops working if the box did not use it (one it used stays until
+    it is revoked), and so does any other unused one. Its answer, a new unused link nobody holds, is dropped unread."""
     try:
         p = LOCAL.run("pair", "--address", f"127.0.0.1:{remote}", "--rotate", "--json", check=False,
                       stdin=subprocess.DEVNULL, timeout=60)
@@ -4180,14 +4239,54 @@ def ask_link(host: str) -> str:
             return ""
 
 
-def ask_mint(host: str, remote: int, port: int, addrs: list) -> bool:
-    """Before minting: what the link grants, what it does to this desktop's listener (and whether it already listens
-    on every interface), how to undo it; then one yes (owner 2026-11-26: questions in setup are fine)."""
+def today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def ask_mint(host: str, me: str, remote: int, port: int, addrs: list, replaces: bool) -> bool:
+    """Before minting: what the link grants, what --rotate ends, what it does to this desktop's listener (and whether
+    it already listens on every interface), what it replaces, how to undo it; then one yes, Enter being no (owner
+    2026-11-26: questions in setup are fine)."""
     now = ", ".join(addrs)
     wide = any(not a.startswith(("127.", "[::1]", "[::ffff:127.")) for a in addrs)
     listener = (MINT_WIDE if wide else MINT_WIDENS).format(now=now, port=port, host=host)
-    print(MINT_HELP.format(host=host, remote=remote, listener=listener), flush=True)
+    print(MINT_HELP.format(host=host, remote=remote, grant=GRANT.format(host=host), listener=listener,
+                           replaces=REPLACES.format(host=host, me=me) if replaces else "",
+                           revoke=MINT_REVOKE.format(host=host, when=f"today, {today()}")), flush=True)
     return owner_says_yes(f"Make {host}'s link with orca pair now? [y/N] ", step="desktop lanes")
+
+
+def after_mint(host: str, port: int, retired: "bool | None", when: str) -> str:
+    """What the owner needs once setup asked Orca for a link, whatever happened next: the listener as it is now (the
+    ask widens it), what the rotate did, and the mint's revoke steps."""
+    now = listen_addresses(port)
+    return (f"Setup asked this desktop's Orca for a link, which makes it listen on every interface: it listens on "
+            f"{', '.join(now) or 'an address /proc does not show'} now (port {port}). "
+            + ("Setup ran orca pair --rotate, which ends that link if " + host + " did not use it (and any other "
+               "unused link of this Orca). " if retired else
+               "The rotate that would end an unused link failed: run orca pair --rotate --json > /dev/null here. "
+               if retired is False else "")
+            + "To undo the rest: " + MINT_REVOKE.format(host=host, when=when))
+
+
+def restart_tunnel(place: Place, ports: tuple, tunnel_opts: "list | None") -> bool:
+    """A paired box whose tunnel is down (a reboot, a locked card): lane-tunnel start with the recorded ports, then
+    whether the box reaches this machine again within PAIR_WAIT."""
+    host, me = place.host, this_machine()
+    t = subprocess.run([tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel"), "start", *(tunnel_opts or []),
+                        "--remote-port", str(ports[1]), host, str(ports[0])], capture_output=True, text=True)
+    if t.returncode != 0:
+        return False
+    end = time.time() + PAIR_WAIT
+    while True:
+        try:
+            if box_pairing_remote(place, "status", me) == "reachable":
+                return True
+        except Fail:
+            pass
+        if time.time() >= end:
+            return False
+        time.sleep(2)
 
 
 def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: "int | None" = None,
@@ -4213,9 +4312,15 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
     again = (f"core/scripts/lane-tunnel start <options> --remote-port {ports[1]} {host} {ports[0]}" if ports else
              f"core/scripts/lane-tunnel start <options> --remote-port <box port> {host} <port> (the ports are "
              "tunnel_port and tunnel_remote_port in the host's record under ~/.config/lane-control/hosts/)")
-    if state == "saved" and ports:  # paired before, the tunnel is down (a reboot, a locked card): no new link needed
-        say("tunnel", "down", f"{host} has this machine's Orca as environment {me} but cannot reach it. To bring the "
-            f"tunnel back without a new link run {again} (and answer no, then Enter, below)")
+    if state == "saved" and ports:  # paired before, the tunnel is down (a reboot, a locked card): fix the tunnel first
+        if restart_tunnel(place, ports, tunnel_opts):
+            say("tunnel", "restarted", f"lane-tunnel@{env_name(host)}.service, from the host's record")
+            say("desktop lanes", "exists", f"{host} reaches this machine's Orca as environment {me} again; no new link")
+            return me
+        say("tunnel", "down", f"{host} has this machine's Orca as environment {me} but cannot reach it, and "
+            f"restarting the tunnel from the record did not bring it back ({again}; journalctl --user -u "
+            f"lane-tunnel@{env_name(host)}.service). A new link replaces that pairing (below): answer no, then Enter, "
+            "to keep it and fix the tunnel instead")
     if state == "reachable":
         given = [f for f, v in (("--tunnel-auth-sock", tunnel_opts and "--auth-sock" in tunnel_opts),
                                 ("--tunnel-ssh", tunnel_opts and "--ssh" in tunnel_opts),
@@ -4234,15 +4339,22 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
     mint, link = False, ""
     if not by_hand:
         port = DESKTOP_PORT
-        addrs = listen_addresses(port)
+        addrs, ours, pid = orca_listener(port)
         if not addrs:
             say("desktop lanes", "by hand", f"(this desktop's Orca does not listen on port {port}, so setup cannot "
                 "make the link for it: LANE_DESKTOP_ORCA_PORT names the port it uses; the hand link names its own)")
+        elif not ours:
+            say("desktop lanes", "by hand", f"(something listens on port {port} here, but not this desktop's Orca "
+                f"app ({'pid ' + str(pid) if pid else 'Orca did not say its pid'}), so setup does not make the link "
+                "for it: the tunnel would lead elsewhere. LANE_DESKTOP_ORCA_PORT names Orca's port; the hand link "
+                "names its own)")
         else:
-            mint = ask_mint(host, remote_port or port, port, addrs)
+            mint = ask_mint(host, me, remote_port or port, port, addrs, state == "saved")
             if not mint:
                 print("Then the hand link, which keeps this desktop on loopback:", flush=True)
     if not mint:
+        if state == "saved":
+            print(REPLACES.format(host=host, me=me).strip(), flush=True)
         link = ask_link(host)
         if not link:
             say("desktop lanes", "skipped", f"(no link; run again to add it, or --no-desktop-lanes)")
@@ -4251,8 +4363,6 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
     remote = remote_port or port
     if link:
         link = link_for_port(link, port, remote)  # the box dials its own end of the tunnel
-    if state == "saved":  # saved there earlier but not reachable: this machine's identity or port changed
-        box_pairing_remote(place, "rm", me)
     tunnel = tool_path("LANE_TUNNEL", "core/scripts/lane-tunnel")
     unit = f"lane-tunnel@{env_name(host)}.service"
     other = ("To pair by hand instead: run again with --pair-by-hand (the Share link, which also keeps this desktop "
@@ -4275,7 +4385,17 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
         raise Fail((t.stderr.strip() or "lane-tunnel failed") + f"; nothing was sent to {host}. For a host that "
                    "takes only a smartcard or an agent's key: unlock it, then pass --tunnel-auth-sock <agent socket> "
                    "(and --tunnel-ssh <wrapper>)")
-    sent = False
+    when = f"{today()}, at {time.strftime('%H:%M')}"
+    asked = sent = added = False
+    unavailable = False
+
+    def record():
+        hosts_dir().mkdir(parents=True, exist_ok=True)
+        write_atomic(host_record(host), json.dumps({
+            "host": host, "environment": place.env, "desktop_environment": me, "tunnel_port": port,
+            "tunnel_remote_port": remote, "link": "orca pair" if mint else "by hand", "paired_at": when},
+            indent=2).encode(), 0o600)
+
     try:
         up = wait_box_port(place, remote, "busy")
         for _ in range(2):  # and it is our unit that holds it, not another program after the unit died
@@ -4291,10 +4411,16 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
                        "GatewayPorts no (or clientspecified) in the box's sshd_config, then run again")
         say("tunnel", "created", t.stdout.strip())
         if mint:  # only now: a check that failed above leaves this desktop's listener as it was
+            asked = True
             try:
                 link = mint_link(remote)
+            except OfferUnavailable as e:
+                unavailable = True
+                raise Fail(f"{e}; nothing was sent to {host}. {other}") from None
             except Fail as e:
                 raise Fail(f"{e}; nothing was sent to {host}. {other}") from None
+        if state == "saved":  # saved there earlier but not reachable: removed only now, when a new link is ready
+            box_pairing_remote(place, "rm", me)
         sent = True
         try:
             box_pairing_remote(place, "add", me, link)
@@ -4302,26 +4428,33 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
             raise Fail(f"{e}. If {host} has this desktop saved under another name, a second one is refused: on "
                        f"{host}, orca-ide environment list; remove the old one (orca-ide environment rm --environment "
                        f"<old>), then run again. {other}") from None
+        added = True
+        link = None
+        end = time.time() + PAIR_WAIT
+        while True:  # the proof: the same reads --check makes on the box (environment list, status --environment)
+            try:
+                state = box_pairing_remote(place, "status", me)
+            except Fail:
+                state = "unknown"  # the box is paired: a status that fails says pending, below
+            if state == "reachable" or time.time() >= end:
+                break
+            time.sleep(2)
     except BaseException:
-        subprocess.run([tunnel, "stop", host], capture_output=True)
-        if sent:
-            retired = mint and retire_offer(remote)
-            print(f"The tunnel to {host} is stopped again. The link may have reached {host}"
-                  + (": setup retired it here with orca pair --rotate, which ends it if it was not used. " if retired
-                     else ": ") + REVOKE_HELP.format(host=host), file=sys.stderr)
+        if added:  # the box has the link: keep the tunnel and the record, so a re-run and --remove-host find them
+            record()
+        else:
+            subprocess.run([tunnel, "stop", host], capture_output=True)
+        if asked:
+            retired = None if added or unavailable else retire_offer(remote)
+            print(("The tunnel to " + host + " is stopped again. " if not added else "")
+                  + after_mint(host, port, retired, when), file=sys.stderr)
+        elif sent:
+            print(f"The tunnel to {host} is stopped again. The link may have reached {host}: "
+                  + REVOKE_HELP.format(host=host, when="the day you made it"), file=sys.stderr)
         raise
     finally:
         link = None  # noqa: F841 (dropped as soon as the box has it)
-    end = time.time() + PAIR_WAIT
-    while True:  # the proof: the same reads --check makes on the box (environment list, status --environment)
-        state = box_pairing_remote(place, "status", me)
-        if state == "reachable" or time.time() >= end:
-            break
-        time.sleep(2)
-    hosts_dir().mkdir(parents=True, exist_ok=True)
-    write_atomic(host_record(host), json.dumps({"host": host, "environment": place.env, "desktop_environment": me,
-                                                "tunnel_port": port, "tunnel_remote_port": remote}, indent=2).encode(),
-                 0o600)
+    record()
     if state == "reachable":
         say("desktop lanes", "created", f"{host} reaches this machine's Orca as environment {me} "
             f"(tunnel lane-tunnel@{env_name(host)}.service)")
@@ -4332,11 +4465,10 @@ def desktop_lanes(place: Place, tunnel_opts: "list | None" = None, remote_port: 
         now = listen_addresses(port)
         say("desktop listener", "now", f"this desktop's Orca listens on {', '.join(now) or 'an address /proc does not show'}"
             f" (port {port})")
-        print(f"To undo: project-setup --remove-host {host}, then in Orca here Settings > Servers, the client {host} "
-              f"paired as > revoke (only the window revokes it). Until then {host} can run commands as you on this "
-              "computer, and this desktop's Orca keeps listening on every interface while that client is paired.")
+        print("To undo: " + MINT_REVOKE.format(host=host, when=when) + f" Until then {host} can run commands as you "
+              "on this computer.")
     else:
-        print(REVOKE_HELP.format(host=host))
+        print(REVOKE_HELP.format(host=host, when="the day you made it"))
     return me
 
 
@@ -4498,7 +4630,12 @@ def remove_host(host: str) -> int:
         say("tunnel", "removed", t.stdout.strip())
     if ok:  # kept when a step failed, so a retry finds the same environment name
         host_record(host).unlink(missing_ok=True)
-    print(REVOKE_HELP.format(host=host))
+    when = rec.get("paired_at") if isinstance(rec, dict) and isinstance(rec.get("paired_at"), str) else None
+    if isinstance(rec, dict) and rec.get("link") == "orca pair":
+        print(f"Revoke the link in Orca here: Settings > Servers, " + ENTRY.format(when=when or "the day setup made it")
+              + " > revoke. " + NARROW.format(host=host))
+    else:
+        print(REVOKE_HELP.format(host=host, when=when or "the day you made it"))
     print(f"Kept: this machine driving {host} (direction 1). To drop that too: orca-ide environment rm --environment "
           f"{place.env}; systemctl --user disable --now orca-tunnel-{place.env}.service")
     return 0 if ok else 1

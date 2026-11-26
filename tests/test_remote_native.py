@@ -58,7 +58,11 @@ while rest:
         host = a
         break
 down_on = os.environ.get("STUB_SSH_DOWN_ON")
-if os.environ.get("STUB_SSH_DOWN") or (down_on and down_on in " ".join(rest)):
+added = os.path.join(os.environ["STUB_BOX"], ".stub-added")
+if "--box-pairing add" in " ".join(rest):
+    open(added, "w").close()
+after_add = os.environ.get("STUB_SSH_DOWN_AFTER_ADD") and os.path.exists(added) and "--box-pairing status" in " ".join(rest)
+if os.environ.get("STUB_SSH_DOWN") or after_add or (down_on and down_on in " ".join(rest)):
     sys.stderr.write("ssh: connect to host %s: No route to host\n" % host)
     sys.exit(255)
 box = os.environ["STUB_BOX"]
@@ -1702,8 +1706,10 @@ class MintTests(Case):
         self.listener.listen()
         self.port, self.remote = self.listener.getsockname()[1], free_port()
         self.seed = secrets.token_hex(8)
-        self.e.env.update(LANE_DESKTOP_ORCA_PORT=str(self.port), STUB_PAIR_SEED=self.seed)
-        self.link, self.token, self.code = stub_offer(self.seed, 0, f"127.0.0.1:{self.remote}")
+        # the stub's Orca app is this test process, which holds the listener
+        self.e.env.update(LANE_DESKTOP_ORCA_PORT=str(self.port), STUB_PAIR_SEED=self.seed, STUB_APP_PID=str(os.getpid()))
+        # the mint rotates first (review M1): the box's link is the stub's first rotation
+        self.link, self.token, self.code = stub_offer(self.seed, 1, f"127.0.0.1:{self.remote}")
 
     def mint(self, *args, answers=(("orca pair now?", "y"),), env_extra=None):
         return self.e.pty_setup(str(self.repo), "box", "--no-start", "--tunnel-remote-port", str(self.remote), *args,
@@ -1727,7 +1733,8 @@ class MintTests(Case):
     def test_one_yes_mints_sends_on_stdin_and_proves_it(self):
         rc, out = self.mint()
         self.assertEqual(rc, 0, out)
-        self.assertEqual([a[2:] for a in self.pair_calls()], [["--address", f"127.0.0.1:{self.remote}", "--json"]])
+        self.assertEqual([a[2:] for a in self.pair_calls()],
+                         [["--address", f"127.0.0.1:{self.remote}", "--rotate", "--json"]])
         node = [x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x]
         self.assertEqual(len(node), 1, node)
         self.assertEqual(node[0]["stdin_sha256"], hashlib.sha256(self.link.encode()).hexdigest())
@@ -1745,11 +1752,15 @@ class MintTests(Case):
         rc, out = self.mint()
         self.assertEqual(rc, 0, out)
         ask = " ".join(out[:out.index(MINT_PROMPT)].split())
-        for s in (f"orca pair --address 127.0.0.1:{self.remote}", "run commands as you", "not this desktop's screen",
-                  f"listens on 127.0.0.1:{self.port} only", "every interface", "until", "revoke",
+        for s in (f"orca pair --address 127.0.0.1:{self.remote} --rotate --json", "can open terminals here",
+                  "run any command as you", "a command run as you can", "--grant-desktop-control",
+                  "every access link of this Orca that nobody has used yet stops working", "Links in use",
+                  f"listens on 127.0.0.1:{self.port} only", "every interface", "revoke", '"Runtime"',
+                  "not after the box", "does not narrow the listener", "quit Orca here and start it again",
                   "project-setup --remove-host box", "Settings > Servers", "--pair-by-hand", "loopback",
                   "never shown, logged or written"):
             self.assertIn(s, ask, s)
+        self.assertNotIn("screen and input (no", ask)  # review M3: no claim that the box cannot reach the screen
         after = " ".join(out[out.index("desktop lanes: created"):].split())
         self.assertIn(f"listens on 127.0.0.1:{self.port}", after)  # the resulting bind, read again after the mint
         self.assertIn("project-setup --remove-host box", after)
@@ -1807,7 +1818,7 @@ class MintTests(Case):
         self.assertEqual(rc, 0, out)
         node = [x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x]
         self.assertEqual(node[0]["endpoint"], f"ws://127.0.0.1:{self.remote}")
-        minted = offer_of(stub_offer(self.seed, 0, f"127.0.0.1:{self.port}")[0])
+        minted = offer_of(stub_offer(self.seed, 1, f"127.0.0.1:{self.port}")[0])
         self.assertEqual(node[0]["rest_sha256"], rest_sha(minted))
 
     def test_orca_refusing_the_offer_says_why_and_the_other_routes_and_sends_nothing(self):
@@ -1820,17 +1831,138 @@ class MintTests(Case):
         self.assertIn("--user disable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
         self.assertNotIn("Traceback", out)
 
-    def test_a_failed_add_after_the_mint_retires_the_link_and_says_to_revoke(self):
-        for extra in ({"STUB_ADD_ECHOES": "1"}, {"STUB_SSH_DOWN_ON": "--box-pairing add"}):
+    def assert_retired_and_told(self, out):
+        """Review M2: after the mint, a failure rotates the link, says the listener was widened (the bind as it is)
+        and gives the mint's own revoke steps."""
+        calls = [c[2:] for c in self.pair_calls()]
+        self.assertEqual(len(calls), 2, calls)  # the mint, then the rotate that retires it
+        self.assertIn("--rotate", calls[1])
+        flat_out = " ".join(out.split())
+        for s in ("listen on every interface", f"listens on 127.0.0.1:{self.port} now", "orca pair --rotate",
+                  "project-setup --remove-host box", '"Runtime"', "does not narrow the listener"):
+            self.assertIn(s, flat_out, s)
+        self.assertNotIn("Traceback", out)
+        self.assert_nowhere(out)
+
+    def test_a_failed_add_after_the_mint_retires_the_link_and_says_so(self):
+        rc, out = self.mint(env_extra={"STUB_ADD_ECHOES": "1"})
+        self.assertEqual(rc, 1, out)
+        self.assert_retired_and_told(out)
+        self.assertIn("--pair-by-hand", " ".join(out.split()))
+        self.assertIn("--on-client", " ".join(out.split()))
+        self.assertIn("--user disable --now lane-tunnel@box.service", self.e.lines(".systemctl"))
+
+    def test_ssh_dropping_at_the_add_retires_the_link_and_says_so(self):
+        rc, out = self.mint(env_extra={"STUB_SSH_DOWN_ON": "--box-pairing add"})
+        self.assertEqual(rc, 1, out)
+        self.assert_retired_and_told(out)
+
+    def test_an_unreadable_answer_from_orca_pair_retires_whatever_it_made(self):
+        rc, out = self.mint(env_extra={"STUB_PAIR_GARBLED": "1"})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("gave no link it could read", out)
+        self.assert_retired_and_told(out)
+        self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
+
+    def test_a_link_for_another_address_is_not_sent_and_is_retired(self):
+        self.link, self.token, self.code = stub_offer(self.seed, 1, f"192.0.2.10:{self.remote}")
+        rc, out = self.mint(env_extra={"STUB_PAIR_BAD_ENDPOINT": "1"})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("does not name 127.0.0.1", out)
+        self.assert_retired_and_told(out)
+        self.assertEqual([x for x in self.e.jlines(".node", self.e.box) if "stdin_sha256" in x], [])
+
+    def test_orcas_reason_is_redacted(self):
+        self.link, self.token, self.code = stub_offer(self.seed, 0, f"127.0.0.1:{self.remote}")
+        rc, out = self.mint(env_extra={"STUB_PAIR_UNAVAILABLE": "1", "STUB_PAIR_GUIDANCE_SECRET": "1"})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("network_exposure_failed", out)
+        self.assert_nowhere(out)
+
+    def test_a_box_that_drops_after_a_good_add_is_recorded_pending_with_the_revoke_steps(self):
+        rc, out = self.mint(env_extra={"STUB_SSH_DOWN_AFTER_ADD": "1"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("desktop lanes: pending", out)
+        rec = json.loads((self.e.home / ".config" / "lane-control" / "hosts" / "box.json").read_text())
+        self.assertEqual((rec["desktop_environment"], rec["link"]), ("deskbox", "orca pair"))
+        flat_out = " ".join(out.split())
+        for s in (f"listens on 127.0.0.1:{self.port}", "project-setup --remove-host box", "does not narrow"):
+            self.assertIn(s, flat_out, s)
+        self.assert_nowhere(out)
+
+    def test_enter_at_the_question_is_no(self):
+        rc, out = self.mint(answers=[(MINT_PROMPT, ""), ("share link", "")])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.pair_calls(), [])
+        self.assertIn("desktop lanes: skipped", out)
+
+    def test_checks_that_fail_before_the_mint_make_no_link(self):
+        """Review m1: the mint comes after every check of the tunnel, on the default route too."""
+        import socket
+        cases = [({"STUB_TUNNEL_EXPOSED": "1"}, "GatewayPorts"), ({"STUB_TUNNEL_FAILS": "1"}, "did not come up"),
+                 ({"STUB_TUNNEL_IMPOSTOR": "1"}, "did not come up")]
+        for extra, said in cases:
             rc, out = self.mint(env_extra=extra)
             self.assertEqual(rc, 1, (extra, out))
-            self.assertIn("--rotate", [x for c in self.pair_calls() for x in c])
-            flat_out = " ".join(out.split())
-            self.assertIn("revoke", flat_out)
-            self.assertIn("--pair-by-hand", flat_out)
-            self.assertIn("--on-client", flat_out)
-            self.assertEqual(self.secrets_seen(out), [], extra)
-            self.assertNotIn("Traceback", out)
+            self.assertIn(said, " ".join(out.split()), extra)
+            self.assertEqual(self.pair_calls(), [], extra)
+        with socket.socket() as busy:  # the box's end is taken (the box is this machine in the tests)
+            busy.bind(("127.0.0.1", 0))
+            busy.listen()
+            self.remote = busy.getsockname()[1]
+            rc, out = self.mint()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("is in use", out)
+        self.assertEqual(self.pair_calls(), [])
+
+    def test_a_listener_that_is_not_orcas_goes_to_the_hand_link(self):
+        """Review m2: the port is checked to be the running Orca app's."""
+        rc, out = self.mint(answers=[("share link", "")], env_extra={"STUB_APP_PID": "1"})
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn(MINT_PROMPT, out)
+        self.assertEqual(self.pair_calls(), [])
+        self.assertIn("not this desktop's Orca app", " ".join(out.split()))
+        rc, out = self.mint(answers=[("share link", "")], env_extra={"STUB_APP_PID": ""})
+        self.assertIn("Orca did not say its pid", " ".join(out.split()))
+
+    def test_a_paired_box_with_its_tunnel_down_gets_the_tunnel_back_not_a_new_link(self):
+        """Review m3."""
+        rc, out = self.mint()
+        self.assertEqual(rc, 0, out)
+        box = self.e.box_state()  # the stub's box reaches this machine only while the tunnel's box end is open
+        box["environments"][0]["tunnel_port"] = self.remote
+        (self.e.box / "stub.json").write_text(json.dumps(box))
+        subprocess.run(["sh", str(TUNNEL), "stop", "box"], env=self.e.env, capture_output=True)
+        rc, out = self.mint(answers=[])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("tunnel: restarted", out)
+        self.assertIn("desktop lanes: exists", out)
+        self.assertNotIn(MINT_PROMPT, out)
+        self.assertEqual(len(self.pair_calls()), 1)
+
+    def test_a_yes_that_replaces_a_dead_pairing_says_the_old_entry_stays(self):
+        rc, out = self.mint()
+        self.assertEqual(rc, 0, out)
+        box = self.e.box_state()
+        for env in box["environments"]:
+            env["reachable"] = False
+        (self.e.box / "stub.json").write_text(json.dumps(box))
+        rc, out = self.mint(answers=[(MINT_PROMPT, "n"), ("share link", "")])
+        self.assertEqual(rc, 0, out)
+        ask = " ".join(out.split())
+        self.assertIn("tunnel: down", ask)
+        self.assertIn("the earlier entry stays valid here until you revoke it too", ask[:ask.index(MINT_PROMPT)])
+        self.assertEqual(self.e.box_state()["environments"][0]["name"], "deskbox")  # a no leaves the box's entry
+
+    def test_remove_host_after_a_mint_names_the_entry_and_the_restart(self):
+        rc, out = self.mint()
+        self.assertEqual(rc, 0, out)
+        r = subprocess.run([sys.executable, str(SETUP), "--remove-host", "box"], env=self.e.env, capture_output=True,
+                           text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        flat_out = " ".join(r.stdout.split())
+        for s in ('"Runtime"', time.strftime("%Y-%m-%d"), "does not narrow the listener", "start it again"):
+            self.assertIn(s, flat_out, s)
 
     def test_no_listener_on_the_desktop_port_goes_to_the_hand_link(self):
         rc, out = self.mint(answers=[("share link", "")], env_extra={"LANE_DESKTOP_ORCA_PORT": str(free_port())})
