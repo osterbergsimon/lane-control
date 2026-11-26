@@ -17,6 +17,20 @@ help, its bundled `orca-cli` skill and its shipped code, read-only; nothing in O
   "Workspace cleanup".
 - A scheduled runner applies the rules, and every workspace is checked again right before removal; nothing is forced.
 
+## Rules are per server
+From the field report 2026-11-26 (a site running native Orca with paired boxes); not re-run here.
+- The rules are a key, `workspaceCleanupPolicy`, in each Orca server's own profile. The desktop and every box have
+  their own.
+- The CLI offers only `preview`, `run` and `report`: no command reads or sets the rules.
+- The app's Settings page is the client's. Switching the window to a paired server does not change it.
+- A project's cleanup setting is kept on its server. "Use global" means that server's global rules, which the owner
+  cannot reach from the desktop.
+- So a new project on a box is unprotected until its own rule is set: the global rules you turned on at the desktop do
+  not apply to it. Set the project's own rule ("Custom").
+- When the app is only a client of the server that was read, "No rule is on here" (`rules-off`) reports that server,
+  not what the app's Settings page shows. The paths to the global rules in this page and in setup's report are for
+  the Orca of the machine you sit at; for a box's project, use the project's own setting.
+
 ## What "merged" means
 
 A workspace has the reason `merged` when either of these holds:
@@ -45,6 +59,10 @@ release, is what keeps an unmerged lane's worktree. Turn it on beside the merged
 rule; turning it on is the owner's, and lane-control only says so.
 
 A workspace with no commits beyond the default branch is `unchanged`, a different rule, not `merged`.
+
+A lane merged only into a side branch (away-improve's `away/<date>`) is not `merged` until its commits reach the
+default branch, so `no-rule-matched` is correct there (field report 2026-11-26). How that fits case 1 above, read from
+the source and naming no base branch, has not been checked.
 
 ## What keeps a merged workspace (so it is not removed at once)
 
