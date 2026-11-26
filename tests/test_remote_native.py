@@ -217,16 +217,17 @@ def make_link(port=None, address="127.0.0.1"):
     return f"orca://pair?code={code}", token, code
 
 
-def run_pty(argv, env, answer=None, prompt="share link", timeout=90):
-    """Run argv in a pseudo-terminal (so getpass has a real /dev/tty with echo); type `answer` at `prompt`.
-    Returns (exit status, everything the terminal showed)."""
+def run_pty(argv, env, answer=None, prompt="share link", timeout=90, answers=None):
+    """Run argv in a pseudo-terminal (so getpass has a real /dev/tty with echo); type `answer` at `prompt`, or each
+    (prompt, answer) of `answers` in turn. Returns (exit status, everything the terminal showed)."""
     pid, fd = pty.fork()
     if pid == 0:
         try:
             os.execve(argv[0], argv, env)
         finally:
             os._exit(127)
-    out, sent, end = b"", answer is None, time.time() + timeout
+    todo = list(answers or ([] if answer is None else [(prompt, answer)]))
+    out, seen, end = b"", 0, time.time() + timeout
     while time.time() < end:
         r, _, _ = select.select([fd], [], [], 0.5)
         if r:
@@ -237,10 +238,10 @@ def run_pty(argv, env, answer=None, prompt="share link", timeout=90):
             if not chunk:
                 break
             out += chunk
-        if not sent and prompt.encode() in out:
+        if todo and todo[0][0].encode() in out[seen:]:
             time.sleep(0.2)  # getpass turns echo off right after the prompt
-            os.write(fd, answer.encode() + b"\r")
-            sent = True
+            seen = len(out)
+            os.write(fd, todo.pop(0)[1].encode() + b"\r")
     else:
         os.kill(pid, 9)
     _, status = os.waitpid(pid, 0)
@@ -1709,7 +1710,7 @@ class DocTests(unittest.TestCase):
     def test_the_docs_put_the_check_first_and_keep_the_link_a_hand_step(self):
         # PAIR-1 (lc-lxd): orca pair widens the desktop, so the 127.0.0.1 link stays the owner's, and --check comes first
         remote = " ".join(REMOTE_DOC.read_text().split())
-        for s in ("## Check first", "project-setup --check <repo> <host>", "changes nothing", "This stays a hand step",
+        for s in ("## Check first", "project-setup --check <repo> <host>", "changes nothing", "In setup today this is a hand step",
                   "`orca pair`", "--address 127.0.0.1", "refusing to widen to all interfaces",
                   "docs/research/2026-11-25-orca-pairing.md", "Orca on your SSH hosts"):
             self.assertIn(s, remote, s)

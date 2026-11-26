@@ -75,6 +75,7 @@ More: [roles](../core/roles.md), [model routing](../core/model-routing.md), [nat
 | Skills (the three lane skills and the design skills) | `~/.agents/skills/`, linked for Claude and OpenCode | `project-setup`, `--refresh` |
 | One project's settings and tier table, **outside its repo** | `~/.config/lane-control/projects/<folder>-<hash>/` (`settings.json`, `lanes.tsv`) | `project-setup`; `--show` prints them |
 | This machine's settings and state | `~/.config/lane-control/`: `machine.conf`, `limits.sh` (optional, yours), the away file, away-improve's files, `hosts/<host>.json`, `tunnels/<host>.env` | `machine-setup`, you, `lane-away`, `lane-improve`, `project-setup`, `lane-tunnel` |
+| The model environment (optional, for a gateway) | the one source `~/.config/lane-control/model-env.conf`, and from it `model-env.sh`, `~/.config/fish/conf.d/lane-control-models.fish` and the `env` block of Claude's user settings (what it wrote there is noted in `model-env.written.json`) | `model-env`, only when you run it |
 | Budget config and weekly ceiling | `~/.config/rove/playbook.conf.sh` (an old folder name, still the default) and the ceiling file it names | you ([getting started](getting-started.md), step 2.2) |
 | In a project's repo | `AGENTS.lane-control.md` plus one pointer line in `AGENTS.md`, and the lane files in `.lane-control/`; the rendered personas there are not committed | `project-setup`, committing only on your yes |
 | Beads: issues and memories | a private repo `<project>-beads` in `~/code/`; the project's `.beads` is a git-ignored link to it | you, or `project-setup` on your yes |
@@ -91,6 +92,19 @@ persona, unit or link names, and nothing without a valid `current` (a dry run un
 
 More: [core and its scripts](../core/README.md), [where beads lives](../core/issues.md#where-beads-lives-backup-and-restore-lc-5c1),
 [updating an existing host](getting-started.md#updating-an-existing-host).
+
+## Models
+
+No setup script has a built-in model for the machine coordinator or the automations: you name them once (a flag,
+`machine.conf` or an answer in the terminal) and a re-run keeps them. An automation's own record keeps its model unless
+you pass `--replace-automation-model`; a new automation takes the model the existing records agree on. Before a model
+is written, a gateway in use is asked what it serves (`<base>/v1/models`): a name it does not list is not written, and
+one it cannot confirm is written only on your yes in a terminal (`--no-model-check` skips the check). For Claude through a gateway, **`model-env`** keeps the
+model variables in one source, writes the shell file, the fish file and Claude's settings `env` from it, including the
+auto-mode classifier model (no default), and `model-env --check` compares every place that sets them. It never edits a
+line you wrote, and never writes a key. A running agent keeps the environment it was born with.
+
+More: [the model environment](../orchestrators/native-orca/setup.md#the-model-environment-claude-through-a-gateway).
 
 ## The lane tools
 
@@ -189,7 +203,10 @@ link step cannot be done. **It is not a drop-in:** it needs direction 1 in place
 bot on the desktop, and a person approves it once. It reaches a bot, not a lane, so it can ask the desktop for work
 but cannot start a supervised lane there ([pairing research](research/2026-11-25-orca-pairing.md), section 6; not run
 there). lane-control has not built it, and setup does not fall back to it by itself. Also pending (PAIN-1, lc-bmk):
-making the share-link step as painless as possible.
+making the share-link step as painless as possible. A newer decision (owner, 2026-11-26, same issue): the default
+route becomes a link minted with `orca pair` by setup, which widens the desktop's listener to every interface; your
+hand-made share link stays for keeping the desktop on loopback. Not built when this was written
+([pairing facts](../orchestrators/native-orca/remote.md#pairing-facts)).
 
 **The rest of what you do by hand for a box:** run `ssh <host>` once so its host key is known; run `project-setup
 --check <repo> <host>`; make sure ssh can log in without asking anything (for a smartcard or agent key, `lane-tunnel`
@@ -210,9 +227,14 @@ Details: [Do you need the tunnel?](../orchestrators/native-orca/remote.md#do-you
   ([record](../orchestrators/native-orca/record.md), NO-6). The docs on main say the no-tunnel route is not run.
 - A container testbed exists in PR #68 (`tests/testbed/`, not on main). It was stood down on 2026-11-25. Its results
   are not verified yet, so this page does not rely on them.
-- Why the share link stays your step: `orca pair` would make the desktop listen on every interface
-  ([pairing research](research/2026-11-25-orca-pairing.md), read from Orca's source).
-- A lane's report across the two machines is poll-only: nothing proves it wakes the coordinator that started it.
+- Why setup asks you for the share link today: `orca pair` would make the desktop listen on every interface
+  ([pairing research](research/2026-11-25-orca-pairing.md), read from Orca's source). The link is a credential, and the
+  address in it is what the box dials, not what the desktop listens on:
+  [pairing facts](../orchestrators/native-orca/remote.md#pairing-facts).
+- A box coordinator's lane on the desktop wakes it with its report, with both Orcas at the same version (1.4.274):
+  measured in the field (field report 2026-11-26), not repeated here. A desktop coordinator's lane on a box is not
+  measured. A report that is lost or never sent is left to the night manager's idle check, Orca's stopped-worker notice
+  where the build has it, and otherwise you ([reports across hosts](../orchestrators/native-orca/remote.md#reports-across-hosts)).
 
 More: [native Orca on an SSH host](../orchestrators/native-orca/remote.md).
 
@@ -275,6 +297,8 @@ More: [away-improve mode, the owner's guide](away-improve.md).
 - **Orca removes a merged lane's worktree**, with its own rule "Delete merged workspaces". Orca's rules are off by
   default and you turn them on; setup reports what it can tell and never changes Orca's settings. "Delete released
   orchestration worker workspaces" is recommended beside it.
+- The rules are each Orca server's own. The app's Settings page does not set a box's global rules, so give each
+  project on a box its own rule ([rules are per server](orca-cleanup.md#rules-are-per-server)).
 - GitHub's "Automatically delete head branches" removes the remote branch; `project-setup` offers to turn it on.
 - When Orca does not take a merged lane, the coordinator removes it by hand, after checks.
 - `lane-sweep` reports what is left over. Without `--apply` it removes nothing.

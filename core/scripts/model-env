@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""model-env: the model environment of this machine from one source, and a check of every place that sets it.
+
+  model-env [--set NAME=VALUE]... [--unset NAME]... [--no-model-check]
+  model-env --check
+
+Without --check it updates the source (~/.config/lane-control/model-env.conf), then writes from it:
+- ~/.config/lane-control/model-env.sh (POSIX shells; you add one `. <that file>` line to your shell profile),
+- ~/.config/fish/conf.d/lane-control-models.fish (when ~/.config/fish is there; fish reads it by itself),
+- the `env` block of Claude Code's user settings ($CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json).
+No shell startup file is ever edited. A generated file edited since, a file lane-control did not write, and a value in
+the settings that it did not put there are reported and left as they are.
+
+With a gateway (ANTHROPIC_BASE_URL) the auto-mode classifier model, CLAUDE_CODE_AUTO_MODE_MODEL, must be set: a
+non-reasoning model the gateway serves. There is no default; in a terminal it is asked for. A first run in a terminal
+with nothing to go on asks for the gateway and its models.
+
+Before anything is written every model name is looked up in the gateway's <base>/v1/models (one request). A name it
+does not list writes nothing. One it could not confirm (no answer, a refused key, a bare alias with nothing saying what
+is sent, only a wildcard) is written only on your yes in a terminal; without a terminal nothing is written.
+--no-model-check writes without the check. The key for that request is ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY of
+this shell, and it is not sent when the shell's own ANTHROPIC_BASE_URL names another URL than the one asked. It is never
+written or printed, and no key or token can be set here.
+
+--check compares each home with the source, value by value, and changes nothing: the three generated ones, the
+hand-written lines in shell startup files and environment.d, the env blocks of set-up projects' Claude settings, the
+systemd user manager's environment and this shell's.
+
+Exit: 0 done, or every home agrees; 1 a model is not served or not confirmed, a home was left that differs, or
+--check found a difference; 2 usage, a refused value or a missing answer.
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import modelenv as M  # noqa: E402
+
+HOW = (f"model-env --set {M.BASE}=<your gateway URL> --set ANTHROPIC_DEFAULT_SONNET_MODEL=<name> "
+       f"--set {M.CLASSIFIER}=<name>")
+
+
+class Usage(Exception):
+    pass
+
+
+def say(line: str):
+    print(line, flush=True)
+
+
+def terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def confirm(question: str) -> bool:
+    try:
+        return input(question).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def ask(name: str, question: str) -> str:
+    """The owner's answer, checked as --set would; "" to skip."""
+    try:
+        value = input(question).strip()
+    except EOFError:
+        return ""
+    why = M.refusal_of(name, value) if value else None
+    if why:
+        raise Usage(why)
+    return value
+
+
+def changes(pairs: list, unset: list) -> dict:
+    """{NAME: value, or None to unset}. A refused pair is never quoted: it may be a key."""
+    out = {}
+    for pair in pairs:
+        name, eq, value = pair.partition("=")
+        if not eq:
+            raise Usage("--set takes NAME=VALUE")
+        why = M.refusal_of(name, value)
+        if why:
+            leaked = " What you typed is now in your shell history: change that key if it was real." \
+                if M.SECRET_NAME.search(name) or M.LOOKS_LIKE_KEY.search(value) else ""
+            raise Usage(why + leaked)
+        out[name] = value
+    for name in unset:
+        if name not in M.KEYS:
+            raise Usage(f"--unset takes one of: {', '.join(M.KEYS)}")
+        out[name] = None
+    return out
+
+
+def first_questions(env) -> dict:
+    values = {}
+    say("No model environment yet. Press Enter to skip a question.")
+    base = ask(M.BASE, f"Gateway URL ({M.BASE}), if your models come from one: ")
+    if base:
+        values[M.BASE] = base
+    for alias, name in M.ALIASES.items():
+        if alias == "fable":
+            continue
+        model = ask(name, f"Model that `{alias}` stands for ({name}): ")
+        if model:
+            values[name] = model
+    return values
+
+
+def classifier(had: dict, values: dict, env) -> None:
+    """With a gateway the classifier model is set explicitly: asked in a terminal, never defaulted."""
+    if M.CLASSIFIER in values or not M.is_gateway(M.view_after(had, values, env).get(M.BASE)):
+        return
+    why = (f"with a gateway the auto-mode classifier model is set explicitly: {M.CLASSIFIER}, a non-reasoning model "
+           "the gateway serves. There is no default")
+    if terminal():
+        say(f"{why}. (Left unset, Claude Code picks one itself, which your gateway may not serve or may reject.)")
+        model = ask(M.CLASSIFIER, "Auto-mode classifier model: ")
+        if model:
+            values[M.CLASSIFIER] = model
+            return
+    raise Usage(f"{why}: --set {M.CLASSIFIER}=<name>. Nothing was written")
+
+
+def write(a, env) -> int:
+    wanted = changes(a.set, a.unset)
+    have = M.read_source(env)
+    values = dict(have or {})
+    for name, value in wanted.items():
+        if value is None:
+            values.pop(name, None)
+        else:
+            values[name] = value
+    if have is None and not wanted:
+        if terminal():
+            values = first_questions(env)
+        if not values:
+            raise Usage(f"nothing to write yet: {HOW}. Nothing was written")
+    classifier(have or {}, values, env)
+    values = M.ordered(values)
+    for w in M.classifier_warnings(values.get(M.CLASSIFIER, "")):
+        say(f"classifier: warning: {w}")
+    if "ANTHROPIC_SMALL_FAST_MODEL" in values:
+        say("note: ANTHROPIC_SMALL_FAST_MODEL is deprecated in Claude Code; use ANTHROPIC_DEFAULT_HAIKU_MODEL")
+
+    if not a.no_model_check:
+        items = [(k, "claude", values[k]) for k in M.MODEL_KEYS if k in values]
+        found = M.check_models(items, M.view_after(have or {}, values, env), env)
+        for line in M.check_lines(found):
+            say(line)
+        why = M.gate(found, confirm if terminal() else None, set())
+        if why:
+            print(f"model-env: {why}. Nothing was written", file=sys.stderr)
+            return 1
+
+    source = M.source_path(env)
+    if have == values:
+        say(f"source: exists {source} ({len(values)} values)")
+    else:
+        M.write_atomic(source, M.source_text(values), 0o600)
+        say(f"source: {'created' if have is None else 'updated'} {source} ({len(values)} values)")
+    left = False
+    files = [("shell env", "sh", M.sh_path(env))]
+    if (M.config_home(env) / "fish").is_dir():
+        files.append(("fish env", "fish", M.fish_path(env)))
+    for name, kind, path in files:
+        what, differs = M.write_shell_file(kind, path, values, env)
+        say(f"{name}: {what}")
+        left |= differs
+    lines, differs = M.merge_settings(values, env)
+    for line in lines:
+        say(line)
+    left |= differs
+    for f, fish in M.startup_files(env):
+        try:
+            found = M.assignments(f.read_text(errors="replace"), fish)
+        except OSError:
+            continue
+        for n, k, v in found:
+            if v is None or v != values.get(k):
+                what = "a value only the shell can work out" if v is None else M.shown(k, v)
+                say(f"hand-written: {k} at {f}:{n} is {what}, the source has "
+                    f"{M.shown(k, values[k]) if k in values else 'none'}; left as it is (it may win over the "
+                    "generated files)")
+    if not M.sources_sh(env):
+        say(f"note: for POSIX shells add this line to your shell profile (nothing here edits it): . {M.sh_path(env)}")
+    say(f"note: {M.RUNNING_NOTE}")
+    say("note: model-env --check compares every place that sets these, value by value")
+    if left:
+        print("model-env: a place above was left as it is and does not carry the source; change or remove it by hand, "
+              "then run model-env --check", file=sys.stderr)
+        return 1
+    return 0
+
+
+def check(env) -> int:
+    report = M.compare(env)
+    for line in report.lines:
+        say(line)
+    say(f"note: {M.RUNNING_NOTE}")
+    if report.bad:
+        say(f"check: {report.bad} differ, are missing or could not be compared. Nothing was changed")
+        return 1
+    say("check: ok (every place that sets a value agrees with the source)")
+    return 0
+
+
+def main(argv) -> int:
+    ap = argparse.ArgumentParser(prog="model-env", description=__doc__.split("\n\n")[0], allow_abbrev=False,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
+    ap.add_argument("--unset", action="append", default=[], metavar="NAME")
+    ap.add_argument("--check", action="store_true", help="compare every home with the source; change nothing")
+    ap.add_argument("--no-model-check", action="store_true", help="do not ask the gateway what it serves")
+    a = ap.parse_args(argv)
+    if a.check and (a.set or a.unset):
+        print("model-env: --check changes nothing; it takes no --set or --unset", file=sys.stderr)
+        return 2
+    if os.geteuid() == 0:
+        print("model-env: refusing to run as root; agents run as a normal user", file=sys.stderr)
+        return 2
+    try:
+        return check(os.environ) if a.check else write(a, os.environ)
+    except (Usage, M.SourceError) as e:
+        print(f"model-env: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"model-env: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

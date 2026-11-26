@@ -193,3 +193,47 @@ Orchestrator: native Orca
 
 ## 37. Budget steps scale from the ceiling
 - **Rule:** Budget steps are offsets below the weekly ceiling (defaults -15, -7, -4, -2; set in the config), never fixed percentages. A ceiling of 93 gives 78, 86, 89 and 91; a ceiling of 50 gives 35, 43, 46 and 48. "Limit free until reset" means use it, with the hard edge at 100 % (`model-routing.md`).
+
+## 38. A listening port is not proof
+- **Failure:** a port that listened was taken to mean the service or tunnel was healthy. (field report 2026-11-26)
+- **Fix:** check the unit's substate and restart counter, and that the socket is owned by the unit's main pid, not by a multiplexing master (a shared ssh connection).
+
+## 39. One server runtime per host after an upgrade
+- **Failure:** after an upgrade, an older server runtime can still be running beside the new one. (field report 2026-11-26)
+- **Fix:** after each upgrade, prove there is exactly one: one listener, on the expected version, and no other server process.
+
+## 40. A `chsh` does not reach the systemd user manager
+- **Failure:** the login shell was changed with `chsh`, but the user manager, and the runtime it starts, kept the old `SHELL`. (field report 2026-11-26)
+- **Fix:** `systemctl --user set-environment SHELL=<shell>`, restart the runtime, and compare its `SHELL` with the passwd entry.
+
+## 41. A running agent keeps the environment it was born with
+- **Failure:** a corrected variable was expected to reach agents already running. (field report 2026-11-26)
+- **Fix:** after an environment change, restart the agent (and whatever starts it); check the value in the running process.
+
+## 42. Never run the gate while the checkout is being updated
+- **Failure:** a gate run during a checkout update tests a tree that is partly old and partly new. (field report 2026-11-26)
+- **Fix:** finish the update first, then run the gate; the two take turns.
+
+## 43. A gate that cannot take the lock has not failed the build
+- **Failure:** a gate that never got its lock reported a build failure. (field report 2026-11-26)
+- **Fix:** give "could not take the lock" its own exit code and say so; nothing was built or tested.
+
+## 44. A watchdog must fail loudly
+- **Failure:** a watchdog that cannot address its target can look like one with nothing to do. (field report 2026-11-26)
+- **Fix:** when it cannot address its target it exits non-zero and says so; it never passes quietly.
+
+## 45. Remove a tool's integrations before the tool
+- **Failure:** removing a tool first leaves hooks, units or settings that still call it. (field report 2026-11-26)
+- **Fix:** remove its integrations first (hooks, units, plugins, settings entries), then the tool.
+
+## 46. Keep secrets off argv
+- **Failure:** a secret passed as a command-line argument can be read in `ps` and `/proc`. (field report 2026-11-26)
+- **Fix:** pass it on stdin or by a file only its owner can read; for a CLI that takes arguments only, feed it inside the process (`core/scripts/pairing-code-stdin.cjs`).
+
+## 47. Ask the model server before writing an alias
+- **Failure:** a model alias written into a config may not exist on the model server. (field report 2026-11-26)
+- **Fix:** before writing it, ask the model server whether the alias exists; refuse one it does not serve.
+
+## 48. "The session exists" can be a lie after a runtime restart
+- **Failure:** after a runtime restart, a session that is listed may no longer have a live agent. (field report 2026-11-26)
+- **Fix:** prove it is alive (its agent process, or an answer) before you rely on it or skip starting one.

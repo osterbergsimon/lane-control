@@ -1,5 +1,6 @@
 """Suggest a project's tier table from an OpenAI-compatible gateway's model list (owner 2026-11-24, lc-48m).
 
+served() is the same one request to <base>/v1/models, for the served-model check at write time (core/modelenv.py).
 project-setup --suggest-tiers <provider> uses it: GET <base>/v1/models, and for LiteLLM <base>/model/info, which maps
 each alias to the model behind it (absent elsewhere: the alias stands for itself). The base URL comes from a flag or
 OpenCode's own config (provider.<id>.options.baseURL); the key only from an environment variable, named by a flag or
@@ -105,11 +106,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _get(url: str, key: "str | None", deadline: float):
+def _get(url: str, key: "str | None", deadline: float, headers: "dict | None" = None):
     """The JSON at url, within `deadline` seconds wall clock. No proxy (the environment's would get the key, in clear
-    for http://) and no redirect. A reply that is not HTTP, or none in time, is a GatewayError."""
-    req = urllib.request.Request(url, headers={"Accept": "application/json",
-                                               **({"Authorization": f"Bearer {key}"} if key else {})})
+    for http://) and no redirect. A reply that is not HTTP, or none in time, is a GatewayError. headers: sent instead of
+    the key's own Bearer header."""
+    sent = {**({"Authorization": f"Bearer {key}"} if key else {}), **(headers or {})}
+    if any(not all(" " <= c <= "~" for c in v) for v in sent.values()):  # http.client's own error quotes the value
+        raise GatewayError(f"GET {url}: the key holds a line break or another character a header cannot carry; "
+                           "nothing was sent")
+    req = urllib.request.Request(url, headers={"Accept": "application/json", **sent})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     box = {}
 
@@ -135,14 +140,13 @@ def _get(url: str, key: "str | None", deadline: float):
     return box["data"]
 
 
-def fetch_models(base: str, key: "str | None") -> list:
-    """[(alias, model behind it, mode or None)] in the gateway's order. /v1/models must answer; /model/info (LiteLLM:
-    the model behind each alias and its mode) may not, and its failure is silent."""
+def _list(base: str, key: "str | None", headers: "dict | None" = None) -> tuple:
+    """(root, [alias], whether the list says it has more pages): one GET <base>/v1/models, which must answer."""
     root = root_of(base)
     if not re.match(r"^https?://", root):
         raise GatewayError(f"the gateway URL must start with http:// or https://, got {base!r}")
     try:
-        data = _get(root + "/v1/models", key, DEADLINE)
+        data = _get(root + "/v1/models", key, DEADLINE, headers)
     except urllib.error.HTTPError as e:
         raise GatewayError(f"GET {root}/v1/models: HTTP {e.code}"
                            + (" (the key was refused, or none was sent)" if e.code in (401, 403) else ""))
@@ -152,6 +156,18 @@ def fetch_models(base: str, key: "str | None") -> list:
     aliases = [m["id"] for m in rows or [] if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
     if not aliases:
         raise GatewayError(f"GET {root}/v1/models lists no models")
+    return root, aliases, bool(data.get("has_more"))
+
+
+def served(base: str, headers: dict) -> tuple:
+    """([id], more): the ids the gateway lists at <base>/v1/models, in one request with the caller's own headers."""
+    return _list(base, None, headers)[1:]
+
+
+def fetch_models(base: str, key: "str | None") -> list:
+    """[(alias, model behind it, mode or None)] in the gateway's order. /v1/models must answer; /model/info (LiteLLM:
+    the model behind each alias and its mode) may not, and its failure is silent."""
+    root, aliases, _ = _list(base, key)
     behind, modes = {}, {}
     try:
         info = _get(root + "/model/info", key, INFO_DEADLINE)
