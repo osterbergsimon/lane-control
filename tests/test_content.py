@@ -3044,3 +3044,34 @@ class FrontDoorDocsTests(unittest.TestCase):
         for (g, v), (script, *_) in F.ROUTES.items():
             row = next(r for k, r in rows.items() if k.startswith(f"`core/scripts/{script}`"))
             self.assertIn(f"lane-control {g} ", row.replace("\\|", "|"), script)
+
+
+class SpawnDocTests(unittest.TestCase):
+    """CLI-2 (lc-wja): the coordinator persona says how `lane-control lane new` reaches it, and the guides name the
+    spawn forms."""
+
+    def test_the_coordinator_takes_lane_new_as_the_owners_ask_for_one_lane(self):
+        coord = flat(NATIVE_DIR / "personas" / "coordinator.md")
+        subject = re.search(r'LANE_SUBJECT = "([^"{]+)\{issue\}"', (ROOT / "core" / "scripts" / "lane-spawn")
+                            .read_text()).group(1)
+        self.assertIn(f"subject `{subject}<issue>`", coord)  # the subject the script sends
+        for needle in ("for that one issue", "It approves nothing else", "merge only on the owner's word",
+                       "one of your lanes or reviewers", "open nothing and tell the owner",
+                       "A handover request from lane-control (`project stop`, `coordinator restart`)"):
+            self.assertIn(needle, coord)
+
+    def test_the_guides_name_the_spawn_forms(self):
+        want = {"docs/getting-started.md": ("lane-control coordinator start <project>", "--force --yes",
+                                            "lane-control coordinator restart <project>",
+                                            "lane-control coordinator status <project>",
+                                            "lane-control coordinator start machine", "--on <host>",
+                                            "lane-control lane new <project> <issue id>",
+                                            "lane-control lane list <project>", "forced_starts"),
+                "docs/how-it-fits.md": ("lane-control coordinator start <project>", "lane-control lane new <project>",
+                                        "lane-control lane list <project>", "lane-control coordinator restart"),
+                "core/README.md": ("lane-control coordinator start|restart|status <project>|machine",
+                                   "lane-control lane new|list|status <project>", "start --force [--yes]")}
+        for rel, needles in want.items():
+            t = flat(ROOT / rel).replace("\\|", "|")
+            for needle in needles:
+                self.assertIn(needle, t, f"{rel}: {needle}")

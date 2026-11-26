@@ -1,4 +1,4 @@
-"""The one front door: `lane-control project|machine|ratchet ...` and the scripts each form runs (owner 2026-11-26,
+"""The one front door: `lane-control project|coordinator|lane|machine|ratchet ...` and the scripts each form runs (owner 2026-11-26,
 lc-35h). A form only names a script and the arguments it puts first; every other argument goes through unchanged, so
 the script decides everything as before. The old names keep working; run by hand in a terminal, each says its new form
 once on stderr (`hint`), and nothing when the front door, another script or an automation runs it.
@@ -76,7 +76,10 @@ and waiting for it. Refuses, naming them, while a lane or reviewer runs. Runs pr
   --wait SECONDS   how long to wait for the handover (default 600)
   --no-handover    close the terminals without asking for one""",
     ("project", "start"): """Starts the project's missing standing agents, each resuming its recorded session.
-Runs project-pause start <project>.""",
+Runs project-pause start <project>.
+
+  --force   start it although the live check cannot tell (asks once; lane-control coordinator start)
+  --yes     with --force, without a terminal""",
     ("project", "status"): """Says whether its coordinator runs, rests or is paused, and what else runs.
 Runs project-pause status <project>.""",
     ("project", "remove-host"): """Undoes a box's desktop lanes (direction 2): the box forgets this machine's Orca

@@ -9,6 +9,7 @@ issue: not on main yet.
 
 ```
 YOU      talk to a coordinator in its Orca terminal; say "merge"; sign agents in; say yes to a box's link (box only)
+         or from any Orca terminal: lane-control coordinator start|restart|status, lane new|list
 
 AGENTS   machine coordinator   one per machine, optional   splits the budget, watches memory and load
          project coordinator   one per project             queues, briefs, opens lanes, reviews, merges on your word
@@ -138,6 +139,15 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
   a retired design lead's additions into `DESIGN.md`. Restart the coordinator (`lane-control project stop`, then
   `start`) so it reads the new persona.
 - Both say `exists` for what is already done, so running them again is safe.
+- **`lane-control coordinator start <project>`** (or `machine`; `--on <host>` runs it on a box): starts a coordinator
+  only when the live check says it is not running. `cannot tell` starts nothing and says what it found; `--force` is
+  your way past that when you can tell what the check cannot (it asks once, and the project's settings store records
+  that you forced it), never past a coordinator that runs. `lane-control coordinator restart <project>` asks the
+  running one for its handover by Orca message, then stops and starts it; `status` says which state it is in.
+- **`lane-control lane new <project> <issue>`** (`--tier`, `--note`): one Orca message to the project's running
+  coordinator asking for a lane for that issue. The coordinator gates, briefs, reviews and merges it as for any lane
+  you ask for in its terminal; nothing is started directly. `lane-control lane list <project>` (and `lane status`)
+  reads Orca's worker list: lane, issue, PR, CI, idle time.
 - **`lane-control project check <repo> <host>`**: run it before a box setup. It lists every prerequisite, says what is
   missing or could not be checked, and changes nothing. A listening port is not proof: it also checks each tunnel
   unit's state, restart counter and socket owner, that the box runs one Orca server (and which), and the box's SHELL
