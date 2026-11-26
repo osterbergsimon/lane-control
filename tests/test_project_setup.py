@@ -57,6 +57,8 @@ class Env:
             p.chmod(0o755)
         self.log = self.home / "stub.log"
         self.state = self.home / "stub.json"
+        # for a stub started with a minimal environment (an OpenCode onboarding run): tests/stubs/fake_agent.py
+        (self.bin / "stub-env.json").write_text(json.dumps({"STUB_LOG": str(self.log), "STUB_STATE": str(self.state)}))
         # gh: prints $STUB_GH (e.g. PRIVATE); fails when it is unset, like a machine with no login or network.
         # direnv: $STUB_DIRENV allowed | notallowed | allowfail (status says allowed, `allow` fails) | fail.
         for name, body in (("gh", 'echo "$@" >> "$STUB_LOG.gh"\n[ -n "$STUB_GH" ] || exit 1\necho "$STUB_GH"\n'),
@@ -2125,15 +2127,17 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Glob,Grep")
         self.assertNotIn("Edit", " ".join(cmd[:-1]))
 
-    def test_onboarding_agents_are_claude_only(self):
-        # They read the whole project, and a third-party lane may not read private data.
-        self.e.script_agents()
-        for flag in ("--adapter", "--adapt-reviewer"):
-            with self.subTest(flag=flag):
-                r = self.e.run(str(self.repo), flag, "opencode/x/y", adapt=True)
-                self.assertEqual(r.returncode, 2)
-                self.assertIn("claude/<model>", r.stderr)
-        self.assertEqual(self.e.agent_runs(), [])
+    def test_onboarding_agents_run_on_opencode_too(self):
+        # Owner 2026-11-24 (LIT-2): nothing is refused by harness; an OpenCode role runs `opencode2 run`.
+        # an OpenCode adapter's files come back from its copy only at its template paths (copy_back)
+        # the run's model is the alias under the run's own provider id (lane-gateway), whatever the given one is
+        self.e.script_agents(**{"lane-gateway/y": [{"write": {".lane-control/project.md": "facts\n"}}], "opus": [PASS]})
+        (self.e.bin / "opencode2").symlink_to(FAKE_AGENT)
+        r = self.e.run(str(self.repo), "--adapter", "opencode/x/y", "--gateway-url", "http://127.0.0.1:4000/v1",
+                       "--gateway-key-env", "X_KEY", adapt=True, env_extra={"X_KEY": "k"})
+        self.assertEqual(r.returncode, 3, r.stderr)  # no terminal for the yes: stopped before the commit
+        self.assertNotIn("claude/<model>", r.stderr)
+        self.assertEqual([(a["tool"], a["model"]) for a in self.e.agent_runs()], [("opencode2", "lane-gateway/y"), ("claude", "opus")])
 
     # --- .gitignore ------------------------------------------------------------------------------------------
     def test_gitignore_is_listed_and_committed_before_the_agent_runs(self):

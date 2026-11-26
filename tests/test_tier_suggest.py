@@ -237,10 +237,57 @@ class SuggestRunTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("--gateway", r.stderr)
 
-    def test_gateway_flags_need_suggest_tiers(self):
-        r = self.run_setup("--gateway", "http://127.0.0.1:9")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("--suggest-tiers", r.stderr)
+    def store_gateway(self, url, key_env=None):
+        """The project's stored onboarding gateway, as project-setup --gateway-url keeps it."""
+        f = self.e.store(self.repo) / "settings.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"root": str(self.repo), "gateway": {"url": url, **({"key_env": key_env} if key_env
+                                                                                     else {})}}))
+
+    def test_one_gateway_flag_for_onboarding_and_the_suggestion(self):
+        # M10: --gateway-url is read by --suggest-tiers too; OpenCode's config points elsewhere and gets nothing
+        self.opencode_config("http://127.0.0.1:9")
+        base = self.gateway(["chat", "code"], info=None)
+        for flag in ("--gateway-url", "--gateway"):  # --gateway: the old name, kept hidden
+            with self.subTest(flag=flag):
+                self.log.unlink(missing_ok=True)
+                r = self.run_setup("--suggest-tiers", "litellm", flag, base, "--gateway-key-env", "MY_KEY",
+                                   env_extra={"MY_KEY": KEY})
+                self.assertEqual(r.returncode, 3, r.stderr + r.stdout)
+                self.assertIn(f"gateway: using {base}, key from $MY_KEY", r.stdout)
+                self.assertEqual([q["path"] for q in self.requests()], ["/v1/models", "/model/info"])
+        self.assertNotIn("--gateway", subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True,
+                                                     text=True).stdout.replace("--gateway-url", "")
+                         .replace("--gateway-key-env", ""))
+
+    def test_the_stored_gateway_comes_before_opencodes_config_and_keeps_its_key(self):
+        # M10: the flag, then the project's stored gateway (with the key variable stored for it), then OpenCode's
+        self.opencode_config("http://127.0.0.1:9", key_ref="{env:OTHER_KEY}")
+        base = self.gateway(*self.LITELLM)
+        self.store_gateway(base, "MY_KEY")
+        r = self.run_setup("--suggest-tiers", "litellm", env_extra={"MY_KEY": KEY, "OTHER_KEY": "other-secret"})
+        self.assertEqual(r.returncode, 3, r.stderr + r.stdout)
+        self.assertIn(f"gateway: using {base}, key from $MY_KEY", r.stdout)
+        self.assertTrue(self.requests())
+
+    def test_a_key_variable_goes_only_with_the_url_it_was_given_for(self):
+        # M9 for the suggestion: a --gateway-url that is neither the stored nor OpenCode's takes no key along
+        self.opencode_config("http://127.0.0.1:9", key_ref="{env:GW_KEY}")
+        self.store_gateway("http://127.0.0.1:8", "MY_KEY")
+        base = self.gateway(*self.LITELLM, key=None)
+        r = self.run_setup("--suggest-tiers", "litellm", "--gateway-url", base,
+                           env_extra={"MY_KEY": KEY, "GW_KEY": KEY})
+        self.assertEqual(r.returncode, 3, r.stderr + r.stdout)
+        self.assertIn(f"gateway: using {base}, no key", r.stdout)
+        self.assertTrue(self.requests())
+        self.assertEqual({q["auth"] for q in self.requests()}, {"missing"})
+
+    def test_a_vendor_or_unclear_url_is_refused_for_the_suggestion_too(self):
+        for url in ("https://api.openai.com/v1", "https://api.openai.com./v1", "http://127.0.0.1:9/v1?key=x"):
+            with self.subTest(url=url):
+                r = self.run_setup("--suggest-tiers", "litellm", "--gateway-url", url)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertEqual(self.requests(), [])
 
 
     # --- review of a088a32 ----------------------------------------------------------------------------------------

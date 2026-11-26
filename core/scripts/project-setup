@@ -6,13 +6,14 @@ agents (--orchestrator orca-cotal; see orchestrators/orca-cotal/docs/orca.md).
                 [--permission-mode auto|bypassPermissions|default]
                 [--port N] [--tiers FILE] [--no-start]
                 [--private GLOB]... [--adapter HARNESS/MODEL] [--adapt-reviewer HARNESS/MODEL]
+                [--gateway-url URL] [--gateway-key-env NAME] [--trust-gateway]
                 [--readapt | --skip-adapt | --refresh | --show] [--write-orca-yaml] [--with <dir|git-url>]...
                 [--no-desktop-lanes] [--pair-by-hand] [--no-machine-setup] [--orca-port N]
                 [--orca-from DIR | --orca-bundle TAR] [--orca-version V]
                 [--tunnel-auth-sock PATH] [--tunnel-ssh PATH] [--tunnel-no-enable] [--tunnel-remote-port N]
   project-setup --remove-host <host>
   project-setup --check <dir> | <git-url|dir> <host>
-  project-setup <dir> --suggest-tiers <provider> [--gateway URL] [--gateway-key-env NAME]
+  project-setup <dir> --suggest-tiers <provider> [--gateway-url URL] [--gateway-key-env NAME]
 
 Native Orca (docs/superpowers/specs/2026-11-19-native-orca-setup-design.md, section 11): the same onboarding (an
 adapting agent and a reviewer, committed only on the owner's yes; the role files go to .lane-control/additions/ and
@@ -53,13 +54,23 @@ with the @cotal-ai/orca extension, and the harnesses it will launch. Every step 
 re-run reports `exists` for each.
 
 Before the Orca steps, a headless adapting agent writes the project's files into .lane-control/ and a reviewer on
-another model checks them. They are committed, by explicit path, only on the owner's yes in a terminal; on no, or
-without a terminal, they stay uncommitted, no Orca step runs and it exits 3. The repo's visibility is read with gh
-(unknown when it cannot be); questions still open after the review are shown and may be answered before the file list
-(one more adapter run, not reviewed). After that commit it asks once more, in a terminal: to commit a
-drafted orca.yaml (from the lockfiles; Orca reads its setup script from the worktree) and to push the default branch,
-since Orca makes lane worktrees from origin/<branch>. A no, no terminal or a failed push commits and pushes nothing more
-and the agents still start. Nothing else is ever committed or pushed.
+another model checks them (--adapter, --adapt-reviewer: `claude -p` for claude/<model>, `opencode2 run` for
+opencode/<provider>/<model>; only the harness a role uses must be on PATH). An OpenCode one reaches its gateway only by
+--gateway-url (written out plainly, not a known vendor's API) and --gateway-key-env NAME (the key's variable, handed to
+the run as LANE_GATEWAY_KEY), both kept per project (never the key; a new URL does not take the old key variable along
+unasked), under the run's own provider id lane-gateway, with OpenCode's config built from nothing; it works in a
+filtered scratch copy of the repo, or with --trust-gateway (a plain warning and one yes; for a model on a gateway the
+owner runs) in the repo itself, every file readable, its writes checked before and after (a refused one stops setup
+before any commit and any further git command, and the next run asks about it before its first git command). No git
+command this process runs runs a program the repo names (GitSafePopen: hooks, core.fsmonitor, filters, drivers off;
+ssh, credential and gpg programs the owner's global ones). --skip-adapt runs no
+onboarding agent (a machine with no usable model yet: adapt later with --readapt). They are committed, by explicit
+path, only on the owner's yes in a terminal; on no, or without a terminal, they stay uncommitted, no Orca step runs and it exits 3.
+The repo's visibility is read with gh (unknown when it cannot be); questions still open after the review are shown and
+may be answered before the file list (one more adapter run, not reviewed). After that commit it asks once more, in a
+terminal: to commit a drafted orca.yaml (from the lockfiles; Orca reads its setup script from the worktree) and to push
+the default branch, since Orca makes lane worktrees from origin/<branch>. A no, no terminal or a failed push commits and
+pushes nothing more and the agents still start. Nothing else is ever committed or pushed.
 
 --with attaches a second repo to the project (e.g. an app and its plugins repo): one space, one manager, one
 coordinator, rooted at the first repo; the attached one gets lanes from that coordinator and nothing else of its own. It
@@ -87,9 +98,10 @@ asked or said.
 
 --suggest-tiers <provider> suggests that table from an OpenAI-compatible gateway (a self-hosted LiteLLM, say): GET
 <base>/v1/models, and <base>/model/info where it answers (LiteLLM: the model behind each alias). Each row is
-opencode/<provider>/<alias>, <provider> being the gateway's provider id in OpenCode's config. The base URL is --gateway,
-else that provider's options.baseURL in OpenCode's own config; the key only an environment variable: --gateway-key-env,
-else the {env:NAME} its options.apiKey names. OpenCode's auth files are never read; the key is never printed, logged,
+opencode/<provider>/<alias>, <provider> being the gateway's provider id in OpenCode's config. The base URL is
+--gateway-url (the onboarding agents' flag; --gateway is its old name), else the project's stored gateway, else that
+provider's options.baseURL in OpenCode's own config; the key only an environment variable, the one that goes with that
+URL: --gateway-key-env, else the stored gateway's, else the {env:NAME} its options.apiKey names. OpenCode's auth files are never read; the key is never printed, logged,
 stored or put in an argv (core/tiersuggest.py). It shows the suggestion with each alias's model and asks, in a terminal,
 whether to write it as the project's lanes.tsv; nothing else runs, and on no (or no terminal) nothing is written and
 it exits 3: edit the table shown and pass it with --tiers.
@@ -103,7 +115,9 @@ once, automatically, and the run says what moved. Only the rendered personas sta
 import argparse
 import contextlib
 import difflib
+import fnmatch
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -194,6 +208,107 @@ class Fail(Exception):
     pass
 
 
+class Refusal(Exception):
+    """An onboarding agent wrote where it may not (copy_back, check_repo_writes). Not a Fail, so no handler that takes a
+    failed run in its stride (a fix-check review, the answers run) can swallow it: setup stops before any commit."""
+
+
+class RepoWrite(Refusal):
+    """A refused write that is in the repo already (--trust-gateway). From here on no git command runs in this process
+    (GitSafePopen), since one could run what the write set; the refusal is kept outside the repo (refusal_file)."""
+
+
+REFUSED: list = []  # the RepoWrite of this run, once there is one
+
+
+# --- every git command this process runs: none of the repo's own commands -------------------------------------------
+# A git command reads the repo's .git/config, hooks and attributes, and some of those run programs (core.fsmonitor at
+# `git status`, a hook at `git commit`, a filter at `git add`). Every git child of this process gets, by environment
+# (GIT_CONFIG_COUNT: the precedence of -c), settings that switch those off, and GIT_CONFIG_NOSYSTEM=1. Program settings
+# that a push needs (ssh, credential helpers, signing) keep the owner's global value, never the repo's.
+GIT_FIXED = (("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false"), ("protocol.ext.allow", "never"),
+             ("safe.bareRepository", "explicit"), ("gc.auto", "0"), ("maintenance.auto", "false"))
+GIT_PROGRAMS = (("core.sshCommand", "ssh"), ("core.askPass", ""), ("gpg.program", "gpg"),
+                ("gpg.openpgp.program", "gpg"), ("gpg.ssh.program", "ssh-keygen"), ("gpg.x509.program", "gpgsm"))
+# a repo's (or its worktree's, or an included file's) own driver and remote programs are made empty or git's own
+GIT_REPO_PROGRAMS = re.compile(r"(filter\..+\.(clean|smudge|process)|diff\..+\.(textconv|command)|diff\.external|"
+                               r"merge\..+\.driver|remote\..+\.(uploadpack|receivepack)|core\.alternaterefscommand|"
+                               r"core\.gitproxy)", re.I)
+GIT_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_PAGER": "cat", "GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
+_GLOBAL_GIT: dict = {}  # the owner's global value of each GIT_PROGRAMS key and credential.helper, read once
+
+
+def _real_popen():
+    return getattr(subprocess, "_lane_real_popen", subprocess.Popen)
+
+
+def _git_out(args: list, cwd=None) -> str:
+    """A git query of config only (no index, no hook, no filter), by the real Popen, with the fixed settings."""
+    env = {**os.environ, **GIT_ENV, **_config_env(list(GIT_FIXED))}
+    try:
+        p = _real_popen()(["git", *args], cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          stdin=subprocess.DEVNULL, text=True, errors="surrogateescape")
+        out, _ = p.communicate(timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return out if p.returncode == 0 else ""
+
+
+def _config_env(pairs: list) -> dict:
+    out = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for i, (k, v) in enumerate(pairs):
+        out[f"GIT_CONFIG_KEY_{i}"], out[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    return out
+
+
+def git_safe_env(cwd, args: list) -> dict:
+    """The environment a git command of this process runs with (see GIT_FIXED)."""
+    if not _GLOBAL_GIT:
+        for key, _ in GIT_PROGRAMS + (("credential.helper", None),):
+            _GLOBAL_GIT[key] = [v for v in _git_out(["config", "--global", "--get-all", key]).split("\n") if v]
+    pairs = list(GIT_FIXED)
+    if not (os.environ.get("GIT_SSH_COMMAND") or os.environ.get("GIT_SSH")):
+        pairs.append(("core.sshCommand", (_GLOBAL_GIT["core.sshCommand"] or ["ssh"])[-1]))
+    for key, default in GIT_PROGRAMS[1:]:
+        pairs.append((key, (_GLOBAL_GIT[key] or [default])[-1]))
+    pairs += [("credential.helper", "")] + [("credential.helper", v) for v in _GLOBAL_GIT["credential.helper"]]
+    where = cwd
+    if "-C" in args[:-1]:
+        where = Path(cwd or ".") / args[args.index("-C") + 1]
+    seen = _git_out(["config", "--show-scope", "--includes", "--name-only", "--get-regexp", "."], cwd=where)
+    for line in seen.splitlines():
+        scope, _, key = line.partition("\t")
+        if scope in ("local", "worktree") and GIT_REPO_PROGRAMS.fullmatch(key):
+            default = {"uploadpack": "git-upload-pack", "receivepack": "git-receive-pack"}.get(key.rsplit(".", 1)[-1], "")
+            pairs.append((key, default))
+    return {**GIT_ENV, **_config_env(pairs)}
+
+
+class GitSafePopen(_real_popen()):
+    """subprocess.Popen for this process: a git command gets git_safe_env, and none runs once a write was refused."""
+
+    def __init__(self, args, *rest, **kw):
+        argv = list(args) if isinstance(args, (list, tuple)) else None
+        if argv and os.path.basename(str(argv[0])) == "git":
+            if REFUSED:
+                raise REFUSED[0]
+            base = dict(os.environ if kw.get("env") is None else kw["env"])
+            given = []  # the caller's own GIT_CONFIG_COUNT pairs come first; ours, later, win
+            for i in range(int(base.get("GIT_CONFIG_COUNT", "0") or 0) if str(base.get("GIT_CONFIG_COUNT", "0")).isdigit() else 0):
+                given.append((base.get(f"GIT_CONFIG_KEY_{i}", ""), base.get(f"GIT_CONFIG_VALUE_{i}", "")))
+            safe = git_safe_env(kw.get("cwd"), argv[1:])
+            ours = [(safe[f"GIT_CONFIG_KEY_{i}"], safe[f"GIT_CONFIG_VALUE_{i}"]) for i in range(int(safe["GIT_CONFIG_COUNT"]))]
+            kw["env"] = {**base, **GIT_ENV, **_config_env(given + ours)}
+        super().__init__(args, *rest, **kw)
+
+
+def guard_git() -> None:
+    """From here on every git command of this process is a safe one (GitSafePopen): for the run of main()."""
+    if not hasattr(subprocess, "_lane_real_popen"):
+        subprocess._lane_real_popen = subprocess.Popen
+    subprocess.Popen = GitSafePopen
+
+
 class TimeLimit(Fail):
     """The overall agent time of this run is used up; raised before an agent starts, never inside one."""
 
@@ -261,8 +376,11 @@ def free_port(start: int) -> int:
 
 SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
-                "paired_environment", "beads_repo", "lane_control", "lane_control_dirty")  # all that is ever written: names and choices, never a secret
+                "paired_environment", "beads_repo", "lane_control", "lane_control_dirty",
+                "gateway")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
+ONBOARD_PINS = {"adapter": "claude/sonnet", "adapt-reviewer": "claude/opus"}  # stored only once given (models.<role>)
+ONBOARD_FROM: dict = {}  # where this run's onboarding pins came from: flag, settings store or default
 
 
 def config_home() -> Path:
@@ -1944,6 +2062,7 @@ def snapshot(repo: Path) -> dict:
 
 
 def check_scope(repo: Path, before: dict):
+    refuse_git_metadata(repo)  # before any other git call
     if current_head(repo) != before[HEAD_KEY]:
         raise Fail("HEAD moved while an agent ran; onboarding's agents never commit. Nothing further was committed")
     # before's paths too: a file put back to its committed state no longer shows in git status
@@ -2010,18 +2129,203 @@ def private_rules(repo: Path) -> list:
     A .git folder or file at any depth; every git-ignored path (data folders, local settings, keys, the .beads link,
     .direnv), also inside submodules and embedded repos; every .env* file except templates and .envrc; and each --private
     glob. Other tracked files stay readable. Grep skips ignored files on its own but not when it is pointed at one, so
-    these rules cover Read, Glob and Grep alike."""
+    these rules cover Read, Glob and Grep alike. Claude's run only: OpenCode runs in a copy (opencode_export)."""
     rules = ["Read(/.git/**)", "Read(/.git)", "Read(/**/.git/**)", "Read(/**/.git)"]  # remote URLs and hooks
     for n in repo_private_names(repo, ""):
-        if RULE_UNSAFE & set(n):
-            raise Fail("a git-ignored or .env name has a character that a deny rule cannot carry "
-                       f"(one of ( ) * ? [ ] {{ }} \\ or a newline): {n!r}. Rename it, or move it out of the repo")
+        check_rule_safe(n)
         rules.append(f"Read(/{n}**)" if n.endswith("/") else f"Read(/{n})")
     for g in PRIVATE_GLOBS:
         rules.append(f"Read(/{g})")
     if sum(map(len, rules)) > DENY_LIMIT:
         raise Fail(f"{len(rules)} private paths are too many to deny one by one; ignore a folder instead of its files")
     return rules
+
+
+def check_rule_safe(n: str) -> None:
+    if RULE_UNSAFE & set(n):
+        raise Fail("a git-ignored, .env or --private name has a character that a deny rule cannot carry "
+                   f"(one of ( ) * ? [ ] {{ }} \\ or a newline): {n!r}. Rename it, or move it out of the repo")
+
+
+def private_glob(rel: str, g: str) -> bool:
+    """True when the --private glob `g` covers the path `rel` (from the repo root), matched here with fnmatch, never by
+    git, so no .gitignore line (a `!` negation) or comment (`#`) and no working folder can change it. As in an ignore
+    line, a glob covers what is below a folder it names (`secrets`, `private/`), one with no slash matches a name at any
+    depth, each `**/` may match no folder at all (each on its own), and `[^...]` is git's `[!...]`. POSIX classes
+    (`[[:digit:]]`) are refused by bad_glob. It errs towards covering more."""
+    g = re.sub(r"\[\^", "[!", g.strip("/"))
+    pieces = g.split("**/")
+    shapes = set()
+    for keep in itertools.product((True, False), repeat=min(len(pieces) - 1, 8)):  # each **/ there or not
+        x = pieces[0]
+        for i, piece in enumerate(pieces[1:]):
+            x += ("**/" if i >= len(keep) or keep[i] else "") + piece
+        shapes |= {x, x.replace("/**/", "/")}
+    parts = rel.split("/")
+    for i in range(1, len(parts) + 1):  # the path and each folder it is in
+        here = "/".join(parts[:i])
+        if any(fnmatch.fnmatchcase(here, x) for x in shapes):
+            return True
+        if "/" not in g and fnmatch.fnmatchcase(parts[i - 1], g):
+            return True
+    return False
+
+
+def export_private(rel: str) -> bool:
+    """A path an OpenCode onboarding agent never gets: in a .git, a .env* file, or covered by a --private glob."""
+    return ".git" in rel.split("/") or env_private(rel.rsplit("/", 1)[-1]) or any(private_glob(rel, g)
+                                                                                 for g in PRIVATE_GLOBS)
+
+
+def tracked_names(repo: Path, prefix: str = "", depth: int = 0) -> list:
+    """The tracked files of the repo (git's index, read from the repo's root whatever this process's folder) and of
+    each checked-out submodule, as paths from the outer repo; a tracked file that a .gitignore line matches is left
+    out too."""
+    ignored = set(git_z(repo, "ls-files", "-c", "-i", "--exclude-standard"))
+    out = []
+    for line in git_z(repo, "ls-files", "-c", "-s"):
+        mode, _, rest = line.partition(" ")
+        name = rest.partition("\t")[2]
+        if mode == "160000":
+            if (repo / name / ".git").exists():
+                if depth >= NESTED_DEPTH:
+                    raise Fail(f"repos nested more than {NESTED_DEPTH} deep: they cannot be copied for OpenCode")
+                out += tracked_names(repo / name, f"{prefix}{name}/", depth + 1)
+        elif name not in ignored:
+            out.append(prefix + name)
+    return list(dict.fromkeys(out))
+
+
+def export_files(repo: Path) -> dict:
+    """{path: file in the repo} for the scratch copy an OpenCode onboarding agent runs in (opencode_export): the tracked
+    files (with what is on disk now) and onboarding's own uncommitted ones (.lane-control/, the generated file), minus
+    every private path (export_private), every symlink and anything that is not a plain file. A link to a file that is
+    itself in the copy is given as that file's content (so AGENTS.md -> CLAUDE.md still reads); every other link is
+    left out, and so is a file below a folder that has become a link."""
+    root = repo.resolve()
+    names = tracked_names(repo) + [n for n, mark in git_changes(repo) if mark == "added" and ours(repo, n)]
+    plain = {}
+    for n in dict.fromkeys(names):
+        f = repo / n
+        if export_private(n) or not f.is_file() or f.is_symlink() or Path(os.path.realpath(f)) != root / n:
+            continue
+        plain[n] = f
+    out = dict(plain)
+    for n in dict.fromkeys(names):
+        f = repo / n
+        if n in plain or export_private(n) or not f.is_symlink():
+            continue
+        target = Path(os.path.realpath(f))
+        rel = target.relative_to(root).as_posix() if target.is_relative_to(root) else None
+        if rel in plain:
+            out[n] = plain[rel]
+    return out
+
+
+def tree_state(top: Path) -> dict:
+    """{path: sha1, or "link"/"other"} of everything below `top`, links never followed; the copy's own empty .git
+    (opencode_export) is left out: nothing in it is ever copied back."""
+    out = {}
+    for here, dirs, files in os.walk(top):
+        if Path(here) == top and ".git" in dirs:
+            dirs.remove(".git")
+        for name in files + [d for d in dirs if (Path(here) / d).is_symlink()]:
+            f = Path(here) / name
+            rel = f.relative_to(top).as_posix()
+            out[rel] = ("link" if f.is_symlink() else hashlib.sha1(f.read_bytes()).hexdigest() if f.is_file()
+                        else "other")
+    return out
+
+
+@contextlib.contextmanager
+def opencode_export(repo: Path):
+    """A scratch folder (mode 700, outside the repo) holding only what an OpenCode onboarding agent may see
+    (export_files): no ignored file, no private path, no link. It is made its own empty git repo (no history, no
+    remote, no hooks) first: OpenCode takes the nearest git work tree as the project, so a copy under a TMPDIR inside
+    some other repo (a HOME kept in git) would otherwise give the agent all of that repo. A TMPDIR inside this repo is
+    refused. Yields (folder, its state); removed after."""
+    top = scratch_dir(repo, "lane-onboard-")
+    try:
+        run(["git", "init", "-q", "--template=", str(top)], cwd=top)
+        for n, src in export_files(repo).items():
+            dest = top / n
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+            dest.chmod(0o755 if os.access(src, os.X_OK) else 0o644)
+        yield top, tree_state(top)
+    finally:
+        shutil.rmtree(top, ignore_errors=True)
+
+
+def adapter_names() -> set:
+    """The paths an onboarding adapter writes, as its prompts name them: each template as `.lane-control/<its name>`
+    and `.lane-control/additions/<its name>` (native Orca's placement), and the suggestions file. Plain names only:
+    no dot-name, no folder of its own, so nothing git (or anything else) would take for a repo or a config."""
+    templates = [t.name for t in TEMPLATES.glob("*.md") if t.name not in PROMPTS]
+    return ({f"{ADAPTED}/{t}" for t in templates} | {f"{ADDITIONS}/{t}" for t in templates} | {SUGGESTIONS})
+
+
+def copy_back(repo: Path, top: Path, before: dict, write: bool) -> None:
+    """Bring back what an OpenCode onboarding agent wrote in its copy: only new or changed plain files, only from the
+    adapting agent (the reviewer writes nothing), and only at the paths adapter_names lists. Everything is checked
+    before anything is written: a file anywhere else (a .git, a dot-name, a folder of its own), a deletion, a link, or
+    a link in the repo on the way to one stops the run, and nothing is copied or made."""
+    after = tree_state(top)
+    changed = sorted(n for n in set(before) | set(after) if before.get(n) != after.get(n))
+    allowed = adapter_names()
+    bad = [n for n in changed if not write or n not in allowed or after.get(n) in (None, "link", "other")]
+    if bad:
+        who = "adapting agent" if write else "reviewer"
+        raise Refusal(f"the OpenCode {who} changed {', '.join(bad[:5])}{' ...' if len(bad) > 5 else ''} in its copy of the "
+                   f"project, where it may not write (the adapter writes only its template files in {ADAPTED}/): "
+                   "nothing it wrote was copied back. Nothing was committed")
+    for n in changed:  # all checked before anything is made or written
+        here = repo
+        for part in Path(n).parts:  # each folder on the way a real folder or not there yet; the file a plain one
+            here = here / part
+            if here.is_symlink() or (here.exists() and not (here.is_file() if here == repo / n else here.is_dir())):
+                raise Refusal(f"{n}: {here.relative_to(repo)} in the repo is a link or not a "
+                           f"{'file' if here == repo / n else 'folder'}, so the OpenCode adapter's files were not copied "
+                           "back. Nothing was committed")
+        if n not in before and (repo / n).exists() and (repo / n) not in RENDERED:  # ignored or private; a rendered
+            # persona is the exception: what the agent wrote there is its additions (move_role_files moves it)
+            raise Refusal(f"{n} is in the repo but was left out of the OpenCode adapter's copy (ignored or private), so "
+                       "its file was not copied over it, nor any other. Nothing was committed")
+    temps = []
+    try:  # every file written beside its place first, then all put in place; on an error none is left behind
+        for n in changed:
+            dest = repo / n
+            dest.parent.mkdir(parents=True, exist_ok=True)  # .lane-control/ or its additions/ only (adapter_names)
+            tmp = dest.with_name(f".{dest.name}.lane-control-{os.getpid()}")
+            temps.append((tmp, dest))
+            shutil.copyfile(top / n, tmp)
+        for tmp, dest in temps:
+            tmp.replace(dest)
+    except OSError as e:
+        for tmp, _ in temps:
+            tmp.unlink(missing_ok=True)
+        raise Fail(f"the OpenCode adapter's files could not be copied back ({e.strerror or e}: "
+                   f"{getattr(e, 'filename', '') or ''}). Nothing was committed; check {ADAPTED}/ with git status")
+
+
+GIT_NAMES = {".git", "head", "commondir", "gitdir", "objects", "refs"}  # any case; no template is named so
+
+
+def refuse_git_metadata(repo: Path) -> None:
+    """Stop when anything under .lane-control/ could pass for a repo: a .git (folder or file, any case, any depth) or a
+    folder laid out as a bare one or a worktree's: any HEAD, commondir, gitdir, objects or refs, any case. A git
+    command run in there would read its config, and so run whatever command it names (core.fsmonitor, hooks).
+    Checked before and after every onboarding agent, on both harnesses, before any git command can go in."""
+    top = repo / ADAPTED
+    if not top.is_dir() or top.is_symlink():
+        return
+    for here, dirs, files in os.walk(top):
+        hit = sorted(n for n in dirs + files if n.lower() in GIT_NAMES)
+        if hit:
+            where = Path(here).relative_to(repo).as_posix()
+            raise Fail(f"{where}/{hit[0]} is git's own name ({', '.join(sorted(GIT_NAMES))} under {ADAPTED}/ make or "
+                       "point to a repo), which an onboarding agent must never write: a git command in there could run a "
+                       f"command its config names. Nothing was committed; remove {where}/{hit[0]} by hand and run again")
 
 
 def git_z(repo: Path, *args) -> list:
@@ -2058,26 +2362,512 @@ def check_limit() -> None:
                         "(the time counts again from zero; --readapt starts the adapting over)")
 
 
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+KEEP_ENV = re.compile(r"PATH|LANG|LC_\w+|TZ|SSL_CERT_FILE|SSL_CERT_DIR|NIX_SSL_CERT_FILE|NODE_EXTRA_CA_CERTS|"
+                      r"(?i:https?_proxy|no_proxy|all_proxy)")  # what an OpenCode run gets from this environment
+
+
+def opencode_rules(write: bool) -> list:
+    """OpenCode's permissions for one onboarding run, a second layer behind its scratch copy (opencode_export), which
+    holds nothing private: every tool off, then read on, and edit on the adapter's own paths (adapter_names) only,
+    for the adapting agent. Shell, web, grep, glob, sub-agents and anything outside the copy stay off (grep and glob
+    have rules that match the pattern searched for, never a folder, so they could not be kept in it)."""
+    rules = [("*", "*", "deny"), ("read", "*", "allow")]
+    if write:
+        rules += [("edit", n, "allow") for n in sorted(adapter_names())]
+    return [{"action": a, "resource": r, "effect": e} for a, r, e in rules]
+
+
+GATEWAY: dict = {}  # the OpenCode onboarding agents' gateway: {"url", "key_env"}; set by resolve_settings
+RUN_PROVIDER = "lane-gateway"  # the provider id of every onboarding run: no OpenCode built-in is keyed by it (m27)
+RUN_KEY_ENV = "LANE_GATEWAY_KEY"  # the only name the key has in a run: lane-control's, never one OpenCode reads (B15)
+# Known vendors' public APIs, by name: refused as an onboarding gateway. It does not prove a host is self-hosted.
+VENDOR_HOSTS = re.compile(
+    r"(^|\.)(openai\.com|anthropic\.com|claude\.ai|openai\.azure\.com|services\.ai\.azure\.com|"
+    r"cognitiveservices\.azure\.com|inference\.ai\.azure\.com|googleapis\.com|mistral\.ai|groq\.com|deepseek\.com|"
+    r"x\.ai|openrouter\.ai|together\.xyz|together\.ai|fireworks\.ai|amazonaws\.com|cohere\.(ai|com)|perplexity\.ai|"
+    r"opencode\.ai|github\.ai|githubcopilot\.com|nvidia\.com|cerebras\.ai|deepinfra\.com|huggingface\.co|"
+    r"vercel\.sh|cloudflare\.com|moonshot\.(ai|cn)|aliyuncs\.com|z\.ai|bigmodel\.cn|sambanova\.ai|replicate\.com|"
+    r"ollama\.com|novita\.ai|hyperbolic\.xyz|baseten\.co|friendli\.ai|ai21\.com|voyageai\.com|minimax(i)?\.(io|chat)|"
+    r"anyscale\.com|lambdalabs\.com|lambda\.ai|nebius\.(ai|com)|siliconflow\.(cn|com)|inference\.net|chutes\.ai|"
+    r"featherless\.ai|scaleway\.ai|venice\.ai)$")
+# A gateway URL as it is written, and nothing a URL parser could read another way (M11): http(s), a host of ASCII
+# letters, digits, . _ - (an IDN as punycode) or a bracketed IPv6, an optional port, a plain path; no %, backslash,
+# user, query or fragment.
+GATEWAY_URL = re.compile(r"(?P<scheme>https?)://(?P<host>[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(?::(?P<port>[0-9]{1,5}))?"
+                         r"(?P<path>/[A-Za-z0-9._~!$&'()*+,;=:/-]*)?")
+KEY_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def gateway_url_refusal(url) -> "str | None":
+    """Why `url` cannot be an onboarding agent's gateway, or None. It must be complete and written out (GATEWAY_URL),
+    and not a known vendor's public API (VENDOR_HOSTS, matched without a trailing dot and in lower case)."""
+    if not isinstance(url, str) or not url:
+        return "no --gateway-url"
+    shown = url if url.isascii() and url.isprintable() else ascii(url)
+    authority = url.partition("://")[2].split("/", 1)[0]
+    if "@" in authority:
+        return "--gateway-url must not carry a user or password: pass the key with --gateway-key-env NAME"
+    if set("?#") & set(url):
+        return ("--gateway-url must be the gateway's base URL, with no query or fragment (not shown: a key may be in "
+                "it; a key goes in --gateway-key-env NAME)")
+    u = GATEWAY_URL.fullmatch(url)
+    if not u or "{" in url:
+        return (f"--gateway-url {shown} must be a complete http(s) URL written out (no {{env:...}}): a host of ASCII "
+                "letters, digits, . _ - (an IDN as punycode) or [IPv6], an optional port and a plain path, with no %, "
+                "backslash or other character a URL parser could read another way")
+    host = u["host"].lower().rstrip(".")
+    from urllib.parse import urlsplit
+    try:  # and Python's parser reads the same host (the shape above leaves it nothing else to read)
+        same = (urlsplit(url).hostname or "").rstrip(".") == host.strip("[]")
+    except ValueError:
+        same = False
+    if not same or not host or (not host.startswith("[") and "" in host.split(".")) or \
+            (u["port"] is not None and not 0 < int(u["port"]) < 65536):
+        return f"--gateway-url {shown} is not a URL"
+    if VENDOR_HOSTS.search(host):
+        return f"--gateway-url {shown} is a vendor's public API, not a self-hosted gateway"
+    return None
+
+
+def gateway_key_refusal(key_env) -> "str | None":
+    """Why `key_env` cannot name the gateway key's variable, or None ("" and None: no key). Never echoes it: it may
+    be a key pasted where its name goes (m26)."""
+    if key_env is None or key_env == "":
+        return None
+    if not (isinstance(key_env, str) and KEY_NAME.fullmatch(key_env)):
+        return ("--gateway-key-env takes the NAME of an environment variable (letters, digits and _), never the key "
+                "itself; what was given is not shown")
+    return None
+
+
+def gateway_refusal(url, key_env) -> "str | None":
+    """Why --gateway-url / --gateway-key-env cannot be used, or None (gateway_url_refusal, gateway_key_refusal)."""
+    return gateway_url_refusal(url) or gateway_key_refusal(key_env)
+
+
+def gateway_said() -> str:
+    """The gateway line said before the first OpenCode onboarding agent: where its prompts go and which key with them."""
+    url, key = GATEWAY.get("url"), GATEWAY.get("key_env")
+    plain = urlsplit_host(url)
+    note = ("; plain http: for loopback or a network you trust" if url.startswith("http://")
+            and plain not in ("localhost", "127.0.0.1", "[::1]") and not plain.startswith("127.") else "")
+    return f"{url}, " + (f"key from ${key}" if key else "no key") + note
+
+
+def urlsplit_host(url: str) -> str:
+    u = GATEWAY_URL.fullmatch(url or "")
+    return u["host"].lower().rstrip(".") if u else ""
+
+
+def gateway_provider(model: str) -> tuple:
+    """(the run's model, its provider block, the run's key variable) for `<provider>/<alias>`, written from GATEWAY
+    alone: provider id RUN_PROVIDER whatever <provider> is (no OpenCode built-in for a provider id applies), npm
+    @ai-sdk/openai-compatible, options.baseURL the given URL, options.apiKey "{env:LANE_GATEWAY_KEY}" when a key
+    variable is given, models {alias: {}}. The key reaches the run under RUN_KEY_ENV only, never under the owner's
+    name (OPENCODE_API_KEY would go to opencode.ai). Nothing comes from any OpenCode config file. Extra headers are
+    not supported yet (bd lc-5cr)."""
+    why = gateway_refusal(GATEWAY.get("url"), GATEWAY.get("key_env"))
+    if why:
+        raise Fail(f"{why}: an OpenCode onboarding agent ({model}) reaches its gateway only by the URL given to "
+                   "project-setup (--gateway-url <url>, and --gateway-key-env NAME for its key), kept per project. "
+                   "Nothing was committed")
+    provider, _, alias = model.partition("/")
+    if not alias:
+        raise Fail(f"opencode/{model}: an OpenCode onboarding agent is opencode/<provider>/<model>, the model as the "
+                   "gateway names it. Nothing was committed")
+    key_env = GATEWAY.get("key_env")
+    if key_env and not os.environ.get(key_env):
+        raise Fail(f"the gateway key's environment variable {key_env} (--gateway-key-env) is not set here. Nothing was "
+                   "committed")
+    block = {"npm": "@ai-sdk/openai-compatible", "name": provider, "models": {alias: {}},
+             "options": {"baseURL": GATEWAY["url"], **({"apiKey": "{env:" + RUN_KEY_ENV + "}"} if key_env else {})}}
+    return f"{RUN_PROVIDER}/{alias}", block, ({RUN_KEY_ENV: os.environ[key_env]} if key_env else {})
+
+
+SYSTEM_CONFIG = {"linux": "/etc/opencode", "darwin": "/Library/Application Support/opencode"}  # OpenCode 2.2.1's own
+
+
+def system_config() -> "Path | None":
+    """OpenCode's system config folder when there is one: it loads it as a whole (configs, plugins, agents, an MCP
+    server, instructions, a formatter) whatever HOME and the XDG folders are, and no switch turns it off."""
+    d = (Path(os.environ.get("ProgramData") or r"C:\ProgramData") / "opencode" if sys.platform == "win32"
+         else Path(SYSTEM_CONFIG.get(sys.platform, SYSTEM_CONFIG["linux"])))
+    return d if d.is_dir() else None
+
+
+def refuse_system_config() -> None:
+    where = system_config()
+    if where:
+        raise Fail(f"{where} exists: OpenCode loads that system config folder in every run whatever its HOME (its MCP "
+                   "servers, instructions, plugins and formatters too), with no switch to keep it out, so an OpenCode "
+                   "onboarding run cannot start from nothing here. Use a Claude --adapter and --adapt-reviewer, or "
+                   "move that folder away for the run. Nothing was committed")
+
+
+def scratch_dir(repo: Path, prefix: str) -> Path:
+    """A new mode-700 folder under TMPDIR (as it is now, not as this process first saw it), never inside the repo."""
+    import tempfile
+    saved, tempfile.tempdir = tempfile.tempdir, None
+    try:
+        base = tempfile.gettempdir()
+    finally:
+        tempfile.tempdir = saved
+    top = Path(tempfile.mkdtemp(prefix=prefix, dir=base))
+    if top.resolve().is_relative_to(repo.resolve()):
+        top.rmdir()
+        raise Fail(f"the temporary folder ({top.parent}, TMPDIR) is inside the repo, where an OpenCode onboarding "
+                   "agent's copy of the project must not be: set TMPDIR to a folder outside it and run again")
+    return top
+
+
+@contextlib.contextmanager
+def opencode_agent(repo: Path, model: str, write: bool):
+    """A plain headless OpenCode run, `opencode2 run`, as agent_cmd is for Claude: yields (argv, environment).
+
+    OpenCode starts from nothing: HOME and the XDG folders are a scratch folder of their own (removed after), so no
+    config, plugin, agent, formatter, MCP server, auth or session of the owner's, nor the project's
+    (OPENCODE_DISABLE_PROJECT_CONFIG) nor Claude Code's (OPENCODE_DISABLE_CLAUDE_CODE), is loaded, and the session is
+    kept in that folder, not the owner's store. Its one config file holds only the run's provider block
+    (gateway_provider: the given gateway URL under the provider id lane-gateway, the key as {env:LANE_GATEWAY_KEY},
+    never the key), formatter, lsp, MCP and plugins off, and the run's agent, whose name is new each run
+    (lane-onboard-<random>), with opencode_rules and steps MAX_TURNS plus OpenCode's forced last answer; OpenCode's
+    title agent is pinned to the same model, so no side request names another (m27). The environment is PATH,
+    locale, TLS and proxy settings (KEEP_ENV) and LANE_GATEWAY_KEY; nothing else of this one (no LANE_ROLE, no
+    OPENCODE_*, not the owner's key variable). The prompt goes on stdin (an argument that starts with - would be read
+    as a flag); --standalone runs a private server started in the run's folder."""
+    refuse_system_config()
+    run_model, block, key_env = gateway_provider(model)
+    name = f"lane-onboard-{secrets.token_hex(6)}"
+    conf = {"provider": {RUN_PROVIDER: block}, "formatter": False, "lsp": False, "mcp": {}, "plugin": [],
+            "instructions": [], "autoupdate": False, "share": "disabled",
+            "agents": {name: {"mode": "primary", "model": run_model, "steps": MAX_TURNS[write] + 1,
+                              "permissions": opencode_rules(write)},
+                       "title": {"model": run_model}}}
+    home = scratch_dir(repo, "lane-onboard-home-")
+    try:
+        env = {k: v for k, v in os.environ.items() if KEEP_ENV.fullmatch(k)}
+        env.update(key_env)
+        for var, sub in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
+                         ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")):
+            (home / sub).mkdir()
+            env[var] = str(home / sub)
+        (home / "config" / "opencode").mkdir()
+        (home / "config" / "opencode" / "opencode.json").write_text(json.dumps(conf))
+        env.update(OPENCODE_DISABLE_PROJECT_CONFIG="1", OPENCODE_DISABLE_CLAUDE_CODE="1",
+                   OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_MODELS_FETCH="1")  # no model catalog fetched
+        yield ([BINARIES["opencode"], "run", "--standalone", "--model", run_model, "--agent", name, "--format",
+                "json"], env)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+TRUST_GATEWAY = False  # --trust-gateway was given
+TRUSTED: set = set()  # repos whose OpenCode onboarding agents run in the repo itself: --trust-gateway, and the yes
+# directly in a git dir: what git itself rewrites on any status, commit, fetch or checkout (also another worktree's
+# lane committing during a run): never a config, a hook or an info file
+GIT_CHURN_FILES = {"index", "HEAD", "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "MERGE_RR",
+                   "AUTO_MERGE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "COMMIT_EDITMSG", "TAG_EDITMSG",
+                   "packed-refs", "gc.pid", "gc.log", "shallow"}
+GIT_CHURN_DIRS = {"objects", "refs", "logs", "rebase-merge", "rebase-apply", "sequencer", "rr-cache", "lost-found",
+                  "lfs"}  # objects/info is kept: alternates there point git at other object stores
+
+
+def trust_warning(repo: Path, roles: list) -> str:
+    return (f"\nWARNING (--trust-gateway): the OpenCode onboarding agents ({', '.join(roles)}) will run in {repo} "
+            "itself, not in a filtered copy. The model will see every file in that folder: ignored and private ones "
+            "included (.env files, keys, the .git folder with its config and remote URLs, everything --private "
+            f"names), and what a link there points to. What it reads goes to the gateway, {GATEWAY.get('url')}, and "
+            "from there to whatever that gateway passes it on to. This is meant for a model on a gateway you run "
+            "yourself. Writes stay limited to the adapter's own files under .lane-control/; anything else it changes "
+            "stops the run before any commit. Without --trust-gateway the agents get a copy without the private files.")
+
+
+def confirm_trust(repo: Path, roles: list) -> bool:
+    """--trust-gateway: the warning, then one yes in a terminal (stdin and stdout both); without one the flag is the
+    yes."""
+    if repo.resolve() in TRUSTED:
+        return True
+    print(trust_warning(repo, roles), flush=True)
+    if has_terminal():
+        if not owner_says_yes(f"Run them in {repo} itself, every file readable? [y/N] ", step="trust-gateway"):
+            return False
+    else:
+        say("trust-gateway", "yes", "--trust-gateway, and no terminal (stdin and stdout) to ask in")
+    TRUSTED.add(repo.resolve())
+    return True
+
+
+def git_dirs(repo: Path) -> list:
+    """The repo's git dir and common dir (a linked worktree's are outside its folder), asked of git before a run."""
+    r = run(["git", "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd=repo, check=False)
+    return list(dict.fromkeys(Path(l) for l in r.stdout.splitlines() if l.strip())) if r.returncode == 0 else []
+
+
+def is_git_dir(d: Path, known: set) -> bool:
+    return d in known or (os.path.isfile(d / "HEAD") and (os.path.isdir(d / "objects") or os.path.isfile(d / "commondir")))
+
+
+def file_state(f: Path, content: bool):
+    """What lstat says of one path (None: not there); a file's content hash too when `content` (git's own files)."""
+    try:
+        st = f.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if stat.S_ISDIR(st.st_mode):
+        return ("dir",)
+    kind = "link" if stat.S_ISLNK(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else "other"
+    digest = None
+    if content and kind == "file":
+        try:
+            digest = hashlib.sha1(f.read_bytes()).hexdigest()
+        except OSError:
+            digest = "unreadable"
+    return (kind, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino, digest)
+
+
+def repo_state(repo: Path, dirs: list) -> dict:
+    """{path: file_state} of everything in the repo folder and in its git dirs outside it (a linked worktree's common
+    dir: its config and hooks), ignored files too, links never followed; a path in the repo by its name from the repo
+    root, one outside by its full path. Every file is seen by kind, mode, size, mtime, ctime and inode (no write leaves
+    all of them as they were), git's own files by their content too, a folder by being there. In each git dir (the
+    repo's, a nested repo's, a submodule's, another worktree's) only what git rewrites by itself is left out
+    (GIT_CHURN_FILES, GIT_CHURN_DIRS but objects/info, *.lock), and only directly in it."""
+    root = repo.resolve()
+    known = {Path(os.path.realpath(d)) for d in dirs}
+    out = {}
+
+    def key(f: Path) -> str:
+        return f.relative_to(root).as_posix() if f.is_relative_to(root) else str(f)
+
+    def walk(top: Path, in_git: bool):
+        for here, subdirs, files in os.walk(top):
+            here = Path(here)
+            gitdir = is_git_dir(here, known)
+            inside = in_git or gitdir or ".git" in here.relative_to(top).parts or here.name == ".git"
+            if gitdir:
+                subdirs[:] = [d for d in subdirs if d not in GIT_CHURN_DIRS or d == "objects"]
+                files = [n for n in files if n not in GIT_CHURN_FILES and not n.endswith(".lock")]
+            for name in files + subdirs:
+                f = here / name
+                if gitdir and name == "objects":
+                    out[key(f)] = file_state(f, False)
+                    continue
+                out[key(f)] = file_state(f, inside)
+            if gitdir and "objects" in subdirs:
+                subdirs.remove("objects")
+                info = here / "objects" / "info"
+                if info.is_dir() and not info.is_symlink():
+                    walk(info, True)
+
+    walk(root, False)
+    for d in known:
+        if not d.is_relative_to(root) and d.is_dir():
+            out[key(d)] = ("dir",)
+            walk(d, True)
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def refusal_file(repo: Path) -> Path:
+    """Where a --trust-gateway refusal of this repo is kept: outside the repo, so no write of the model's reaches it."""
+    return config_home() / "lane-control" / "refused" / f"{store_key(repo)}.json"
+
+
+def keep_refusal(repo: Path, paths: dict, unfinished: bool) -> None:
+    f = refusal_file(repo)
+    f.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    write_atomic(f, (json.dumps({"repo": str(repo.resolve()), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                 "unfinished": unfinished, "paths": paths}, indent=2) + "\n").encode(), 0o600)
+
+
+def refusal_gate(target: Path) -> "str | None":
+    """Before the first git command of a run: a --trust-gateway refusal kept for this repo (or a run that stopped before
+    its check) stops it, with each path named, until every refused path is back as it was before that run, or the
+    owner says in a terminal that they read them by hand. None: go on."""
+    try:
+        d = target.expanduser().resolve()
+    except OSError:
+        return None
+    f = next((refusal_file(p) for p in (d, *d.parents) if refusal_file(p).is_file()), None)
+    if f is None:
+        return None
+    try:
+        rec = json.loads(f.read_text())
+        paths, unfinished, repo, at = dict(rec["paths"]), bool(rec["unfinished"]), rec["repo"], rec["at"]
+    except (OSError, ValueError, KeyError, TypeError):
+        paths, unfinished, repo, at = {}, True, str(d), "an earlier run"
+    root = Path(repo)
+
+    def now(p: str):
+        st = file_state(root / p if not os.path.isabs(p) else Path(p), True)
+        return "absent" if st is None else "dir" if st == ("dir",) else f"sha1:{st[6]}" if st[6] else st[0]
+    left = sorted(p for p, want in paths.items() if now(p) != want)
+    if not left and not unfinished:
+        f.unlink(missing_ok=True)
+        say("trust-gateway", "cleared", f"what the run of {at} in {repo} was refused for is back as it was")
+        return None
+    why = ("a --trust-gateway run there stopped before its writes were checked" if unfinished else
+           "a --trust-gateway run there was refused for writes it may not make")
+    print(f"\n{repo}: {why} ({at}). Before any git command runs there (one could run what such a write set: a hook, "
+          "core.fsmonitor in .git/config), read these in an editor and put back what you did not write"
+          + (":" if left else ": .git/config, .git/config.worktree, .git/hooks/ and .git/info/, and the folder"),
+          flush=True)
+    for p in left:
+        print(f"  {p}", flush=True)
+    if has_terminal() and owner_says_yes("Have you read each of them by hand and put back what you did not write? "
+                                         "[y/N] ", step="trust-gateway"):
+        f.unlink(missing_ok=True)
+        return None
+    return (f"{why}: nothing ran and nothing was committed. Read the paths above by hand (not with a git command), then "
+            f"run again in a terminal and answer yes (the record: {f})")
+
+
+def check_write_paths(repo: Path) -> None:
+    """Before a --trust-gateway adapter run: each folder on the way to the adapter's files a real folder or not there
+    yet, each file a plain one or not there, so no write can go through a link out of the repo."""
+    for n in sorted(adapter_names()):
+        here = repo
+        for part in Path(n).parts:
+            here = here / part
+            if here.is_symlink() or (here.exists() and not (here.is_file() if here == repo / n else here.is_dir())):
+                raise Fail(f"{n}: {here.relative_to(repo)} in the repo is a link or not a "
+                           f"{'file' if here == repo / n else 'folder'}, so the OpenCode adapter cannot run in the repo "
+                           "itself (--trust-gateway). Nothing was committed")
+
+
+def check_repo_writes(repo: Path, before: dict, after: dict, write: bool) -> None:
+    """After a --trust-gateway run: what changed must be the adapter's own files (adapter_names), plain files, and the
+    folders they are in; the reviewer changes nothing. Anything else (in .git or a git dir outside the folder, a
+    dot-name, another file, a link, a deletion) is a RepoWrite: kept outside the repo with each path's state before
+    the run, and no git command runs after it, in this run or a later one, until the owner has looked."""
+    allowed = adapter_names() if write else set()
+    folders = {Path(n).parent.as_posix() for n in allowed} | {Path(n).parent.parent.as_posix() for n in allowed}
+    bad = []
+    for n in sorted(set(before) | set(after)):
+        was, now = before.get(n), after.get(n)
+        if was == now:
+            continue
+        if now is not None and now[0] == "file" and n in allowed and (was is None or was[0] == "file"):
+            continue
+        if was is None and now == ("dir",) and n in folders:
+            continue
+        bad.append(n)
+    if not bad:
+        refusal_file(repo).unlink(missing_ok=True)
+        return
+    keep_refusal(repo, {n: "absent" if before.get(n) is None else "dir" if before[n] == ("dir",)
+                        else f"sha1:{before[n][6]}" if before[n][6] else "changed" for n in bad}, False)
+    shown = [n + (" (removed)" if after.get(n) is None else " (a link)" if after[n][0] == "link" else "") for n in bad]
+    who = "adapting agent" if write else "reviewer"
+    error = RepoWrite(
+        f"the OpenCode {who} changed {', '.join(shown[:8])}{' ...' if len(shown) > 8 else ''} in the repo "
+        f"(--trust-gateway), where it may not write (the adapter writes only its template files in {ADAPTED}/). "
+        "Setup stopped: nothing was committed and no git command ran after it. Read each of those by hand in an "
+        "editor (not with git: a git command there could run what such a write set) and put back what you did not "
+        "write; the next run asks you first. If another process wrote there during the run (a lane committing in "
+        "another worktree, an editor), run it again with the lanes stopped")
+    REFUSED.append(error)
+    raise error
+
+
+def run_opencode_in_repo(repo: Path, model: str, prompt: str, write: bool):
+    """--trust-gateway: one OpenCode onboarding run in the repo itself, everything in it readable. The same run
+    otherwise (opencode_agent: config from nothing, edit on the adapter's exact paths only); its writes are checked
+    by the repo's state before and after (check_repo_writes), also after a failed or interrupted run. A record that a
+    run is under way is kept outside the repo first, so a run killed before its check is looked at too."""
+    if write:
+        check_write_paths(repo)
+    dirs = git_dirs(repo)
+    before = repo_state(repo, dirs)
+    keep_refusal(repo, {}, True)
+    try:
+        with opencode_agent(repo, model, write) as (cmd, env):
+            p = run(cmd, cwd=repo, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
+    except BaseException:
+        check_repo_writes(repo, before, repo_state(repo, dirs), write)
+        raise
+    check_repo_writes(repo, before, repo_state(repo, dirs), write)
+    return p
+
+
+def run_opencode(repo: Path, model: str, prompt: str, write: bool):
+    """One OpenCode onboarding run in a scratch copy of the repo (opencode_export), then copy_back, only after a run
+    that succeeded: a failed, empty or cut-off run brings nothing back (run_agent says why). With --trust-gateway
+    and the owner's yes, in the repo itself (run_opencode_in_repo)."""
+    if repo.resolve() in TRUSTED:
+        return run_opencode_in_repo(repo, model, prompt, write)
+    with opencode_export(repo) as (top, before):
+        with opencode_agent(repo, model, write) as (cmd, env):
+            p = run(cmd, cwd=top, timeout=AGENT_TIMEOUT, input=prompt, env=env, check=False)
+        out, steps, error = opencode_result(p.stdout)
+        if p.returncode == 0 and not error and (out.strip() or steps) and steps < MAX_TURNS[write]:
+            copy_back(repo, top, before, write)
+    return p
+
+
+def opencode_result(stdout: str) -> tuple:
+    """(text, tool steps, error) from `opencode2 run --format json`: the text of its last message, as `claude -p`
+    prints it; how many steps called tools; the last error event's message, or ""."""
+    texts, steps, error = [], 0, ""
+    for line in stdout.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        part = e.get("part") if isinstance(e.get("part"), dict) else {}
+        if e.get("type") == "text" and isinstance(part.get("text"), str):
+            texts.append((part.get("messageID"), part["text"]))
+        elif e.get("type") == "step_finish" and part.get("reason") == "tool-calls":
+            steps += 1
+        elif e.get("type") == "error":
+            err = e.get("error")
+            error = str(err.get("message") or err.get("type")) if isinstance(err, dict) else str(err)
+    last = texts[-1][0] if texts else None
+    return "\n".join(t for m, t in texts if m == last), steps, error
+
+
 def run_agent(repo: Path, who: tuple, prompt: str, write: bool) -> str:
     global agent_spent
     check_limit()
+    refuse_git_metadata(repo)  # before private_rules or the copy run git in the repo's folders
     started = time.monotonic()
+    opencode = who[0] == "opencode"
     try:
-        p = run(agent_cmd(who[1], prompt, write, tuple(private_rules(repo))), cwd=repo, timeout=AGENT_TIMEOUT, stdin=subprocess.DEVNULL, check=False)
+        if opencode:
+            p = run_opencode(repo, who[1], prompt, write)
+        else:
+            p = run(agent_cmd(who[1], prompt, write, tuple(private_rules(repo))), cwd=repo, timeout=AGENT_TIMEOUT,
+                    stdin=subprocess.DEVNULL, check=False)
     finally:
         agent_spent += time.monotonic() - started
-    if p.returncode != 0:
-        said = (p.stderr.strip() + "\n" + p.stdout.strip()).strip().splitlines()
-        shown = (p.stderr.strip() or p.stdout.strip()).splitlines()
+        refuse_git_metadata(repo)  # also after a failed run: what it wrote is in the repo (Claude) or came back
+    stderr = ANSI.sub("", p.stderr).strip()
+    empty = False
+    if opencode:
+        out, steps, error = opencode_result(p.stdout)
+        empty = not out.strip() and not steps  # exit 0 with nothing done (a help print, an empty answer)
+        failed, out_of_turns = p.returncode != 0 or bool(error) or empty, steps >= MAX_TURNS[write]
+        shown = (error or stderr).splitlines()
+    else:
+        out, failed = p.stdout, p.returncode != 0
+        out_of_turns = failed and any("max turns" in l.lower() for l in (stderr + "\n" + p.stdout).splitlines())
+        shown = (stderr or p.stdout.strip()).splitlines()
+    if failed or out_of_turns:
         # the adapter may have left half-written files; a plain re-run would review them as if they were complete
-        left = (f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or remove {ADAPTED}/"
-                if write else "")
-        if any("max turns" in l.lower() for l in said):
+        left = ((" Nothing it wrote was copied back." if opencode and repo.resolve() not in TRUSTED else
+                 f" Files it half wrote may be left in {ADAPTED}/: run again with --readapt, or put {ADAPTED}/ back as "
+                 f"committed (`git status {ADAPTED}` shows what changed)") if write else "")
+        if out_of_turns:
             raise Fail(f"the {'adapting agent' if write else 'reviewer'} used all {MAX_TURNS[write]} turns and was "
                        f"stopped before it finished. Nothing was committed and no Orca step ran.{left}")
-        raise Fail(f"claude -p --model failed: {shown[-1] if shown else p.returncode}. "
-                   f"Nothing was committed.{left}")
-    return p.stdout
+        if empty and not error and p.returncode == 0:
+            raise Fail(f"opencode2 run --model {who[1]} gave no answer and called no tool"
+                       f"{': ' + shown[-1] if shown else ''}. Nothing was committed.{left}")
+        raise Fail(f"{'opencode2 run' if opencode else 'claude -p'} --model failed: "
+                   f"{shown[-1] if shown else p.returncode}. Nothing was committed.{left}")
+    return out
 
 
 def repo_visibility(repo: Path) -> str:
@@ -2141,7 +2931,7 @@ def move_role_files(repo: Path) -> None:
     """Native Orca: a role file an onboarding agent wrote at .lane-control/<role>.md (where the shared prompts put
     them) is that role's additions, so it moves to .lane-control/additions/. The rendered personas are set aside while
     the agents run (rendered_aside), so whatever is there now is the agent's."""
-    if ORCHESTRATOR != "native-orca":
+    if ORCHESTRATOR != "native-orca" or REFUSED:  # after a refused write no git command runs (B2)
         return
     for role in NATIVE_ROLES:
         f = repo / ADAPTED / f"{role}.md"
@@ -2204,7 +2994,7 @@ def review_prompt(repo: Path, project: str, earlier: str = "", visibility: str =
     The first review is the full audit; with `earlier` (the findings the last fix answered) it only checks those."""
     changes = [(p, m) for p, m in git_changes(repo) if ours(repo, p)]
     files = "\n".join(f"- {p} ({m})" for p, m in changes)
-    tracked = [p for p, m in changes if m != "added"]
+    tracked = [p for p, m in changes if m != "added" and not export_private(p)]  # a private one is named, never shown
     diff = run(["git", "diff", "HEAD", "--", *tracked], cwd=repo, check=False).stdout if tracked else ""
     diff = clip(diff, DIFF_LIMIT)
     head = (fill("check-prompt.md", project, clip(earlier, FINDINGS_LIMIT), visibility) if earlier
@@ -2238,7 +3028,7 @@ def review_with_fixes(repo: Path, project: str, adapter: tuple, reviewer: tuple,
     notes = []
 
     def review(earlier: str = "") -> str:
-        say("review", "running", "/".join(reviewer) + (" (checks the fixes only)" if earlier else ""))
+        say("review", "running", "/".join(reviewer) + (" (checks the fixes only)" if earlier else onboard_from("adapt-reviewer")))
         try:
             out = run_agent(repo, reviewer, review_prompt(repo, project, earlier, visibility), write=False)
         except Fail as e:
@@ -2334,11 +3124,20 @@ def coordinator_kickoff() -> str:
             + fence + "\n" + LEFTOVER.replace(fence, "") + "\n" + fence)
 
 
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def plain(text: str) -> str:
+    """Model text as it may be printed: no control character (an escape sequence could rewrite the file list above the
+    owner's question, or reach the clipboard), tabs and newlines kept."""
+    return CONTROL.sub("", text)
+
+
 def show_suggestions(repo: Path):
     f = kept_suggestions(repo)
     if f.is_file() and f.read_text(errors="replace").strip():
         print("\nSuggested AGENTS.md edits (not applied, not committed):")
-        for line in f.read_text(errors="replace").strip().splitlines():
+        for line in plain(f.read_text(errors="replace")).strip().splitlines():
             print(f"  {line}")
 
 
@@ -2348,7 +3147,7 @@ def show_changes(repo: Path, changes: list, notes: list = ()):
         print(f"  {mark}: {p}")
     show_suggestions(repo)
     for note in notes:
-        print(f"\n{note}")
+        print(f"\n{plain(note)}")
     print(flush=True)
 
 
@@ -2662,7 +3461,7 @@ def ask_and_apply_answers(repo: Path, project: str, adapter: tuple, before: dict
           "it is printed at the end):", flush=True)
     given = []
     for n, item in enumerate(items, 1):
-        print(f"\n{n}. {item}", flush=True)
+        print(f"\n{n}. {plain(item)}", flush=True)
         try:
             answer = input("   Your answer (Enter: ask me later): ").strip()
         except EOFError:
@@ -2741,6 +3540,35 @@ def stale_checkout(repo: Path, quick: bool = False):
     return None
 
 
+def refuse_private_onboarding(repo: Path) -> None:
+    """A --private glob may not cover what onboarding writes and its reviewer must see (the adapter's files, the
+    generated file) nor AGENTS.md or the file it links to: a review that cannot see them proves nothing, and the
+    reviewer's prompt holds AGENTS.md's diff. Both harnesses; checked before any agent starts."""
+    names = sorted(adapter_names() | {GENERATED, "AGENTS.md", agents_md(repo)})
+    for g in PRIVATE_GLOBS:
+        hit = [n for n in names if private_glob(n, g)]
+        if hit:
+            raise Fail(f"--private {g!r} covers {hit[0]}, which onboarding writes or its reviewer must read: narrow the "
+                       f"glob (the settings store keeps it: {store_dir(repo) / 'settings.json'}). Nothing was changed")
+
+
+def skipped_adapt(repo: Path) -> None:
+    """--skip-adapt on a project not onboarded yet: the route for a machine with no usable model, said as such."""
+    if not onboarded(repo):
+        say("adapt", "skipped", f"--skip-adapt: no onboarding agent ran, so the project's own files are not written: "
+            f"no {GENERATED}, nothing under {ADAPTED}/ but the rendered personas (git-excluded), and the coordinator "
+            "is told the project is not adapted yet. Adapt it later, once a model is at hand: lane-control project "
+            f"setup {repo} --readapt (with --adapter and --adapt-reviewer)")
+
+
+def onboard_from(role: str) -> str:
+    """Said beside a run's model: where it came from, so a run that falls back to the default says so."""
+    src = ONBOARD_FROM.get(role)
+    flag = "--adapter" if role == "adapter" else "--adapt-reviewer"
+    return (f" (the default: no {flag} given and none in the settings store)" if src == "default"
+            else " (from the settings store)" if src == "settings store" else "")
+
+
 def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bool) -> bool:
     """The steps in front of the Orca setup; True when that setup may run. A re-run is safe: committed files are left
     alone unless `again`, and uncommitted ones (an earlier run, a hand edit) go back to review instead of being
@@ -2748,16 +3576,36 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     if onboarded(repo) and not again and not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
         say("adapt", "exists", f"{ADAPTED}/ is committed")
         return refresh_section(repo)
-    if not shutil.which("claude"):
-        raise Fail("claude not on PATH, but the onboarding agents use it")
+    for h in sorted({adapter[0], reviewer[0]}):  # only the harnesses a role here uses (a gateway-only box has no claude)
+        if not shutil.which(BINARIES[h]):
+            fell = [r for r, w in (("adapter", adapter), ("adapt-reviewer", reviewer))
+                    if w[0] == h and ONBOARD_FROM.get(r) == "default"]
+            hint = (f" ({', '.join('--' + r for r in fell)} not given and none in the settings store, so the default; "
+                    "pass opencode/<provider>/<model> to onboard on OpenCode)") if fell else ""
+            raise Fail(("claude not on PATH, but the onboarding agents use it" if h == "claude" else
+                        f"{BINARIES[h]} not on PATH, but the onboarding agents run on {h}") + hint)
+    on_opencode = [f"{h}/{m}" for h, m in (adapter, reviewer) if h == "opencode"]
+    for h, m in (adapter, reviewer):  # before any agent: each OpenCode role's provider, and no system config
+        if h == "opencode":
+            refuse_system_config()
+            gateway_provider(m)
     for key in ("user.name", "user.email"):
         if not run(["git", "config", "--get", key], cwd=repo, check=False).stdout.strip():
             raise Fail(f"git has no {key} here, so the owner's commit can't be made; set it and run again")
     check_agents_md(repo)
     check_gitignore(repo)
+    refuse_private_onboarding(repo)
     # Before the agent starts, so nothing in .cotal/ can pass for its work; committed with its files.
     if ORCHESTRATOR == "orca-cotal":
         say("gitignore", ignore_cotal(repo), ".cotal/")
+    if on_opencode:  # where the prompts go, and which key with them (M9), before the first agent
+        say("gateway", "using", gateway_said())
+        if TRUST_GATEWAY and not confirm_trust(repo, on_opencode):
+            say("adapt", "stopped", "no --trust-gateway yes: no agent ran, nothing was committed. Run again without "
+                "--trust-gateway for a filtered copy")
+            return False
+    elif TRUST_GATEWAY:
+        say("trust-gateway", "unused", "no onboarding agent runs on OpenCode")
     before = snapshot(repo)
     visibility = repo_visibility(repo)
     say("visibility", visibility, "from the git host" if visibility != "unknown" else "gh could not say; the adapter treats it as public")
@@ -2768,7 +3616,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
         if left and not again:
             say("adapt", "unfinished", f"{ADAPTED}/ is from a run that did not finish; "
                 "the adapter runs again over it")
-        say("adapt", "running", "/".join(adapter))
+        say("adapt", "running", "/".join(adapter) + onboard_from("adapter"))
         kept_suggestions(repo).unlink(missing_ok=True)
         adapt(repo, adapter, fill("prompt.md", project, visibility=visibility) + ADAPT_RULES, before)
     if not any(p.startswith(ADAPTED + "/") for p, _ in git_changes(repo)):
@@ -2781,7 +3629,7 @@ def onboard(repo: Path, project: str, adapter: tuple, reviewer: tuple, again: bo
     write_section(repo)
     unresolved, notes = review_with_fixes(repo, project, adapter, reviewer, before, visibility)
     if unresolved is not None:
-        print(f"\n{unresolved}\n")
+        print(f"\n{plain(unresolved)}\n")
         say("adapt", "stopped", f"nothing committed, no Orca setup. Owner: fix {ADAPTED}/ and run again, or remove it")
         return False
     notes += ask_and_apply_answers(repo, project, adapter, before)
@@ -2855,6 +3703,9 @@ def resolve_attached(target: str, dest: Path) -> Path:
     d = Path(target).expanduser().resolve()
     if not d.is_dir():
         raise Fail(f"--with {target}: {d} is not a directory")
+    why = refusal_gate(d)  # before the first git command there (B3)
+    if why:
+        raise Fail(f"--with {target}: {why}")
     top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False)
     if top.returncode != 0:
         raise Fail(f"--with {target}: {d} is not a git repository (an attached repo must already be one)")
@@ -2905,15 +3756,23 @@ def onboard_attached(d: Path, project: str, adapter: tuple, reviewer: tuple, aga
 
 
 def bad_glob(g) -> bool:
+    """A --private glob project-setup will not take; POSIX classes too, which an OpenCode run's matcher (private_glob)
+    cannot carry: write the range ([0-9])."""
     return not isinstance(g, str) or not g or g.startswith(("/", "~", "!")) or ".." in Path(g).parts \
-        or bool(RULE_UNSAFE & set(g) - set("*?[]"))
+        or bool(RULE_UNSAFE & set(g) - set("*?[]")) or "[:" in g \
+        or bool({"", "."} & set(g.rstrip("/").split("/")))  # ./x, a//b, a/./b: no matcher reads them alike
+
+
+GLOB_RULE = ("a glob relative to the repo root, with no POSIX class like [[:digit:]] (write [0-9]) and no ./ or // "
+             "(write config/** for ./config/**)")
 
 
 def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
+            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool,
+            "gateway": dict}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
@@ -2968,11 +3827,34 @@ def resolve_settings(repo: Path, a) -> dict:
     private = list(dict.fromkeys([*(st.get("private") or []), *a.private]))
     for g in private:
         if bad_glob(g):
-            raise Fail(f"{store_dir(repo) / 'settings.json'}: private glob {g!r} is not a glob relative to the repo root")
-    changes = {"root": str(repo), "models": {r: f"{h}/{m}" for r, (h, m) in pins.items()},
+            raise Fail(f"{store_dir(repo) / 'settings.json'}: private glob {g!r} is not {GLOB_RULE}")
+    onboarding, kept = {}, {}
+    for role, flag in (("adapter", a.adapter), ("adapt-reviewer", a.adapt_reviewer)):
+        spec = flag or stored.get(role) or ONBOARD_PINS[role]
+        try:
+            onboarding[role] = harness_model(spec)
+        except SystemExit:
+            raise Fail(f"{store_dir(repo) / 'settings.json'}: models.{role} is {spec!r}, expected <claude|opencode>/<model>")
+        if flag or stored.get(role):  # what the owner gave once is kept; the defaults are never written
+            kept[role] = spec
+        ONBOARD_FROM[role] = "flag" if flag else "settings store" if stored.get(role) else "default"
+    gateway, gateway_given = resolve_gateway(st, a)
+    GATEWAY.clear()
+    GATEWAY.update(gateway)
+    if onboarding["adapter"][0] == onboarding["adapt-reviewer"][0] == "opencode" and \
+            onboarding["adapter"][1].partition("/")[2] == onboarding["adapt-reviewer"][1].partition("/")[2]:
+        raise Refused(f"--adapter and --adapt-reviewer must be different models, both are "
+                      f"{onboarding['adapter'][1].partition('/')[2]} at the one gateway (an onboarding run's model is "
+                      "the part after the provider id)")
+    if onboarding["adapter"][1] == onboarding["adapt-reviewer"][1]:
+        raise Refused(f"--adapter and --adapt-reviewer must be different models, both are {onboarding['adapter'][1]} "
+                      f"(the store's models.adapter and models.adapt-reviewer count too)")
+    changes = {"root": str(repo), "models": {**{r: f"{h}/{m}" for r, (h, m) in pins.items()}, **kept},
                "private": private, "orchestrator": ORCHESTRATOR}
     if not persona_modes:
         changes["permission_mode"] = mode
+    if gateway_given:
+        changes["gateway"] = {k: v for k, v in gateway.items() if v}
     if a.name:
         changes["name"] = a.name
     if ORCHESTRATOR == "native-orca":  # before anything is written: a refused run leaves the store as it was
@@ -2982,7 +3864,41 @@ def resolve_settings(repo: Path, a) -> dict:
     check_written_models([(f"the {r}", h, m) for r, (h, m) in pins.items() if f"{h}/{m}" != stored.get(r)], a,
                          "The settings store was not changed")
     settings(repo, **changes)
-    return {"pins": pins, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name")}
+    return {"pins": pins, "mode": mode, "modes": persona_modes, "private": private, "name": a.name or st.get("name"),
+            "onboarding": onboarding}
+
+
+def resolve_gateway(st: dict, a) -> tuple:
+    """({"url", "key_env"} this run's OpenCode onboarding agents use, whether a flag gave it: then it is stored). The URL
+    and its key variable are one setting (M9): a --gateway-url other than the stored one never takes the stored key
+    variable along unless the owner says yes in a terminal or names it with --gateway-key-env; otherwise it is
+    dropped, and said. --gateway-key-env '' is no key. A key variable is stored only once it is set here (m26): a
+    key pasted where its name goes is then refused without being shown or kept."""
+    stored = st.get("gateway") if isinstance(st.get("gateway"), dict) else {}
+    old_url, old_key = stored.get("url"), stored.get("key_env")
+    given = bool(a.gateway_url) or a.gateway_key_env is not None
+    url = a.gateway_url or old_url
+    if a.gateway_key_env is not None:
+        key = a.gateway_key_env or None
+    elif a.gateway_url and old_url and a.gateway_url != old_url and old_key:
+        question = (f"The stored gateway key variable ${old_key} was for {old_url}. Send its key to {a.gateway_url} "
+                    "too? [y/N] ")
+        if has_terminal() and owner_says_yes(question, step="gateway"):
+            key = old_key
+        else:
+            key = None
+            say("gateway", "key dropped", f"${old_key} was for {old_url}; pass --gateway-key-env {old_key} to send it "
+                f"to {a.gateway_url}")
+    else:
+        key = old_key
+    if given:  # checked now and kept (never the key)
+        why = gateway_refusal(url, key)
+        if why:
+            raise Refused(why)
+        if a.gateway_key_env and not os.environ.get(a.gateway_key_env):
+            raise Refused("the variable --gateway-key-env names is not set here, so it was not stored (its name is not "
+                          "shown, in case a key was pasted there): set it, or pass the variable's name, not the key")
+    return {"url": url, "key_env": key}, given
 
 
 def which_orchestrator(flag, repo, default: str = None) -> str:
@@ -3012,10 +3928,6 @@ def suggest_tiers(a) -> int:
         print(f"project-setup: --suggest-tiers takes OpenCode's provider id (such as litellm), got {provider!r}",
               file=sys.stderr)
         return 2
-    if a.gateway_key_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", a.gateway_key_env):
-        print("project-setup: --gateway-key-env takes the NAME of an environment variable (letters, digits and _), "
-              "never the key itself", file=sys.stderr)  # not echoed: it may be a key pasted by mistake
-        return 2
     try:
         d = Path(a.target).expanduser().resolve()
         top = run(["git", "rev-parse", "--show-toplevel"], cwd=d, check=False) if d.is_dir() else None
@@ -3023,27 +3935,42 @@ def suggest_tiers(a) -> int:
             raise Fail(f"{d} is not an existing git repository; --suggest-tiers needs the project's checkout")
         repo = Path(top.stdout.strip())
         oc = TS.opencode_provider(provider)
+        st = settings(repo) if (store_dir(repo) / "settings.json").is_file() else {}
     except (Fail, TS.GatewayError) as e:
         print(f"project-setup: {e}", file=sys.stderr)
         return 1
+    # one gateway for onboarding and the suggestion (M10): --gateway-url, else the project's stored gateway, else
+    # OpenCode's config for the provider; a key variable goes only with the URL it was given for
+    stored = st.get("gateway") if isinstance(st.get("gateway"), dict) else {}
     where = oc["where"]
-    base, key_env = a.gateway or oc["base"], a.gateway_key_env or oc["key_env"]
-    if not key_env and oc["literal_key"]:
-        print(f"project-setup: OpenCode's config ({where}) has the apiKey of {provider} written in it, which is never "
-              "used: write it as \"{env:NAME}\" and set NAME in the environment, or pass --gateway-key-env NAME",
-              file=sys.stderr)
-        return 2
+    base = a.gateway_url or stored.get("url") or oc["base"]
+    if a.gateway_key_env is not None:
+        key_env, key_from = a.gateway_key_env or None, "--gateway-key-env"
+    elif stored.get("url") and base == stored["url"]:
+        key_env, key_from = stored.get("key_env"), "the project's stored gateway"
+    elif oc["base"] and base == oc["base"]:
+        if not oc["key_env"] and oc["literal_key"]:
+            print(f"project-setup: OpenCode's config ({where}) has the apiKey of {provider} written in it, which is "
+                  "never used: write it as \"{env:NAME}\" and set NAME in the environment, or pass --gateway-key-env "
+                  "NAME", file=sys.stderr)
+            return 2
+        key_env, key_from = oc["key_env"], f"{where}, which names it"
+    else:
+        key_env, key_from = None, ""
     if not base:
-        print(f"project-setup: no gateway URL for {provider}: pass --gateway <base URL>, or give the provider "
+        print(f"project-setup: no gateway URL for {provider}: pass --gateway-url <base URL>, or give the provider "
               "options.baseURL in OpenCode's config", file=sys.stderr)
         return 2
     key = None
     if key_env:
         key = os.environ.get(key_env)
         if not key:
-            print(f"project-setup: the gateway key's environment variable {key_env} is not set"
-                  + (f" ({where} names it)" if where and not a.gateway_key_env else ""), file=sys.stderr)
+            print("project-setup: the gateway key's environment variable "
+                  + (f"{key_env} is not set ({key_from})" if key_from != "--gateway-key-env" else
+                     "--gateway-key-env names is not set (its name is not shown, in case a key was pasted there)"),
+                  file=sys.stderr)
             return 2
+    say("gateway", "using", f"{base}, " + (f"key from ${key_env}" if key else "no key"))
     try:
         found = TS.fetch_models(base, key)
         models, left_out = TS.usable(found, provider, oc["models"])
@@ -3473,6 +4400,10 @@ NATIVE_KICKOFF = {
     "coordinator": ("Read your persona, {persona}, then AGENTS.md and AGENTS.lane-control.md and `bd recall "
                     "handover-latest`; then tell the owner in one line that you are ready, and wait for them."),
 }
+NOT_ADAPTED = (" This project is not adapted to lane-control yet (it was set up with --skip-adapt): AGENTS.lane-control.md "
+               "and the project's files under .lane-control/ (all but the personas) do not exist, so do not look for "
+               "them; say so to the owner in that line, and that `lane-control project setup {repo} --readapt` adapts it once a "
+               "model is at hand.")
 NATIVE_RESUME = ("You are back after a pause. Reread your persona, {persona}; then resume from `bd recall "
                  "{handover}`, `orca-ide orchestration run-current` and `orca-ide worktree list`, and tell the "
                  "owner in one line that you are back.")
@@ -3906,7 +4837,9 @@ def native_main(a, tiers: Path) -> int:
             ADAPT_RULES += NATIVE_PLACEMENT
             REVIEW_RULES = NATIVE_REVIEW_NOTE + REVIEW_RULES
             CHECK_RULES = NATIVE_REVIEW_NOTE + CHECK_RULES
-        adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
+        adapter, adapt_reviewer = cfg["onboarding"]["adapter"], cfg["onboarding"]["adapt-reviewer"]
+        if a.skip_adapt:
+            skipped_adapt(repo)
         if not a.skip_adapt:
             refuse_tracked(repo, NATIVE_ROLES)
             with rendered_aside(repo):
@@ -3938,6 +4871,9 @@ def native_main(a, tiers: Path) -> int:
         global COORDINATOR_KICKOFF, LEFTOVER_DELIVERED
         persona = {r: repo / ADAPTED / f"{r}.md" for r in STANDING}
         COORDINATOR_KICKOFF = NATIVE_KICKOFF["coordinator"].format(persona=persona["coordinator"])
+        if not onboarded(repo):  # --skip-adapt: the files the persona names are not there yet (m2)
+            COORDINATOR_KICKOFF = NATIVE_KICKOFF["coordinator"].replace(
+                " and AGENTS.lane-control.md", "").format(persona=persona["coordinator"]) + NOT_ADAPTED.format(repo=repo)
         kickoffs = {"coordinator": coordinator_kickoff()}
         LEFTOVER_DELIVERED = start_standing(place, repo, project, pins, cfg["mode"], repo_id, kickoffs)
         print(f"summary: {project} · native Orca · orca repo {repo_id} · sessions "
@@ -3949,7 +4885,7 @@ def native_main(a, tiers: Path) -> int:
     finally:
         if LEFTOVER and not LEFTOVER_DELIVERED:
             print("\nLeft open at the commit and not given to a coordinator in this run (it was not started now). "
-                  "Bring it to the coordinator yourself:\n" + LEFTOVER, file=sys.stderr)
+                  "Bring it to the coordinator yourself:\n" + plain(LEFTOVER), file=sys.stderr)
         if agent_spent:
             print(f"agent time used: {minutes(agent_spent)} of {minutes(AGENT_LIMIT)}")
 
@@ -5250,6 +6186,20 @@ def box_pairing(args: list) -> int:
 
 
 def main(argv=None) -> int:
+    """_main, with every git command made safe (guard_git) and a refused onboarding write stopping it all: no handler
+    on the way takes it for an ordinary failed run (Refusal is not a Fail)."""
+    guard_git()
+    REFUSED.clear()
+    try:
+        return _main(argv)
+    except Refusal as e:
+        print(f"project-setup: {e}", file=sys.stderr)
+        return 1
+    finally:  # in this process only for this run (tests call main() many times)
+        subprocess.Popen = subprocess._lane_real_popen
+
+
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(allow_abbrev=False, prog="project-setup", description=__doc__.split("\n\n")[0])
     ap.add_argument("target", nargs="?")
     ap.add_argument("host_pos", nargs="?", metavar="host",
@@ -5323,11 +6273,22 @@ def main(argv=None) -> int:
     ap.add_argument("--suggest-tiers", metavar="PROVIDER",
                     help="suggest the project's tier table from a gateway's model list, rows opencode/PROVIDER/<alias> "
                          "(PROVIDER: the gateway's provider id in OpenCode's config); writes it only on the owner's yes")
-    ap.add_argument("--gateway", metavar="URL",
-                    help="with --suggest-tiers: the gateway's base URL (default: OpenCode's config for PROVIDER)")
+    ap.add_argument("--gateway-url", metavar="URL",
+                    help="the self-hosted gateway: the one an OpenCode --adapter or --adapt-reviewer reaches (a "
+                         "complete http(s) URL written out, e.g. http://127.0.0.1:4000/v1; its model is the <model> of "
+                         "opencode/<provider>/<model>; kept per project, required for an OpenCode onboarding agent), "
+                         "and the one --suggest-tiers reads (default: the project's stored gateway, else PROVIDER's "
+                         "baseURL in OpenCode's config)")
+    ap.add_argument("--gateway", dest="gateway_url", help=argparse.SUPPRESS)  # the old --suggest-tiers name
     ap.add_argument("--gateway-key-env", metavar="NAME",
-                    help="with --suggest-tiers: the environment variable that holds the gateway key (default: the "
-                         "{env:NAME} OpenCode's config names); the key itself is never an argument")
+                    help="the environment variable that holds the gateway key, for the gateway --gateway-url gives "
+                         "(kept per project with it; '' for none; a new --gateway-url does not take a stored one along "
+                         "unless you say yes); the key itself is never an argument")
+    ap.add_argument("--trust-gateway", action="store_true",
+                    help="run the OpenCode onboarding agents in the repo itself, with no filtered copy: the model sees "
+                         "every file in the folder, ignored and private ones included. For a model on a gateway you "
+                         "run; asks once in a terminal (without one, the flag is the yes). Writes stay limited to the "
+                         "adapter's own files. Not kept")
     ap.add_argument("--beads-repo", metavar="OWNER/NAME",
                     help="the private GitHub repo that holds this project's beads (default: the project's origin owner "
                          "and `<repo name>-beads`). Kept in the settings store")
@@ -5339,10 +6300,12 @@ def main(argv=None) -> int:
                     help="a tracked file or folder the onboarding agents must not read, relative to the repo root "
                          "(repeatable, e.g. 'shot*.png' or 'private/**'; applies to every repo of the project, attached ones too); git-ignored paths are always denied. Kept in "
                          "the settings store: a later run adds to the list, it never drops one")
-    ap.add_argument("--adapter", default="claude/sonnet",
-                    help="harness/model of the agent that adapts the project's files")
-    ap.add_argument("--adapt-reviewer", default="claude/opus",
-                    help="harness/model that reviews the adapted files; must be a different model from --adapter")
+    ap.add_argument("--adapter",
+                    help="harness/model of the agent that adapts the project's files (claude/<model> or "
+                         "opencode/<provider>/<model>; default claude/sonnet); kept in the project's settings store")
+    ap.add_argument("--adapt-reviewer",
+                    help="harness/model that reviews the adapted files; must be a different model from --adapter "
+                         "(default claude/opus); kept in the project's settings store")
     again = ap.add_mutually_exclusive_group()
     again.add_argument("--readapt", action="store_true", help="adapt the project again although it was done before")
     again.add_argument("--refresh", action="store_true",
@@ -5351,11 +6314,25 @@ def main(argv=None) -> int:
     again.add_argument("--show", action="store_true",
                        help="print the project's settings store (settings.json, lanes.tsv) and stop; "
                             "writes nothing")
-    again.add_argument("--skip-adapt", action="store_true", help="only the Orca setup: no adapting agent, no commit")
+    again.add_argument("--skip-adapt", action="store_true",
+                       help="only the Orca setup: no adapting agent, no commit. The route for a new project on a "
+                            "machine with no usable model yet: adapt it later with --readapt")
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--box-pairing"]:  # on a box, from this machine's host run (direction 2)
         return box_pairing(argv[1:])
     a = ap.parse_args(argv)
+    global TRUST_GATEWAY
+    TRUST_GATEWAY = a.trust_gateway
+    TRUSTED.clear()
+    where = None
+    if a.target and not (a.host or a.host_pos):  # the folder the run's git commands go to: checked before the first
+        url = re.match(r"^(https?|ssh|git|file)://|^[\w.-]+@[\w.-]+:", a.target)
+        where = (Path(a.dest).expanduser() / slug(a.name or re.sub(r"\.git$", "", a.target.rstrip("/").rsplit("/", 1)[-1]
+                                                                     .rsplit(":", 1)[-1])) if url else Path(a.target))
+    why = refusal_gate(where) if where is not None else None  # a refused --trust-gateway write (B3)
+    if why:
+        print(f"project-setup: {why}", file=sys.stderr)
+        return 1
     value_flags = {s for act in ap._actions if act.option_strings and act.nargs is None for s in act.option_strings}
 
     if os.geteuid() == 0:
@@ -5389,8 +6366,15 @@ def main(argv=None) -> int:
         print(f"project-setup: two hosts given ({a.host_pos} and --host {a.host}); give one", file=sys.stderr)
         return 2
     host = a.host or a.host_pos
-    if (a.gateway or a.gateway_key_env) and a.suggest_tiers is None:
-        print("project-setup: --gateway and --gateway-key-env go with --suggest-tiers", file=sys.stderr)
+    why = (gateway_url_refusal(a.gateway_url) if a.gateway_url is not None else None) \
+        or gateway_key_refusal(a.gateway_key_env)
+    if why:
+        print(f"project-setup: {why}", file=sys.stderr)
+        return 2
+    if a.trust_gateway and (a.skip_adapt or a.refresh or a.show or a.suggest_tiers is not None):
+        print("project-setup: --trust-gateway is for the OpenCode onboarding agents, and no onboarding agent runs with "
+              + ("--skip-adapt" if a.skip_adapt else "--refresh" if a.refresh else "--show" if a.show
+                 else "--suggest-tiers"), file=sys.stderr)
         return 2
     if a.suggest_tiers is not None:
         if host:
@@ -5440,18 +6424,17 @@ def main(argv=None) -> int:
     for v in (a.coordinator, a.reviewer):  # any harness/model the owner gives; only the shape is checked
         if v:
             harness_model(v)
-    adapter, adapt_reviewer = harness_model(a.adapter), harness_model(a.adapt_reviewer)
+    for v in (a.adapter, a.adapt_reviewer):
+        if v:
+            harness_model(v)
     for g in a.private:
         if bad_glob(g):
-            print(f"project-setup: --private takes a glob relative to the repo root, got {g!r}", file=sys.stderr)
+            print(f"project-setup: --private takes {GLOB_RULE}, got {g!r}", file=sys.stderr)
             return 2
-    if not a.skip_adapt and not a.refresh and {adapter[0], adapt_reviewer[0]} != {"claude"}:
-        print("project-setup: --adapter and --adapt-reviewer must be claude/<model>: these agents read the whole "
-              "project, and a third-party lane may not read private data", file=sys.stderr)
-        return 2
-    if not a.skip_adapt and not a.refresh and adapter[1] == adapt_reviewer[1]:
-        print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are {adapter[1]}",
-              file=sys.stderr)
+    if not a.skip_adapt and not a.refresh and a.adapter and a.adapt_reviewer \
+            and harness_model(a.adapter)[1] == harness_model(a.adapt_reviewer)[1]:
+        print(f"project-setup: --adapter and --adapt-reviewer must be different models, both are "
+              f"{harness_model(a.adapter)[1]}", file=sys.stderr)
         return 2
     tiers = Path(a.tiers or OC / "templates" / "lanes.tsv").expanduser()
     if a.with_repos and (a.refresh or a.show):
@@ -5564,6 +6547,7 @@ def main(argv=None) -> int:
             # a stored repo that is gone stays listed: only the owner takes it out
             settings(repo, attached=list(dict.fromkeys([*stored_attached, *(str(d) for d in attached)])))
         coord, reviewer = cfg["pins"]["coordinator"], cfg["pins"]["reviewer"]
+        adapter, adapt_reviewer = cfg["onboarding"]["adapter"], cfg["onboarding"]["adapt-reviewer"]
         PRIVATE_GLOBS[:] = cfg["private"]
         mode = cfg["mode"]
         modes = {r: cfg["modes"].get(r, mode) for r in ("coordinator", "reviewer")}
@@ -5583,6 +6567,8 @@ def main(argv=None) -> int:
         if "claude" in needed and not a.no_start:
             ensure_claude_trust(repo, record=a.trust_folder)
         project = cfg["name"] or repo.name
+        if a.skip_adapt:
+            skipped_adapt(repo)
         if not a.skip_adapt and not onboard(repo, project, adapter, adapt_reviewer, a.readapt):
             return STOPPED
         if not a.skip_adapt:  # also on a re-run: a declined or failed push is offered again
@@ -5629,7 +6615,7 @@ def main(argv=None) -> int:
     finally:
         if LEFTOVER and not LEFTOVER_DELIVERED:  # the file is gone: nothing the owner left open may vanish silently
             print("\nLeft open at the commit and not given to a coordinator in this run (it was not started now). "
-                  "Bring it to the coordinator yourself:\n" + LEFTOVER, file=sys.stderr)
+                  "Bring it to the coordinator yourself:\n" + plain(LEFTOVER), file=sys.stderr)
         if agent_spent:
             print(f"agent time used: {minutes(agent_spent)} of {minutes(AGENT_LIMIT)}")
 

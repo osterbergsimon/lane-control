@@ -36,12 +36,11 @@ If not: on Linux, Orca's CLI is `orca-ide`; plain `orca` may be another program.
 start the Orca app first. For bd, `lane-control machine setup` (step 3) says how to fix it and never installs it. The
 full list is in [the native Orca setup](../orchestrators/native-orca/setup.md).
 
-**Claude is needed to onboard a new project, even when every role runs on OpenCode.** The agents that adapt a project's
-files and review them always run on Claude (`claude -p`), because they read the whole project. So the machine where you
-first run `lane-control project setup` on a project needs `claude` installed and signed in. Once a project is onboarded
-(its `.lane-control/` files and `AGENTS.lane-control.md` committed and pushed), any machine can set it up again without
-Claude. A machine with only OpenCode does that: onboard the project once on a machine with Claude, push it, and clone it
-on the OpenCode machine. Step 4B has the details.
+**Onboarding runs on Claude or OpenCode.** The agents that adapt a project's files and review them run on Claude
+(`claude -p`) by default, or on OpenCode when you pass OpenCode models for them (`--adapter`, `--adapt-reviewer`).
+A machine needs only the engine its roles use, so a machine with only OpenCode can set up a new project, and one with
+no usable model yet can set it up without onboarding (`--skip-adapt`) and adapt it later. Step 4B has the three
+routes.
 
 ## 2. Get lane-control, its tools and your engine config
 
@@ -103,7 +102,8 @@ cp ~/code/lane-control/core/templates/budget-ceiling.json ~/.config/claude-usage
 Edit `"ceiling"` in it (the template says 40). The usage file, `~/.claude/usage-history.jsonl`, must be written by
 Claude Code's status line ([core/machine.md](../core/machine.md), "Usage feeds"). Then `budget-state` prints one line
 per budget, `main weekly=<w> window=<s> ceiling=<c> step=<n> <name> window_step=<m>`, or `main unknown` when the usage
-file is missing or stale.
+file is missing or empty. An old file still gives a reading, whatever its age: `machine-setup` (step 3) warns
+`usage feed: stale` for that.
 
 **With no usage feed at all** (only a self-hosted gateway): there is no budget to meter and the caps are the limit.
 In the copy, set the feed under `BUDGET_USAGE` to empty (`[main]=""`). Then `budget-state` prints
@@ -278,26 +278,80 @@ harness, and the table is yours to edit.
 
    ```bash
    lane-control project setup ~/code/<project> \
-     --coordinator opencode/litellm/chat --reviewer opencode/litellm/code
+     --coordinator opencode/litellm/chat --reviewer opencode/litellm/code \
+     --adapter opencode/litellm/code --adapt-reviewer opencode/litellm/chat \
+     --gateway-url http://127.0.0.1:4000/v1 --gateway-key-env LITELLM_API_KEY
    ```
 
-   A later run keeps the table you accepted. Do not pass `--adapter` or `--adapt-reviewer`: they must be Claude models
-   (the defaults, `claude/sonnet` and `claude/opus`), and setup refuses anything else with exit 2: `--adapter
-   and --adapt-reviewer must be claude/<model>`.
+   A later run keeps the table you accepted. `--adapter` and `--adapt-reviewer` are the onboarding agents: the
+   adapting agent and its reviewer, which must be different models. Without them they are Claude (`claude/sonnet` and
+   `claude/opus`), and a machine without Claude then stops with `claude not on PATH, but the onboarding agents use it`.
+   An OpenCode onboarding agent reaches the gateway only by what you give here: `--gateway-url`, the gateway's base
+   URL written out plainly (`http(s)://<host>`, a host of letters, digits, `.`, `_`, `-` or `[IPv6]`, a port, a path; no
+   `{env:...}`, `%`, backslash, user, query or fragment), and `--gateway-key-env`, the name of the variable that
+   holds its key (leave it out, or give `''`, for a gateway with no key). The model is the part after the provider in
+   `opencode/<provider>/<model>`, as the gateway names it. Both are kept for the project (never the key), so a later
+   run needs them only to change them; a new `--gateway-url` does not take the old key variable along unless you name
+   it again or say yes when asked. You should see `gateway: using http://127.0.0.1:4000/v1, key from
+   $LITELLM_API_KEY` before the first agent: check it is your gateway. Known vendors' APIs are refused by name, but
+   that does not prove a host is yours, and the gateway must not redirect (OpenCode would send the prompt on). A
+   gateway that needs extra headers is not supported yet. `--suggest-tiers` takes the same `--gateway-url` and
+   `--gateway-key-env`, and without them uses the gateway stored here.
 
-**Onboarding a new project needs Claude on that machine.** The adapting agent and its reviewer are always Claude, so the
-first `lane-control project setup` of a project fails with `claude not on PATH, but the onboarding agents use it` on a
-machine without it. (Making onboarding run on OpenCode is planned work; this step will change when it lands.) What a
-machine with only OpenCode can do today:
+   If not: `the variable --gateway-key-env names is not set here` means it is not set in this shell (its name is not
+   printed, in case a key was pasted there; nothing was stored). `is a vendor's public API` or `must be a complete
+   http(s) URL written out` names the URL to fix.
 
-- **The project is already onboarded** (its `.lane-control/` files and `AGENTS.lane-control.md` are committed on the
-  default branch). Clone or pull it and run the command above. You should see `adapt: exists .lane-control/ is
-  committed`, and no Claude is needed.
-- **The project is new.** Onboard it once on a machine with Claude: `lane-control project setup ~/code/<project>
-  --no-start`, answer `y` to the commit and the push. Then pull it on the OpenCode machine and run the command above.
-- **No machine with Claude at all.** `--skip-adapt` runs the rest of the setup without Claude, but it writes none of
-  the project's lane-control files (no path map, no `AGENTS.lane-control.md`), and the coordinator is told to read
-  them. That is a stopgap, not a setup. (Read from the source; not run.)
+**Three routes for a new project.** Pick one by where the model runs:
+
+- **A model on a gateway you run: add `--trust-gateway`.** The onboarding agents then read the project folder itself,
+  with nothing filtered. Before any agent runs you get a warning that says so plainly: the model sees every file in
+  the folder, ignored and private ones included (`.env` files, keys, the `.git` folder with its config and remote
+  URLs, what `--private` names, what a link there points to), all of it goes to the gateway, and this is meant for a
+  model on a gateway you run. Then one question, `Run them in <project> itself, every file readable? [y/N]`; answer
+  `y`. Without a terminal (stdin and stdout both; a `| tee log` counts as none) the flag is the yes. A no runs nothing
+  (exit 3). The flag is not kept: give it on each run that adapts. The adapter still writes only its own files under
+  `.lane-control/`: anything else that changes in the folder or in its `.git` (a config, a hook, another file, a
+  link, a deletion) stops setup at once, before any commit and before any other git command, with each path named.
+  Read those in an editor, not with git (a git command there could run what such a write set), and put back what you
+  did not write; the next `lane-control project setup` on the project asks you about them first, and runs nothing until
+  you say yes (or they are back as they were).
+- **A hosted model you do not control: leave `--trust-gateway` out (the default).** Each agent works in a scratch
+  copy of the project that holds only what it may see, described below.
+- **No usable model on this machine yet: `--skip-adapt`.**
+
+  ```bash
+  lane-control project setup ~/code/<project> --skip-adapt \
+    --coordinator opencode/litellm/chat --reviewer opencode/litellm/code
+  ```
+
+  No onboarding agent runs: `adapt: skipped --skip-adapt: ...` says that the project's own files are not written (no
+  `AGENTS.lane-control.md`; `.lane-control/` holds only the rendered personas), and the rest runs as usual (Orca, the
+  coordinator, whose first message says the project is not adapted yet). Once a model is at hand, adapt it: the
+  command from step 2 with `--readapt` added.
+
+**The scratch copy (without `--trust-gateway`).** Each onboarding agent runs as `opencode2 run` in a scratch copy of
+the project, with the same prompts, checks and review round as on Claude. The copy holds only what it may see: the
+tracked files (and onboarding's own new files under `.lane-control/`), minus `.env*` files and everything your
+`--private` globs cover (a POSIX class like `[[:digit:]]` anywhere in it and a `./` or `//` spelling are refused, with
+the way to write it; a glob may not cover AGENTS.md or onboarding's own files). The copy is its own empty git repo, so
+no repo around your temporary folder is read either; a TMPDIR inside the project is refused. It has no `.git`, no
+ignored file and no symlink: a link to a file that is in the copy, like `AGENTS.md -> CLAUDE.md`, comes as that file's
+content, and every other link is left out. So OpenCode never sees a private file, including an `AGENTS.md` it would
+attach by itself. Only the adapter's template files under `.lane-control/` come back to the repo; anything else it
+changed (a `.git`, a dot-name, another file) stops the run, and nothing is copied.
+
+**In both OpenCode routes** the agent has `read` alone (no shell, grep, glob or web), and only the adapter writes, only
+its template files under `.lane-control/`. OpenCode starts from nothing for the run: none of your OpenCode config is
+read (nor its plugins, formatters or MCP servers, nor the project's); its one provider is written from `--gateway-url`
+and `--gateway-key-env` alone, under a provider id of its own (`lane-gateway`), and the key reaches it only as
+`LANE_GATEWAY_KEY`, never under your variable's name. An `/etc/opencode` folder (OpenCode loads it whatever its HOME)
+stops it too. `--adapter` and `--adapt-reviewer` are kept in the project's settings store once given, so a later run
+or `--readapt` without them uses the same models; a run that uses a default says so beside the model (`adapt: running
+claude/sonnet (the default: ...)`). An onboarded project (its `.lane-control/` files and `AGENTS.lane-control.md`
+committed on the default branch) says `adapt: exists .lane-control/ is committed` and runs no onboarding agent, so
+these flags make no difference there. The details, and how it differs from Claude's run, are in [the native Orca
+setup](../orchestrators/native-orca/setup.md), "OpenCode on a self-hosted LiteLLM gateway".
 
 ### What the setup does, and what you should see
 
@@ -310,9 +364,10 @@ In order, roughly:
    Yes to both creates the private repo, copies the folder there, pushes it and links `.beads` to it; the old folder
    is kept beside it. No to either changes nothing, and beads stays local with no off-machine copy (the setup says so).
    With no beads and a private beads repo already on GitHub it offers `Restore beads: ...? [y/N]` instead.
-3. On a project not onboarded yet, an adapting agent (Claude) writes the project's lane files, and a reviewer checks
-   them. Then it asks `Commit these files and run the Orca setup? [y/N]`. Answer `y`; on no, or without a terminal,
-   nothing more runs and it exits 3. An onboarded project says `adapt: exists` and skips this.
+3. On a project not onboarded yet, an adapting agent (Claude, or OpenCode with `--adapter`) writes the project's lane
+   files, and a reviewer checks them. Then it asks `Commit these files and run the Orca setup? [y/N]`. Answer `y`; on
+   no, or without a terminal, nothing more runs and it exits 3. An onboarded project says `adapt: exists` and skips
+   this.
 4. It may ask to commit a drafted `orca.yaml` and to push the default branch. Say yes to the push: Orca cuts lane
    worktrees from `origin/<branch>`.
 5. `orca-repo: created ...`, `lane-tools: created ...` and the skills (`native-orca-lanes`, `component-gallery`,
@@ -471,7 +526,8 @@ Why each step:
   never installed (it says so). A failed install exits 1 and changes nothing.
 - `--refresh` renders the skills and the personas again from the installed tree and records its sha. It keeps each
   persona's engine and model and the project's tier table, starts nothing and commits nothing, and says which running
-  agents need a restart. It ignores `--coordinator` (setup says so).
+  agents need a restart. It refuses `--coordinator` and `--permission-mode` (exit 2): to change engines, see
+  [moving a project to the gateway](#a-project-that-runs-on-claude-and-should-move-to-the-gateway).
 - A machine set up before the install moves to it with the first install: `note: this machine moves to the install
   ...` (from `lane-control install`, or `project-setup: note: ...` when setup installs first), and per project, at
   its `--refresh`, `lane-control: moved ...`. Nothing else to do.

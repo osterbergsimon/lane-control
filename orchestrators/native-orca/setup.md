@@ -126,9 +126,12 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    suggested table (swift, standard, deep from name hints; top `none`; rows `opencode/<provider>/<alias>`). It leaves
    out, and names, a model whose LiteLLM `model_info.mode` is not chat (an embedding model, a reranker) and, where
    OpenCode's config lists the provider's models (`provider.<id>.models`), an alias it does not list, since OpenCode
-   starts only those. The base
-   URL is the provider's `baseURL`, or `--gateway <url>`; the key is the variable its `{env:NAME}` names, or
-   `--gateway-key-env NAME`. A key written in the config itself is never used (it stops and says so). OpenCode's auth
+   starts only those. The base URL is `--gateway-url <url>` (the same flag the onboarding agents use; `--gateway` is
+   its old name), else the project's stored gateway (the one onboarding keeps), else the provider's `baseURL` in
+   OpenCode's config; the key is `--gateway-key-env NAME`, else the variable kept with that stored gateway, else the
+   one the provider's `{env:NAME}` names, each only with the URL it goes with: a `--gateway-url` that is neither
+   takes no key along (`gateway: using <url>, no key`). A key written in the config itself is never used (it stops
+   and says so). OpenCode's auth
    files are never read, and the key is never printed, logged, stored or passed as an argument; it goes to the URL
    given only: no redirect is followed and no proxy is used. In a terminal it asks before it writes the table to the project's settings store; on no,
    or without a terminal, nothing is written: edit the table it printed and pass it with `--tiers <file>`. A later
@@ -138,6 +141,160 @@ A self-hosted gateway with any models behind it is first class, and nothing is r
    four automations run OpenCode v2 on OpenCode's own default model (`"model"` in its config), since Orca passes no
    model to an OpenCode automation. With no usage feed (every budget's feed empty in the playbook config) no budget
    is metered: the caps are the limit, and night check-ins still go out.
+4. Setting a project up on such a machine: the onboarding agents (the adapting agent and its reviewer) run on either
+   harness. There are three routes for a new project; pick one before the first setup run:
+   - **A model on a gateway you run (trusted gateway).** `lane-control project setup <repo> --adapter
+     opencode/litellm/code --adapt-reviewer opencode/litellm/deep --coordinator opencode/litellm/chat --reviewer
+     opencode/litellm/deep --gateway-url http://127.0.0.1:4000/v1 --gateway-key-env LITELLM_API_KEY --trust-gateway`.
+     The onboarding agents read the repo itself: no scratch copy, no private-path filtering. Before any agent runs it
+     prints a warning that says what the model will see (every file in the folder, ignored and private ones included:
+     `.env` files, keys, the `.git` folder with its config and remote URLs (in a linked worktree only its one-line
+     pointer: OpenCode refuses the shared folder outside it), what `--private` names, and what a link there points to;
+     all of it goes to the gateway and on to whatever the gateway passes it to) and that this is meant for a model on a
+     gateway you run, then asks once, `Run them in <repo> itself, every file readable? [y/N]`; without a terminal
+     (stdin and stdout both, so `| tee log` is none) the flag is the yes. A no runs nothing and exits 3. `--trust-gateway` is not kept: give it on each run that should
+     use it. It is refused with `--skip-adapt`, `--refresh`, `--show` and `--suggest-tiers`, and does nothing for
+     Claude roles (it says so).
+   - **A hosted model you do not control (the default).** The same command without `--trust-gateway`: each agent works
+     in a filtered scratch copy, below.
+   - **No usable model on this machine yet.** `lane-control project setup <repo> --skip-adapt --coordinator
+     opencode/litellm/chat --reviewer opencode/litellm/deep`: no onboarding agent runs, so the project's own files
+     are not written: no `AGENTS.lane-control.md`, and `.lane-control/` holds only the rendered personas
+     (git-excluded) (`adapt: skipped ...` says so). The rest of the setup (Orca, the coordinator) runs as usual; the
+     coordinator's first message says the project is not adapted yet and leaves `AGENTS.lane-control.md` out. Adapt it later, once a model
+     is at hand: `lane-control project setup <repo> --readapt --adapter ... --adapt-reviewer ...`, which runs the
+     onboarding as a first setup would.
+
+   What both OpenCode routes share. The defaults stay `claude/sonnet` and `claude/opus`; `--adapter` and
+   `--adapt-reviewer` are kept in the settings store (`models.adapter`, `models.adapt-reviewer`) once given, and a run
+   on a default says so; only a harness a role uses must be on PATH, so a box without Claude needs no `claude`. Each
+   agent runs `opencode2 run --standalone --model lane-gateway/<model> --agent lane-onboard-<random> --format json`,
+   the prompt on stdin, with the same prompts, checks and review round as Claude, and with OpenCode starting from
+   nothing (`opencode_agent`): HOME and the XDG folders are a scratch folder of the run's own, so no config, plugin,
+   agent, formatter, LSP, MCP server, auth or session of yours is loaded (an owner formatter made OpenCode run
+   JavaScript from the project after a write: seen live), and the session stays in that folder. No OpenCode config of
+   yours is read for the run: an earlier version copied the provider's block from it and kept resolving it differently
+   from OpenCode (merge order, the `providers` key, `{env:}` inside a URL), so that the prompt, the project and the key
+   could reach another host, a vendor's API among them (each seen live). Its one config file is written fresh from
+   explicit values:
+   - one provider, with the id `lane-gateway` whatever the `<provider>` of `opencode/<provider>/<model>` is: OpenCode
+     has built-in behaviour for some provider ids (with `opencode` or `github-copilot` it sent a side request for a
+     model of its own, `gpt-6-luna`: seen live), so the `<provider>` part does not reach the run; two onboarding agents
+     with the same `<model>` are the same model at the one gateway and are refused. npm `@ai-sdk/openai-compatible`,
+     the one model `<model>` as the gateway names it, and OpenCode's title agent pinned to it, so no side request names
+     another model;
+   - `baseURL`, the `--gateway-url`. It must be written out plainly, since OpenCode reads a URL with a WHATWG parser and
+     Python does not: `http://<host>` or `https://<host>`, a host of ASCII letters, digits, `.`, `_` and `-` (an IDN as punycode)
+     or a bracketed IPv6 address, an optional port and a plain path; no `{env:...}`, no user or password, no `%`,
+     backslash, other character, query or fragment (a vendor's host name with a trailing dot, a percent-encoded
+     letter, a backslash before a suffix that reads as a gateway's name, an ideographic full stop or an invisible
+     character in it each read as one host here and as the vendor's to OpenCode: seen live). Then known vendors' public APIs are
+     refused by name (OpenAI, Anthropic, Azure OpenAI and AI Foundry, Google, Mistral, Groq, DeepSeek, xAI, OpenRouter,
+     Together, Fireworks, AWS, Cohere, Perplexity, opencode.ai, GitHub Models and Copilot, NVIDIA, Cerebras, DeepInfra,
+     Hugging Face, Vercel, Cloudflare, Moonshot, Alibaba, Z.ai, SambaNova, Replicate, Ollama's cloud and others); that
+     does not prove a host is self-hosted, so `gateway: using <url>, key from $NAME` (or `no key`) is printed before
+     the first agent, to read. The gateway must not redirect: OpenCode follows a 307 or 308 and sends the same request,
+     prompt included, to wherever it points (seen live), and project-setup cannot switch that off. Plain `http://<host>`
+     is for loopback or a network you trust; the line says so for any other host;
+   - `apiKey` `"{env:LANE_GATEWAY_KEY}"` when `--gateway-key-env NAME` is given: the run's environment holds the
+     key under `LANE_GATEWAY_KEY` only, never under your variable's name, since OpenCode reads some names itself
+     (`OPENCODE_API_KEY` went to opencode.ai as its own service's key: seen live). Left out with no key
+     (`--gateway-key-env ''`, or never given). `--gateway-key-env` takes a variable's name: a value that is not one is
+     refused without being shown, and a name is kept only once that variable is set in this shell (so a key pasted
+     there is neither printed nor stored). The URL and its key variable are one setting, kept as `gateway` in the
+     settings store (never the key): a `--gateway-url` other than the stored one does not take the stored key variable
+     along unless you name it with `--gateway-key-env` or say yes when asked in a terminal; otherwise it is dropped,
+     and said (`gateway: key dropped ...`). No headers (a gateway that needs them is not supported yet, bd lc-5cr), no
+     other provider; formatter, LSP, MCP and plugins off; and the run's agent and rules.
+
+   The run's environment is PATH, locale, TLS and proxy settings and `LANE_GATEWAY_KEY`, nothing else of yours, and no
+   model catalog is fetched (`OPENCODE_DISABLE_MODELS_FETCH=1`). OpenCode also loads a system config folder whatever
+   HOME is (`/etc/opencode`; `/Library/Application Support/opencode` on macOS; `%ProgramData%\opencode` on Windows),
+   with no switch to keep it out: when that folder exists the run refuses to start and names it. The run's rules:
+   every tool off, then read on, and edit only on the adapter's exact paths, each template as `.lane-control/<its
+   name>` or `.lane-control/additions/<its name>` and `.lane-control/SUGGESTIONS.md`, only for the adapter, so no
+   shell, web, grep, glob, sub-agent or path outside the folder, for an agent whose name is new each run. The
+   project's own OpenCode config and plugins are not loaded (`OPENCODE_DISABLE_PROJECT_CONFIG=1`), nor Claude Code's
+   (`OPENCODE_DISABLE_CLAUDE_CODE=1`). On both harnesses, any of git's own names under `.lane-control/` (`.git`,
+   `HEAD`, `commondir`, `gitdir`, `objects`, `refs`, any case, folder or file) stops the run before and after each
+   agent, before any git command can go in: git would run a command its config names. A run that uses all its steps
+   (80 for the adapter, 60 for the reviewer) fails as a Claude run out of turns does, and so does one that exits 0
+   with no answer and no tool call. `--refresh` runs no agent and needs no Claude either.
+
+   Git, in both routes and on Claude too: no git command setup runs (its own, its helpers') runs a program the repo
+   names. Every git child of the setup process gets, through `GIT_CONFIG_COUNT` (the precedence of `-c`),
+   `core.hooksPath=/dev/null`, `core.fsmonitor=false`, `protocol.ext.allow=never`, `safe.bareRepository=explicit` and
+   no automatic gc, plus `GIT_CONFIG_NOSYSTEM=1`, `GIT_PAGER=cat` and `GIT_EDITOR=true`; `core.sshCommand`,
+   `core.askPass`, the gpg programs and `credential.helper` are the owner's global values (or git's defaults), never
+   the repo's; and every filter (`clean`, `smudge`, `process`), diff driver (`textconv`, `command`, `diff.external`),
+   merge driver, `uploadpack`/`receivepack`, `core.alternateRefsCommand` and `core.gitProxy` that the repo's own config,
+   its worktree config or a file they include sets is made empty (a diff that needs one then fails, it does not run
+   it). So the repo's own hooks do not run at setup's commit and push either.
+
+   Writes, with `--trust-gateway`: the agent runs in the repo, so its writes are checked by the state before and
+   after each run of the repo folder and of its git dirs, asked of git before the run (a linked worktree's common dir,
+   with the shared config, hooks and the other worktrees' folders, is outside the folder), ignored files included and
+   links never followed; git's own files by their content too. Directly in each git dir (the repo's, a nested repo's,
+   a submodule's under `modules/`, another worktree's under `worktrees/`), and only there, what git rewrites by
+   itself is left out: `objects/` (but not `objects/info`, where alternates point git elsewhere), `refs/`, `logs/`,
+   `packed-refs`, `index`, `HEAD` and the other `*_HEAD`, `COMMIT_EDITMSG`, `*.lock` and the like, so a lane
+   committing in another worktree during the run is no refusal; a config, `config.worktree`, a hook or an info file
+   counts. Never seen: those left-out files (a branch made, say), a file made and removed again within the run, a
+   write outside the repo and its git dirs, and one through a link already there that leads out; only OpenCode's
+   rules stop those (they did in every live attempt, `write`, `edit` and `patch` alike). Only new or changed plain
+   files at the adapter's paths, and the folders they are in, may change. Anything else (a `.git` or dot-name write,
+   another file, a link, a deletion, any write by the reviewer), in any run (the adapter's, the fix rounds', the run
+   that applies your answers, every review), stops setup at once: before any commit and with no git command after it
+   in that run, not even its own cleanup, and with each path named, also after a failed or interrupted (Ctrl-C) run.
+   The refusal is kept outside the repo (`~/.config/lane-control/refused/<project>.json`, with each path's state
+   before the run), as is a mark that a run is under way, so one killed before its check counts too. The next
+   `lane-control project setup` on that folder reads it before its first git command: when every path is back as it was it says so
+   and goes on; otherwise it lists them, says to read them in an editor (`.git/config`, `.git/hooks/` and the rest; a
+   git command there could run what they set, so not `git status`), and runs nothing until you say yes in a terminal.
+   Another process writing there during the run (a lane, an editor) shows the same way: run it with the lanes
+   stopped. Before the adapter runs, a link or a non-folder on the way to its files stops it, so no write goes through
+   a link out of the repo.
+
+   The scratch copy, without `--trust-gateway` (`opencode_export`, mode 700, removed after the run). It is made its
+   own empty git repo (no history, remote or hooks) before anything goes in, since OpenCode takes the nearest git
+   work tree as the project: a copy under a TMPDIR inside some other repo (a HOME kept in git) would otherwise give
+   the agent all of that repo (seen live). A TMPDIR inside the project's repo is refused (in both routes: the run's
+   HOME is made there too). Deny rules alone did not hold on OpenCode: it matches the path it is asked for, never what
+   a symlink leads to; its wildcard is not git's; and it attaches an `AGENTS.md` by itself, past every read rule, when
+   it reads in or lists that folder (each seen live). So the copy holds only what the agents may see: the tracked
+   files (git's index, read from the repo's root, checked-out submodules included, with what is on disk now) and
+   onboarding's own new files (`.lane-control/`, `AGENTS.lane-control.md`), minus `.env*` files, a tracked file a
+   `.gitignore` line matches, and everything a `--private` glob covers. The globs are matched by project-setup with
+   fnmatch from the repo root, as ignore lines are (a name alone covers a folder and all below it, `dir/`, each `**/`
+   as a folder or none, `[^...]`), never by git, so no `.gitignore` negation, leading `#` or working folder changes
+   them; they err towards covering more (a test checks each form against git's own matching); a POSIX class (`[:`
+   anywhere: `[[:digit:]]`, `[![:alpha:]]`) and a `./`, `//` or `/./` spelling are refused, on both harnesses, with
+   the way to write it. A glob may not cover the adapter's files, `AGENTS.lane-control.md`, `AGENTS.md` or the file it
+   links to: a review that cannot see them proves nothing, and the reviewer's prompt holds AGENTS.md's diff. The copy
+   has no `.git`, no ignored file and no symlink: a link to a file that is itself in the copy comes as that file's
+   content (`AGENTS.md -> CLAUDE.md`), every other link is left out, and so is a file below a folder that has become a
+   link. Untracked files, untracked embedded repos and anything ignored are not in it; a repo committed as a gitlink
+   is copied like a submodule, its tracked files only, also with no `.gitmodules` entry (mark it `--private` if it
+   should stay out). After a run that succeeded (a failed, empty or cut-off one brings nothing back) only new or
+   changed plain files at the adapter's own paths, and only from the adapter, are copied back; anything else that
+   changed (a file elsewhere, a dot-name or `.git`, a folder of its own, a deletion, a link, a link or a folder in the
+   repo where a file goes, a file in the repo the copy left out (ignored or private) that it would replace, any write
+   by the reviewer) stops the run with one line, checked before anything is written, and nothing is copied or made;
+   the files go beside their places first and are all put in place at the end, so an error leaves none (a role file
+   over a rendered persona on native Orca becomes that role's additions, as on Claude).
+
+   The opt-in live check (real opencode2, a fake model on 127.0.0.1; a proxy that lets nothing through logs any request
+   past the given gateway; for the copy, every request is searched for a marker in each private file; the owner's
+   config there turns formatters, LSP, an MCP server, a plugin and instructions on, and the project has prettier and a
+   prettier config that would leave a marker): `LANE_LIVE_OPENCODE=1 python3 -m unittest discover -s tests -p
+   test_project_setup_native.py -k OpenCodeOnboardingLiveTests`. It covers both routes (`write` and `edit`, and the
+   `patch` tool OpenCode offers a `gpt-*` model instead: a move onto a hook or AGENTS.md, a new hook, `.git/config` or
+   `.envrc`, a file outside, a delete, all refused by OpenCode's rules; the delete of an adapter path it lets through
+   stops the run), each with a negative control
+   (the copy's filter switched off lets a marker through; the trusted run's edit rules widened let an `AGENTS.md`
+   write land, and the before/after check stops it), the key under `OPENCODE_API_KEY` (and, as a control, handed over
+   under that name: opencode.ai is asked) and the side model under built-in provider ids (and, as a control, under the
+   given id with no title model: another model is asked).
 
 The URL, the key's variable and the model names stay in OpenCode's config and the project's settings store: no key,
 host or gateway URL in any repo.

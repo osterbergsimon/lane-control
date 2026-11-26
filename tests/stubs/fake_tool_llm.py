@@ -6,7 +6,8 @@ OpenAI-compatible chat server on 127.0.0.1 for live harness checks.
 
 Prints its port on the first line, then serves until killed. The tool call is $LANE_FAKE_TOOL (default shell) with
 {"command": $LANE_FAKE_CMD} (or the JSON in $LANE_FAKE_ARGS); once its result is in the conversation the answer is
-"done". Every POST body is appended to the log as one JSON line. No real provider is ever contacted."""
+"done". Every POST body is appended to the log as one JSON line; with $LANE_FAKE_CHAT_ONLY set, a POST to any other
+route than chat completions is logged and answered 404. No real provider is ever contacted."""
 import http.server, json, os, sys
 LOG = sys.argv[1]
 CMD = os.environ.get("LANE_FAKE_CMD", "echo hi")
@@ -19,6 +20,8 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         open(LOG, "a").write(json.dumps({"path": self.path, "body": raw.decode("utf8", "replace")}) + "\n")
+        if os.environ.get("LANE_FAKE_CHAT_ONLY") and not self.path.endswith("/chat/completions"):
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
         req = json.loads(raw)
         msgs = req.get("messages", [])
         last_user, idx = "", -1
