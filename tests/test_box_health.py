@@ -56,6 +56,11 @@ if a[1:2] == ["show-environment"]:
     if st.get("shell"):
         print("SHELL=" + st["shell"])
     sys.exit(0)
+if a[1:2] == ["is-enabled"]:
+    word = st.get("enabled", {}).get(a[2])
+    if word:
+        print(word)
+    sys.exit(0 if word == "enabled" else 1)
 if a[1:2] == ["show"]:
     u = st.setdefault("units", {}).get(a[2])
     props = [a[i + 1] for i, x in enumerate(a) if x == "-p"]
@@ -239,19 +244,25 @@ class UnitHealthTests(Module):
         u = self.conf / "systemd" / "user"
         u.mkdir(parents=True)
         (u / "orca-tunnel-box.service").write_text(
-            "[Service]\nExecStart=/usr/bin/env ssh  -N -o BatchMode=yes -L 127.0.0.1:6769:127.0.0.1:6769 user@box\n")
+            "[Service]\nExecStart=/usr/bin/env ssh -F /trial/ssh_config -N -o BatchMode=yes -L "
+            "127.0.0.1:6769:127.0.0.1:6769 user@box\n")
         (u / "lane-tunnel@.service").write_text(TEMPLATE.read_text())
         t = self.conf / "lane-control" / "tunnels"
         t.mkdir(parents=True)
-        (t / "box.env").write_text("SSH_HOST=user@box\nPORT=6768\nREMOTE_PORT=6790\nSSH_AUTH_SOCK=/run/a.sock\n")
+        (t / "box.env").write_text("SSH_HOST=user@box\nPORT=6768\nREMOTE_PORT=6790\nSSH_AUTH_SOCK=/run/a.sock\n"
+                                   "SSH_CONFIG=/trial/ssh_config\n")
+        self.sstate.write_text(json.dumps({"enabled": {"lane-tunnel@box.service": "disabled"}}))
         got = {x["unit"]: x for x in self.B.tunnel_units(self.conf)}
         self.assertEqual(got["orca-tunnel-box.service"]["port"], 6769)
         self.assertEqual(got["orca-tunnel-box.service"]["host"], "user@box")
         self.assertFalse(got["orca-tunnel-box.service"]["controlpath"])  # written before the fix
         self.assertTrue(got["lane-tunnel@box.service"]["controlpath"])
+        # review M1, m3: the repair keeps the port, the ssh config and a tunnel started with --no-enable
         self.assertEqual(self.B.repair(got["lane-tunnel@box.service"]),
-                         "lane-tunnel start --auth-sock /run/a.sock --remote-port 6790 user@box 6768")
-        self.assertEqual(self.B.repair(got["orca-tunnel-box.service"]), "orca-host-install user@box --tunnel")
+                         "LANE_SSH_CONFIG=/trial/ssh_config lane-tunnel start --no-enable --auth-sock /run/a.sock "
+                         "--remote-port 6790 user@box 6768")
+        self.assertEqual(self.B.repair(got["orca-tunnel-box.service"]),
+                         "LANE_SSH_CONFIG=/trial/ssh_config orca-host-install user@box --tunnel --port 6769")
 
 
 class RuntimeTests(Module):
@@ -604,6 +615,18 @@ class HostInstallTests(Env):
         self.assertIn("ControlPath=none", self.unit().read_text())
         self.assertIn(["--user", "restart", "orca-tunnel-box.service"], self.calls())  # the old unit was running
 
+    def test_tunnel_keeps_the_ssh_config_the_unit_was_written_with(self):
+        server = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
+        cfg = self.tmp / "trial_ssh_config"
+        cfg.write_text("")
+        self.unit().parent.mkdir(parents=True)
+        self.unit().write_text(f"[Service]\nExecStart=/usr/bin/env ssh -F {cfg} -N -L 127.0.0.1:{self.port}:127.0.0.1:"
+                               f"{self.port} box\n")
+        self.units(**{"orca-tunnel-box.service": self.running(server)})
+        r = self.run_tool("--tunnel")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"ssh -F {cfg} -N", self.unit().read_text())  # review m3
+
     def test_tunnel_whose_port_is_held_by_another_process_fails_and_names_it(self):
         holder = self.spawn_node(self.box_slot("0.2.0+bbbb"), "--port", str(self.port), port=self.port)
         unit_ssh = self.spawn("ssh", "-N")
@@ -624,7 +647,7 @@ class HostInstallTests(Env):
         self.units(**{"orca-tunnel-box.service": self.running(server)})
         r = self.run_tool("--tunnel", "--port", str(self.port))
         self.assertEqual(r.returncode, 1)
-        self.assertIn("--pair", r.stderr)
+        self.assertIn(f"--pair --port {self.port}", r.stderr)  # review M1: never the default port
 
     def audit(self, *args):
         script = subprocess.run(["sh", str(HOST_INSTALL), "--audit-script"], env=self.env, capture_output=True,

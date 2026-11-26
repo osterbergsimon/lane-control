@@ -196,8 +196,10 @@ def tunnel_units(conf: Path) -> list:
         except OSError:
             continue
         m = re.search(r"^ExecStart=.*-L 127\.0\.0\.1:(\d+):127\.0\.0\.1:\d+ (\S+)\s*$", text, re.M)
+        cfg = re.search(r"^ExecStart=.* ssh +-F (\S+)", text, re.M)
         out.append({"unit": f.name, "host": m.group(2) if m else f.name[len("orca-tunnel-"):-len(".service")],
                     "port": int(m.group(1)) if m else None, "controlpath": unmuxed(text) and runs_unmuxed(f.name),
+                    "ssh_config": cfg.group(1) if cfg else "",
                     "kind": "orca-tunnel"})
     try:
         template = (units / "lane-tunnel@.service").read_text()
@@ -210,8 +212,20 @@ def tunnel_units(conf: Path) -> list:
             continue
         out.append({"unit": f"lane-tunnel@{f.stem}.service", "host": env.get("SSH_HOST") or f.stem, "port": None,
                     "controlpath": unmuxed(template) and runs_unmuxed(f"lane-tunnel@{f.stem}.service"),
-                    "kind": "lane-tunnel", "env": env})
+                    "kind": "lane-tunnel", "env": env, "ssh_config": env.get("SSH_CONFIG") or "",
+                    "enabled": enabled(f"lane-tunnel@{f.stem}.service")})
     return out
+
+
+def enabled(unit: str):
+    """True or False as systemctl --user is-enabled says, None when it cannot say (no user manager)."""
+    try:
+        r = subprocess.run(["systemctl", "--user", "is-enabled", unit], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    word = r.stdout.strip()
+    return True if word in ("enabled", "enabled-runtime", "static", "linked") else False if word else None
 
 
 def runs_unmuxed(unit: str) -> bool:
@@ -230,14 +244,23 @@ def unmuxed(unit_text: str) -> bool:
 
 
 def repair(t: dict, tree=None) -> str:
-    """The command that rewrites and restarts one tunnel unit (with `tree`, by its path in that lane-control tree)."""
+    """The command that rewrites and restarts one tunnel unit as it was set up (with `tree`, by its path in that
+    lane-control tree): its port, its ssh config (LANE_SSH_CONFIG) and, for direction 2, its agent, wrapper and
+    --no-enable (review M1, m3)."""
+    import shlex
+    cfg = t.get("ssh_config") or ""
+    pre = f"LANE_SSH_CONFIG={shlex.quote(cfg)} " if cfg else ""
     if t["kind"] == "orca-tunnel":
-        return f"{str(tree) + '/scripts/' if tree else ''}orca-host-install {t['host']} --tunnel"
+        return (f"{pre}{str(tree) + '/scripts/' if tree else ''}orca-host-install {t['host']} --tunnel" +
+                (f" --port {t['port']}" if t.get("port") else ""))
     e = t.get("env") or {}
     port, rport = e.get("PORT", "<port>"), e.get("REMOTE_PORT") or e.get("PORT", "<port>")
-    opts = "".join(f" {flag} {e[k]}" for flag, k in (("--auth-sock", "SSH_AUTH_SOCK"), ("--ssh", "LANE_TUNNEL_SSH"))
-                   if e.get(k))
-    return f"{str(tree) + '/core/scripts/' if tree else ''}lane-tunnel start{opts} --remote-port {rport} {t['host']} {port}"
+    opts = "".join(f" {flag} {shlex.quote(e[k])}" for flag, k in (("--auth-sock", "SSH_AUTH_SOCK"),
+                                                                  ("--ssh", "LANE_TUNNEL_SSH")) if e.get(k))
+    if t.get("enabled") is False:
+        opts = " --no-enable" + opts
+    return (f"{pre}{str(tree) + '/core/scripts/' if tree else ''}lane-tunnel start{opts} --remote-port {rport} "
+            f"{t['host']} {port}")
 
 
 # --- Orca's server runtimes on a host -------------------------------------------------------------------------------

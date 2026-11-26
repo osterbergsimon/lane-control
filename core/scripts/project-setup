@@ -4050,9 +4050,12 @@ def check_host(a, host: str) -> int:
         row("direction 1", "to do", f"(no environment {place.env} here: project-setup <repo> {host} puts Orca's "
             "server there and pairs it, orca-host-install)")
     elif not place.reachable():
+        d1u = next((t for t in HEALTH.tunnel_units(config_home()) if t["unit"] == f"orca-tunnel-{place.env}.service"),
+                   None)
         row("direction 1", "missing", f"(environment {place.env} is saved here but does not answer: is "
             f"orca-tunnel-{place.env}.service running here, and Orca's server on {host}? systemctl --user status "
-            f"orca-tunnel-{place.env}.service)")
+            f"orca-tunnel-{place.env}.service" + (f"; to restore the tunnel: {HEALTH.repair(d1u, HERE)}" if d1u else
+                                                   "") + ")")
     else:
         try:
             box = place.jrun("status")["result"]["runtime"].get("appVersion")
@@ -4112,12 +4115,8 @@ def check_host(a, host: str) -> int:
 
     def tunnel_row(label, t):
         state, detail = states[t["unit"]]
-        fix = HEALTH.repair(t)
-        if t["kind"] == "lane-tunnel":
-            fix = "core/scripts/" + fix + (" (with the options it was started with)" if not t.get("env", {}).get(
-                "SSH_HOST") else "")
-        else:
-            fix = "scripts/" + fix
+        fix = HEALTH.repair(t, HERE) + (" (with the options it was started with)" if t["kind"] == "lane-tunnel" and
+                                        not t.get("env", {}).get("SSH_HOST") else "")
         if state == "not checked":
             return unread(label, f"{t['unit']}: {detail}")
         if state != "ok":

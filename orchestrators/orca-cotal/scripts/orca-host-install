@@ -282,18 +282,24 @@ answers() { "$orca" status --environment "$name" --json 2>/dev/null | grep -q '"
 
 if [ "$tunnel_only" = 1 ]; then  # restore the direction-1 tunnel of a paired host, and nothing else
   [ "$pair" = 0 ] && [ -z "$from$bundle$want" ] || die "--tunnel restores the tunnel only: it takes --port, not --pair, --from, --bundle or --version" 2
+  # The ssh config the unit was written with stays, unless LANE_SSH_CONFIG names another (review m3).
+  if [ -z "$sshf" ]; then
+    oldcfg=$(sed -n 's/^ExecStart=.* ssh  *-F \([^ ]*\) .*/\1/p' "$unitfile" 2>/dev/null | head -n 1)
+    [ -z "$oldcfg" ] || { [ -f "$oldcfg" ] && sshf="-F $oldcfg"; } || die "$unit names the ssh config $oldcfg, which is not there: set LANE_SSH_CONFIG" 2
+  fi
   if [ "$port_set" = 0 ]; then
     port=$(sed -n 's/^ExecStart=.* -L 127\.0\.0\.1:\([0-9][0-9]*\):127\.0\.0\.1:[0-9]* .*/\1/p' "$unitfile" 2>/dev/null | head -n 1)
     [ -n "$port" ] || die "no $unit here to read the port from: give --port <the port orca-host-install --pair used>" 2
   fi
   [ -x "$orca" ] || die "Orca CLI not found at $orca (open Orca once, or set ORCA_CLI)"
-  saved_here || die "$host was never paired here (no environment $name): run orca-host-install $host --pair"
+  saved_here || die "$host was never paired here (no environment $name): run orca-host-install $host --pair --port $port"
   servers=$(audit - "$port" list) || die "cannot ssh to $host"
-  printf '%s\n' "$servers" | awk -v p="$port" '$3 == "server" && $4 == p { f = 1 } END { exit !f }' ||
-    die "no Orca server runs on $host with port $port, so a tunnel has nothing to reach: run orca-host-install $host --pair"
+  serving=$(printf '%s\n' "$servers" | awk -v p="$port" '$3 == "server" && $4 == p { print $2; exit }')
+  [ -n "$serving" ] ||
+    die "no Orca server runs on $host with port $port, so a tunnel has nothing to reach: run orca-host-install $host --pair --port $port${want:+ --version $want}"
   write_tunnel
   prove_tunnel
-  answers || die "the tunnel is up, but environment $name does not answer through it (the server's identity may have changed): run orca-host-install $host --pair"
+  answers || die "the tunnel is up, but environment $name does not answer through it (the server's identity may have changed): run orca-host-install $host --pair --port $port --version $serving"
   echo "already-paired $name"
   exit 0
 fi
