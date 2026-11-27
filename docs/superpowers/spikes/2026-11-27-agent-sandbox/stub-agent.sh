@@ -47,6 +47,8 @@ else ok "the owner's token is not in the agent's environment"; fi
 leak=0
 for e in /proc/[0-9]*/environ; do tr '\0' '\n' <"$e" 2>/dev/null | grep -q '^FAKE_OWNER_TOKEN=' && leak=1; done
 if [ "$leak" = 1 ]; then no "another process's environment shows the owner's token"; else ok "no visible process has the owner's token"; fi
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}${XDG_RUNTIME_DIR:-}" ]; then no "the session bus variables reached the agent"
+else ok "the session bus variables (given to systemd-run only) did not reach the agent"; fi
 
 # 3. Capabilities (review r2 B1): none; read-only binds cannot be remounted, written or unmounted; no nested user
 #    namespace; the namespace's network filter cannot be changed.

@@ -256,7 +256,7 @@ Never: other Orca verbs, `--to`, `--environment`, `--on`, `--file`; gh `api`, `a
 `spike.sh` runs the chain above with the stub as the agent, and the broker's push and fetch as the commands above
 (`spike_helpers.py` does the outbox read, history and CI checks, host-pid lookup and nft rules). Result (2026-11-27,
 the pins above, nested in Orca's FHS env): **PASS**.
-- `control` (no sandbox): 23 leaks; host `git status` runs the planted program.
+- `control` (no sandbox): 24 leaks; host `git status` runs the planted program.
 - `caps` (the chain without `--cap-drop ALL`): a read-only bind remounted, its host file written (r2 B1).
 - `naive` (round 2's start, owner's environment, `--clearenv --setenv`): the token in `/proc/1/environ`, the key in 3
   host processes' argv (r2 M2).
