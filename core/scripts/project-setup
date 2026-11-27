@@ -283,7 +283,8 @@ def free_port(start: int) -> int:
 
 SETTING_KEYS = ("root", "name", "models", "permission_mode", "private", "port",
                 "claude_setup", "attached", "orchestrator", "runs", "old_runs", "terminals", "paused",
-                "paired_environment", "beads_repo", "lane_control", "lane_control_dirty", "forced_starts")  # all that is ever written: names and choices, never a secret
+                "paired_environment", "beads_repo", "lane_control", "lane_control_dirty", "forced_starts",
+                "maintenance_paths")  # all that is ever written: names and choices, never a secret
 DEFAULT_PINS = {"coordinator": "claude/opus", "reviewer": "claude/opus"}
 
 
@@ -2845,12 +2846,13 @@ def validate_settings(repo: Path, st: dict) -> None:
     """A hand-edited settings.json with a value of the wrong type is refused and named, never guessed at."""
     f = store_dir(repo) / "settings.json"
     want = {"private": list, "attached": list, "models": dict, "design_lead": bool, "name": str, "root": str,
-            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool}
+            "permission_mode": str, "port": int, "orchestrator": str, "beads_repo": str, "runs": dict, "old_runs": list, "terminals": dict, "paused": bool,
+            "maintenance_paths": list}
     for k, t in want.items():
         if k in st and (not isinstance(st[k], t) or (t is int and isinstance(st[k], bool))):
             raise Fail(f"{f}: {k} must be a {'list' if t is list else 'JSON object' if t is dict else t.__name__}, "
                        f"not {json.dumps(st[k])[:40]}")
-    for k in ("private", "attached"):
+    for k in ("private", "attached", "maintenance_paths"):
         if any(not isinstance(x, str) for x in st.get(k, [])):
             raise Fail(f"{f}: {k} must be a list of strings")
     if any(not isinstance(v, str) for v in (st.get("models") or {}).values()):

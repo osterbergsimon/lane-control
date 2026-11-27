@@ -108,3 +108,47 @@ def report(repo: Path, branch: str) -> "tuple[str, str]":
     if "HTTP 403" in err and re.search(r"upgrade to github|make this repository public", err, re.I):
         return "unavailable", f"{branch}: not available on this repository's plan (HTTP 403; a private repo on a free plan has no protection)"
     return "unknown", f"{branch}: could not be read ({_last_line(err)})"
+
+
+def review_needed(repo: Path, branch: str) -> "str | None":
+    """Why a merge into `branch` needs a review the coordinator cannot give (a maintenance merge is then refused), or None.
+    An approving review or a code-owner review required by classic protection or by a ruleset counts; protection that cannot
+    be read counts too (fail closed). None for no protection, or none on the plan. Read-only."""
+    code, out, err = _api(repo, f"repos/{{owner}}/{{repo}}/branches/{quote(branch, safe='/')}/protection")
+    plan = "HTTP 403" in err and bool(re.search(r"upgrade to github|make this repository public", err, re.I))
+    if code == 0:
+        try:
+            body = json.loads(out)
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return f"{branch}'s protection gave an answer that is not protection settings, so it is not known whether a review is required"
+        rev = body.get("required_pull_request_reviews")
+        if isinstance(rev, dict):
+            n = rev.get("required_approving_review_count")
+            if isinstance(n, int) and n > 0:
+                return f"{branch}'s protection requires {n} approving review(s), which the coordinator cannot give"
+            if rev.get("require_code_owner_reviews"):
+                return f"{branch}'s protection requires a code owner's review, which the coordinator cannot give"
+    elif not (("HTTP 404" in err and "not protected" in err.lower()) or plan):
+        return f"{branch}'s protection cannot be read ({_last_line(err)}), so it is not known whether a review is required"
+    rcode, rout, rerr = _api(repo, f"repos/{{owner}}/{{repo}}/rules/branches/{quote(branch, safe='/')}")
+    if rcode != 0:
+        if "HTTP 403" in rerr and re.search(r"upgrade to github|make this repository public", rerr, re.I):
+            return None
+        return f"the rulesets on {branch} cannot be read ({_last_line(rerr)}), so it is not known whether a review is required"
+    try:
+        rules = json.loads(rout)
+    except ValueError:
+        rules = None
+    if not isinstance(rules, list):
+        return f"the rulesets on {branch} gave an answer of an unexpected shape"
+    for r in rules:
+        if isinstance(r, dict) and r.get("type") == "pull_request":
+            p = r.get("parameters") if isinstance(r.get("parameters"), dict) else {}
+            n = p.get("required_approving_review_count")
+            if isinstance(n, int) and n > 0:
+                return f"a ruleset on {branch} requires {n} approving review(s), which the coordinator cannot give"
+            if p.get("require_code_owner_review"):
+                return f"a ruleset on {branch} requires a code owner's review, which the coordinator cannot give"
+    return None

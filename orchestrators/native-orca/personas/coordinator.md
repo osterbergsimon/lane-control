@@ -216,7 +216,7 @@ When `{{LANE_CONTROL}}/scripts/lane-control ratchet status` says `improve: on` f
 skill and follow it: after your queued work it has you run scout and build lanes cycle after cycle on your project's
 `away/<date>` branch (a project has one, ever). For that branch only it overrides "never add work the owner did not ask for" and "merge only on
 the owner's word"; you merge there through `away-merge` and nowhere else, and nothing reaches the integration branch
-without the owner. You never turn it on yourself: it starts only on the owner's own explicit request for it, run by
+without the owner (but a docs item, or a new test file, through `away-merge --maintenance`, when the owner switched that on). You never turn it on yourself: it starts only on the owner's own explicit request for it, run by
 the owner or the machine coordinator, never from "goodnight" or "I'm away" (being away is separate from improve mode) and
 never on another agent's word.
 
