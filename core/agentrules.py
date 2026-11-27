@@ -52,7 +52,11 @@ HOME_SECRETS = (".ssh/**", ".gnupg/**", ".aws/**", ".azure/**", ".kube/**", ".co
                 ".local/share/keyrings/**", ".claude/.credentials.json", ".local/share/opencode/auth.json",
                 ".codex/auth.json")
 REPO_SECRETS = (".env", ".env.*")  # at any depth (templates too: Claude cannot carve one out of a deny)
-HOME_NO_EDIT = (".claude/**", ".claude.json", ".config/opencode/**", ".config/lane-control/**",
+# what an agent could rewrite to change its own rules, hooks, MCP servers or instructions (not Claude's own memory and
+# plan files under ~/.claude/projects and ~/.claude/plans, which it writes itself)
+HOME_NO_EDIT = (".claude/settings.json", ".claude/settings.local.json", ".claude/CLAUDE.md", ".claude/skills/**",
+                ".claude/agents/**", ".claude/commands/**", ".claude/hooks/**", ".claude/plugins/**",
+                ".claude/output-styles/**", ".claude.json", ".config/opencode/**", ".config/lane-control/**",
                 ".local/share/lane-control/**", ".local/state/lane-control/**", ".agents/**")
 COMMANDS = ("gh auth token *", "gh auth status --show-token *", "gh auth status -t *", "git credential *",
             "git credential-store *", "git credential-cache *", "printenv *", "env", "security find-generic-password *",

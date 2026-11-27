@@ -792,10 +792,11 @@ class RoundTwoTests(Scratch):
         self.assertIn("lane-control machine extras remove frontend-design", out)
 
     def test_m6_no_text_names_the_removed_kinds_as_extras(self):
-        self.assertIn("skills, MCP, personas, plugins", F.ROUTES[("project", "extras")][3])
+        self.assertIn("skills, MCP, personas, rules, env", F.ROUTES[("project", "extras")][3])
         text = (ROOT / "docs" / "how-it-fits.md").read_text()
-        self.assertIn("your skills, MCP servers, personas and plugins", text)
-        self.assertNotIn("hooks, permissions,\n", text)
+        self.assertIn("your skills, MCP servers, personas, plugins, agent hooks, permission rules and env",
+                      " ".join(text.split()))
+        self.assertNotIn("are not extras yet", text)
 
     def test_n1_a_file_already_there_with_the_same_text_is_not_taken_over(self):
         self.add("--plugin", "opencode:foo@1.0.0", "--for", "lanes")

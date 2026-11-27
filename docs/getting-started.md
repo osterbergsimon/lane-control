@@ -484,6 +484,24 @@ all). A secret is never stored: name it with `--env` and keep its value in the a
 theirs when the coordinator starts them; `lane-control project check` says what is missing or changed. More: [how the
 parts fit](how-it-fits.md#extras).
 
+Permission rules, the agents' own hooks and plain env values are extras too:
+
+```sh
+lane-control project extras add ~/code/<project> --permission allow 'Bash(npm run test *)' --for lanes
+lane-control project extras add ~/code/<project> --permission deny 'Bash(git push --force *)'
+lane-control project extras add ~/code/<project> --agent-hook PreToolUse --matcher 'Bash' -- ~/hooks/guard.sh
+lane-control project extras add ~/code/<project> --env APP_MODE=test --for lanes
+```
+
+Beside any rule, lane-control keeps its own denies: no allow reaches your secrets, auth files, `.env` files,
+`--private` paths, the agents' own settings or a command that prints a credential, on Claude and OpenCode alike. An
+allow that could get there another way (a bare `Bash`, a shell or interpreter, a file reader, a path outside the
+folder) is refused, and add tells you what a program you allow reads by itself is not bound by any rule. An agent
+hook is your own script, pinned like a lifecycle hook and run from a checked copy with no secret in its environment;
+after editing it, add it again (until then it is refused, and a PreToolUse one blocks). An env value is never a
+secret, and never one of lane-control's or the harness's own names (`LANE_*`, `ORCA_*`, `HOME`, `XDG_*`, `PATH`,
+...). More: [rules, agent hooks and env](how-it-fits.md#permission-rules-agent-hooks-and-env-values).
+
 Hooks are your own scripts that lane-control runs at a moment of a lane's life, not an agent's extras:
 
 ```sh

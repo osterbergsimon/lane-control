@@ -19,7 +19,7 @@ from test_extras import LE, SECRET, ROOT, X, Scratch, claude_reads, git
 
 R = X.R
 RUNNER = ROOT / "core" / "scripts" / "lane-agent-hook"
-H, W, M = "/home/u", "/w/lane-1", "/c/app"
+H, W, M = "/u/me", "/w/lane-1", "/c/app"  # HOME, a lane's worktree, the main checkout
 PRIVATE = ["fixtures/customers/*", "data/"]
 # Every allow add refuses, and more: the proofs show the floor holds even if one got through.
 WIDE = ["Bash", "Bash(*)", "Bash(gh *)", "Bash(gh auth *)", "Bash(git *)", "Bash(cat *)", "Bash(printenv *)",
@@ -29,7 +29,7 @@ FLOOR_READS = [f"{H}/.ssh/id_ed25519", f"{H}/.ssh/sub/key", f"{H}/.aws/credentia
                f"{H}/.netrc", f"{H}/.git-credentials", f"{H}/.claude/.credentials.json",
                f"{H}/.local/share/opencode/auth.json", f"{W}/.env", f"{W}/api/.env", f"{W}/a/b/.env.local",
                f"{M}/.env", f"{M}/svc/.env.production", f"{W}/fixtures/customers/acme.csv", f"{M}/data/x/y.json"]
-FLOOR_EDITS = [f"{H}/.claude/settings.json", f"{H}/.config/opencode/opencode.json", f"{M}/.claude/settings.local.json",
+FLOOR_EDITS = [f"{H}/.claude/settings.json", f"{H}/.claude/skills/x/SKILL.md", f"{H}/.claude.json", f"{H}/.config/opencode/opencode.json", f"{M}/.claude/settings.local.json",
                f"{H}/.config/lane-control/extras.json", f"{H}/.agents/bin/x"]
 FLOOR_COMMANDS = ["gh auth token", "gh auth token --hostname github.com", "gh auth status --show-token",
                   "git credential fill", "printenv", "printenv GITHUB_TOKEN", "env", "timeout 5 gh auth token",
@@ -58,6 +58,9 @@ class FloorProofTests(unittest.TestCase):
                 for p in FLOOR_EDITS + ([f"{W}/.claude/settings.json"] if folder == W else []):
                     with self.subTest(folder=folder, edit=p):
                         self.assertEqual(R.claude_decision(order, "Edit", p, H, folder, settings_dir), "deny")
+                memory = f"{H}/.claude/projects/-w-lane-1/memory/notes.md"  # Claude's own memory stays writable
+                self.assertNotEqual(R.claude_decision({"deny": order["deny"]}, "Edit", memory, H, folder,
+                                                      settings_dir), "deny")
                 for c in FLOOR_COMMANDS:
                     with self.subTest(folder=folder, command=c):
                         self.assertEqual(R.claude_decision(order, "Bash", c, H, folder, settings_dir), "deny")

@@ -39,7 +39,7 @@ ROUTES = {
     ("project", "start"): ("project-pause", ["start"], "<project>", "start its missing agents"),
     ("project", "status"): ("project-pause", ["status"], "<project>", "running, resting or paused"),
     ("project", "extras"): ("lane-extras", ["project"], "add|list|remove <project> ...",
-                            "skills, MCP, personas, plugins"),
+                            "skills, MCP, personas, rules, env"),
     ("project", "gate"): ("lane-extras", ["gate"], "<project> <PR> [--head <sha>]", "lifecycle gate: green or not"),
     ("project", "hook"): ("lane-extras", ["hook"], "<project> <event> [--pr N] ...", "run an event's hooks now"),
     ("coordinator", "start"): ("lane-spawn", ["coordinator", "start"], "<project>|machine [--force]",

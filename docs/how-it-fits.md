@@ -18,9 +18,10 @@ AGENTS   machine coordinator   one per machine, optional   splits the budget, wa
 SETUP    lane-control machine setup   once per machine   machine coordinator, 4 automations, CI limits timer
          lane-control project setup   once per project   lane tools, skills, personas, tier table, coordinator
                                                           (lane-control project refresh updates them)
-         lane-control project|machine extras              your skills, MCP servers, personas and plugins for
-                                                          the agents (refresh puts them in place), and your
-                                                          lifecycle hooks (scripts lane-control runs)
+         lane-control project|machine extras              your skills, MCP servers, personas, plugins, agent hooks,
+                                                          permission rules and env values for the agents (refresh
+                                                          puts them in place), and your lifecycle hooks (scripts
+                                                          lane-control runs)
 
 LANE     lane-room   may another lane open?        lane-tier     which model does this tier use?
 TOOLS    lane-heavy  one gate for heavy builds     design-shots  screenshots of a UI
@@ -171,11 +172,12 @@ lane-control machine extras add|list|remove ...             every project on thi
   --persona <name> --prompt-file <path> [--tier T] [--harness H]   a lane role the coordinator can brief a lane with
   --plugin claude:<plugin>@<marketplace>@<version> | opencode:<package>@<version>
   --hook <event> --script <path | git-url@commit:path> [--timeout S]   a lifecycle hook (below)
+  --agent-hook PreToolUse|PostToolUse|SessionStart|Stop [--matcher T|T] [--timeout S] -- <path | git-url@commit:path>
+                                                             the agent's own hook, your script (below)
+  --permission allow|deny <rule>                             a Claude rule; lane-control's own denies stay (below)
+  --env NAME=value                                           a value that is not a secret
   --for lanes|coordinator|reviewer|all                       who gets it (default all; not for a hook)
 ```
-
-Claude's and OpenCode's own agent hooks, permission rules and env values are not extras yet: they get their own design
-(lc-yw1g).
 
 - **Stored** in the project's settings store (`~/.config/lane-control/projects/<key>/extras.json`, beside its tier
   table) or `~/.config/lane-control/extras.json`. Never in a project repo, and never a secret. An MCP server gets
@@ -228,6 +230,57 @@ OpenCode      the main checkout's .opencode/opencode.json    .opencode/opencode.
   MCP command not found, or the coordinator cannot get its extras now, with why) or `not applied` (refresh has not
   run yet), each with what to run.
 - Setup's onboarding agents run with no MCP server and no settings files, so they get no extras.
+
+### Permission rules, agent hooks and env values
+
+The same store, roles and files (lc-yw1g; `core/agentrules.py`, design in
+[the spec](superpowers/specs/2026-11-27-extras-permissions-hooks-env-design.md)). Claude's go in the session's
+settings (the coordinator's launch `--settings` file, a lane's `.claude/settings.json`); OpenCode's in
+`.opencode/opencode.json` (`permissions`, `policies`) and `.opencode/plugins/lane-control-extras.js` (env values and
+agent hooks).
+
+- **A floor no allow can reach.** With any permission rule, lane-control writes its own denies beside it: reading or
+  editing the secret and auth files (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gh`, `~/.netrc`,
+  `~/.git-credentials`, Claude's `.credentials.json`, OpenCode's and Codex's `auth.json`, ...), any `.env` or
+  `.env.*` (templates too), every `--private` path; editing the agents' own settings, instructions and extensions
+  (`~/.claude/settings*.json`, its skills, agents, hooks and plugins, `~/.claude.json`, `~/.config/opencode`, the main checkout's `.claude/settings.local.json`, the files lane-control wrote in that
+  folder) and lane-control's folders; and the commands that print a credential (`gh auth token`, `git credential`,
+  `printenv`, ...). Claude takes a deny over any allow from any file. On OpenCode, where the last matching rule wins,
+  every deny comes after every allow, and every deny (yours and the floor) is also a `tool.use` policy, which no
+  rule, saved approval or later allow lifts. The tests prove both against each harness's documented rules, with
+  wildcards, either add order and machine and project rules mixed.
+- **Refused at add, and again at refresh and prepare** (a project's `--private` paths may change; a machine allow is
+  checked against every project's): a bare or wildcard tool (`Bash`, `Read`, `Edit(*)`); a Bash allow with a
+  wildcard anywhere but one at the end, without a subcommand before it (`Bash(git *)`), with a shell operator, a
+  program by path, or a program that can read any file or run any command by itself (shells, interpreters, file
+  readers and copiers, network tools, `env`, `sudo`, `xargs`, `npx`, `docker`, `git -c`, `git config`, ...), or one
+  overlapping a floor command; a file allow that is not a plain path inside the session's folder (no `/`, `//`, `~`,
+  `..`, dot-file or leading wildcard) or that overlaps a `--private` path either way; a rule with a key or password
+  in it (never shown). Not enforced, and said at add: what an allowed program reads by itself (`make test`, `npm
+  run build` run the project's own code, which a lane can change): Claude's Read denies do not reach a program's own
+  reads.
+- **A deny** is never refused for what it covers. One with no OpenCode form (`Agent(model:opus)`) is Claude only,
+  and add says so. Rules are translated: Bash to `shell`, Read to `read`, Edit and Write to `edit`, WebFetch's domain
+  to `webfetch` URLs, `mcp__server__tool` to `server_tool`; Claude's `**` and `*` both become OpenCode's `*`.
+- **Agent hooks** are your script only, pinned as a lifecycle hook is (an absolute path outside every checkout, by
+  its hash, or a file at a full commit), never from a repo, never with arguments. The session runs lane-control's
+  runner (`core/scripts/lane-agent-hook`), never the script: it reads the hook from your store, checks it and runs a
+  private copy made just before, in the session's folder, with the event's JSON on stdin and its output and exit code
+  passed back, and with EXT-2's short environment (`PATH`, `HOME`, `USER`, locale, XDG folders, `TMPDIR`,
+  `SSH_AUTH_SOCK`), `CLAUDE_PROJECT_DIR` and `LANE_AGENT_HOOK_EVENT`, `_NAME`, `_HARNESS`: no token or key of the
+  agent's. A timeout per hook (default 60 s). A machine's and a project's of the same name both run.
+  A changed or missing script is never dropped: `check` and `doctor` flag it, refresh and prepare refuse it (the
+  folder keeps none of lane-control's extras, prepare exits 1), and a session that still has it is refused at run: a
+  PreToolUse hook blocks the call, the other events report the error. On OpenCode, PreToolUse and PostToolUse run
+  at its tool hooks (a refusal stops the call); SessionStart and Stop are Claude only (add says so). `--matcher` is
+  `*` or tool names joined by `|`.
+- **Env values** are never a secret: a secret-looking name, a value shaped like a key, token, password in a URL or
+  auth header, or a long opaque word is refused and never stored or shown; so is a name lane-control, the harness or
+  the shell runs on (`LANE_*`, `ORCA_*`, `HOME`, `XDG_*`, `PATH`, `CLAUDE_*`, `ANTHROPIC_*`, `GIT_*`, `SSH_*`, `LD_*`,
+  ...). Claude sets them for the session and what it starts; OpenCode's plugin for its shell commands only.
+- Not run against a live agent here: Claude's rules are read from its documentation (2.1.332); OpenCode 2.2.1 loads
+  the files (`opencode debug config` and `debug agents`, standalone, in a scratch HOME), and its policy enforcement
+  is from its documentation. A live session check is lc-hat1.
 - Checked without starting an agent: Claude's rules above are read from its code (2.1.332) and documentation;
   OpenCode 2.2.1's `debug config` and skill list show a worktree reading only its own `.opencode/opencode.json` and
   `.opencode/skills/`, and the main checkout only its own. A live session check is lc-hat1.

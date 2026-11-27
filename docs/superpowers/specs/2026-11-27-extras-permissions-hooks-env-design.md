@@ -66,9 +66,11 @@ When a role has at least one permission extra, its file gets, in this order:
 The floor (core/agentrules.py `floor`): read and edit of the secrets and auth files (`~/.ssh`, `~/.gnupg`, `~/.aws`,
 `~/.azure`, `~/.kube`, `~/.config/gcloud`, `~/.config/gh`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`,
 `~/.npmrc`, `~/.pypirc`, `~/.password-store`, the keyrings, Claude's `.credentials.json`, OpenCode's `auth.json`,
-Codex's `auth.json`), the project's `.env` and `.env.*` files (templates too: Claude cannot carve them out of a deny),
-every `--private` glob (in the worktree and at the main checkout's absolute path); edit of the agents' own settings
-(`~/.claude`, `~/.config/opencode`, the main checkout's `.claude/settings.local.json`, the files lane-control writes in
+Codex's `auth.json`), any `.env` and `.env.*` file (templates too: Claude cannot carve them out of a deny), every
+`--private` glob (at the main checkout's absolute path, and at any depth anywhere, so in every worktree wherever Orca
+put it); edit of the agents' own settings,
+instructions and extensions (`~/.claude/settings*.json`, its skills, agents, commands, hooks and plugins, `~/.claude.json`;
+not its own memory and plan files), `~/.config/opencode`, the main checkout's `.claude/settings.local.json`, the files lane-control writes in
 that folder) and of lane-control's own folders (`~/.config/lane-control`, `~/.local/share/lane-control`,
 `~/.local/state/lane-control`, `~/.agents`); and the commands that print a credential (`gh auth token`, `gh auth
 status --show-token|-t`, `git credential`, `git credential-store|cache`, `printenv`, a bare `env`, `security
