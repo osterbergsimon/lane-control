@@ -59,6 +59,23 @@ rules).
   `status` shows `maintenance merges N`. The summary PR's own section, "Maintenance merges into <integration>", is read from
   git, one line each with its PR link and sha, marked when the away branch does not hold it (m2).
 
+## Review round 2 (the coordinator's calls)
+
+- **docs is an extension allowlist (M1):** `.md`, `.rst`, `.svg`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`; anything else
+  under `docs/` is not maintenance, whatever its name (no `.txt`: `requirements.txt`, `CMakeLists.txt`).
+- **Plans and specs agents follow are never maintenance (M2):** `**/superpowers/**`, `**/plans/**`, and the folder forms of
+  the harnesses' rule files (`agents/`, `commands/`, `.windsurf/`, `.clinerules/`, `.kiro/`, `.junie/`, `AGENT.md`,
+  `QWEN*.md`, `*instructions*.md`). The guide says the list stays incomplete and a project narrows with `maintenance_paths`.
+- **`status` reads the take-in from git (M3)**, as away-merge does: a resolved one is resolved, a lost record's still shown.
+- **What the merge changes on main (m1):** with the merge base GitHub's compare gives, a path the PR changes that main renamed
+  or deleted since then is refused (git would follow the rename to an unchecked path); a merge base that cannot be read refuses.
+- **A cap stops maintenance merges (m2):** `--max-hours`, `--stop-at` and `--max-items` reached refuse `--maintenance` (with the
+  away-branch fallback), though they stay soft for the away branch.
+- **Under the lock (m3):** the project's maintenance paths, the protection and the take-in are read again; `pending()` gives a
+  reason when git cannot be read instead of "no earlier merges".
+- **tests wording (m4):** `__mocks__` (and `__fixtures__`, `__snapshots__`) are machinery; `describe()` and the guide name
+  `test/` and say a new test file can change how the existing tests behave.
+
 ## Not done
 
 - Setting `maintenance_paths` from `project setup` (lc-d2bq; a hand edit of settings.json for now, validated on read).

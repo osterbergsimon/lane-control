@@ -35,8 +35,8 @@
 #       its cap raised (`on --continue --project <name> --max-items <more>`). The period's record (improve-period.json) fails
 #       closed if it is lost or unreadable (merges refused, `status` says why): `on --continue` makes it again.
 #       --maintenance [docs,tests] (off unless given; bare is docs; a --continue re-run keeps it, --no-maintenance turns it
-#       off): while the mode is on, an item whose every change the kinds allow (docs: content files under docs/ and the root
-#       README.md and CHANGELOG.md; tests: NEW test files only), inside the project's own `maintenance_paths` if it has them
+#       off): while the mode is on and below every cap, an item whose every change the kinds allow (docs: .md .rst .svg and
+#       image files under docs/ and the root README.md and CHANGELOG.md, nothing else; tests: NEW test files only), inside the project's own `maintenance_paths` if it has them
 #       (they only narrow), and never an agent instruction, CI or tooling file, merges into the integration branch through
 #       `away-merge --maintenance` with no human review, and the away branch takes it in
 #       (docs/superpowers/specs/2026-11-27-ratchet-maintenance-merges-design.md). It counts toward --max-items.

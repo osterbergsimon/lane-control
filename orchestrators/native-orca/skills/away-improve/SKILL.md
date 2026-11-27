@@ -112,17 +112,17 @@ worker, the idle time, the deadline).
 The owner may let small items reach the integration branch while away, so they do not wait and the away branch does not
 drift from it. `status` says which kinds this period takes and your project's maintenance paths. These merges reach main with
 no human review: keep them small and plain.
-- **docs** (the default): content files under `docs/` and the root `README.md` and `CHANGELOG.md` (text and images); no
-  executable, build or config file. **tests** (only when `status` names it): NEW test files only; never a change to an
+- **docs** (the default): files under `docs/` and the root `README.md` and `CHANGELOG.md` with an allowed extension
+  (`.md`, `.rst`, `.svg` and images); nothing else, whatever its name. **tests** (only when `status` names it): NEW test files only; never a change to an
   existing test, never the suite's machinery (conftest, stubs, helpers, fixtures, runners, shell scripts).
-- Never an agent instruction (AGENTS.md, CLAUDE.md, SKILL.md, a persona, a skill, a template, any `.claude/` or `.opencode/`
-  folder), no CI file, no code. An item is maintenance only when every path it changes is allowed. One other path and it is
+- Never an agent instruction (AGENTS.md, CLAUDE.md, SKILL.md, a persona, a skill, a template, a plan or spec under
+  `superpowers/` or `plans/`, any `.claude/` or `.opencode/` folder), no CI file, no code. An item is maintenance only when every path it changes is allowed. One other path and it is
   an ordinary item on the away branch. Never split an item to get part of it in.
 - Cut its build lane from `origin/<integration branch>`, with its PR into the integration branch: in the build brief, say it
   is a maintenance item and fill `<MAINTENANCE_PATHS>` with what `status` lists. Review it as any item, and write the same
   `Review: passed <head sha>` comment.
-- Merge with `away-merge --maintenance --project <your project> --pr <n> --item "<title>"`, only while the mode is on (after
-  `off` or the end time it refuses: the drain is for the away branch). The same checks as step 6 (no `--local-suite-ok`: CI
+- Merge with `away-merge --maintenance --project <your project> --pr <n> --item "<title>"`, only while the mode is on and below
+  every cap (after `off`, the end time or a cap it refuses: the drain is for the away branch). The same checks as step 6 (no `--local-suite-ok`: CI
   must be green on the head), plus the files at the head, the branch protection (a required review it cannot give is a
   refusal) and the away branch's take-in. It merges into the integration branch as `maintenance: <item>`, then merges it into
   the away branch (never a rebase). It counts toward `--max-items` and the summary PR lists it in its own section.

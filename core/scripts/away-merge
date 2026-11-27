@@ -194,6 +194,12 @@ def run(a) -> int:
                                   f"into the integration branch have stopped; the item goes to the away branch as any item: "
                                   f"`gh pr edit {a.pr} --base {branch}`, then away-merge without --maintenance")
             target = None
+        elif state.get("maintenance") and (cap := cap_hit(state, a.project)):  # m2: a soft cap stops writes to main
+            refuse("maintenance", f"a cap is reached for {a.project} ({cap}): maintenance merges into the integration branch "
+                                  "stop at a cap (only the running lane's PR still lands, on the away branch); the item goes "
+                                  f"to the away branch as any item: `gh pr edit {a.pr} --base {branch}`, then away-merge "
+                                  "without --maintenance")
+            target = None
         elif not state.get("maintenance"):
             refuse("maintenance", f"the period takes no maintenance merges (the owner switches them on with `lane-control ratchet "
                                   f"on --continue --maintenance`); the item goes to the away branch as any item: "
@@ -300,8 +306,9 @@ def run(a) -> int:
             for f in sorted(paths):
                 if rx.fullmatch(f):
                     refuse("deny", f"{f} matches the owner's deny path {g}")
+    pglobs = None
     if maint:
-        maintenance_checks(a, checkout, state, target, branch, head, diff, paths, refuse, fallback)
+        pglobs = maintenance_checks(a, checkout, state, target, branch, head, diff, paths, refuse, fallback)
     if failed:
         print("\n".join(failed), file=sys.stderr)
         return 1
@@ -339,6 +346,8 @@ def run(a) -> int:
             return 1
         # what the checks above relied on must still hold (the gates can run for minutes, and the owner may change the period)
         moved = settings_moved(checked, state, mode, a.project, maint)
+        if maint and not moved:
+            moved = maintenance_again(checkout, state, a.project, branch, target, pglobs)
         if moved:
             print("\n".join(f"away-merge: refused (changed): {c}" for c in moved), file=sys.stderr)
             return 1
@@ -455,10 +464,16 @@ def maintenance_checks(a, checkout: Path, state: dict, integ: str, branch: str, 
     if why:
         refuse("maintenance", f"the project's maintenance paths cannot be used ({why})")
         return
-    at_head, why = maintenance.compare_files(checkout, gh, integ, head)
+    at_head, base, why = maintenance.compare_files(checkout, gh, integ, head)
     if at_head is None:
         refuse("maintenance", f"{why}, so the paths at the head cannot be checked")
     else:
+        # m1: what the merge changes on main, not only what the PR changed since its base (git follows main's renames)
+        if not maintenance.fetch(checkout, branch, integ):
+            refuse("maintenance", f"origin's {integ} cannot be fetched, so what the merge changes on it cannot be checked")
+        else:
+            for p in maintenance.main_moved(checkout, integ, base, set(at_head) | (paths or set())):
+                refuse("maintenance", p)
         files = dict(at_head)
         for x in paths or set():
             files.setdefault(x, "modified")  # a path only the diff names: never taken for a new file
@@ -473,11 +488,40 @@ def maintenance_checks(a, checkout: Path, state: dict, integ: str, branch: str, 
     why = protection.review_needed(checkout, integ)
     if why:
         refuse("protection", f"{why}: a maintenance merge is refused" + fallback)
-    rec_merges = improve.merges_of(state, a.project)
-    why = maintenance.pending(checkout, branch, integ, rec_merges)
+    why = maintenance.pending(checkout, branch, integ, improve.merges_of(state, a.project))
     if why:
-        refuse("take-in", f"{why}: the next maintenance merge waits until it has (a lane merges origin/{integ} into a branch "
-                          f"cut from {branch}, resolves it, and its PR goes into {branch} through away-merge)")
+        refuse("take-in", f"{why}: {WAIT}".format(integ=integ, branch=branch))
+    return pglobs
+
+
+WAIT = ("the next maintenance merge waits until it has (a lane merges origin/{integ} into a branch cut from {branch}, resolves "
+        "it, and its PR goes into {branch} through away-merge)")
+
+
+def cap_hit(state: dict, project: str) -> "str | None":
+    """The cap reached for the project (`hours:5.0/1`, `weekly:70/70`, `items:...`), or None; a record that cannot be read is a
+    hit too (the caps fail closed)."""
+    try:
+        return improve.caps(state, project)[1]
+    except Exception as e:  # a period record or budget reading that breaks: no write to main on a guess
+        return f"the caps cannot be read ({e})"
+
+
+def maintenance_again(checkout: Path, state: dict, project: str, branch: str, integ: str, pglobs) -> list:
+    """Under the lock, just before a maintenance merge (m3): what the checks read outside the period file, read again. The
+    project's maintenance_paths, the branch protection and the take-in (another merge of the same project may have merged and
+    conflicted while this one's gates ran). [] when all still hold."""
+    out = []
+    now, _where, why = maintenance.globs_for(checkout)
+    if why or now != pglobs:
+        out.append(f"the project's maintenance paths changed while the checks ran{f' ({why})' if why else ''}; run again")
+    why = protection.review_needed(checkout, integ)
+    if why:
+        out.append(f"{why}: a maintenance merge is refused")
+    why = maintenance.pending(checkout, branch, integ, improve.merges_of(state, project))
+    if why:
+        out.append(f"{why}: " + WAIT.format(integ=integ, branch=branch))
+    return out
 
 
 def still_as_checked(checkout: Path, number: int, before: dict, branch: str, login: str, head: str,

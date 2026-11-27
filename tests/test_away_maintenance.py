@@ -7,9 +7,12 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -83,10 +86,40 @@ class DocsMergeTests(MaintenanceTest):
         self.assertTrue(any(c.startswith(f"api repos/{{owner}}/{{repo}}/compare/main...{OID}") for c in self.gh_calls()))
 
     def test_the_root_readme_and_changelog_and_a_docs_image_are_docs(self):
-        self.pr(baseRefName="main", diff=diff_of("README.md", "CHANGELOG.md", "docs/a/notes.txt", "docs/a/b.rst")
+        self.pr(baseRefName="main", diff=diff_of("README.md", "CHANGELOG.md", "docs/a/notes.md", "docs/a/b.rst", "docs/c.svg")
                 + "diff --git a/docs/shot.png b/docs/shot.png\nnew file mode 100644\nBinary files /dev/null and b/docs/shot.png differ\n")
         r = self.maint()
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_r2_M1_build_files_with_a_txt_name_are_not_docs(self):  # r2 M1: an extension allowlist, no .txt
+        self.pr(baseRefName="main", diff=diff_of("docs/requirements.txt", "docs/CMakeLists.txt"))
+        r = self.maint()
+        self.assertFallsBack(r, "docs/requirements.txt is not a docs content file")
+        self.assertIn("docs/CMakeLists.txt is not a docs content file", r.stderr)
+
+    def test_r2_M2_plans_and_specs_agents_follow_are_never_maintenance(self):  # r2 M2
+        self.pr(baseRefName="main", diff=diff_of("docs/superpowers/plans/2026-11-23-away-improve.md"))
+        self.assertFallsBack(self.maint(), "is an agent instruction, CI or tooling file (**/superpowers/**)")
+
+    def test_r2_m1_a_file_main_moved_since_the_lane_branched_is_refused(self):  # r2 m1: git follows main's renames
+        work = self.tmp / "gh-work"
+        subprocess.run(["git", "clone", "-q", str(self.tmp / "shop.git"), str(work)], check=True, capture_output=True)
+        (work / "docs").mkdir()
+        (work / "docs" / "rules.md").write_text("Rule one.\n")
+        git(work, "add", "docs/rules.md")
+        git(work, "commit", "-qm", "rules")
+        git(work, "push", "-q", "origin", "HEAD:main")
+        base = git(work, "rev-parse", "HEAD").strip()
+        (work / "personas").mkdir()
+        git(work, "mv", "docs/rules.md", "personas/rules.md")
+        git(work, "commit", "-qm", "the owner moves the rules")
+        git(work, "push", "-q", "origin", "HEAD:main")
+        self.pr(baseRefName="main", diff=diff_of("docs/rules.md"), merge_base=base)
+        r = self.maint()
+        self.assertRefused(r, "maintenance")
+        self.assertIn("docs/rules.md was moved to personas/rules.md on main", r.stderr)
+        self.pr(baseRefName="main", diff=diff_of("docs/rules.md"), merge_base="0" * 40)  # a base that cannot be read: refused
+        self.assertIn("merge base", self.maint().stderr)
 
     def test_markdown_outside_docs_is_not_maintenance(self):
         self.pr(baseRefName="main", diff=diff_of("src/notes/CHANGES.md"))
@@ -243,6 +276,13 @@ class StopsWithTheModeTests(MaintenanceTest):  # M3
         self.pr(baseRefName=self.branch, diff=DOCS_DIFF)
         self.assertEqual(self.merge().returncode, 0)  # the running lane's last PR still lands on the away branch
 
+    def test_r2_m2_a_reached_max_hours_stops_them(self):  # r2 m2: the wall clock bounds writes to main too
+        self.assertEqual(self.on("--continue", "--max-hours", "1").returncode, 0)
+        later = {"LANE_NOW": str(time.time() + 5 * 3600)}
+        self.assertIn("cap reached", self.run_script("lane-improve", "status", env=later).stdout)
+        r = self.maint(env=later)
+        self.assertFallsBack(r, "a cap is reached for shop (hours:")
+
     def test_a_passed_end_time_stops_them(self):
         st = self.state()
         st["end"] = "2020-01-01T00:00:00+00:00"
@@ -341,6 +381,28 @@ class TakeInTests(MaintenanceTest):
         body = self.summary_prs(self.shop)[str(self.state()["prs"]["shop"])]["body"]
         self.assertIn("NOT yet in the away branch", body)  # m2: read from git, not assumed
 
+    def test_r2_M3_status_reads_a_resolved_take_in_as_resolved(self):  # r2 M3
+        self.conflict()
+        self.assertEqual(self.maint().returncode, 3)
+        self.assertIn("not taken in", self.run_script("lane-improve", "status").stdout)
+        # a lane resolves it: main merged into the away branch, the conflict settled, pushed (as its PR would land)
+        work = self.tmp / "work-shop"
+        git(work, "fetch", "-q", "origin")
+        git(work, "checkout", "-q", self.branch)
+        git(work, "reset", "-q", "--hard", f"origin/{self.branch}")
+        subprocess.run(["git", "-C", str(work), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q",
+                        "origin/main"], capture_output=True)
+        (work / "docs" / "guide.md").write_text("Both lines, settled.\n")
+        git(work, "add", "docs/guide.md")
+        git(work, "commit", "-qm", "away: Take in main")
+        git(work, "push", "-q", "origin", self.branch)
+        st = self.run_script("lane-improve", "status").stdout
+        self.assertNotIn("not taken in", st)
+        self.assertIn("maintenance merges 1", st)
+        self.pr(n=8, baseRefName="main", diff=diff_of("docs/other.md"))
+        self.assertEqual(self.maint(pr=8).returncode, 0)  # away-merge and status agree
+        self.assertNotIn("not taken in", self.run_script("lane-improve", "status").stdout)
+
     def test_a_pending_take_in_is_read_from_git_whatever_the_period_record_says(self):  # m3
         self.conflict()
         self.assertEqual(self.maint().returncode, 3)
@@ -429,14 +491,49 @@ class PolicyTests(unittest.TestCase):
                 (why,) = self.bad(p)
                 self.assertIn("agent instruction", why)
 
-    def test_docs_are_content_files_only(self):  # M1
-        for p in ("docs/conf.py", "docs/package.json", "docs/Makefile", "docs/gen.sh", "docs/x.yml", "docs/a.svg"):
+    def test_docs_are_an_extension_allowlist(self):  # M1, r2 M1
+        for p in ("docs/conf.py", "docs/package.json", "docs/Makefile", "docs/gen.sh", "docs/x.yml", "docs/a.txt",
+                  "docs/requirements.txt", "docs/CMakeLists.txt", "docs/a.adoc", "docs/a.markdown", "docs/a.html"):
             with self.subTest(p=p):
                 (why,) = self.bad(p)
                 self.assertIn("not a docs content file", why)
-        for p in ("docs/a.md", "docs/a/b.MD", "docs/a.txt", "docs/a.rst", "docs/a.adoc", "README.md", "CHANGELOG.md"):
+        for p in ("docs/a.md", "docs/a/b.MD", "docs/a.rst", "docs/a.svg", "docs/a.png", "docs/a.webp", "README.md",
+                  "CHANGELOG.md"):
             with self.subTest(p=p):
                 self.assertEqual(self.bad(p), [])
+
+    def test_r2_M2_agent_followed_files_under_docs(self):  # r2 M2
+        for p in ("docs/superpowers/plans/x.md", "docs/superpowers/specs/x.md", "docs/plans/x.md", "docs/agents/reviewer.md",
+                  "docs/commands/x.md", "docs/AGENT.md", "docs/QWEN.md", "docs/copilot-instructions.md",
+                  "docs/.windsurf/rules/a.md", "docs/.clinerules/x.md", "docs/.kiro/steering/a.md", "docs/.junie/guidelines.md"):
+            with self.subTest(p=p):
+                (why,) = self.bad(p, status="added")
+                self.assertIn("agent instruction", why)
+
+    def test_r2_m4_jest_mocks_and_the_wording(self):  # r2 m4
+        (why,) = self.bad("tests/__mocks__/a.test.js", kinds=("tests",), status="added")
+        self.assertIn("machinery", why)
+        text = maintenance.describe(["tests"])
+        self.assertIn("tests/ or test/", text)
+        self.assertIn("change how the existing tests behave", text)
+
+    def test_r2_m3_unreadable_git_is_a_reason_and_the_lock_reads_again(self):  # r2 m3
+        with mock.patch.object(maintenance, "fetch", lambda *a: True), mock.patch.object(maintenance, "items", lambda *a: None):
+            self.assertIn("cannot be read from git", maintenance.pending(Path("."), "away/x", "main", []))
+        loader = importlib.machinery.SourceFileLoader("away_merge_r2", str(ROOT / "core" / "scripts" / "away-merge"))
+        spec = importlib.util.spec_from_loader("away_merge_r2", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        P = mock.patch.object
+        with P(mod.maintenance, "globs_for", lambda c: (None, "the kinds alone", None)), \
+                P(mod.protection, "review_needed", lambda c, b: None), P(mod.improve, "merges_of", lambda s, p: []):
+            with P(mod.maintenance, "pending", lambda *a: None):
+                self.assertEqual(mod.maintenance_again(Path("."), {}, "shop", "away/x", "main", None), [])
+                self.assertTrue(mod.maintenance_again(Path("."), {}, "shop", "away/x", "main", ["docs/guide/**"]))  # narrowed
+            with P(mod.maintenance, "pending", lambda *a: "away/x has not taken in the maintenance merge of PR #7 (abc) yet"):
+                self.assertIn("PR #7", mod.maintenance_again(Path("."), {}, "shop", "away/x", "main", None)[0])
+                with P(mod.protection, "review_needed", lambda c, b: "main's protection requires 1 approving review(s)"):
+                    self.assertEqual(len(mod.maintenance_again(Path("."), {}, "shop", "away/x", "main", None)), 2)
 
     def test_a_control_character_and_odd_names(self):  # M4
         (why,) = self.bad("docs/a\nb.md")

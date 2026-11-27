@@ -2337,7 +2337,9 @@ class AwayImproveContentTests(unittest.TestCase):
         guide = flat(ROOT / "docs" / "away-improve.md")
         for needle in ("lane-control ratchet on --maintenance", "--maintenance docs,tests", "maintenance_paths",
                        "away-merge --maintenance", "take-in", "never a rebase", "no human review", "only narrow",
-                       "Only while the mode is on", "cannot read them", "2026-11-27-ratchet-maintenance-merges-design.md"):
+                       "Only while the mode is on", "cannot read them", "2026-11-27-ratchet-maintenance-merges-design.md",
+                       "an allowlist", "superpowers/", "change how the existing tests behave", "below every cap",
+                       "a resolved one is shown resolved", "moved or deleted is refused", "A name list stays incomplete"):
             self.assertIn(needle, guide, needle)
 
     def test_innovation_prompt_is_strong_and_in_one_place(self):

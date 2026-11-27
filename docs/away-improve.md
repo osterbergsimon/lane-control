@@ -111,19 +111,25 @@ re-run keeps what is set. It is recorded in `improve.json` (`maintenance: ["docs
 passed, nothing more. Docs are text; new test files are code that runs in your suite and in CI, and a test PR defines the tests
 that turn green, so `tests` is off unless you name it.
 
-- **docs** (the default): content files under `docs/` and the root `README.md` and `CHANGELOG.md`: `.md`, `.markdown`,
-  `.txt`, `.rst`, `.adoc`, and the images `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`. No executable, build or config file
-  (`docs/conf.py`, `docs/package.json`, `docs/Makefile`, `docs/*.sh` are refused). Images are binary, so the secret and name
-  scans cannot read them; any other binary file is refused.
+- **docs** (the default): files under `docs/` and the root `README.md` and `CHANGELOG.md` with one of the extensions
+  `.md`, `.rst`, `.svg`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, and nothing else whatever its name (an allowlist:
+  `docs/requirements.txt`, `docs/CMakeLists.txt`, `docs/conf.py`, `docs/package.json`, `docs/Makefile` are refused). The
+  raster images are binary, so the secret and name scans cannot read them; any other binary file is refused.
 - **tests** (only when named): NEW test files under `tests/` or `test/`, named as a test (`test_*.py`, `*_test.go`,
   `*.test.ts` and the like). Changing or deleting an existing test file is refused, and so is the suite's machinery: a
-  `conftest`, `testhome`, stubs, helpers, fixtures, runners, loaders, `__init__` and shell scripts. These go to the away branch.
+  `conftest`, `testhome`, stubs, helpers, fixtures, runners, loaders, `__mocks__`, `__init__` and shell scripts. These go
+  to the away branch. A new test file can also change how the existing tests behave (it runs at discovery, and can patch the
+  runner or a package's test setup), so opting in trusts the agent review with your whole suite.
 - **Never, whatever the kinds say:** agent instructions and harness config, at any depth and in any case (`AGENTS*.md`,
-  `CLAUDE*.md`, `GEMINI*.md`, `SKILL.md`, any `.claude/`, `.opencode/`, `.agents/`, `.codex/`, `.pi/`, `skills/`,
-  `personas/`, `templates/`, `prompts/` folder, `.mcp.json`, `opencode.json` and the like), CI and tooling files
+  `CLAUDE*.md`, `GEMINI*.md`, `AGENT.md`, `QWEN*.md`, `SKILL.md`, `*instructions*.md`, any `.claude/`, `.opencode/`,
+  `.agents/`, `.codex/`, `.pi/`, `.windsurf/`, `.clinerules/`, `.kiro/`, `.junie/`, `agents/`, `commands/`, `skills/`,
+  `personas/`, `templates/`, `prompts/` folder, `.mcp.json`, `opencode.json` and the like), the plans, specs and spikes
+  agents execute step by step (any `superpowers/` or `plans/` folder, so this repo's `docs/superpowers/**`), CI and tooling
+  files
   (`.github/**`, `.gitlab-ci.yml`, `.circleci/**`, `Jenkinsfile`, `.pre-commit-config.yaml`, `.gitattributes`, `.gitmodules`,
   `.gitleaks.toml` and the like), a symlink, a submodule, an executable, a name with a control character, and a path your deny
-  paths or the secret and name scans refuse. One path outside and the item goes to the away branch as any item.
+  paths or the secret and name scans refuse. One path outside and the item goes to the away branch as any item. A name list
+  stays incomplete: if your project keeps other files agents follow under `docs/`, narrow it with `maintenance_paths`.
 - **A project's own paths only narrow.** A project can set `maintenance_paths`, a list of globs, in its settings store
   (`~/.config/lane-control/projects/<folder>-<hash>/settings.json`, which `lane-control project setup --show` names; it is
   outside the repo, so no PR can widen it). A path must then match one of them as well as a kind. Each glob must start inside a
@@ -137,19 +143,24 @@ that turn green, so `tests` is off unless you name it.
   head, each with its status, so a test file is new only when GitHub says it is added; 300 files or more is refused), refuses
   a PR from an away branch, the summary PR or a fork, and reads the integration branch's protection: a required approving
   review (or code owner's review), classic or in a ruleset, is a review the coordinator cannot give, so the merge is refused
-  with that reason; protection that cannot be read is refused too. Under the lock, just before the merge, the mode, the kinds,
-  your deny paths and the branches must still be what the checks saw. The merge is `--match-head-commit <head>`, so a push
+  with that reason; protection that cannot be read is refused too. It also checks what the merge changes on main, not only
+  what the PR changed since it branched: git follows a rename made on main since then, so a PR that edits a file main has
+  moved or deleted is refused (the lane merges main in first). Under the lock, just before the merge, the mode, the kinds, your
+  deny paths, the branches, the project's maintenance paths, the protection and the take-in must still be what the checks
+  saw. The merge is `--match-head-commit <head>`, so a push
   after the checks refuses. It is a merge commit titled `maintenance: <item>`, its message `Pull request #<n>`,
   `Ratchet-maintenance: away/<date>` and the entry.
-- **Only while the mode is on.** After `lane-control ratchet off`, or once its end time has passed, maintenance merges stop at
-  once: the drain is for the running lane's last PR into the away branch, and `away-merge --maintenance` refuses.
+- **Only while the mode is on, below every cap.** After `lane-control ratchet off`, once its end time has passed, or once a
+  cap is reached (`--max-hours`, `--stop-at`, `--max-items`), maintenance merges stop at once: the drain and a cap's soft end
+  are for the running lane's last PR into the away branch, and `away-merge --maintenance` refuses.
 - **A refusal for a path** names the way to the away branch: `gh pr edit <n> --base away/<date>`, then a plain `away-merge`,
   whose own checks then apply (a deny path or a private name is refused there too).
 - **The take-in.** Right after the merge the away branch takes in the maintenance merge commit: a merge commit, `ratchet: take
   in main after maintenance #<n>`, pushed without force (never a rebase). It is not an item. When the merge commit is not on
   origin's main yet (or is not known and main does not hold the PR's head), a conflict, or a push the branch refuses, it stops:
-  nothing is forced, `away-merge` exits 3 and says so, `status` shows the take-in still to happen, and the next maintenance
-  merge is refused until the away branch holds it. That is read from git (every maintenance merge on main that names this away
+  nothing is forced, `away-merge` exits 3 and says so, `status` shows the take-in still to happen (until the away branch
+  holds it: `status` reads it from git too, so a resolved one is shown resolved), and the next maintenance merge is refused
+  until the away branch holds it. That is read from git (every maintenance merge on main that names this away
   branch), so a new period does not forget it. The way out is a lane that merges main into a branch cut from the away branch,
   resolves the conflict, and goes into the away branch through `away-merge`. That PR holds everything main gained, your own
   commits too, so `away-merge` may refuse it (a deny path, a private name, a reached `--max-items`): then the coordinator tells

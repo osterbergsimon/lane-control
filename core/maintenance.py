@@ -20,14 +20,16 @@ DEFAULT_KINDS = ("docs",)   # bare `--maintenance`
 # docs: content files only, under docs/ or the root README and CHANGELOG; no executable, build or config file
 DOC_ROOTS = ("docs/",)
 DOC_FILES = ("README.md", "CHANGELOG.md")
-DOC_TEXT = (".md", ".markdown", ".txt", ".rst", ".adoc")
+# an extension ALLOWLIST (the coordinator's call, 2026-11-27): anything else under docs/ is not maintenance, whatever its name
+# (no .txt: requirements.txt and CMakeLists.txt are build files)
+DOC_TEXT = (".md", ".rst", ".svg")
 DOC_IMAGES = (".png", ".jpg", ".jpeg", ".gif", ".webp")  # binary: not scanned for secrets or names (the guide says so)
 # tests: NEW test files only, under tests/ or test/, named as a test; never a change to an existing one, and never the
 # suite's own machinery (conftest, testhome, stubs, helpers, runners, fixture loaders, shell scripts)
 TEST_ROOTS = ("tests/", "test/")
 TEST_NAMES = re.compile(r"(?:test_[^/]*\.py|[^/]*_test\.(?:py|go|rs)|[^/]*\.(?:test|spec)\.(?:js|jsx|ts|tsx|mjs|cjs)"
                         r"|[^/]*_spec\.rb|[^/]*Test\.(?:java|kt))")
-TEST_MACHINERY_DIRS = {"stubs", "stub", "mocks", "mock", "helpers", "helper", "support", "fixtures", "fixture", "utils", "util",
+TEST_MACHINERY_DIRS = {"stubs", "stub", "mocks", "mock", "__mocks__", "__fixtures__", "__snapshots__", "helpers", "helper", "support", "fixtures", "fixture", "utils", "util",
                        "lib", "bin", "scripts", "tools", "runner", "runners", "loaders", "data"}
 TEST_MACHINERY_NAMES = re.compile(r"conftest|testhome|__init__|runner|loader|helper|fixture|stub", re.I)
 # never maintenance, whatever the kinds or the project's globs say; matched at any depth and in any case
@@ -37,6 +39,10 @@ NEVER = (
     "**/.codex/**", "**/.pi/**", "**/.gemini/**", "**/.cursor/**", "**/.cursorrules", "**/.windsurfrules", "**/.clinerules",
     "**/.roo/**", "**/.continue/**", "**/.aider*", "**/.mcp.json", "**/opencode.json", "**/opencode.jsonc", "**/skills/**",
     "**/personas/**", "**/templates/**", "**/prompts/**", "**/.cotal/**", "**/.lane-control-root", "**/orca.yaml",
+    # plans, specs and spikes agents execute step by step, and the folder forms of the harnesses' rule files (a name list
+    # stays incomplete: a project narrows further with maintenance_paths)
+    "**/superpowers/**", "**/plans/**", "**/agents/**", "**/commands/**", "**/AGENT.md", "**/QWEN*.md",
+    "**/*instructions*.md", "**/.windsurf/**", "**/.clinerules/**", "**/.kiro/**", "**/.junie/**",
     # CI, and the files that change how git, the scans or the tooling behave
     "**/.github/**", "**/.gitlab-ci.yml", "**/.gitlab/**", "**/.circleci/**", "**/.travis.yml", "**/Jenkinsfile",
     "**/azure-pipelines.yml", "**/.azure-pipelines/**", "**/.buildkite/**", "**/bitbucket-pipelines.yml", "**/.drone.yml",
@@ -65,11 +71,12 @@ def describe(kinds) -> str:
     """What the kinds let through, in the owner's words (`on` and `status` print it)."""
     parts = []
     if "docs" in kinds:
-        parts.append("docs (content files under docs/, the root README.md and CHANGELOG.md: text and images, no executable, "
-                     "build or config file)")
+        parts.append(f"docs (files under docs/ and the root README.md and CHANGELOG.md with one of the extensions "
+                     f"{' '.join(DOC_TEXT + DOC_IMAGES)}; nothing else, whatever its name)")
     if "tests" in kinds:
-        parts.append("new test files under tests/ (only new ones; never a change to an existing test or the suite's "
-                     "machinery). These are code nobody but agents reviewed: they run in your suite and in CI")
+        parts.append("new test files under tests/ or test/ (only new ones; never a change to an existing test or the suite's "
+                     "machinery). These are code nobody but agents reviewed: they run in your suite and in CI, and a new "
+                     "test file can also change how the existing tests behave")
     return "; ".join(parts)
 
 
@@ -221,25 +228,52 @@ def problems(files: dict, kinds, project_globs, deny, modes: dict, binary: set) 
     return out
 
 
-def compare_files(checkout: Path, gh, integration: str, head: str) -> "tuple[dict | None, str]":
-    """({path: status} for every file GitHub lists for the compare `integration...head`, why not): the files the merge brings
-    in, read at the exact head sha; a rename gives its new name "renamed" and its old one "removed". FILE_LIMIT files or
-    more, or an answer that is not a file list, is a why."""
+def compare_files(checkout: Path, gh, integration: str, head: str) -> "tuple[dict | None, str, str]":
+    """({path: status} for every file GitHub lists for the compare `integration...head`, the merge base's sha, why not): the
+    files the PR changes since its merge base, read at the exact head sha; a rename gives its new name "renamed" and its old
+    one "removed". FILE_LIMIT files or more, or an answer that is not a file list, is a why."""
     try:
         out = json.loads(gh(["api", f"repos/{{owner}}/{{repo}}/compare/{integration}...{head}"], checkout))
     except Exception as e:  # textscan.Refuse, ValueError
-        return None, f"GitHub's file list for {integration}...{head[:7]} cannot be read ({e})"
+        return None, "", f"GitHub's file list for {integration}...{head[:7]} cannot be read ({e})"
     files = out.get("files") if isinstance(out, dict) else None
     if not isinstance(files, list) or not all(isinstance(f, dict) and isinstance(f.get("filename"), str) for f in files):
-        return None, "GitHub's compare gave no file list"
+        return None, "", "GitHub's compare gave no file list"
     if len(files) >= FILE_LIMIT:
-        return None, f"the PR changes {len(files)} files, and GitHub's compare lists at most {FILE_LIMIT}: too many to check"
+        return None, "", f"the PR changes {len(files)} files, and GitHub's compare lists at most {FILE_LIMIT}: too many to check"
+    base = ((out.get("merge_base_commit") or {}).get("sha") or "") if isinstance(out.get("merge_base_commit"), dict) else ""
     found = {}
     for f in files:
         found[f["filename"]] = str(f.get("status") or "")
         if isinstance(f.get("previous_filename"), str):
             found.setdefault(f["previous_filename"], "removed")
-    return found, ""
+    return found, base, ""
+
+
+def main_moved(repo: Path, integration: str, base: str, paths) -> list:
+    """Why the merge would change other paths than the PR's own (m1): git's merge follows renames made on the integration
+    branch since the merge base, so a PR's edit of a file main renamed (or deleted) lands at a path nobody checked. One line
+    per such path; one line too when the merge base cannot be read here (fail closed). The caller has fetched."""
+    if not re.fullmatch(r"[0-9a-f]{40}", base or "") or not _resolve(repo, base):
+        return [f"the PR's merge base on {integration} ({(base or 'not given')[:12]}) cannot be read here, so what the merge "
+                "changes on it cannot be checked"]
+    r = _git(repo, "diff", "--name-status", "-M", "-z", base, f"refs/remotes/origin/{integration}")
+    if r.returncode:
+        return [f"git cannot tell what {integration} changed since the PR's merge base"]
+    out, parts, i, mine = [], r.stdout.split("\0"), 0, set(paths)
+    while i < len(parts) - 1:
+        st = parts[i]
+        if st[:1] in ("R", "C"):
+            old, new, i = parts[i + 1], parts[i + 2], i + 3
+            if old in mine and st[:1] == "R":
+                out.append(f"{old} was moved to {new} on {integration} since the lane branched, so the merge would change "
+                           f"{new}, which nothing checked: merge {integration} into the lane's branch first")
+        else:
+            path, i = parts[i + 1], i + 2
+            if st[:1] == "D" and path in mine:
+                out.append(f"{path} was deleted on {integration} since the lane branched: merge {integration} into the "
+                           "lane's branch first")
+    return out
 
 
 def _git(repo: Path, *args: str, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -311,7 +345,10 @@ def pending(repo: Path, away: str, integration: str, merges: list) -> "str | Non
     period record, a merge git may not show yet: its recorded target (the merge commit, else the PR's head) must be in it."""
     if not fetch(repo, away, integration):
         return f"origin's {away} cannot be fetched to see whether the earlier maintenance merges are in it"
-    for title, pr, sha, in_away in items(repo, integration, away) or []:
+    listed = items(repo, integration, away)
+    if listed is None:  # git could not be read: never "no earlier merges"
+        return f"the maintenance merges on {integration} cannot be read from git, so the away branch's take-in cannot be checked"
+    for title, pr, sha, in_away in listed:
         if not in_away:
             return f"{away} has not taken in the maintenance merge of PR #{pr} ({sha}) yet"
     for m in merges:

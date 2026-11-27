@@ -52,7 +52,12 @@ if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/com
             if m:
                 st = "added" if "\\nnew file mode" in block else "removed" if "\\ndeleted file mode" in block else "modified"
                 files.append({"filename": m.group(2), "status": st})
-    print(json.dumps({"status": "ahead", "files": files})); sys.exit(0)
+    base = p.get("merge_base")
+    if base is None:  # the merge base: by default main as the checkout last fetched it (a PR cut from main's tip)
+        import subprocess
+        r = subprocess.run(["git", "rev-parse", "refs/remotes/origin/main"], capture_output=True, text=True)
+        base = r.stdout.strip() if r.returncode == 0 else ""
+    print(json.dumps({"status": "ahead", "files": files, "merge_base_commit": {"sha": base}})); sys.exit(0)
 if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/branches/") and a[1].endswith("/protection"):
     if os.environ.get("GH_PROTECTION"):
         print(os.environ["GH_PROTECTION"]); sys.exit(0)

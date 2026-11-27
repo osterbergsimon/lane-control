@@ -1644,10 +1644,15 @@ def maintenance_lines(s: dict, cos: list) -> list:
         line = (f"  {c.name}: maintenance paths: {', '.join(globs) if globs else 'what the kinds allow'} ({where})" if not why
                 else f"  {c.name}: maintenance paths cannot be used ({why}): every maintenance merge is refused")
         line += f"; maintenance merges {n}"
-        todo = [m for m in merges_of(s, c.name) if m.get("kind") == "maintenance" and m.get("taken_in") is not True]
-        if todo:
-            line += (f"; {s['branches'][c.name]} has not taken in #{todo[-1].get('pr')} ({todo[-1].get('take_in') or 'not taken in'})"
-                     ": no maintenance merge until it has")
+        # read from git, as away-merge reads it (M3): a take-in a lane or the owner has since resolved is resolved here too,
+        # and one a lost record no longer names is still shown
+        try:
+            why = maintenance.pending(c.checkout, s["branches"][c.name], s["integration"].get(c.name, "main"),
+                                      merges_of(s, c.name))
+        except Exception as e:  # status never fails for this line
+            why = f"the take-in cannot be read ({e})"
+        if why:
+            line += f"; {why}: no maintenance merge until it has (not taken in)"
         out.append(line)
     return out
 
