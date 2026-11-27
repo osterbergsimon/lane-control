@@ -3954,16 +3954,18 @@ def after_setup(repo: Path, project: str, mode: str) -> bool:
 
 
 def native_refresh(repo: Path, a, tiers: Path) -> int:
+    """Re-render the personas (stored pins, current additions) and the hooks, and install the skills and the lane
+    tools (design-shots among them; the design skills are fetched from upstream). Nothing is adapted or started; the
+    only commit is a retired design lead's additions moving into DESIGN.md, on the owner's yes. A running session
+    rereads its persona at its next compaction, or on a restart. Last, the owner's
+    after-setup hooks run (core/hooks.py); one that fails makes refresh exit 1."""
     code = native_refresh_steps(repo, a, tiers)
     project = a.name or settings(repo).get("name") or repo.name
     return 1 if not after_setup(repo, project, "refresh") else code
 
 
 def native_refresh_steps(repo: Path, a, tiers: Path) -> int:
-    """Re-render the personas (stored pins, current additions) and the hooks, and install the skills and the lane
-    tools (design-shots among them; the design skills are fetched from upstream). Nothing is adapted or started; the
-    only commit is a retired design lead's additions moving into DESIGN.md, on the owner's yes. A running session
-    rereads its persona at its next compaction, or on a restart."""
+    """native_refresh without the after-setup hooks."""
     root = attached_to(repo)
     if root is not None:
         raise Fail(f"{repo} is attached to the project at {root}, not a project of its own: run --refresh on {root}")
