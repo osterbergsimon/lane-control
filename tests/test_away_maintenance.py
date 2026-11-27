@@ -180,11 +180,12 @@ class MaintenanceMergeTests(MaintenanceTest):
         r = self.maint()
         self.assertRefused(r, "head")
         st = self.state()
-        self.pr(n=st["prs"]["shop"], baseRefName="main", diff=DOCS_DIFF)
-        r = self.maint(pr=st["prs"]["shop"])
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("summary", r.stderr)
-        self.assertEqual(self.merged(), [])
+        st["prs"]["shop"] = 7  # a PR recorded as the summary PR is refused by its number too
+        self.improve_file().write_text(json.dumps(st))
+        self.pr(baseRefName="main", diff=DOCS_DIFF)
+        r = self.maint()
+        self.assertRefused(r, "head")
+        self.assertIn("summary PR", r.stderr)
 
     def test_a_pr_from_a_fork_is_never_maintenance(self):
         self.pr(baseRefName="main", diff=DOCS_DIFF, isCrossRepository=True)

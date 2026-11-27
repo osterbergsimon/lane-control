@@ -211,7 +211,9 @@ def pending(repo: Path, away: str, integration: str, merges: list) -> "str | Non
         return f"origin's {away} cannot be fetched to see whether the earlier maintenance merges are in it"
     for m in todo:
         target = m.get("target") or m.get("sha") or ""
-        full = _resolve(repo, target) if re.fullmatch(r"[0-9a-f]{7,40}", target) else None
+        # a merge whose commit is not known: the away branch must hold the integration branch as it is now
+        full = (_resolve(repo, target) if re.fullmatch(r"[0-9a-f]{7,40}", target) else None) or (
+            None if target else _resolve(repo, f"refs/remotes/origin/{integration}"))
         if not full or _git(repo, "merge-base", "--is-ancestor", full, f"refs/remotes/origin/{away}").returncode:
             return (f"{away} has not taken in the maintenance merge of PR #{m.get('pr')} ({target[:7] or 'commit unknown'}) yet"
                     f" ({m.get('take_in') or 'not taken in'})")

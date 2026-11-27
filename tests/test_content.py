@@ -2322,6 +2322,21 @@ class AwayImproveContentTests(unittest.TestCase):
             self.assertIn(route, t)
         self.assertIn("never around", t)
 
+    def test_maintenance_merges_are_one_route_with_a_fallback(self):  # RAT-2 (lc-3g6o)
+        s = flat(AWAY_SKILL)
+        for needle in ("`maintenance: on`", "`away-merge --maintenance --project", "every path it changes", "no CI file",
+                       "no `--local-suite-ok`", "`gh pr edit <n> --base <away branch>`", "Exit 3", "never a rebase",
+                       "Never split an item", "`--max-items`", "<MAINTENANCE_PATHS>"):
+            self.assertIn(needle, s, needle)
+        b = flat(AWAY_TEMPLATES / "away-build-brief.md")
+        for needle in ("maintenance item", "<MAINTENANCE_PATHS>", "no CI file", "goes to <AWAY_BRANCH> as any item"):
+            self.assertIn(needle, b, needle)
+        self.assertIn("`away-merge --maintenance`", flat(PERSONA_DIR / "coordinator.md"))
+        guide = flat(ROOT / "docs" / "away-improve.md")
+        for needle in ("lane-control ratchet on --maintenance", "maintenance_paths", "away-merge --maintenance", "take-in",
+                       "never a rebase", "2026-11-27-ratchet-maintenance-merges-design.md"):
+            self.assertIn(needle, guide, needle)
+
     def test_innovation_prompt_is_strong_and_in_one_place(self):
         t = flat(AWAY_TEMPLATES / "away-innovation.md")
         for needle in ("you are expected to improve the product, not only fix bugs", "new features", "better UX",

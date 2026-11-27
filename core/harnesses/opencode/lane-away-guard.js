@@ -63,6 +63,7 @@ function problem(s, drain) {
   if ("prs" in s && !(plain(s.prs) && Object.values(s.prs).every((v) => Number.isInteger(v)))) return "prs is not {project: number}";
   if (s.stop_at != null && !(typeof s.stop_at === "number" && s.stop_at > 0 && s.stop_at < 100)) return "stop_at is not a weekly percentage";
   if (s.max_items != null && !(Number.isInteger(s.max_items) && s.max_items >= 1)) return "max_items is not a whole number above 0";
+  if ("maintenance" in s && typeof s.maintenance !== "boolean") return "maintenance is not true or false";
   if (drain) {
     if (!timeOk(s.ended)) return "ended is not a time";
     if (!strList(s.pending)) return "pending is not a list of names";
@@ -386,8 +387,9 @@ function analyze(text, start, root, integration, depth = 0) {
 function refusal(what, integration, project) {
   return `away-improve mode is on for this project, so ${what} is refused here. Merges into the away branch go only ` +
     `through away-merge (core/scripts/away-merge --project ${project ?? "<project>"} --pr <n> --item "<title>"), run by ` +
-    `you the coordinator after the review comment; nothing is merged into or pushed to ${integration} while the owner ` +
-    "is away. If away-merge refuses, fix what it names; do not go around it.";
+    `you the coordinator after the review comment; nothing is merged into or pushed to ${integration} by hand while the ` +
+    `owner is away (a docs or tests item reaches it only through away-merge --maintenance, when the owner switched ` +
+    "maintenance merges on). If away-merge refuses, fix what it names; do not go around it.";
 }
 
 async function guard(event) {

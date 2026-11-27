@@ -282,3 +282,10 @@ follow-ups above; everything else there stands.
   a body edited outside them or inside them (the digest no longer matches), or with markers missing or repeated, is left as it
   is with a warning, never rewritten, and `--summary-file` never replaces an edited summary silently; the refresh runs under the improve lock. Bodies go through
   `--body-file`. A branch from before this change is not converted (a stated limit, no such branch exists).
+
+## Maintenance merges (2026-11-27, RAT-2; lc-3g6o)
+
+On the owner's ask, a period may take maintenance merges (`on --maintenance`): a docs-or-tests item merges into the integration
+branch through `away-merge --maintenance`, and the away branch then takes the integration branch in. This changes "Nothing
+reaches the integration branch without the owner's word" for those items only, when the owner switched it on; the design is
+`2026-11-27-ratchet-maintenance-merges-design.md`.

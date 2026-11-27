@@ -3,6 +3,7 @@
 docs/superpowers/specs/2026-11-23-away-improve-design.md).
 
   away-merge --project NAME --pr N --item "<title>" [--local-suite-ok LOG] [--metric "<text>"]
+  away-merge --maintenance --project NAME --pr N --item "<title>" [--metric "<text>"]
 
 Merges PR N into the project's active away/<date> branch as a merge commit titled `away: <item>` (never squashed), whose
 message body is `Pull request #N` and the item's log entry, copied from the PR's body, and prints the merge commit; a PR that is
@@ -52,7 +53,26 @@ so a push in between is refused. The project's checkout is its coordinator's, fr
 except for the merge itself and, after it, the project's draft summary PR (away/<date> -> the integration branch): its body is
 rebuilt from the branch's merge commits, keeping the coordinator's summary (a REST PATCH, `gh pr edit` only when that fails), and it is opened as a draft (`gh pr create --draft`) when it does not exist.
 That PR is never merged by an agent; a failure there does not undo the merge (stderr says so, and names `lane-improve pr`).
-Exit: 0 merged; 1 refused or could not be checked; 2 usage.
+
+--maintenance (the period's `lane-control ratchet on --maintenance`; design:
+docs/superpowers/specs/2026-11-27-ratchet-maintenance-merges-design.md) merges a maintenance item into the project's
+integration branch instead: a PR whose every changed path matches the project's maintenance globs (core/maintenance.py:
+default docs/**, **/*.md, tests/**, or `maintenance_paths` in its settings store), never a CI or tooling file, a symlink, a
+submodule or an executable. Every check above holds, with the integration branch as the base and without --local-suite-ok
+(CI must be green on the head); and also:
+  maintenance  the period takes maintenance merges, the project's globs can be used, and every path GitHub lists for the
+               compare <integration>...<head sha> and every path in the diff is maintenance. A refusal here names the way
+               the item goes to the away branch as today (`gh pr edit <n> --base away/<date>`, then away-merge without it)
+  head         the PR's head is not an away/* branch (the summary PR), not the summary PR and not from a fork
+  protection   the integration branch's protection (classic or a ruleset) requires no review the coordinator cannot give,
+               and can be read
+  take-in      the away branch has taken in every earlier maintenance merge of the period
+The merge is titled `maintenance: <item>`, its message `Pull request #N`, `Ratchet-maintenance: <away branch>` and the entry.
+Right after it the away branch takes the integration branch in: a merge commit of the maintenance merge into away/<date>,
+pushed without force (never a rebase). A conflict, or a push that fails, is reported and forced through by nothing (exit 3);
+the next maintenance merge waits until a lane has brought it in.
+Exit: 0 merged; 1 refused or could not be checked; 2 usage; 3 merged into the integration branch, but the away branch did not
+take it in (said on stderr).
 """
 import argparse
 import datetime as dt
@@ -66,6 +86,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import hooks  # noqa: E402
 import improve  # noqa: E402
+import maintenance  # noqa: E402
+import protection  # noqa: E402
 import machineconf  # noqa: E402
 import privatenames  # noqa: E402
 from textscan import (as_diff, HEADER, PRIVATE, Refuse, _unquote, added_lines, gh, is_public, name_check, names_scan,  # noqa: E402,F401
@@ -76,26 +98,7 @@ MARKER = re.compile(r"^\s*Review: passed ([0-9a-f]{40})\s*$", re.M)
 GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
 
-def glob_re(glob: str) -> "re.Pattern":
-    """`**` crosses directories (`**/` also matches none), `*` and `?` stay within one name."""
-    out, i = "", 0
-    while i < len(glob):
-        if glob.startswith("**/", i):
-            out += "(?:.*/)?"
-            i += 3
-        elif glob.startswith("**", i):
-            out += ".*"
-            i += 2
-        elif glob[i] == "*":
-            out += "[^/]*"
-            i += 1
-        elif glob[i] == "?":
-            out += "[^/]"
-            i += 1
-        else:
-            out += re.escape(glob[i])
-            i += 1
-    return re.compile(out)
+glob_re = maintenance.glob_re
 
 
 def diff_paths(diff: str) -> "set | None":
@@ -155,6 +158,11 @@ def run(a) -> int:
     if a.metric is not None and len(a.metric) > improve.ITEM_LIMIT:
         print(f"away-merge: --metric is a short line (at most {improve.ITEM_LIMIT} characters)", file=sys.stderr)
         return 2
+    maint = bool(a.maintenance)
+    if maint and a.local_suite_ok is not None:
+        print("away-merge: --maintenance merges into the integration branch, so CI must be green on the head: "
+              "--local-suite-ok is for the away branch only", file=sys.stderr)
+        return 2
     failed = []
 
     def refuse(check: str, why: str):
@@ -173,6 +181,19 @@ def run(a) -> int:
             refuse("improve", f"the branch recorded for {a.project} ({branch!r}) is not an away/<date> branch, or is its "
                               "integration branch: away-merge merges only into away branches, never into main or develop")
             branch = None
+    target = branch  # where the PR goes: the away branch, or the integration branch for a maintenance merge
+    integ = state["integration"].get(a.project, "") if state else ""
+    if maint and branch:
+        if not state.get("maintenance"):
+            refuse("maintenance", f"the period takes no maintenance merges (the owner switches them on with `lane-control ratchet "
+                                  f"on --continue --maintenance`); the item goes to the away branch as any item: "
+                                  f"`gh pr edit {a.pr} --base {branch}`, then away-merge without --maintenance")
+            target = None
+        elif not integ or AWAY_BRANCH.fullmatch(integ) or integ.startswith("away/"):
+            refuse("maintenance", f"the integration branch recorded for {a.project} ({integ!r}) cannot take a maintenance merge")
+            target = None
+        else:
+            target = integ
     try:
         cos = {c.name: c for c in machineconf.coordinators(machineconf.load())}
     except machineconf.ConfError as e:
@@ -183,12 +204,14 @@ def run(a) -> int:
               f"({', '.join(cos) or 'none'})", file=sys.stderr)
         return 1
     checkout = cos[a.project].checkout
-    if not branch:
+    if not branch or not target:
         print("\n".join(failed), file=sys.stderr)
         return 1
+    fallback = (f"; it goes to the away branch as any item: `gh pr edit {a.pr} --base {branch}`, then away-merge without "
+                "--maintenance (whose own checks then apply)")
     try:
-        pr = json.loads(gh(["pr", "view", str(a.pr), "--json", "baseRefName,headRefOid,state,body,isDraft,comments,statusCheckRollup,files"],
-                           checkout))
+        pr = json.loads(gh(["pr", "view", str(a.pr), "--json", "baseRefName,headRefOid,state,body,isDraft,comments,statusCheckRollup,files"
+                            + (",headRefName,isCrossRepository" if maint else "")], checkout))
         diff = gh(["pr", "diff", str(a.pr)], checkout)
         head_now = json.loads(gh(["pr", "view", str(a.pr), "--json", "headRefOid"], checkout)).get("headRefOid")
     except (Refuse, ValueError) as e:
@@ -200,9 +223,20 @@ def run(a) -> int:
         return 1
     if head_now != head:
         refuse("head", f"PR {a.pr} was pushed to while it was being checked ({head[:7]} then {str(head_now)[:7]}); run again")
-    if pr.get("baseRefName") != branch:
+    if maint and pr.get("baseRefName") != target:
+        refuse("base", f"PR {a.pr} goes into {pr.get('baseRefName')!r}, not {a.project}'s integration branch {target!r}: a "
+                       "maintenance merge goes only there")
+    elif not maint and pr.get("baseRefName") != branch:
         refuse("base", f"PR {a.pr} goes into {pr.get('baseRefName')!r}, not {a.project}'s away branch {branch!r}; "
                        "away-merge never merges anywhere else")
+    if maint:
+        head_ref = str(pr.get("headRefName") or "")
+        if head_ref.startswith("away/") or a.pr == state.get("prs", {}).get(a.project):
+            refuse("head", f"PR {a.pr} is from an away branch ({head_ref or 'the summary PR'}): the away branch reaches "
+                           f"{target} only when the owner merges the summary PR")
+        if pr.get("isCrossRepository") is not False:
+            refuse("head", f"PR {a.pr} is from a fork (or that cannot be read): a maintenance merge takes only a lane's PR from "
+                           "this repository")
     if str(pr.get("state", "")).upper() != "OPEN":
         refuse("open", f"PR {a.pr} is {str(pr.get('state')).lower()}, not open")
     try:
@@ -256,6 +290,8 @@ def run(a) -> int:
             for f in sorted(paths):
                 if rx.fullmatch(f):
                     refuse("deny", f"{f} matches the owner's deny path {g}")
+    if maint:
+        maintenance_checks(a, checkout, state, target, branch, head, diff, paths, refuse, fallback)
     if failed:
         print("\n".join(failed), file=sys.stderr)
         return 1
@@ -292,7 +328,7 @@ def run(a) -> int:
             print(f"away-merge: refused (improve): {mode}", file=sys.stderr)
             return 1
         if res:  # the gates ran for minutes: the PR is read again, and merged only as it was gated
-            changed = still_as_checked(checkout, a.pr, pr, branch, login, head, ci_was_green=not why)
+            changed = still_as_checked(checkout, a.pr, pr, target, login, head, ci_was_green=not why)
             if changed:
                 print("\n".join(f"away-merge: refused (changed): {c}" for c in changed), file=sys.stderr)
                 return 1
@@ -305,13 +341,15 @@ def run(a) -> int:
                       file=sys.stderr)
                 return 1
             print(f"away-merge: PR {a.pr} was a draft: marked it ready to merge")
-        message = f"Pull request #{a.pr}\n\n{entry}".replace("\x1e", "").replace("\x1f", "").replace("\x00", "")
+        line = f"{maintenance.LINE}{branch}\n" if maint else ""
+        message = f"Pull request #{a.pr}\n{line}\n{entry}".replace("\x1e", "").replace("\x1f", "").replace("\x00", "")
         # the message goes through a file, never argv (a long or non-ASCII entry would hit the argument size limit)
         with tempfile.NamedTemporaryFile("w", prefix="away-merge-msg-", suffix=".txt", delete=False, encoding="utf-8") as fh:
             fh.write(message)
         try:
             try:
-                gh(["pr", "merge", str(a.pr), "--merge", "--subject", f"away: {item}", "--body-file", fh.name, "--match-head-commit", head], checkout)
+                subject = f"{maintenance.SUBJECT}{item}" if maint else f"away: {item}"
+                gh(["pr", "merge", str(a.pr), "--merge", "--subject", subject, "--body-file", fh.name, "--match-head-commit", head], checkout)
             finally:
                 Path(fh.name).unlink(missing_ok=True)
         except Refuse as e:
@@ -333,14 +371,30 @@ def run(a) -> int:
             except Refuse as e:  # merged, so it is counted; only its commit is unknown
                 sha = ""
                 print(f"away-merge: the merge commit could not be read ({e}); recording the merge without it", file=sys.stderr)
-        print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}", flush=True)
+        print(f"away-merge: merged PR {a.pr} into {target} as {sha or '(commit unknown)'}: "
+              f"{maintenance.SUBJECT if maint else 'away: '}{item}", flush=True)
         if name_line:
             print(f"away-merge: {name_line}")
         if why:
             print(f"away-merge: CI was not green ({why}); the full suite ran locally: {a.local_suite_ok} "
                   f"(ends: {suite_line})")
+        extra, took = None, ("", "")
+        if maint:  # the away branch takes the integration branch in at once, so it does not drift (a merge, never a rebase)
+            took = maintenance.take_in(checkout, branch, target, sha or "", a.pr)
+            extra = {"kind": "maintenance", "taken_in": took[0] in ("merged", "up to date"),
+                     "target": took[1] if took[0] in ("merged", "up to date") else (sha or ""),
+                     "take_in": took[0] if took[0] in ("merged", "up to date") else f"{took[0]}: {took[1]}"}
+            if took[0] == "merged":
+                print(f"away-merge: {branch} took in {target} (a merge commit, {took[1][:12]}): it does not drift")
+            elif took[0] == "up to date":
+                print(f"away-merge: {branch} already holds {target} at {took[1][:12]}: nothing to take in")
+            else:
+                print(f"away-merge: {branch} did NOT take in {target} ({took[0]}: {took[1]}). Nothing was forced. The maintenance "
+                      f"merge stands on {target}; the next maintenance merge is refused until {branch} has it: a lane merges "
+                      f"origin/{target} into a branch cut from {branch}, resolves it, and its PR goes into {branch} through "
+                      "away-merge", file=sys.stderr)
         try:
-            improve.record_merge(state, a.project, a.pr, item, sha)
+            improve.record_merge(state, a.project, a.pr, item, sha, extra)
         except OSError as e:
             print(f"away-merge: the merge is done, but it could not be recorded for --max-items ({e.strerror or e})",
                   file=sys.stderr)
@@ -353,7 +407,37 @@ def run(a) -> int:
     sys.stdout.flush()
     sys.stderr.flush()  # what the merge said is out before any hook runs: a stopped hook never hides the merge
     after_merge(entries, {**facts, "merge_sha": sha if re.fullmatch(r"[0-9a-f]{40}", sha or "") else ""})
-    return 0
+    return 3 if maint and took[0] not in ("merged", "up to date") else 0
+
+
+def maintenance_checks(a, checkout: Path, state: dict, integ: str, branch: str, head: str, diff: str, paths, refuse,
+                       fallback: str) -> None:
+    """The checks only a maintenance merge has (each refusal goes through `refuse`): the project's globs, every path at the
+    head sha from GitHub and in the diff, the modes, the integration branch's protection and the away branch's take-in."""
+    globs, _where, why = maintenance.globs_for(checkout)
+    if why:
+        refuse("maintenance", f"the project's maintenance globs cannot be used ({why})")
+        return
+    at_head, why = maintenance.compare_paths(checkout, gh, integ, head)
+    if at_head is None:
+        refuse("maintenance", f"{why}, so the paths at the head cannot be checked")
+    else:
+        # the deny paths have been checked on the diff; the paths only GitHub's list at the head names go through them here
+        seen = paths or set()
+        for p in maintenance.problems(at_head | seen, globs, state["deny_paths"], maintenance.diff_modes(diff)):
+            if "deny path" in p:
+                if not any(p.startswith(f"{s} matches the owner's deny path ") for s in seen):
+                    refuse("deny", p)
+            else:
+                refuse("maintenance", p + fallback)
+    why = protection.review_needed(checkout, integ)
+    if why:
+        refuse("protection", f"{why}: a maintenance merge is refused" + fallback)
+    rec_merges = improve.merges_of(state, a.project)
+    why = maintenance.pending(checkout, branch, integ, rec_merges)
+    if why:
+        refuse("take-in", f"{why}: the next maintenance merge waits until it has (a lane merges origin/{integ} into a branch "
+                          f"cut from {branch}, resolves it, and its PR goes into {branch} through away-merge)")
 
 
 def still_as_checked(checkout: Path, number: int, before: dict, branch: str, login: str, head: str,
@@ -448,6 +532,8 @@ def main(argv=None) -> int:
     ap.add_argument("--pr", required=True, type=int)
     ap.add_argument("--item", required=True)
     ap.add_argument("--local-suite-ok", metavar="RUN_REF")
+    ap.add_argument("--maintenance", action="store_true",
+                    help="merge a maintenance item (docs, tests) into the integration branch (`ratchet on --maintenance`)")
     ap.add_argument("--metric", help="a short measured change for the ledger, such as 'tests 412 -> 431'")
     try:
         a = ap.parse_args(argv)

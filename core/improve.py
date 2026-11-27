@@ -22,6 +22,10 @@ night and a changed budget never do, and the mode never changes presence. Fields
              could not then, by away-merge after the first merge; its body is built from the branch's merge commits (each
              carries its item's log entry) plus the coordinator's summary, refreshed by away-merge after every merge.
              Optional (a file without it is fine); never merged by an agent.
+  maintenance true while the period takes maintenance merges (`on --maintenance`; optional, missing = false): a PR whose every
+             path matches the project's maintenance globs (core/maintenance.py) merges into the integration branch through
+             `away-merge --maintenance`, and the away branch then takes the integration branch in
+             (docs/superpowers/specs/2026-11-27-ratchet-maintenance-merges-design.md)
 
 Every reader treats a missing, malformed or ended file as improve off; a malformed one says why on one stderr line.
 lane-limits.sh has its own copy of this validation (a lone copy of that script cannot import this module):
@@ -129,6 +133,8 @@ def _problem(state, drain: bool = False) -> "str | None":
     mh = state.get("max_hours")
     if mh is not None and not (isinstance(mh, (int, float)) and not isinstance(mh, bool) and 0 < mh <= MAX_HOURS_LIMIT):
         return f"max_hours is not a number of hours above 0 and at most {MAX_HOURS_LIMIT}"
+    if not isinstance(state.get("maintenance", False), bool):
+        return "maintenance is not true or false"
     prs = state.get("prs", {})
     if not (isinstance(prs, dict) and all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
                                            for k, v in prs.items())):
@@ -408,15 +414,28 @@ def _modify_period(state: dict, fn) -> None:
         _write_period(rec)
 
 
-def record_merge(state: dict, project: str, pr: int, item: str, sha: str) -> None:
-    """away-merge's own record of a merge it made (what --max-items counts; never read from the log's text). Refuses to write
-    over a record that cannot be read (PeriodError): the next merge is refused for it too."""
+def record_merge(state: dict, project: str, pr: int, item: str, sha: str, extra: "dict | None" = None) -> None:
+    """away-merge's own record of a merge it made (what --max-items counts; never read from the log's text). `extra` adds
+    fields: a maintenance merge has kind "maintenance", taken_in (whether the away branch took it in), target (the commit to
+    take in) and take_in (what happened). Refuses to write over a record that cannot be read (PeriodError): the next merge is
+    refused for it too."""
     def add(rec):
         m = rec["merges"].setdefault(project, [])
         if not isinstance(m, list):
             m = rec["merges"][project] = []
-        m.append({"pr": pr, "item": item, "sha": sha, "at": now().isoformat(timespec="seconds")})
+        m.append({"pr": pr, "item": item, "sha": sha, "at": now().isoformat(timespec="seconds"), **(extra or {})})
     _modify_period(state, add)
+
+
+def merges_of(state: dict, project: str) -> list:
+    """The period record's merges for a project ([] when there are none or the record cannot be read)."""
+    rec, _ = _read_period(state)
+    m = (rec or {"merges": {}})["merges"].get(project)
+    return [x for x in m if isinstance(x, dict)] if isinstance(m, list) else []
+
+
+def maintenance_done(state: dict, project: str) -> int:
+    return sum(1 for x in merges_of(state, project) if x.get("kind") == "maintenance")
 
 
 def items_done(state: dict, project: str) -> int:
@@ -840,7 +859,8 @@ def status_rows() -> list:
     rows = []
     for p in dict.fromkeys(names):
         row = {"project": p, "improve": "off", "item": None, "phase": None, "round": None, "pr": None, "deadline": None,
-               "deadline_passed": False, "last_activity_age_min": None, "cap": None, "branch": None, "error": None}
+               "deadline_passed": False, "last_activity_age_min": None, "cap": None, "branch": None, "error": None,
+               "maintenance_merges": 0}
         st = s if s and covers(s, p) else (d if d and p in d["pending"] else None)
         if st is None and broken:
             row.update(improve="unknown", error=broken)
@@ -849,6 +869,7 @@ def status_rows() -> list:
             row["improve"] = "draining" if st is d else ("unknown" if lost else "wrapped" if is_wrapped(st, p) else "on")
             row["error"] = lost
             row["branch"] = st["branches"].get(p)
+            row["maintenance_merges"] = maintenance_done(st, p)
             rec = cycle(st, p)
             row.update({k: rec.get(k) for k in ("item", "phase", "round", "pr", "deadline")})
             dl = _when(rec.get("deadline"))
@@ -941,12 +962,13 @@ def _already_merged(repo: Path, branch: str, integration: str) -> bool:
 
 
 START_PREFIX = "away: start "  # the subject of the one commit `on` adds to a new away branch (the start commit)
+TAKE_IN_PREFIX = "ratchet: take in "  # a maintenance merge's take-in (core/maintenance.py): no item either
 
 
 def _unworked(repo: Path, branch: str, integration: str) -> bool:
     """Whether the branch holds at most the start commit `on` made: no item was ever merged into it."""
     r = _git(repo, "log", "--format=%s", f"refs/remotes/origin/{integration}..refs/remotes/origin/{branch}")
-    return r.returncode == 0 and all(l.startswith(START_PREFIX) for l in r.stdout.splitlines())
+    return r.returncode == 0 and all(l.startswith((START_PREFIX, TAKE_IN_PREFIX)) for l in r.stdout.splitlines())
 
 
 def _has_one_already(repo: Path, have: list, integration: str) -> str:
@@ -1246,9 +1268,11 @@ def strip_markers(text: str) -> str:
     return _ANY_MARKER.sub("", text)
 
 
-def pr_body(project: str, branch: str, integration: str, summary: "str | None", items: "list | None") -> str:
+def pr_body(project: str, branch: str, integration: str, summary: "str | None", items: "list | None",
+            maint: "list | None" = None) -> str:
     """The summary PR's text: the coordinator's summary (between markers), the merged items (`merged_items`: a list, or None
-    when git could not be read) and each item's log entry (between markers). Never longer than BODY_LIMIT: entries are
+    when git could not be read), the maintenance merges into the integration branch (`maintenance.items`, their own section,
+    shown when there is one) and each item's log entry (between markers). Never longer than BODY_LIMIT: entries are
     shortened first (and it says so), then the list is cut."""
     summary = strip_markers(summary or "").strip() or NO_SUMMARY.replace("<project>", project)
     head, foot = generated_parts(project, branch, integration)
@@ -1259,7 +1283,7 @@ def pr_body(project: str, branch: str, integration: str, summary: "str | None", 
     def whole(inner: str) -> str:
         return f"{top}{_start(ITEMS_START, inner)}\n{inner}{bottom}"
 
-    listing = items_text(items)
+    listing = items_text(items) + maintenance_text(maint, integration)
     entries = [(t, e) for t, _pr, _sha, _rev, e in items or [] if e]
     for cap in (None, 700, 200, 0):
         text = _entries_text(entries, cap)
@@ -1332,6 +1356,18 @@ def items_text(items: "list | None") -> str:
     for title, pr, sha, reverted, _entry in items:
         what = "already reverted" if reverted else f"`git revert -m 1 {sha}`"
         lines.append(f"- {_neutral(title)} ({f'PR #{pr}, ' if pr else ''}{sha}): {what}")
+    return "\n".join(lines)
+
+
+def maintenance_text(maint: "list | None", integration: str) -> str:
+    """The "Maintenance merges" section: one line per maintenance merge into the integration branch, with its PR link (#N) and
+    sha; "" when there is none (or git could not be read)."""
+    if not maint:
+        return ""
+    lines = [f"\n\nMaintenance merges into {integration} (docs and tests only, merged by `away-merge --maintenance` and already "
+             f"on {integration}; the away branch took each in. To undo one, revert it on {integration}):"]
+    for title, pr, sha in maint:
+        lines.append(f"- {_neutral(title)} ({f'PR #{pr}, ' if pr else ''}{sha}): `git revert -m 1 {sha}` on {integration}")
     return "\n".join(lines)
 
 
@@ -1414,6 +1450,11 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
     a REST PATCH, `pr edit --body-file` when that fails).
     PrError says why it could not be done."""
     items = merged_items(repo, branch, integration)
+    try:
+        import maintenance
+        maint = maintenance.items(repo, integration, branch) if items is not None else None
+    except Exception:  # the summary never fails for the maintenance section
+        maint = None
     old_body = None
     if number is None:
         found = _gh_json(repo, list, "pr", "list", "--head", branch, "--state", "open", "--json",
@@ -1424,7 +1465,7 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
             number, url, what = mine[0]["number"], str(mine[0].get("url", "")), "refreshed"
             old_body = mine[0].get("body")
         else:
-            body = pr_body(project, branch, integration, summary, items)
+            body = pr_body(project, branch, integration, summary, items, maint)
             url = _gh_body(repo, ["pr", "create", "--draft", "--base", integration, "--head", branch, "--title",
                                   pr_title(project, branch)], body).strip().splitlines()[-1:] or [""]
             url = url[0]
@@ -1452,7 +1493,7 @@ def sync_summary_pr(repo: Path, project: str, branch: str, integration: str, num
     if summary and len(summary) > SUMMARY_LIMIT:
         raise BodyKept(f"summary PR #{number}'s body is left as it is: its summary is {len(summary)} characters, over the "
                        f"limit of {SUMMARY_LIMIT}; shorten it", number, url)
-    edit_body(repo, number, pr_body(project, branch, integration, summary, items))
+    edit_body(repo, number, pr_body(project, branch, integration, summary, items, maint))
     return number, url, what
 
 
@@ -1573,9 +1614,35 @@ def describe(s: dict, how: "dict | None" = None) -> list:
         lines.append(f"  never touching: {', '.join(s['deny_paths'])}")
     lines.append("  budget: " + ("unmetered (no budget steps for improve work; machine limits still apply)" if s["unmetered"]
                                  else "metered (follows the project's budget steps)"))
+    lines.append("  maintenance: " + ("on: a PR that changes only the project's maintenance paths (docs, tests) merges into the "
+                                      "integration branch through `away-merge --maintenance`, and the away branch takes it in"
+                                      if s.get("maintenance") else "off (every item goes to the away branch)"))
     if cap_text(s):
         lines.append(f"  caps: {cap_text(s)}; the lane that is running finishes, then the project wraps up (`lane-improve status` shows each project's progress)")
     return lines
+
+
+def maintenance_lines(s: dict, cos: list) -> list:
+    """Per project, while maintenance is on: its maintenance globs (and where they come from), its maintenance merges this period,
+    and one whose take-in is still to happen (from the record; away-merge checks git)."""
+    if not s.get("maintenance"):
+        return []
+    import maintenance
+    out = []
+    for c in cos:
+        if not covers(s, c.name) or c.name not in s["branches"]:
+            continue
+        globs, where, why = maintenance.globs_for(c.checkout)
+        n = maintenance_done(s, c.name)
+        line = (f"  {c.name}: maintenance paths {', '.join(globs)} ({where})" if not why else
+                f"  {c.name}: maintenance paths cannot be used ({why}): every maintenance merge is refused")
+        line += f"; maintenance merges {n}"
+        todo = [m for m in merges_of(s, c.name) if m.get("kind") == "maintenance" and m.get("taken_in") is not True]
+        if todo:
+            line += (f"; {s['branches'][c.name]} has not taken in #{todo[-1].get('pr')} ({todo[-1].get('take_in') or 'not taken in'})"
+                     ": no maintenance merge until it has")
+        out.append(line)
+    return out
 
 
 def open_summary_prs(cos: list, branches: dict, integs: dict, known: dict) -> "tuple[dict, list]":
@@ -1642,6 +1709,8 @@ def cmd_on(a) -> int:
             end = parse_until(a.until).isoformat(timespec="seconds")
         else:
             end = UNTIL_BACK if a.until_back else None  # none given: a re-run keeps the current end, a first run has none
+        if a.maintenance and a.no_maintenance:
+            raise ValueError("give one of --maintenance, --no-maintenance")
         stop_at = parse_cap("--stop-at", a.stop_at, False)
         max_items = parse_cap("--max-items", a.max_items, True)
         max_hours = parse_hours(a.max_hours)
@@ -1758,6 +1827,7 @@ def cmd_on(a) -> int:
             "max_items": eff_max,
             "max_hours": eff_hours,
             "max_hours_off": bool(hours_off and eff_hours is None),
+            "maintenance": False if a.no_maintenance else bool(a.maintenance) or bool(prev.get("maintenance")),
         }
     else:
         state = {
@@ -1774,6 +1844,7 @@ def cmd_on(a) -> int:
             "max_items": eff_max,
             "max_hours": eff_hours,
             "max_hours_off": bool(hours_off and eff_hours is None),
+            "maintenance": bool(a.maintenance),
         }
     lost = period_problem(state) if prev else None  # the period's record cannot be trusted: this run makes it again
     write(state)
@@ -1788,7 +1859,7 @@ def cmd_on(a) -> int:
         tinteg = state["integration"]
     notes, warns = install_denies(targets, tinteg)
     print("lane-improve: improve mode on")
-    print("\n".join(describe(state, how) + notes))
+    print("\n".join(describe(state, how) + maintenance_lines(state, cos) + notes))
     if hours_default:
         print(hours_default)
     for p in resumes:
@@ -2004,7 +2075,7 @@ def cmd_status(a) -> int:
     s = load()
     if s:
         print(f"improve: on (since {dt.datetime.fromisoformat(s['started']).strftime('%a %d %b %H:%M')})")
-        print("\n".join(describe(s)))
+        print("\n".join(describe(s) + maintenance_lines(s, _coordinator_list())))
         why = period_problem(s)
         if why:
             print(f"  period record: {why}; counts and wrap-ups are unknown and merges are refused. {FIX_PERIOD}")
@@ -2077,6 +2148,8 @@ def main(argv=None) -> int:
     on.add_argument("--max-items", dest="max_items")
     on.add_argument("--max-hours", dest="max_hours")
     on.add_argument("--continue", dest="cont", action="store_true")
+    on.add_argument("--maintenance", action="store_true")
+    on.add_argument("--no-maintenance", dest="no_maintenance", action="store_true")
     on.add_argument("--yes", action="store_true")
     sub.add_parser("off")
     dr = sub.add_parser("drained")
