@@ -37,6 +37,25 @@ if a[:2] == ["api", "graphql"]:
     if os.environ.get("GH_EDITED_FAIL"):
         print("gh: " + os.environ["GH_EDITED_FAIL"], file=sys.stderr); sys.exit(1)
     print(json.dumps({"data": {"repository": {"pullRequest": {"lastEditedAt": prs[n].get("lastEditedAt")}}}})); sys.exit(0)
+if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/compare/"):  # maintenance: files at the head
+    head = a[1].split("...", 1)[1]
+    found = [p for p in prs.values() if p.get("head_after", p.get("headRefOid")) == head or p.get("headRefOid") == head]
+    if os.environ.get("GH_COMPARE_FAIL") or not found:
+        print("gh: " + os.environ.get("GH_COMPARE_FAIL", "Not Found (HTTP 404)"), file=sys.stderr); sys.exit(1)
+    p = found[0]
+    files = p.get("compare_files")
+    if files is None:
+        import re
+        files = [{"filename": m.group(2), "status": "modified"} for m in re.finditer(r"^diff --git a/(.*?) b/(.*)$", p.get("diff", ""), re.M)]
+    print(json.dumps({"status": "ahead", "files": files})); sys.exit(0)
+if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/branches/") and a[1].endswith("/protection"):
+    if os.environ.get("GH_PROTECTION"):
+        print(os.environ["GH_PROTECTION"]); sys.exit(0)
+    print(os.environ.get("GH_PROTECTION_ERR", "gh: Branch not protected (HTTP 404)"), file=sys.stderr); sys.exit(1)
+if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/rules/branches/"):
+    if os.environ.get("GH_RULES_ERR"):
+        print(os.environ["GH_RULES_ERR"], file=sys.stderr); sys.exit(1)
+    print(os.environ.get("GH_RULES", "[]")); sys.exit(0)
 pr = prs.get(a[2]) if a[:1] == ["pr"] and len(a) > 2 else None
 if pr is None:
     print("gh stub: no such PR / not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
@@ -51,8 +70,9 @@ if a[:2] == ["pr", "view"] and "mergeCommit" in a:
 if a[:2] == ["pr", "view"] and a[a.index("--json") + 1] == "headRefOid":
     print(json.dumps({"headRefOid": pr.get("head_after", pr["headRefOid"])})); sys.exit(0)
 if a[:2] == ["pr", "view"]:
-    print(json.dumps({k: pr[k] for k in ("baseRefName", "headRefOid", "state", "body", "comments", "statusCheckRollup", "files")}
-                     | {"isDraft": pr.get("isDraft", False)})); sys.exit(0)
+    want = a[a.index("--json") + 1].split(",")
+    dflt = {"isDraft": False, "headRefName": "lane/item", "isCrossRepository": False}
+    print(json.dumps({k: pr.get(k, dflt.get(k)) for k in want})); sys.exit(0)
 if a[:2] == ["pr", "ready"]:
     if os.environ.get("GH_READY_FAIL"):
         print("gh: " + os.environ["GH_READY_FAIL"], file=sys.stderr); sys.exit(1)
