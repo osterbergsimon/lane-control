@@ -2,232 +2,282 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** OpenCode lanes run under bubblewrap, where the floor paths do not exist and the config that sets their
-limits is read-only, launched by Orca's unchanged `worker-start` through a PATH shim, with narrow brokers for Orca
-mail, git push/fetch and gh.
+**Goal:** OpenCode lanes and reviewers run in their own clone, under pasta + bubblewrap, where the floor does not
+exist and nothing outside runs what they wrote, launched by Orca's unchanged `worker-start` through a PATH shim, with
+one typed broker for Orca mail, git, gh, beads, review files and heavy slots.
 
-**Architecture:** `lane-control lane prepare --sandbox` writes a per-lane profile outside the sandbox. A shim named
-`opencode`/`opencode2`, first on PATH, finds the profile for its worktree and runs the real CLI under a pinned bwrap
-from `env -i`, after starting a per-lane broker on a unix socket. Inside, `orca`, `gh` and `git` wrappers send the
-few allowed requests to the broker. Pure Python builds the bwrap argv from the profile, so it is unit-tested without
-bwrap.
+**Architecture:** `lane-control lane prepare --sandbox` makes the lane's single-branch clone and a one-shot launch
+ticket outside the sandbox. A shim named `opencode`/`opencode2`, first on PATH, takes the ticket, binds it to the
+pane's terminal handle, starts the broker, and supervises `pasta -- bwrap -- <real agent>` from `env -i`, writing the
+run record after bwrap's `--info-fd`. The clone is mounted at the Orca worktree's path; commits leave as bundles the
+broker imports with fsck. Pure Python builds every argv from the ticket, so most tests need no bwrap; an adversarial
+suite with real bwrap is a required local gate.
 
-**Tech Stack:** Python 3 stdlib (`core/sandbox.py`, the shim, the broker), bash only where existing scripts are
-bash, bubblewrap 0.12.0 from nixpkgs, unittest with `tests/stubs/`.
+**Tech Stack:** Python 3 stdlib (`core/sandbox.py`, shim, broker, wrappers), bubblewrap and passt from nixpkgs,
+unittest with `tests/stubs/`.
 
-**Spec:** `docs/superpowers/specs/2026-11-27-agent-sandbox-design.md` (read it whole first). The spike
-(`docs/superpowers/spikes/2026-11-27-agent-sandbox/spike.sh`) is the reference mount plan in small.
+**Spec:** `docs/superpowers/specs/2026-11-27-agent-sandbox-design.md` (round 2; read it whole first). The spike
+(`docs/superpowers/spikes/2026-11-27-agent-sandbox/spike.sh`) is the reference for the clone, mounts, network and
+bundle flow.
 
 ## Global Constraints
 
-- Never a privileged container, never a setuid helper; bwrap is used only when its binary has no setuid bit.
-- bwrap is run only by absolute path, `SANDBOX_BWRAP=` in `machine.conf`, from `env -i` with the allowlist; never
-  started with the owner's environment (the spike's `/proc/1/environ` leak).
-- bwrap flags always: `--die-with-parent --new-session --unshare-pid --unshare-ipc --unshare-uts
-  --unshare-cgroup-try --proc /proc --dev /dev --tmpfs /tmp --tmpfs $HOME --clearenv`; phase 1 never `--unshare-net`.
-- Profiles live in `~/.local/state/lane-control/sandbox/<worktree-id>.json` (`<worktree-id>` = sha256 of the
-  resolved worktree path, first 16 hex); that folder is never mounted inside.
-- Env never passed: `ORCA_CLI_COMMAND`, `ORCA_USER_DATA_PATH`, `GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`,
-  `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and any `*_TOKEN`, `*_KEY`,
-  `*_SECRET` except the one gateway key variable the profile names.
-- Never mounted: `/run/user/<uid>`, `/var/run`, `/nix/var/nix/daemon-socket`, `~/.config/orca` (except the exact
-  plugin and hook files the spec lists, read-only), the owner's `~/.config/opencode`, `~/.claude`, `~/.ssh`.
-- Fail closed: a worktree of a sandbox-on project, other than its primary checkout, with no valid profile is refused
-  with one line naming the worktree and the fix (`lane-control lane prepare ... --sandbox`).
-- Broker: push only `HEAD:refs/heads/<lane branch>` to `origin`, no `+`; git with `--git-dir` and `GIT_COMMON_DIR`
-  from the profile, `-c core.hooksPath=/dev/null -c core.fsmonitor=false`; refuse when a local or worktree scope sets
-  any of `core.sshCommand`, `core.gitProxy`, `core.fsmonitor`, `core.hooksPath`, `hook.*`, `remote.*.uploadpack`,
-  `remote.*.receivepack`, `gpg.program`, `gpg.*.program`, `gpg.ssh.defaultKeyCommand`, `filter.*`, `diff.external`,
-  `diff.*.textconv`, `credential.*`. The owner's own global and system config is left as git reads it (lc-8h1.1).
-- Tests write only to their temp dirs (`import testhome` first); real-bwrap tests skip with a reason when
-  `bwrap --unshare-user --ro-bind / / true` fails (CI's Ubuntu restricts user namespaces).
-- The repo is public: no hostnames, usernames or private paths; examples use `<project>`, `user@host`.
+- Never a privileged container or a setuid helper; bwrap and pasta only by absolute path from `machine.conf`
+  (`SANDBOX_BWRAP`, `SANDBOX_PASTA`), only when not setuid, always from `env -i`.
+- Only `/nix/store` is mounted, never `/nix/var`; `/run` and `/tmp` are tmpfs; `~/.config/orca` only the two
+  read-only files the spec lists; the shared repo, the main checkout, the beads folder and other clones never.
+- bwrap flags: `--die-with-parent --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try`, plus
+  `--new-session` unless `/proc/sys/dev/tty/legacy_tiocsti` reads `0`. pasta: `--config-net -q --no-map-gw
+  --dns-forward 169.254.1.53 -T <ORCA_AGENT_HOOK_PORT>[,<loopback gateway port>]`; `resolv.conf` inside names
+  `169.254.1.53`.
+- The environment inside is exactly the spec's list; nothing else whatever its name.
+- Clones: `git clone --no-local --single-branch --branch <base> --no-tags`, in
+  `~/.local/state/lane-control/sandbox/<lane-id>/repo` (reviewers: `.../<lane-id>/review-<n>/repo`); no lane-control
+  code runs git in them after `prepare` hands them over; removed with `rm -rf`.
+- Tickets: `~/.local/state/lane-control/sandbox/tickets/<worktree-id>/<nonce>.json`, one-shot (atomic rename into
+  `used/`); `<worktree-id>` = first 16 hex of sha256 of the resolved Orca worktree path; nonce = 32 hex from
+  `secrets.token_hex(16)`. Run records: `.../sandbox/runs/<terminal-handle>.json`.
+- Broker: typed JSON requests only (the spec's table, names verbatim), at most 1 MB; no argv or path from the lane;
+  text through files the broker creates (0600); option values as `--opt=value`; unknown fields refused; every request
+  logged to `<lane folder>/broker.log`.
+- Push: import `refs/heads/<branch>` from the bundle into `refs/lanes/<lane>` with `-c fetch.fsckObjects=true -c
+  transfer.fsckObjects=true fetch --no-tags --no-recurse-submodules --no-write-fetch-head`, fast-forward only; push
+  `refs/lanes/<lane>:refs/heads/<branch>` to `origin`, no `+`. Git runs only in the shared repo.
+- Fail closed: no unused ticket, a bad ticket, a failed probe or a failed selftest means the agent is not started;
+  one line names the worktree and the fix.
+- Tests import `testhome` first and write only to their temp dirs. The real-bwrap suite runs under
+  `LANE_SANDBOX_SELFTEST=1`, where a skip is a failure; CI (user namespaces restricted) skips it and says so.
+- Public repo: no hostnames, usernames, private paths or machine facts; examples use `<project>`, `user@host`.
 - Never run `tests/test-orca-host-install.sh`.
 
 ## Review Focus
 
-1. The agent rewrites `<wt>/.git` (or its admin dir's `commondir`) to point at a git dir it made, then something
-   outside runs git there: the files must be read-only inside, and the broker must use the profile's git dir, so
-   the planted `core.fsmonitor` never runs. (Task 2 mount test; Task 4 broker test.)
-2. A profile that is missing, unreadable, malformed JSON, or names a different worktree than the one the shim runs
-   in: the shim refuses; it never falls back to running unsandboxed. (Task 3.)
-3. PATH changed after setup so the real `opencode2` comes first: `lane started` sees no sandboxed-run record within
-   30 s and stops the worker. (Task 6.)
-4. A `--private` entry in each accepted form (`fixtures/customers`, `./fixtures/customers/`, `fixtures/customers/`,
-   a single file, a glob with no fixed folder): the first four are hidden inside; the last is reported, not silently
-   dropped. (Task 2.)
-5. A request to the broker with extra or forged flags (`--from` another terminal, `--to dispatch:<other>`,
-   `--environment`, `gh api`, `push --force`, a refspec to `main`): refused, logged, nothing run. (Task 4.)
+1. A second `prepare` or relaunch while an older ticket is unused: the shim takes the oldest, binds it to this
+   terminal; a ticket of another worktree or role is never taken. (Task 4.)
+2. A bundle that is not a fast-forward, names extra refs, or carries a corrupt object: refused, nothing written to
+   `refs/lanes` or origin, the lane told why. (Task 5.)
+3. A report whose dispatch belongs to another terminal (a reviewer's, an old round's): refused; a follow-up dispatch
+   of this terminal: accepted. (Task 5.)
+4. A base whose history holds a tracked `--private` path in any accepted form (`x`, `./x/`, `x/`, a file) or a
+   `.env.local`: `prepare` refuses and names it. (Task 3.)
+5. The owner's own OpenCode tab in the primary checkout, `opencode --version`, `opencode models`: passed through
+   unchanged, never sandboxed, never refused. (Task 4.)
 
 ---
 
-### Task 1: Measure Orca's launch through a shim (owner's go first)
+### Task 1: Measure Orca's launch (owner's go first)
 
-The design's one unmeasured claim. A stub, never a real agent or gateway.
+A stub, never a real agent or gateway.
 
 **Files:**
-- Create: `docs/superpowers/spikes/2026-11-27-agent-sandbox/orca-launch-probe.md` (the result, written up)
-- Create: `docs/superpowers/spikes/2026-11-27-agent-sandbox/stub-opencode2` (prints `opencode v2.2.1` for
-  `--version`, otherwise records argv, cwd, env names (never values) and its parent chain to a file in the scratch
-  dir, then waits for input like a TUI)
+- Create: `docs/superpowers/spikes/2026-11-27-agent-sandbox/orca-launch-probe.md`
+- Create: `docs/superpowers/spikes/2026-11-27-agent-sandbox/stub-opencode2` (answers `--version` with
+  `opencode v2.2.1`; otherwise writes argv, cwd, env names (never values), open fds and its parent chain to the scratch
+  dir and waits like a TUI)
 
-- [ ] **Step 1:** Ask the coordinator for the owner's go to start one Orca worker with the stub, in a scratch
-  worktree of lane-control, with the stub first on PATH through a scratch folder (no write to `~/.local/bin`).
-- [ ] **Step 2:** Start it as a terminal launch and as a chat launch (the owner's tab setting decides; record which
-  ran). Record: the binary Orca ran (stub or real), the env names Orca set (`OPENCODE_CONFIG_CONTENT`,
-  `ORCA_AGENT_HOOK_*`, plugin paths), and whether `opencode --version` went through the stub.
-- [ ] **Step 3:** With the stub run under the spike's bwrap (the shim's job later), record whether Orca still marks
-  the worker ready and running, and which OpenCode store files Orca's transcript reader opens
-  (`worker-read --source transcript`).
-- [ ] **Step 4:** Write the findings; if the PATH shim does not reach a chat launch, say so and fall back to the
-  owner's custom command (spec, open question 1). Commit by path.
+- [ ] **Step 1:** Ask the coordinator for the owner's go: one Orca worker with the stub first on PATH through a
+  scratch folder (no write to `~/.local/bin`), in a scratch worktree, once as a terminal launch and once as a chat.
+- [ ] **Step 2:** Record: which binary ran; the env names Orca set (`OPENCODE_CONFIG_DIR`, `ORCA_OPENCODE_*`,
+  `ORCA_AGENT_HOOK_*`, `ORCA_PANE_KEY`, `ORCA_AGENT_LAUNCH*`); the files those name; whether `--version` went through
+  the stub; the JSON fields of `worker-show` and `dispatch-show` that name the terminal.
+- [ ] **Step 3:** For each Orca token, read Orca's docs and code for what it authorizes (hook posts only, or RPC);
+  write the list. A token that reaches more than this pane's hooks goes on the spec's never-passed list.
+- [ ] **Step 4:** Repeat with the stub under the spike's pasta + bwrap: Orca still marks it ready and running; mail
+  typed into the pane arrives; which OpenCode store files `worker-read --source transcript` opens.
+- [ ] **Step 5:** With the owner's go, the same with Orca's custom command pointing at the stub (spec open
+  question 1), and the `terminal create --command` + `worker-start --terminal` fallback. Write the findings; commit.
 
-### Task 2: The mount plan as a pure function
+### Task 2: `core/sandbox.py`: tickets, clone layout and argv as pure functions
 
 **Files:**
 - Create: `core/sandbox.py`
 - Test: `tests/test_sandbox.py`
 
 **Interfaces:**
-- Produces: `worktree_id(worktree: Path) -> str`; `profile_path(worktree: Path) -> Path`;
-  `load_profile(worktree: Path) -> dict` (raises `SandboxError(str)` on missing, malformed, or a `worktree` field
-  that is not this worktree); `private_mounts(globs: list[str], wt: Path) -> tuple[list[tuple[str, Path]], list[str]]`
-  (`("tmpfs", dir)` or `("null", file)`, plus the globs that cannot be a mount); `env_for(env: dict, profile: dict)
-  -> dict`; `bwrap_argv(profile: dict) -> list[str]` (everything after the bwrap path, ending with `--`).
-- Profile fields: `worktree`, `admin_dir`, `common_dir`, `branch`, `project`, `agent`, `real_binary`,
-  `agent_config` (path of the generated config), `plugins` (list of files), `data_dir`, `cache_dir`, `beads_dir`,
-  `heavy_slots`, `tool_path` (list of store bin dirs), `private` (list of globs), `gateway_key_env`, `run_dir`.
+- Produces: `class SandboxError(Exception)`; `worktree_id(wt: Path) -> str`; `lane_dir(lane_id: str) -> Path`;
+  `write_ticket(wt: Path, t: dict) -> str` (returns the nonce); `take_ticket(wt: Path, terminal: str) -> dict` (oldest
+  unused, atomic rename, raises `SandboxError`); `bwrap_argv(t: dict, tiocsti_off: bool) -> list[str]` (after the
+  bwrap path, ending with `--`); `pasta_argv(t: dict, hook_port: int, gateway_port: int | None) -> list[str]`;
+  `env_for(env: dict, t: dict) -> dict`.
+- Ticket fields: `nonce`, `role` (`lane`|`reviewer`|`check`), `lane`, `issue`, `project`, `repo` (owner/name),
+  `base`, `branch`, `worktree`, `clone`, `run_dir`, `data_dir`, `cache_dir`, `home_files` ({inside path: source}),
+  `tool_path`, `persona`, `gateway_key_env`, `sha` (reviewer, check).
 
-- [ ] **Step 1: Failing tests** in `tests/test_sandbox.py`:
-  `test_home_is_tmpfs_and_only_agent_config_is_back` (`--tmpfs $HOME` before `--ro-bind <agent_config>
-  $HOME/.config/opencode/opencode.json`); `test_limits_and_git_pointers_are_read_only` (ro binds after the worktree's
-  rw bind for `.opencode`, `opencode.json`, `opencode.jsonc`, `orca.yaml`, `.git`, common `config`, `hooks`, `info`,
-  `packed-refs`, `refs`, `worktrees`, own admin `commondir`, `gitdir`, `config.worktree`, and the rw bind of the
-  lane's branch folder and own admin dir after them); `test_private_forms` (the four fixed forms give one
-  `("tmpfs", wt/"fixtures/customers")`, a file gives `("null", ...)`, `**/*.pem` is returned as left over);
-  `test_env_allowlist` (a dict with every never-passed name plus `LITELLM_KEY` named by the profile: only allowlisted
-  names and `LITELLM_KEY` remain); `test_never_mounted` (no argv element starts with `/run/user`, `/var/run`,
-  `/nix/var/nix/daemon-socket`, `~/.config/orca` other than the listed files); `test_profile_for_other_worktree_is_refused`.
-- [ ] **Step 2:** `python3 -m unittest tests.test_sandbox -v` → fails (no module).
-- [ ] **Step 3:** Implement `core/sandbox.py`; order of binds as the spec's mount table, spike's `box_args` as the
-  reference.
-- [ ] **Step 4:** `test_real_bwrap_stub_agent`: when the probe works, run the spike's `stub-agent.sh` under
-  `bwrap_argv` on a temp fixture (reuse the spike's fixture layout) and assert exit 0; else skip with the probe's
-  reason. Run the module → PASS.
-- [ ] **Step 5:** Commit `core/sandbox.py tests/test_sandbox.py`.
+- [ ] **Step 1: Failing tests:** `test_only_nix_store` (`/nix/store` bound; no argv element equal to or a parent of
+  `/nix/var`, `/run/user`, `/var/run`, `~/.config/orca`, the shared repo or its `.git`); `test_clone_at_worktree_path`
+  (`--bind <clone> <worktree>` and nothing else under the worktree path); `test_etc_is_minimal` (`--tmpfs /etc`, then
+  only the spec's names and the generated `resolv.conf`); `test_home_files_read_only` (each `home_files` entry is a
+  `--ro-bind` after `--tmpfs $HOME`); `test_new_session_only_when_tiocsti_allowed`; `test_env_is_exactly_the_list`
+  (an env with every never-passed name, a `FOO_TOKEN`, `GH_TOKEN`, `SSH_AUTH_SOCK`: only the spec's names remain, and
+  the ticket's `gateway_key_env`); `test_pasta_args` (`--no-map-gw`, the DNS forward address, `-T` with exactly the
+  hook and gateway ports); `test_take_ticket_oldest_and_once`, `test_take_ticket_other_worktree_refused`,
+  `test_take_ticket_malformed_refused`.
+- [ ] **Step 2:** `python3 -m unittest tests.test_sandbox -v` → FAIL (no module).
+- [ ] **Step 3:** Implement; the spike's `box()` is the reference order.
+- [ ] **Step 4:** Run → PASS. **Step 5:** Commit `core/sandbox.py tests/test_sandbox.py`.
 
-### Task 3: The shim
+### Task 3: `lane prepare --sandbox`
+
+**Files:**
+- Modify: `core/scripts/lane-extras` (the `lane prepare` parser near :216 and its body)
+- Modify: `core/harnesses/opencode/adapter.py` (idle reader takes the ticket's `data_dir`)
+- Test: `tests/test_extras.py` (new class `SandboxPrepareTests`)
+
+**Interfaces:**
+- Consumes: `sandbox.write_ticket`, `sandbox.lane_dir`.
+- Produces: `lane-control lane prepare <project> <worktree> --sandbox --role lanes|reviewer|check [--lane KEY]
+  [--issue ID] [--sha SHA]` → the clone (lanes: the base; reviewer and check: `refs/lanes/<lane>` at `--sha`), the
+  generated home files (gitconfig with the owner's name and email only, `opencode.json` with the provider entry and
+  no inline key, `resolv.conf`, persona, skills), the per-lane data and cache folders, the tool list (from the
+  project's settings store, never the worktree) built with `nix build --no-link --print-out-paths`, and a ticket.
+  Prints the nonce on its last line.
+
+- [ ] **Step 1: Failing tests:** `test_clone_has_only_the_base` (another branch's commit and a ref under
+  `refs/owner/` are absent from the clone: `git cat-file -e` fails); `test_tracked_private_refused` (each accepted
+  form, and a file, tracked anywhere in the base's history → exit 1 naming the path); `test_tracked_env_refused`
+  (`.env`, `.env.local`); `test_inline_key_refused` (an `apiKey` literal in the owner's provider config → exit 1, the
+  value never printed); `test_tool_list_from_store_only` (a `tools` file in the worktree is ignored);
+  `test_reviewer_gets_its_own_clone_at_sha`; `test_ticket_fields`; `test_refuses_without_selftest_record`
+  (Task 7's record missing or older than the pins → exit 1); `test_idle_reads_ticket_data_dir`.
+- [ ] **Step 2–4:** FAIL, implement, PASS. **Step 5:** Commit.
+
+### Task 4: The shim
 
 **Files:**
 - Create: `core/scripts/lane-sandbox-shim`
 - Test: `tests/test_sandbox_shim.py`
 
 **Interfaces:**
-- Consumes: `sandbox.load_profile`, `sandbox.bwrap_argv`, `sandbox.env_for`; `machine.conf`'s `SANDBOX_BWRAP`,
-  `SANDBOX_REAL_OPENCODE`, `SANDBOX_PROJECTS` (space-separated project roots with the sandbox on).
-- Produces: exit 2 and one line on refusal; on success `exec env -i <allowlist> <SANDBOX_BWRAP> <argv> <real> <args>`;
-  writes `<run_dir>/started.json` (`pid`, `time`, `argv0`) before the exec.
+- Consumes: `sandbox.take_ticket`, `bwrap_argv`, `pasta_argv`, `env_for`; `machine.conf` keys `SANDBOX_BWRAP`,
+  `SANDBOX_PASTA`, `SANDBOX_REAL_OPENCODE`, `SANDBOX_PROJECTS`, `SANDBOX_LANE_MEMORY`.
+- Produces: passthrough (`os.execv` of the real binary with the original argv and env) outside sandbox-on projects,
+  in a primary checkout, and for `--version`, `models`, `-h`/`--help`; otherwise it stays the parent: starts
+  `lane-broker serve <ticket>`, runs `env -i [systemd-run --user --scope -p MemoryMax=...] <pasta> ... -- <bwrap>
+  --info-fd 3 ... -- <real> <args>`, reads `child-pid` from fd 3, writes `runs/<terminal>.json` (`nonce`, `role`,
+  `pid`, `mntns` = `os.readlink(f"/proc/{pid}/ns/mnt")`), forwards SIGINT, SIGTERM, SIGHUP and SIGWINCH, and exits with
+  the child's status. Refusal: exit 2 and one line.
 
-- [ ] **Step 1: Failing tests** (fake bwrap and fake real binary from `tests/stubs/fake.py` that record argv and
-  env): `test_passthrough_outside_sandbox_projects` (cwd in the main checkout, or `--version`, or `models`: the real
-  binary gets the original argv and env); `test_sandboxed_lane_runs_under_bwrap` (bwrap gets the argv, env is only
-  the allowlist, `started.json` written); `test_missing_profile_refused`, `test_malformed_profile_refused`,
-  `test_profile_of_another_worktree_refused` (exit 2, real binary not run); `test_shim_never_finds_itself` (the shim
-  as `real_binary` in machine.conf is refused).
-- [ ] **Step 2:** run → FAIL. **Step 3:** implement. **Step 4:** run → PASS; `bash -n` not needed (Python).
-- [ ] **Step 5:** Commit.
+- [ ] **Step 1: Failing tests** (fake bwrap, pasta and real binary from `tests/stubs/fake.py` that record argv, env
+  and fds, and a fake bwrap that writes `{"child-pid": <pid>}` to fd 3): `test_passthrough_cases` (the five in
+  Review Focus 5); `test_no_ticket_refused`; `test_ticket_bound_to_terminal`; `test_run_record_after_info_fd` (no
+  record when the fake bwrap exits before writing fd 3); `test_env_i_before_pasta` (pasta's own env holds no
+  `FAKE_OWNER_TOKEN`); `test_shim_never_its_own_real_binary`; `test_signals_forwarded`.
+- [ ] **Step 2–4:** FAIL, implement, PASS. **Step 5:** Commit.
 
-### Task 4: The broker and the inside wrappers
+### Task 5: The broker
 
 **Files:**
-- Create: `core/scripts/lane-broker`, `core/sandbox-inside/orca`, `core/sandbox-inside/gh`, `core/sandbox-inside/git`
+- Create: `core/scripts/lane-broker`
 - Test: `tests/test_lane_broker.py`
 
 **Interfaces:**
-- Consumes: the profile (Task 2), plus `terminal`, `task_id`, `dispatch_id`, `repo` (owner/name) fields added by
-  `prepare` (Task 5).
-- Produces: `lane-broker serve <profile>` (listens on `<run_dir>/broker.sock`, one JSON request per connection:
-  `{"kind": "orca"|"gh"|"push"|"fetch", "args": [...]}`, answers `{"exit": n, "stdout": s, "stderr": s}`);
-  `handle(req: dict, profile: dict, run=subprocess.run) -> dict` for tests. The inside wrappers send argv and print
-  the answer; `git` sends only `push` and `fetch`, and execs the real git for everything else.
+- Consumes: the ticket; the run record (bound terminal).
+- Produces: `lane-broker serve <ticket-file>` (listens on `<run_dir>/broker.sock`); `handle(req: dict, ticket: dict,
+  terminal: str, run=subprocess.run) -> dict` (`{"exit": n, "stdout": s, "stderr": s}`), one handler per request name
+  in the spec's table, refusing a request the ticket's role may not make.
 
-- [ ] **Step 1: Failing tests:** `test_orca_mail_verbs_only` (`send`, `ask`, `check`, `reply` run with `--from`,
-  `--task-id`, `--dispatch-id` forced to the profile's; `terminal create`, `worker-start`, `agent launch` refused);
-  `test_orca_forged_flags_refused` (`--from term_other`, `--to dispatch:x`, `--environment`, `--pairing-code`,
-  `--on`); `test_push_own_branch_only` (`push`, `push origin HEAD` → runs `git --git-dir=<admin> push origin
-  HEAD:refs/heads/<branch>` with `GIT_COMMON_DIR`, `core.hooksPath=/dev/null`, `core.fsmonitor=false`;
-  `--force`, `+HEAD:...`, `HEAD:main`, another remote → refused); `test_planted_git_dir_ignored` (a worktree whose
-  `.git` file points at a git dir with `core.fsmonitor` naming a marker script: the push runs with the profile's
-  git dir and the marker is never written); `test_repo_scope_program_key_refused` (each key in Global Constraints
-  set in the local scope → refused with the key named); `test_gh_allowlist` (`pr create`, `pr view`, `pr checks`,
-  `run view` with `--repo` forced; `api`, `auth token`, `secret list` refused); `test_every_request_logged`.
-- [ ] **Step 2:** run → FAIL. **Step 3:** implement. **Step 4:** run → PASS; `sh -n` the inside wrappers if shell.
-- [ ] **Step 5:** Commit.
-
-### Task 5: `lane prepare --sandbox` and the generated agent config
-
-**Files:**
-- Modify: `core/scripts/lane-extras` (the `lane prepare` parser near :216 and its body)
-- Modify: `core/harnesses/opencode/adapter.py` (idle reader takes the profile's `data_dir` when there is one)
-- Test: `tests/test_extras.py` (new class `SandboxPrepareTests`)
-
-**Interfaces:**
-- Consumes: `sandbox.worktree_id`, `sandbox.profile_path`, `sandbox.private_mounts`.
-- Produces: the profile file (all fields of Task 2 and 4), the generated `opencode.json` in `run_dir`, a `{}`
-  placeholder for a missing `<wt>/opencode.json` added to `.git/info/exclude`, the per-lane `data_dir`, the project
-  `cache_dir`, the tool list built outside (`nix build --no-link --print-out-paths` per entry of the project's tool
-  list) into `tool_path`.
-
-- [ ] **Step 1: Failing tests:** `test_prepare_sandbox_writes_profile` (fields present, paths resolved, profile mode
-  0600 in a 0700 folder); `test_placeholder_excluded_from_git`; `test_private_leftovers_reported` (a pattern-only
-  glob prints one line naming it); `test_agent_config_has_no_allow_policy` (the generated config holds the owner's
-  denies and lane-control's persona plugin, no `allow` anywhere); `test_prepare_refuses_without_bwrap` (no
-  `SANDBOX_BWRAP` → exit 1, says to run machine setup); `test_idle_reads_profile_data_dir`.
+- [ ] **Step 1: Failing tests** (`run` is a recorder; nothing real is sent): `test_report_checks_dispatch` (a
+  dispatch that `dispatch-show` gives another terminal → refused; this terminal's follow-up dispatch → accepted);
+  `test_no_path_crosses` (a `body` that is a floor path is sent as text through the broker's own file, never read;
+  requests with `body_file`, `file`, `attach`, `template` fields → refused); `test_no_recipient_field` (`to`,
+  `environment`, `on`, `pairing_code` → refused); `test_reply_only_to_seen_ids`; `test_value_as_equals_form` (a
+  subject `--to=bot:x` stays one `--subject=--to=bot:x` argument); `test_gh_own_pr_only` (the PR number comes from
+  `gh pr list --head <branch>` in the ticket's repo; `number`, `repo`, `url` fields → refused; `api`, `auth`,
+  `secret`, `web`, `editor` → refused); `test_push_import_with_fsck_fast_forward_only` (real git in temp repos:
+  a fast-forward bundle → `refs/lanes/<lane>` and origin's branch; a non-fast-forward, a bundle with an extra ref,
+  a corrupt object → refused, nothing written); `test_push_never_runs_git_in_the_clone` (a clone whose config sets
+  `core.fsmonitor` to a marker script: the push leaves no marker); `test_bd_own_issue_only` (note, claim on another
+  issue → refused; `close`, `delete`, `remember` → refused; the DB path comes from lane-control's record, a `.beads`
+  link in the clone is ignored); `test_review_names` (`../x.md`, `x/y.md`, an existing name for `review-write` →
+  refused); `test_reviewer_cannot_push`; `test_check_role_has_no_requests`; `test_size_limit`;
+  `test_every_request_logged`.
 - [ ] **Step 2–4:** FAIL, implement, PASS. **Step 5:** Commit.
 
-### Task 6: Machine setup, check, and the after-start check
+### Task 6: The inside wrappers
 
 **Files:**
-- Modify: `core/scripts/machine-setup`, `core/scripts/machine-check`, `core/machineconf.py`
-- Modify: `core/scripts/lane-control` (new `lane started <worktree> [--timeout 30]`)
-- Modify: `core/scripts/lane-heavy` (slot files in `~/.local/state/lane-control/heavy/`, out of the state folder's top)
-- Test: `tests/test_machine_setup.py`, `tests/test_machine_caps.py`, `tests/test_sandbox_shim.py`
+- Create: `core/sandbox-inside/{orca,orca-ide,gh,git,bd,lane-heavy}` (one Python file, `core/sandbox-inside/wrap.py`,
+  and links named after each command)
+- Test: `tests/test_sandbox_inside.py`
 
 **Interfaces:**
-- Produces: `machine setup --sandbox` writes `SANDBOX_BWRAP` (store path, GC root under lane-control's data folder),
-  `SANDBOX_REAL_OPENCODE`, the shim links in the first PATH folder ahead of the real CLI (asks first; `--yes` for
-  scripts), and refuses on a setuid bwrap or a failed probe. `machine-check` reports `sandbox: ok|off|broken
-  (<why>)`, including "the shim is not first on the login shell's PATH". `lane started` exits 0 when
-  `started.json` appears in time, else runs `orca-ide orchestration worker-stop` for the lane and exits 1.
+- Consumes: the broker socket at `/run/lane/broker.sock` (path from `LANE_BROKER`, default that).
+- Produces: `orca`/`orca-ide orchestration send --type worker_done ...` → a `report` request (subject, body read from
+  the given `--body` or `--body-file` inside the sandbox, outcome, files); `ask`, `check`, `reply`, `escalation`
+  likewise; `gh pr create|view|checks|diff|comment|edit` → the matching request; `git push` → `git bundle create
+  /run/lane/outbox/push.bundle <branch> ^origin/<base>` then `push`; `git fetch`/`pull` → `fetch`, then `git fetch
+  /run/lane/inbox/in.bundle` (and `merge` for pull); `pull --rebase` refused; every other `git` verb execs the real
+  git; `bd show|ready|update --claim|comment|create` → the bd requests; `lane-heavy <cmd>` → holds `heavy-slot`
+  while `<cmd>` runs. Anything else: exit 2 with one line naming the broker request list.
 
-- [ ] **Step 1: Failing tests:** `test_setup_pins_bwrap_store_path`, `test_setup_refuses_setuid_bwrap`,
-  `test_setup_refuses_when_no_path_folder_precedes_real_cli`, `test_check_reports_shim_not_first`,
-  `test_lane_started_stops_unsandboxed_worker` (stub Orca from `tests/stubs/orca-via-env` records the worker-stop),
-  `test_heavy_slots_moved`.
-- [ ] **Step 2–4:** FAIL, implement, PASS; `bash -n` every changed shell script. **Step 5:** Commit.
+- [ ] **Step 1: Failing tests** (a fake broker on a temp socket): one test per mapping above, and
+  `test_unknown_verb_refused`, `test_pull_rebase_refused`, `test_heavy_slot_released_on_exit`.
+- [ ] **Step 2–4:** FAIL, implement, PASS. **Step 5:** Commit.
 
-### Task 7: Coordinator doctrine and docs
+### Task 7: Machine setup, check, selftest
 
 **Files:**
-- Modify: `orchestrators/native-orca/skills/native-orca-lanes/SKILL.md` (OpenCode lane: `lane prepare --sandbox`
-  before `worker-start`, `lane started <worktree>` right after; a refusal holds the lane)
-- Modify: `orchestrators/native-orca/setup.md`, `docs/how-it-fits.md`, `docs/getting-started.md` (what the
-  sandbox hides, what stays open: the spec's list, in plain words)
-- Test: `tests/test_content.py` (the skill names both commands in order; the docs name the three open items:
-  network, coordinator unsandboxed, worktree content run outside)
+- Modify: `core/scripts/machine-setup`, `core/scripts/machine-check`, `core/machineconf.py`, `core/scripts/lane-control`
+- Create: `tests/sandbox_escapes/` (the adversarial stub, grown from the spike's `stub-agent.sh`), `tests/test_sandbox_escapes.py`
+- Test: `tests/test_machine_setup.py`, `tests/test_machine_caps.py`
 
-- [ ] **Step 1–4:** failing content test, edit, PASS. **Step 5:** Commit.
+**Interfaces:**
+- Produces: `machine setup --sandbox` (pins bwrap and passt, GC roots, shim links in the first PATH folder ahead of
+  the real CLI after asking; refuses a setuid binary, a failed probe, or a failed selftest); `machine-check` line
+  `sandbox: on|off|broken (<why>)` (probe, pins present, shim first on the login shell's PATH, `legacy_tiocsti`,
+  selftest record current); `lane-control sandbox selftest` runs `tests/test_sandbox_escapes.py` with
+  `LANE_SANDBOX_SELFTEST=1` and writes `~/.local/state/lane-control/sandbox/selftest.json` (pins, lane-control
+  version, time, result).
 
-### Task 8: Live check with the stub, then one real lane (owner's go)
+- [ ] **Step 1: Failing tests** in `tests/test_sandbox_escapes.py` (real pasta + bwrap; each attack is tried inside,
+  then checked from outside; skip only without `LANE_SANDBOX_SELFTEST=1`, fail when it is set and a probe fails):
+  `test_floor_absent` (the spike's floor list, a link, a search); `test_no_owner_env_anywhere` (incl.
+  `/proc/1/environ`); `test_sockets` (nix daemon, host loopback not forwarded, abstract socket, session bus path,
+  the forwarded port works); `test_shared_repo_absent_and_foreign_objects_missing`; `test_nested_repo_gitlink`
+  (B2: after the run, host `git status` in the Orca worktree, the main checkout and a fresh clone of the pushed branch
+  leave no marker); `test_beads_hooks_unreachable` (B3: no `.beads` inside; a planted `.beads/hooks/on_update` in the
+  clone is never run by a host `bd update` through the broker); `test_shared_objects_untouched` (B4: the shared
+  repo's `git fsck` and object count before and after a run that tries `rm -rf` of every object path it can name);
+  `test_tracked_private_refused` (B5); `test_two_runs_after_rename` (B6: run 1 renames folders in the clone, run 2
+  still sees no private data); `test_lane_files_not_on_host` (B7: `.claude/settings.local.json`, `.mcp.json`,
+  `.envrc` written inside are absent from the Orca worktree after the run); `test_follow_up_dispatch_and_second_agent`
+  (B8: a reviewer ticket in the same worktree gets its own clone and cannot push); `test_pty_resize_and_dev_tty`
+  (M2: under a pty, SIGWINCH reaches the child and `/dev/tty` opens when `legacy_tiocsti` is 0);
+  `test_dns_and_outbound` (skipped unless `LANE_SANDBOX_NET=1`, then name lookup and a TCP connect work); setup tests
+  `test_setup_pins_store_paths`, `test_setup_refuses_setuid`, `test_setup_refuses_without_selftest`,
+  `test_check_reports_shim_not_first`.
+- [ ] **Step 2–4:** FAIL, implement, PASS (selftest with `LANE_SANDBOX_SELFTEST=1` on this machine: every test runs,
+  none skips). **Step 5:** Commit.
 
-- [ ] **Step 1:** Repeat Task 1's probe through the real shim, profile and broker: the stub sends `worker_done`
-  through the inside `orca`, pushes its branch through the broker to a scratch remote, and the spike's stub checks
-  run inside the launched pane. Record the result in the probe file.
-- [ ] **Step 2:** With the owner's go, one real OpenCode lane on a small issue with the sandbox on; record in the
-  lane ledger what broke. Full suite (`python3 -m unittest discover -s tests`) through `lane-heavy` before the PR.
+### Task 8: After-start check, sandboxed checks, doctrine and docs
 
-### Task 9 (phase 2 and 3, separate issues)
+**Files:**
+- Modify: `core/scripts/lane-control` (`lane started <worktree> --nonce <n> [--timeout 30]`, `sandbox check <lane>
+  --sha <sha> -- <command>`)
+- Modify: `orchestrators/native-orca/skills/native-orca-lanes/SKILL.md` (sandboxed lane: `prepare --sandbox`, then
+  `worker-start`, then `lane started`; reviewer: its own `prepare --sandbox --role reviewer --sha`; never rerun a
+  sandboxed lane's checks on the host: `sandbox check` or CI; never check out its branch)
+- Modify: `orchestrators/native-orca/personas/reviewer.md`, `.../coordinator.md` (same rules, short)
+- Modify: `orchestrators/native-orca/setup.md`, `docs/how-it-fits.md`, `docs/getting-started.md`
+- Test: `tests/test_sandbox_shim.py` (`lane started`), `tests/test_content.py`
 
-File as their own issues, each with a design note before code: key proxy for the gateway key; `--unshare-net` with
-pasta and Landlock's abstract-socket scope; sandboxed onboarding agent in project-setup (closes lc-8h1.2's agent
-side and lc-8h1.3); Claude lanes (spec, "Claude lanes").
+- [ ] **Step 1: Failing tests:** `test_lane_started_ok` (record with the nonce, live pid, other mount namespace,
+  terminal equal to `worker-show`'s); `test_lane_started_stops_unsandboxed` (no record in time, a stale record of an
+  older nonce, or the shim's own mount namespace → `orchestration worker-stop` recorded by the stub Orca, exit 1);
+  `test_sandbox_check_runs_in_fresh_clone`; content tests: the skill names `prepare --sandbox`, `worker-start`,
+  `lane started` in that order, forbids a host rerun and `gh pr checkout` for sandboxed lanes; the docs name the open
+  items (internet and LAN, the lane's key, coordinator unsandboxed, detection not prevention with the PATH shim).
+- [ ] **Step 2–4:** FAIL, edit, PASS. **Step 5:** Commit.
+
+### Task 9: Live check with the stub, then one real lane (owner's go)
+
+- [ ] **Step 1:** Task 1's probe through the real shim, ticket, broker and wrappers: the stub receives its brief,
+  resolves a name, commits, merges a new base commit, runs a test through `lane-heavy`, pushes to a scratch remote,
+  opens a PR on a scratch repo, takes a follow-up dispatch, and reports `worker_done`; a reviewer ticket in the same
+  worktree reviews it. Record each step in the probe file.
+- [ ] **Step 2:** With the owner's go, one real OpenCode lane on a small issue with the sandbox on; record what
+  broke in the lane ledger. Full suite (`python3 -m unittest discover -s tests`) through `lane-heavy` and the selftest
+  before the PR.
+
+Phases 2 and 3 are their own issues (lc-0zae: key proxy and egress allowlist; lc-pk2c: sandboxed onboarding agent;
+lc-d2wk: Claude lanes), each with a design note before code.
