@@ -8,6 +8,7 @@ lane list|status` reads Orca's worker list and shows each lane's own worker. Stu
 What only a person may do (lane new, --force) refuses whenever an agent may run it, and a test process has no
 terminal: those paths' successes run in-process with project-setup's person check (agent_caller) patched, their
 refusals as real subprocesses; agent_caller itself is tested on its own."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import contextlib
 import importlib.machinery
 import importlib.util
