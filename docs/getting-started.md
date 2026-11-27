@@ -499,7 +499,9 @@ starts), `gate` (before the coordinator merges: a failing one means not green, a
 `on-report` only warns. A script gets its facts as `LANE_HOOK_*` variables (project, PR, head sha, lane, issue,
 outcome, ...), never a secret and no argument, and runs in an empty folder of its own, never in a lane's worktree,
 with a timeout (default 10 minutes). Keep it outside every project repo; it is pinned by its hash (or commit), so
-after editing it, add it again. Its exit code and last 20 lines are shown. More: [hooks](how-it-fits.md#hooks).
+after editing it, add it again. Its exit code and last 20 lines are shown (with known secret shapes masked: still,
+never print one). A broken gate or lane-start hook blocks until you fix or remove it; for one run, a person can pass
+`--skip-hook <name> --reason "<why>"` (recorded). More: [hooks](how-it-fits.md#hooks).
 
 ## Updating an existing host
 

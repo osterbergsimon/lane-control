@@ -39,8 +39,8 @@ It fails loudly: a target it cannot address, a send Orca refuses, a crash, or a 
 `UNADDRESSED` line, and the agent puts it in front of the owner (at most every WATCHDOG_ESCALATE_MIN minutes while the same
 lines stay). A message's backoff is written before it is sent, so a crash after a send never sends it again.
 Each ESCALATE that --send takes from the outbox also runs the owner's on-report hooks (core/hooks.py; lc-76o) with the
-project, its checkout and PR and the outcome `escalation`, whether the send went through or not, after the sends and
-outside the state lock: each is a `HOOK` line with its exit code and last lines; one that fails is a `HOOK-WARN` line
+project, its checkout and PR and the outcome `escalation`, whether the send went through or not, after the sends (their
+SENT and UNADDRESSED lines are printed first) and outside the state lock: each is a `HOOK` line with its exit code and last lines; one that fails is a `HOOK-WARN` line
 and only warns (the exit code is the sends').
 State: ~/.cache/lane-control/watchdog/ (outbox, backoff per project and kind, summary stamp, `last`).
 Exit (--send): 0 all sent; 1 something reached nobody; 2 usage or no Orca terminal to send from.
@@ -327,7 +327,7 @@ class Round:
             self.machine_msgs.append(("ESCALATE", p, key if late is None else "deadline:" + (rec.get("deadline") or ""), budget, [
                 f"away watchdog: {p}'s away-improve cycle is stalled ({'past its deadline' if late is not None else 'quiet'}); "
                 "its coordinator has been told. Look at it, tell the owner if it stays so. The watchdog merges nothing and "
-                "changes no lane.", "", *ev], {"project_root": str(c.checkout), "pr": str(rec.get("pr") or "")}))
+                "changes no lane.", "", *ev], {"project_root": str(c.checkout), "repo": str(c.checkout), "pr": str(rec.get("pr") or "")}))
 
     def summary(self, st: "dict | None"):
         conf, now = self.conf, self.now
@@ -565,7 +565,13 @@ def send_outbox() -> int:
             improve._atomic(cache_dir() / "last", (cache_dir() / "last").read_text() + "".join(f"{x}\n" for x in lines))
         except OSError:
             pass
-    hook_lines = [x for m in escalated for x in on_report(m)]
+    for line in lines:  # what was sent and what reached nobody is out before any hook runs
+        print(line, flush=True)
+    hook_lines = []
+    for m in escalated:
+        for line in on_report(m):
+            print(line, flush=True)
+            hook_lines.append(line)
     if hook_lines:
         with locked():
             try:
@@ -573,8 +579,6 @@ def send_outbox() -> int:
                                 + "".join(f"{x}\n" for x in hook_lines))
             except OSError:
                 pass
-    for line in lines + hook_lines:
-        print(line)
     return 1 if any(x.startswith("UNADDRESSED") for x in lines) else 0
 
 

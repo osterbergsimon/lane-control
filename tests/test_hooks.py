@@ -12,6 +12,8 @@ import io
 import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import time
 import unittest
@@ -70,6 +72,22 @@ class StoreTests(HookScratch):
         self.assertIn("gate: hook:tests", out)
         self.assertIn("lanes: none", out)  # a hook is no role's: it runs outside every session
 
+    def test_m3_a_linked_script_pins_and_runs_its_target(self):
+        real = self.t / "dotfiles" / "gate.sh"
+        real.parent.mkdir()
+        real.write_text("#!/bin/sh\necho real\n")
+        real.chmod(0o755)
+        link = self.owner / "gate.sh"
+        link.symlink_to(real)
+        out = self.add("--hook", "gate", "--script", link)
+        self.assertIn(f"the file pinned and run is {real}", out)
+        (e,) = self.stored()
+        self.assertEqual(e["script"], str(real))
+        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:gate"]["state"], "ok")
+        code, so, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
+        self.assertEqual(code, 0, so)
+        self.assertIn("| real", so)
+
     def test_bad_hooks_are_refused(self):
         f = self.script("h.sh", "#!/bin/sh\nexit 0\n")
         self.refused("project", "add", self.repo, "--hook", "before-lunch", "--script", f, says="takes after-setup")
@@ -122,11 +140,35 @@ class StoreTests(HookScratch):
         self.assertEqual(code, 0, out + err)
         self.assertIn("from git", out)
         self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:gate"]["state"], "ok")
-        (X.hook_file(e)).write_text("#!/bin/sh\nexit 0\n")  # a pinned checkout changed by hand
-        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:gate"]["state"], "changed")
+        # review M4, M5: the checkout's working files never count; the hook runs from an export of the pinned commit
+        (X.hook_file(e)).write_text("#!/bin/sh\necho UNCHECKED\n")
+        (X.hook_source_dir(e) / "local.sh").write_text("echo planted\n")
+        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:gate"]["state"], "ok")
         code, out, err = self.run_le("gate", self.repo, "7", "--head", HEAD)
-        self.assertEqual(code, 1, out)
-        self.assertIn("refused", out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("from git", out)
+        self.assertNotIn("UNCHECKED", out)
+
+    def test_m4_a_git_hook_that_writes_beside_itself_runs_again_and_again(self):
+        up = self.t / "upstream" / "py"
+        up.mkdir(parents=True)
+        (up / "lib.py").write_text("WORD = 'gate ok'\n")
+        (up / "gate.py").write_text("#!/usr/bin/env python3\nimport os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"
+                                    "import lib\nopen(os.path.join(os.path.dirname(__file__), 'log'), 'a').write('x')\n"
+                                    "print(lib.WORD)\n")
+        (up / "gate.py").chmod(0o755)
+        git("init", "-q", "-b", "main", cwd=up)
+        git("add", "-A", cwd=up)
+        git("commit", "-q", "-m", "v1", cwd=up)
+        sha = git("rev-parse", "HEAD", cwd=up)
+        self.add("--hook", "gate", "--script", f"file://{up}@{sha}:gate.py")
+        for _ in range(2):
+            code, out, err = self.run_le("gate", self.repo, "7", "--head", HEAD)
+            self.assertEqual(code, 0, out + err)
+            self.assertIn("| gate ok", out)
+        e = [x for x in X.effective(self.store) if x["kind"] == "hook"][0]
+        self.assertEqual(sorted(p.name for p in X.hook_source_dir(e).iterdir() if p.name != ".git"),
+                         ["gate.py", "lib.py"])  # it wrote into its run folder, never its checkout
 
 
 class EventTests(HookScratch):
@@ -220,6 +262,90 @@ class EventTests(HookScratch):
                 self.assertNotIn(value.strip(), out + err)
 
 
+class NameTests(HookScratch):
+    """Review B1: facts are names, not secrets; only the real shapes of a key are refused."""
+
+    def test_ordinary_names_with_sk_in_them_are_fine_and_no_hooks_is_green(self):
+        tracker = self.t / "task-tracker"
+        tracker.mkdir()
+        git("init", "-q", "-b", "main", cwd=tracker)
+        store = X.store_for(tracker)
+        store.mkdir(parents=True)
+        (store / "settings.json").write_text(json.dumps({"root": str(tracker), "name": "task-tracker"}))
+        code, out, _ = self.run_le("gate", tracker, "7", "--head", HEAD)
+        self.assertEqual(code, 0, out)
+        self.assertIn("no gate hooks", out)
+        self.assertEqual(self.run_le("hook", tracker, "on-report", "--lane", "desk-4ab")[0], 0)
+        _, facts_out = self.hook("lane-start")
+        wt = self.t / "workspaces" / "fix-disk-usage"
+        git("worktree", "add", "-q", wt, "-b", "fix-disk-usage", cwd=self.repo)
+        code, out, err = self.run_le("prepare", self.repo, wt, "--role", "lanes", "--lane", "TASK-1",
+                                     "--issue", "desk-4ab")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(facts(facts_out)["LANE_HOOK_ISSUE"], "desk-4ab")
+        H = LE.H
+        for v in ("/srv/code/helpdesk-ui", "task-tracker", "risk-ask-flask"):
+            self.assertEqual(H.check_facts({"project": v}), {"project": v})
+        self.assertEqual(H.clean("task-list tests passed"), "task-list tests passed")
+        with self.assertRaises(H.HookError):
+            H.check_facts({"worktree": "/tmp/" + SECRET})
+
+    def test_m7_the_outcome_is_a_status_never_a_lane_key(self):
+        self.hook("on-report")
+        code, out, err = self.run_le("hook", self.repo, "on-report", "--outcome", "APP-3")
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("APP-3", out + err)
+        for word in ("succeeded", "failed", "blocked", "NEEDS_DEEP", "escalation"):
+            self.assertEqual(self.run_le("hook", self.repo, "on-report", "--outcome", word)[0], 0, word)
+
+    def test_m2_minor_an_attached_repos_pr_names_its_repo(self):
+        other = self.t / "lib"
+        other.mkdir()
+        git("init", "-q", "-b", "main", cwd=other)
+        _, out = self.hook("gate")
+        self.refused("gate", self.repo, "7", "--head", HEAD, "--repo", other, says="neither the project's")
+        (self.store / "settings.json").write_text(json.dumps({"root": str(self.repo), "name": "app",
+                                                              "attached": [str(other)]}))
+        self.assertEqual(self.run_le("gate", self.repo, "7", "--head", HEAD, "--repo", other)[0], 0)
+        got = facts(out)
+        self.assertEqual((got["LANE_HOOK_REPO"], got["LANE_HOOK_PROJECT_ROOT"]), (str(other), str(self.repo)))
+
+
+class SkipTests(HookScratch):
+    """Review m3: the way past a broken blocking hook is said where it fails; a skip is a person's, with a reason."""
+
+    def test_a_failing_gate_says_the_way_past_and_a_person_can_skip_it_once(self):
+        self.hook("gate", name="broken", code=1)
+        code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
+        self.assertEqual(code, 1)
+        self.assertIn("lane-control project extras remove hook:broken", out)
+        self.assertIn("--skip-hook broken --reason", out)
+        self.refused("gate", self.repo, "7", "--head", HEAD, "--skip-hook", "broken", says="needs --reason")
+        self.refused("gate", self.repo, "7", "--head", HEAD, "--skip-hook", "nope", "--reason", "the CI box is down",
+                     says="no gate hook of that name")
+        code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD, "--skip-hook", "broken", "--reason",
+                                   "the CI box is down today")
+        self.assertEqual(code, 0, out)
+        self.assertIn("hook:broken skipped by a person", out)
+        (rec,) = [json.loads(x) for x in LE.H.skips_file().read_text().splitlines()]
+        self.assertEqual((rec["hook"], rec["reason"], rec["pr"], rec["event"]),
+                         ("broken", "the CI box is down today", "7", "gate"))
+        self.assertEqual(oct(LE.H.skips_file().stat().st_mode & 0o777), "0o600")
+
+    def test_an_agent_cannot_skip(self):
+        self.hook("gate", name="broken", code=1)
+
+        def agent(what):
+            raise LE.X.ExtrasError(f"{what} is for a person at a terminal")
+        with mock.patch.object(LE, "person", agent), contextlib.redirect_stderr(io.StringIO()) as err, \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = LE.main(["gate", str(self.repo), "7", "--head", HEAD, "--skip-hook", "broken",
+                            "--reason", "because I want to"])
+        self.assertIn("for a person at a terminal", err.getvalue())
+        self.assertEqual(code, 1)
+        self.assertFalse(LE.H.skips_file().exists())
+
+
 class RunTests(HookScratch):
     def test_a_hook_runs_outside_every_worktree_with_no_secret_and_no_arguments(self):
         _, out = self.hook("on-report")
@@ -251,6 +377,22 @@ class RunTests(HookScratch):
         self.assertIn("[redacted]", out)
         self.assertNotIn("\033", out)
         self.assertIn("hook:on-report-loud failed", out)  # a script's name at an event that is not in it
+
+    def test_m6_common_secret_forms_are_masked_and_n1_control_characters_go(self):
+        H = LE.H
+        for line in ("password=hunter2-fake", "DB_PASSWORD: correct-horse-fake", "--password hunter2fake",
+                     "key 0123456789abcdef0123456789abcdef", '{"client_secret": "Fake0123abcd"}',
+                     "Authorization: Bearer abc.def", "https://u:pw@example.com/x", "token " + SECRET):
+            with self.subTest(line=line):
+                got = H.clean(line)
+                self.assertIn("[redacted]", got)
+                for bad in ("hunter2", "correct-horse", "0123456789abcdef0123", "Fake0123", "abc.def", ":pw@",
+                            SECRET):
+                    self.assertNotIn(bad, got)
+        self.assertIn("[redacted]", H.clean("Basic dXNlcjpwYXNzd29yZA=="))
+        for line in ("PASS: test_x", "ok 12 tests passed", "exit=0", "PWD=/tmp/x", "basic tests pass"):
+            self.assertEqual(H.clean(line), line)
+        self.assertEqual(H.clean("a\x9b31mb\u202ec\u200bd\x85e"), "abcde")  # an 8-bit CSI, bidi, zero width, C1
 
     def test_a_commit_in_the_output_is_shown(self):
         self.script("sha.sh", f"#!/bin/sh\necho 'tested {HEAD}'\n")
@@ -361,6 +503,76 @@ class AwayMergeHookTests(AwayMergeTest):
         got = facts(am)
         self.assertEqual((got["LANE_HOOK_EVENT"], got["LANE_HOOK_MERGE_SHA"], got["LANE_HOOK_PR"]),
                          ("after-merge", MERGE, "7"))
+
+
+    def test_m1_a_pr_retargeted_during_the_gates_is_not_merged(self):
+        owner = self.tmp / "owner"
+        owner.mkdir()
+        retarget = owner / "retarget.py"
+        retarget.write_text("#!/usr/bin/env python3\nimport json\n"
+                            f"f = {str(self.tmp / 'prs.json')!r}\n"
+                            "prs = json.load(open(f))\nprs['7']['baseRefName'] = 'main'\njson.dump(prs, open(f, 'w'))\n")
+        retarget.chmod(0o755)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            store = X.store_for(self.shop)
+            X.save(X.project_file(store), {"extras": [{"kind": "hook", "name": "retarget", "event": "gate", "for": [],
+                                                       "timeout": 60, "script": str(retarget),
+                                                       "sha256": X.sha256(retarget)}]})
+        r = self.merge()
+        self.assertRefused(r, "changed")
+        self.assertIn("now goes into 'main'", r.stderr)
+
+    def test_m2_a_stopped_away_merge_still_says_it_merged_and_stops_its_hook(self):
+        owner = self.tmp / "owner"
+        owner.mkdir()
+        pid = owner / "hook.pid"
+        slow = owner / "slow.sh"
+        slow.write_text(f"#!/bin/sh\necho $$ > {pid}\nsleep 30\n")
+        slow.chmod(0o755)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            store = X.store_for(self.shop)
+            X.save(X.project_file(store), {"extras": [{"kind": "hook", "name": "slow", "event": "after-merge",
+                                                       "for": [], "timeout": 60, "script": str(slow),
+                                                       "sha256": X.sha256(slow)}]})
+        (self.tmp / "gh.log").write_text("")
+        p = subprocess.Popen([str(ROOT / "core" / "scripts" / "away-merge"), "--project", "shop", "--pr", "7",
+                              "--item", "Add the x feature"], env=self.env, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+        stopped_hook(self, p, pid)
+        out = p.stdout.read()
+        self.assertIn("merged PR 7", out)
+        self.assertEqual(len(self.merged()), 1)
+
+
+def stopped_hook(test, p, pid: Path) -> None:
+    """Wait for the hook to start, stop the command with SIGTERM, and check the hook's process group is gone."""
+    end = time.monotonic() + 30
+    while not (pid.exists() and pid.read_text().strip()) and time.monotonic() < end:
+        time.sleep(0.05)
+    test.assertTrue(pid.exists(), "the hook never started")
+    hook = int(pid.read_text())
+    p.send_signal(signal.SIGTERM)
+    p.wait(timeout=15)
+    test.assertEqual(p.returncode, -signal.SIGTERM)
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
+        try:
+            os.kill(hook, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    test.fail("the hook outlived the command that ran it")
+
+
+class StopTests(HookScratch):
+    def test_m2_a_stopped_command_stops_its_hook(self):
+        pid = self.owner / "hook.pid"
+        self.script("slow.sh", f"#!/bin/sh\necho $$ > {pid}\nsleep 30\n")
+        self.add("--hook", "gate", "--script", self.owner / "slow.sh", "--timeout", "120")
+        p = subprocess.Popen([sys.executable, str(LC), "project", "gate", str(self.repo), "7", "--head", HEAD],
+                             env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stopped_hook(self, p, pid)
+        self.assertIn("up to 120 s in all", p.stdout.read())
 
 
 class WatchdogHookTests(WatchTest):

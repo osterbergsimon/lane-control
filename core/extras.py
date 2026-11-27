@@ -549,7 +549,11 @@ def make_hook(event: str, opts: dict) -> tuple:
     if spec.startswith(("/", "~")):
         path, h, warn = owners_file(spec, bool(opts.get("allow_repo_path")), "the hook script", True)
         warnings += [warn] if warn else []
-        e.update(script=path, sha256=h)
+        real = os.path.realpath(path)  # a link (dotfiles, home-manager): its target is pinned and run, never the link
+        if real != path:
+            warnings.append(f"note: {path} is a link: the file pinned and run is {real} (add it again when the link "
+                            "points elsewhere)")
+        e.update(script=real, sha256=h)
         stem = Path(path).stem
     else:
         m = SPEC.fullmatch(spec)
@@ -571,10 +575,10 @@ def make_hook(event: str, opts: dict) -> tuple:
         why = fetch(e["url"], e["commit"], "", hook_source_dir(e), want=e["path"])
         if why:
             raise ExtrasError(f"--script: {why}")
-        f = hook_file(e)
-        if f.is_symlink() or not f.is_file() or not os.access(f, os.X_OK):
-            raise ExtrasError(f"--script: {e['path']} at that commit is not an executable file (git's mode 100755)")
-        e["sha256"] = sha256(f)
+        data, why = hook_blob(e)
+        if why:
+            raise ExtrasError(f"--script: {why}")
+        e["sha256"] = digest(data)
     return e, warnings
 
 
@@ -784,25 +788,58 @@ def hook_file(e: dict) -> Path:
     return Path(e["script"]) if e.get("script") else hook_source_dir(e) / e["path"]
 
 
+def git_bytes(folder: Path, *args) -> "bytes | None":
+    try:
+        r = subprocess.run(["git", "-C", str(folder), *args], capture_output=True, timeout=120,
+                           stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def has_commit(e: dict) -> bool:
+    src = hook_source_dir(e)
+    return src.is_dir() and git_bytes(src, "cat-file", "-e", f"{e['commit']}^{{commit}}") is not None
+
+
+def hook_blob(e: dict) -> tuple:
+    """(the script's bytes at the pinned commit, None), or (None, why not). Read from the commit's own objects, never
+    the checkout's files: what is written, ignored or marked unchanged there does not count."""
+    src = hook_source_dir(e)
+    tree = git_bytes(src, "ls-tree", "-z", e["commit"], "--", e["path"])
+    entry = (tree or b"").split(b"\0")[0].decode(errors="replace")
+    meta, _, name = entry.partition("\t")
+    parts = meta.split()
+    if len(parts) != 3 or name != e["path"]:
+        return None, f"no {e['path']} at commit {e['commit'][:12]}"
+    mode, kind, blob = parts
+    if kind != "blob" or mode != "100755":
+        return None, f"{e['path']} at that commit is not an executable file (git's mode 100755)"
+    data = git_bytes(src, "cat-file", "blob", blob)
+    if data is None:
+        return None, f"{e['path']} cannot be read at commit {e['commit'][:12]}"
+    return data, None
+
+
 def hook_problem(e: dict, fetch_it: bool = False) -> "str | None":
-    """None when the hook's script is as it was added (its pin and its hash), else what is wrong. fetch_it: a git
-    hook's checkout that is not there is fetched (refresh, and a run); otherwise that is `not fetched`."""
+    """None when the hook's script is as it was added (its pin and its hash), else what is wrong. A git hook is read
+    from its pinned commit's objects (the checkout's working files never count); fetch_it: a commit that is not there
+    is fetched (refresh, and a run), otherwise that is `not fetched`."""
     f = hook_file(e)
     if e.get("url"):
-        src = hook_source_dir(e)
-        if not f.is_file() and not f.is_symlink():
+        if not has_commit(e):
             if not fetch_it:
                 return f"commit {e['commit'][:12]} not fetched"
-            why = fetch(e["url"], e["commit"], "", src, want=e["path"])
+            why = fetch(e["url"], e["commit"], "", hook_source_dir(e), want=e["path"])
             if why:
                 return why
-        head = git(src, "rev-parse", "HEAD")
-        if head is None or head.stdout.strip() != e["commit"]:
-            return f"{src} is not at {e['commit'][:12]} any more"
-        st = git(src, "status", "--porcelain", "--untracked-files=all")
-        if st is None or st.returncode != 0 or st.stdout.strip():
-            return f"{src} changed since it was fetched"
-    elif not f.is_file():
+        data, why = hook_blob(e)
+        if why:
+            return why
+        if digest(data) != e.get("sha256"):
+            return f"{e['path']} at {e['commit'][:12]} is not the script that was added (add it again to accept it)"
+        return None
+    if not f.is_file():
         return f"{f} is missing"
     if f.is_symlink() or not f.is_file():
         return f"{f} is not a plain file"
@@ -1403,7 +1440,8 @@ def check_entry(e: dict) -> tuple:
     if k == "hook":
         why = hook_problem(e)
         if why is None:
-            return "ok", f"{e['event']}: {hook_file(e)} as added"
+            return "ok", f"{e['event']}: " + (f"{hook_file(e)} as added" if e.get("script") else
+                                               f"{e['path']} at the pinned commit {e['commit'][:12]}")
         return ("missing" if why.endswith(("is missing", "not fetched")) else "changed"), why
     if e["harness"] == "opencode":
         return "ok", "OpenCode installs it at start"

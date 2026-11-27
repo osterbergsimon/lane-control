@@ -66,7 +66,8 @@ class Parser(argparse.ArgumentParser):
     """argparse that never repeats what it could not parse: a misplaced value may be a secret."""
 
     def error(self, message):
-        safe = message.split(":")[0] if "unrecognized arguments" in message else message
+        safe = message.split(":")[0] if "unrecognized arguments" in message else \
+            message.split(": invalid choice")[0] + ": invalid choice" if "invalid choice" in message else message
         self.exit(2, f"{self.prog}: {safe} (not shown: one may be a secret); see --help\n")
 
 
@@ -220,9 +221,11 @@ def cmd_prepare(argv: list) -> int:
     ap.add_argument("--role", required=True, choices=("lanes", "reviewer"))
     ap.add_argument("--lane", help="the lane's key, for the lane-start hooks")
     ap.add_argument("--issue", help="the lane's issue id, for the lane-start hooks")
+    skip_flags(ap)
     a = ap.parse_args(argv)
     H.check_facts({"lane": a.lane, "issue": a.issue})  # before anything is written
     root, st, store = X.find_project(a.project)
+    skip = skips(X.effective(store), "lane-start", a, "lane-control lane prepare") if a.role == "lanes" else {}
     wt = Path(a.worktree).expanduser()
     if wt.is_symlink():
         raise X.ExtrasError(f"{wt} is a symlink: give the worktree's own path")
@@ -252,13 +255,17 @@ def cmd_prepare(argv: list) -> int:
         return 1
     n = len([e for e in entries if not X.user_level(e) and e["kind"] not in ("persona", "hook")])
     if a.role == "lanes":
-        res = H.run(X.effective(store), "lane-start", {**facts_of(root, st), "worktree": str(wt), "role": a.role,
-                                                       "lane": a.lane, "issue": a.issue})
+        facts = {**facts_of(root, st), "worktree": str(wt), "role": a.role, "lane": a.lane, "issue": a.issue}
+        if skip:
+            H.record_skip(skip, "lane-start", H.check_facts(facts))
+        res = H.run(X.effective(store), "lane-start", facts, skip)
         for line in H.report(res):
             print(f"prepare: {line}")
         if H.failed(res):
             print(f"prepare: failed: {len(H.failed(res))} lane-start hook(s) did not pass; hold the lane and tell "
                   "the owner what they printed")
+            for line in H.way_past(res, "lane-start", f"lane-control lane prepare {root} {wt} --role lanes"):
+                print(f"prepare: {line}")
             return 1
     print(f"prepare: done ({', '.join(scopes)} extras in {wt}; {n} extra(s))")
     return 0
@@ -272,6 +279,35 @@ def fact_flags(ap) -> None:
     ap.add_argument("--head", help="the PR's full head commit")
     ap.add_argument("--lane", help="the lane's key")
     ap.add_argument("--issue", help="the lane's issue id")
+    ap.add_argument("--repo", help="the checkout of the repo the PR is in, for a repo attached to the project "
+                                   "(default: the project's own)")
+    skip_flags(ap)
+
+
+def skip_flags(ap) -> None:
+    ap.add_argument("--skip-hook", dest="skip_hook", action="append", default=[], metavar="NAME",
+                    help="a person at a terminal only: do not run this hook once, recorded with --reason")
+    ap.add_argument("--reason")
+
+
+def skips(entries: list, event: str, a, what: str) -> dict:
+    """--skip-hook: checked, and a person's only (an agent is refused, as for extras add)."""
+    if not a.skip_hook:
+        return {}
+    skip = H.check_skip(entries, event, a.skip_hook, a.reason)
+    person(f"{what} --skip-hook")
+    return skip
+
+
+def repo_of(root: Path, st: dict, given: "str | None") -> Path:
+    """The checkout the PR is in: the project's own, or a repo attached to it."""
+    if not given:
+        return root
+    d = Path(given).expanduser().resolve()
+    repos = [root, *[Path(x).resolve() for x in st.get("attached") or [] if isinstance(x, str)]]
+    if d not in repos:
+        raise X.ExtrasError(f"--repo {d} is neither the project's checkout nor a repo attached to it")
+    return d
 
 
 def pr_head(root: Path, pr: str) -> "str | None":
@@ -296,22 +332,33 @@ def cmd_gate(argv: list) -> int:
     root, st, store = X.find_project(a.project)
     entries = X.effective(store)
     gates = X.hooks_for(entries, "gate")
-    facts = H.check_facts({**facts_of(root, st), "pr": a.pr, "head_sha": a.head, "lane": a.lane, "issue": a.issue})
-    if not gates:
+    if not gates:  # green before anything else is looked at
         print(f"gate: passed for PR {a.pr}: no gate hooks (lane-control project|machine extras add --hook gate ...)")
         return 0
-    head = a.head or pr_head(root, a.pr)
+    repo = repo_of(root, st, a.repo)
+    facts = H.check_facts({**facts_of(root, st), "repo": str(repo), "pr": a.pr, "head_sha": a.head,
+                           "lane": a.lane, "issue": a.issue})
+    skip = skips(entries, "gate", a, "lane-control project gate")
+    head = a.head or pr_head(repo, a.pr)
     if not head:
-        print(f"gate: failed for PR {a.pr}: its head commit cannot be read (gh pr view {a.pr}); give --head <full "
-              "sha>: not green, do not merge")
+        print(f"gate: failed for PR {a.pr}: its head commit cannot be read (gh pr view {a.pr} in {repo}); give "
+              "--head <full sha>: not green, do not merge")
         return 1
-    res = H.run(entries, "gate", {**facts, "head_sha": head})
+    facts["head_sha"] = head
+    if skip:
+        H.record_skip(skip, "gate", facts)
+    total = sum(int(e.get("timeout") or X.HOOK_TIMEOUT) for e in gates if e["name"] not in skip)
+    print(f"gate: running {len(gates)} gate hook(s) for PR {a.pr} at {head}, up to {total} s in all", flush=True)
+    res = H.run(entries, "gate", facts, skip)
     for line in H.report(res):
         print(f"gate: {line}")
     bad = H.failed(res)
     if bad:
         print(f"gate: failed for PR {a.pr} at {head}: {len(bad)} of {len(res)} gate hook(s) did not pass: not "
               "green, do not merge; tell the owner what they printed")
+        cmd = f"lane-control project gate {root} {a.pr} --head {head}" + (f" --repo {repo}" if repo != root else "")
+        for line in H.way_past(res, "gate", cmd):
+            print(f"gate: {line}")
         return 1
     print(f"gate: passed for PR {a.pr} at {head} ({len(res)} gate hook(s)): merge only this head "
           f"(--match-head-commit {head})")
@@ -326,22 +373,31 @@ def cmd_hook(argv: list) -> int:
     ap.add_argument("event", choices=X.EVENTS)
     ap.add_argument("--pr")
     ap.add_argument("--merge-sha", dest="merge_sha")
-    ap.add_argument("--outcome", help="one word, such as the report's first (succeeded, failed, blocked)")
+    ap.add_argument("--outcome", choices=H.OUTCOMES, help="the report's status, the word after the lane key "
+                                                          "(succeeded, failed, blocked, ...), or escalation")
     ap.add_argument("--worktree")
     fact_flags(ap)
     a = ap.parse_args(argv)
     root, st, store = X.find_project(a.project)
-    facts = H.check_facts({**facts_of(root, st), "pr": a.pr, "head_sha": a.head, "merge_sha": a.merge_sha,
-                           "lane": a.lane, "issue": a.issue, "outcome": a.outcome, "worktree": a.worktree})
-    res = H.run(X.effective(store), a.event, facts)
-    if not res:
+    entries = X.effective(store)
+    if not X.hooks_for(entries, a.event):  # nothing to run: done before anything else is looked at
         print(f"hook: no {a.event} hooks for {st.get('name') or root.name}")
         return 0
+    repo = repo_of(root, st, a.repo)
+    facts = H.check_facts({**facts_of(root, st), "repo": str(repo), "pr": a.pr, "head_sha": a.head,
+                           "merge_sha": a.merge_sha, "lane": a.lane, "issue": a.issue, "outcome": a.outcome,
+                           "worktree": a.worktree})
+    skip = skips(entries, a.event, a, "lane-control project hook")
+    if skip:
+        H.record_skip(skip, a.event, facts)
+    res = H.run(entries, a.event, facts, skip)
     for line in H.report(res):
         print(f"hook: {line}")
     bad = H.failed(res)
     if bad and a.event in H.BLOCKING:
         print(f"hook: failed: {len(bad)} {a.event} hook(s) did not pass")
+        for line in H.way_past(res, a.event, f"lane-control project hook {root} {a.event} ..."):
+            print(f"hook: {line}")
         return 1
     if bad:
         print(f"hook: warning: {len(bad)} {a.event} hook(s) did not pass; {a.event} only warns, nothing is undone: "

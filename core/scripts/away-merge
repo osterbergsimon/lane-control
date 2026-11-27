@@ -263,7 +263,7 @@ def run(a) -> int:
         print(f"away-merge: refused (summary): PR {a.pr} is {a.project}'s draft summary PR, which only the owner merges",
               file=sys.stderr)
         return 1
-    facts = {"project": a.project, "project_root": str(checkout), "pr": a.pr, "head_sha": head}
+    facts = {"project": a.project, "project_root": str(checkout), "repo": str(checkout), "pr": a.pr, "head_sha": head}
     try:
         entries = hooks.X.effective(hooks.X.store_for(checkout))
         res = hooks.run(entries, "gate", facts)
@@ -284,6 +284,11 @@ def run(a) -> int:
         if state is None:
             print(f"away-merge: refused (improve): {mode}", file=sys.stderr)
             return 1
+        if res:  # the gates ran for minutes: the PR is read again, and merged only as it was gated
+            changed = still_as_checked(checkout, a.pr, pr, branch, login, head, ci_was_green=not why)
+            if changed:
+                print("\n".join(f"away-merge: refused (changed): {c}" for c in changed), file=sys.stderr)
+                return 1
         sha = None
         if pr.get("isDraft"):
             try:
@@ -321,7 +326,7 @@ def run(a) -> int:
             except Refuse as e:  # merged, so it is counted; only its commit is unknown
                 sha = ""
                 print(f"away-merge: the merge commit could not be read ({e}); recording the merge without it", file=sys.stderr)
-        print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}")
+        print(f"away-merge: merged PR {a.pr} into {branch} as {sha or '(commit unknown)'}: away: {item}", flush=True)
         if name_line:
             print(f"away-merge: {name_line}")
         if why:
@@ -338,8 +343,39 @@ def run(a) -> int:
             print(f"away-merge: the merge is done, but its cycle was not closed in the ledger ({e.strerror or e}); run "
                   f"`lane-improve cycle {a.project} --phase idle`", file=sys.stderr)
     refresh_summary_pr(checkout, state, a.project)
+    sys.stdout.flush()
+    sys.stderr.flush()  # what the merge said is out before any hook runs: a stopped hook never hides the merge
     after_merge(entries, {**facts, "merge_sha": sha if re.fullmatch(r"[0-9a-f]{40}", sha or "") else ""})
     return 0
+
+
+def still_as_checked(checkout: Path, number: int, before: dict, branch: str, login: str, head: str,
+                     ci_was_green: bool) -> list:
+    """What changed on the PR since it was checked (a gate can run for minutes): its base, head, state, review marker,
+    body and, when CI was green, CI. [] when nothing did; a PR that cannot be read is a change too."""
+    try:
+        now = json.loads(gh(["pr", "view", str(number), "--json",
+                             "baseRefName,headRefOid,state,body,isDraft,comments,statusCheckRollup,files"], checkout))
+    except (Refuse, ValueError) as e:
+        return [f"PR {number} cannot be read again after the gates ({e})"]
+    out = []
+    if now.get("baseRefName") != branch:
+        out.append(f"PR {number} now goes into {now.get('baseRefName')!r}, not {branch!r}: away-merge never merges "
+                   "anywhere else")
+    if now.get("headRefOid") != head:
+        out.append(f"PR {number}'s head moved during the gates ({head[:7]} then {str(now.get('headRefOid'))[:7]})")
+    if str(now.get("state", "")).upper() != "OPEN":
+        out.append(f"PR {number} is {str(now.get('state')).lower()} now, not open")
+    if not any((c.get("author") or {}).get("login") == login and head in MARKER.findall(c.get("body") or "")
+               for c in now.get("comments") or []):
+        out.append(f"the `Review: passed {head}` comment is gone")
+    if (now.get("body") or "") != (before.get("body") or ""):
+        out.append(f"PR {number}'s body was edited during the gates: the entry is not the one checked")
+    if ci_was_green:
+        why = ci_green(now.get("statusCheckRollup") or [])
+        if why:
+            out.append(f"CI is not green any more ({why})")
+    return out
 
 
 def after_merge(entries: list, facts: dict) -> None:

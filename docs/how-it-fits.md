@@ -252,24 +252,41 @@ on-report    a lane's report; the away watchdog's escalation     lane-control pr
 
 - **Never from a project repo.** Only what you add runs: an absolute path outside every project checkout (as given or
   through a link; `--allow-repo-path` takes one anyway, with a warning), pinned by its hash, or a file in a git repo
-  pinned at a full commit, fetched at add (and by refresh) and checked against its commit and hash. A missing or
-  changed script does not run: it is `refused` (for a gate: not green) and `check` and `doctor` flag it `missing` or
-  `changed`, with what to do. A path hook runs as a copy of the bytes just checked, so a write after the check cannot
-  change what runs.
+  pinned at a full commit, fetched at add (and by refresh) and checked against its commit and hash. A link is
+  resolved at add: its target is what is pinned and run (add says so). A missing or changed script does not run: it
+  is `refused` (for a gate: not green) and `check` and `doctor` flag it `missing` or `changed`, with what to do.
+  Every hook runs from a private copy made and checked just before: a path hook's bytes that matched its hash; a git
+  hook's whole pinned commit, exported from the commit's own objects (`git archive`), so nothing written, ignored or
+  marked unchanged in its checkout counts, and what the hook writes beside itself is gone after the run.
 - **Facts, never secrets.** No arguments, stdin closed. The environment is a short list (`PATH`, `HOME`, `USER`, the
   locale, the XDG folders, `TMPDIR`, `SSH_AUTH_SOCK`) and the facts as `LANE_HOOK_<FACT>`: `EVENT`, `NAME`, `SOURCE`,
   `PROJECT`, `PROJECT_ROOT` and, where the event has them, `PR`, `HEAD_SHA`, `MERGE_SHA`, `LANE`, `ISSUE`, `OUTCOME`,
-  `WORKTREE`, `ROLE`, `SETUP` (`setup` or `refresh`). Each fact is checked (a number, a full sha, a word); none of the
-  caller's other variables gets through, so no token or key does. A hook that needs a secret reads it itself.
+  `WORKTREE`, `ROLE`, `SETUP` (`setup` or `refresh`), and `REPO`, the checkout of the repo the PR is in (the
+  project's own, or an attached repo's with `--repo`). `OUTCOME` is a report's status (`succeeded`, `failed`,
+  `blocked`, `partial`, `NEEDS_STANDARD`, `NEEDS_DEEP`) or `escalation`. Each fact is checked: a number, a full sha
+  and a word against their shape, a name or a path only for the real shapes of a key (so `task-tracker` or
+  `fix-disk-usage` is fine). None of the caller's other variables gets through, so no token or key does. A hook that
+  needs a secret reads it itself.
 - **Where it runs.** With your HOME, in a fresh empty folder of its own under `~/.local/state/lane-control/hooks/`,
   removed after: never in a lane's worktree or a checkout (the facts say where they are).
-- **A timeout** per hook (`--timeout`, default 600 s): then its whole process group is stopped, and so is anything
-  it left running when it ends.
-- **Shown:** each hook's exit code, its time and the last 20 lines of its output, with control characters taken out
-  and anything shaped like a token, key or password replaced by `[redacted]`.
-- **The coordinator** runs `gate` right before a merge and the after-merge and on-report hooks (its persona and the
-  `native-orca-lanes` skill say when); with no hooks they answer at once. A lane-start hook adds the prepare step to
-  the coordinator's persona at the next refresh.
+- **A timeout** per hook (`--timeout`, default 600 s). Each hook runs in its own process group: at its timeout, when
+  it ends, or when the command running it is stopped (TERM, HUP, INT), the whole group is stopped. A child that
+  leaves the group (`setsid`) is not. What the command printed before (away-merge's merge line, the watchdog's sends)
+  is out before any hook runs.
+- **Shown:** each hook's exit code, its time and the last 20 lines of its output, with escape sequences and control
+  and format characters (C0, C1, bidi) taken out. Best effort, a mask, not a promise: the real shapes of a token, a
+  password in a URL, an `Authorization` header, a secret-named key or option given a value (`password=...`,
+  `DB_PASSWORD: ...`, `--token ...`, `"client_secret": "..."`) and a long opaque word (a sha lane-control passed in
+  is kept) become `[redacted]`. A hook must not print secrets.
+- **A broken blocking hook:** the failure says the way past it, which is the owner's: fix the script and add it
+  again, or `lane-control project|machine extras remove hook:<name>` (a machine hook is every project's), or, for one
+  run, `--skip-hook <name> --reason "<why>"` on `project gate`, `project hook` or `lane prepare`: a person at a
+  terminal only (an agent is refused), recorded in `~/.local/state/lane-control/hooks/skips.jsonl`.
+- **The coordinator** runs `gate` right before a merge and the after-merge hooks once after it, and the on-report
+  hooks when it takes a report (its persona and the `native-orca-lanes` skill say when); with no hooks they answer at
+  once, green. In the ratchet `away-merge` runs the gate and after-merge hooks itself, and reads the PR again after
+  the gates: a base, head, review, body or CI that changed meanwhile refuses the merge. A lane-start hook adds the
+  prepare step to the coordinator's persona at the next refresh.
 - **Orca's own features do not fit here** (read on 1.4.274): its automations start an agent from a prompt, on a
   schedule or a GitHub, Slack or Linear event (`pr_merged` among them, through Orca's GitHub app), never a script, and
   cannot hold a merge; `orca.yaml`'s `scripts.setup` is the project repo's own committed file, run inside each new

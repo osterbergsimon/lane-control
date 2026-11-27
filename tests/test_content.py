@@ -2977,6 +2977,15 @@ class LifecycleHookContentTests(unittest.TestCase):
                 self.assertIn("hook . after-merge --pr <n>", text)
                 self.assertIn("hook . on-report --lane <KEY>", text)
                 self.assertIn("only warn", text)
+                self.assertIn("the report's word after the key, without the colon", text)  # review M7
+                self.assertIn("--repo <its folder>", text)  # review m2
+                self.assertIn("`--skip-hook` is a person's only", text)  # review m3
+                self.assertIn("Right after the merge, once:", text)  # review m1
+        persona = " ".join((NATIVE / "coordinator.md").read_text().split())
+        self.assertIn("`away-merge` runs the gate and after-merge hooks itself: after it, run neither", persona)
+        away = " ".join((NATIVE_DIR / "skills" / "away-improve" / "SKILL.md").read_text().split())
+        self.assertIn("never run `lane-control project gate` or `project hook ... after-merge` yourself for an "
+                      "away-merge", away)
 
 if __name__ == "__main__":
     unittest.main()

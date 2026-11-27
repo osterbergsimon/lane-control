@@ -3949,6 +3949,8 @@ def after_setup(repo: Path, project: str, mode: str) -> bool:
     if HOOKS.failed(res):
         say("hook after-setup", "failed", f"{len(HOOKS.failed(res))} of {len(res)} did not pass; the {mode} itself is "
                                           "done, nothing is undone")
+        for line in HOOKS.way_past(res, "after-setup", ""):
+            print(f"hook after-setup: {line}")
         return False
     return True
 
