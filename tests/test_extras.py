@@ -5,7 +5,7 @@ read them: the coordinator's Claude extras at its launch (files in the store), a
 worktree (`lane-control lane prepare`). A folder gets only files lane-control creates and owns whole, all or nothing,
 never through a symlink; refresh applies every recorded worktree again; `project check` and `doctor` flag missing,
 changed and failing extras. The built-in design skills are the default machine extras. Everything runs in a scratch
-HOME. Agent hooks, permission rules and env values are lc-yw1g (EXT-1b)."""
+HOME. Agent hooks, permission rules and env values (lc-yw1g, EXT-1b): tests/test_extras_rules.py."""
 import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import contextlib
 import importlib.machinery
@@ -215,11 +215,9 @@ class StoreTests(Scratch):
         self.assertEqual(self.stored(), [])
         self.refused("project", "remove", self.repo, "plugin:opencode:foo", says="no extra")
 
-    def test_the_kinds_left_for_ext_1b_are_refused(self):
-        for args in (("--permission", "allow", "Bash(make:*)"), ("--agent-hook", "Stop", "--", self.server),
-                     ("--env", "APP_MODE=fast")):
-            with self.subTest(args=args):
-                self.assertNotEqual(self.run_le("project", "add", self.repo, *args)[0], 0)
+    def test_one_kind_at_a_time_and_env_names_only_with_mcp(self):
+        # agent hooks, permission rules and env values are kinds since lc-yw1g: tests/test_extras_rules.py
+        self.refused("project", "add", self.repo, "--permission", "allow", "Bash(make:*)", says="subcommand")
         self.refused("project", "add", self.repo, "--env", "GITHUB_TOKEN", says="exactly one kind")
         self.refused("project", "add", self.repo, "--plugin", "opencode:x@1.0.0", "--env", "A", says="for --mcp only")
         self.assertEqual(self.stored(), [])
