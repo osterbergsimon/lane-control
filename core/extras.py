@@ -3,37 +3,41 @@
 lanes/coordinators?", then "do it, centralize and improve these things", "perhaps custom lane personas, too?".
 
 Kinds (one entry each, its id `<kind>:<name>`):
-  skill       a skill from a git repo pinned at a full commit, `<git-url>@<commit>[:<path>]`
-  mcp         an MCP server run by a command; secrets only as the names of environment variables, never a value
-  persona     a named lane role the coordinator can brief a lane with (a prompt file, a default tier and harness)
-  agent-hook  a script run on a Claude Code event (PreToolUse, PostToolUse, SessionStart, Stop); on OpenCode the
-              plugin equivalent for the tool events, and none for the session ones (said, never hidden)
-  permission  an allow or deny rule added to lane-control's own; an allow that would reach a secret is refused
-  plugin      a Claude or OpenCode plugin, pinned
-  env         a non-secret environment variable (a name or value that looks like a key or token is refused)
+  skill    a skill from a git repo pinned at a full commit, `<git-url>@<commit>[:<path>]`
+  mcp      an MCP server run by a command; a secret only as the NAME of an environment variable, never a value
+  persona  a named lane role the coordinator can brief a lane with (a prompt file, a default tier and harness)
+  plugin   a Claude or OpenCode plugin, pinned
+Agent hooks, permission rules and env values are not kinds yet: they need their own design (lc-yw1g, EXT-1b).
 
 Scope per extra: lanes, coordinator, reviewer (reviewer and design reviewer), or all. Stored in the project's own
 settings store (<config>/lane-control/projects/<key>/extras.json, beside its tier table) and, machine-wide, in
 <config>/lane-control/extras.json: never in a project repo. A project's extras add to the machine's; one with the same
-id takes the machine's place for that project. The built-in design skills (core/design-skills.tsv) are default
+id takes the machine's place for that project. The built-in design skills (core/design-skills.tsv) are the default
 machine extras: installed for the whole user (~/.agents/skills, and ~/.claude/skills unless Claude's own plugin has
-the skill) exactly as before; `machine extras remove` turns one off. Every other extra goes into the folder of the
-sessions it is for, where each harness reads it:
+the skill) exactly as before; `machine extras remove` turns one off.
 
-  Claude    <folder>/.claude/settings.local.json (hooks, permissions, env, enabledPlugins, enabledMcpjsonServers),
-            <folder>/.mcp.json (MCP servers; ${NAME} for each secret, filled from the session's environment), and
-            <folder>/.claude/skills/<name> (a link into the pinned checkout)
-  OpenCode  <folder>/.opencode/opencode.json (mcp, permission, plugin), <folder>/.opencode/skills/<name>, and
-            <folder>/.opencode/plugins/lane-extras.js with lane-extras.json beside it (hooks and env)
+Every other extra goes only where the sessions of its role read it:
+  coordinator, Claude    files in the project's settings store, given at its launch: --mcp-config <mcp.json>,
+                         --settings <settings.json> (enabledPlugins) and --plugin-dir <plugin> (its skills). Nothing
+                         goes in the main checkout's .claude/ or .mcp.json: Claude reads the main checkout's
+                         .claude/settings.local.json, and its .claude/skills, from every linked worktree.
+  coordinator, OpenCode  the main checkout's .opencode/opencode.json and .opencode/skills/ (OpenCode reads a
+                         project's .opencode/ from the session's own worktree up to its root; a lane's worktree is
+                         not under the main checkout)
+  lane, reviewer         its own worktree, written by `lane-control lane prepare` before the worker starts:
+                         .mcp.json, .claude/settings.json (enabledMcpjsonServers: only the servers lane-control wrote,
+                         enabledPlugins; .claude/settings.local.json when the project commits settings.json),
+                         .claude/skills/<name>, .opencode/opencode.json, .opencode/skills/<name>
 
-The coordinator's folder is the project's main checkout (`project refresh` and setup); a lane's or reviewer's is its
-worktree (`lane-control lane prepare`, which the coordinator runs before the worker starts, since Orca starts a
-worker with no per-role settings of its own). Everything written is in the repo's own git exclude, and what was added
-is recorded in <state>/lane-control/extras/<folder>.json, so a later apply takes out only its own entries and leaves
-the owner's alone. Setup's onboarding agents run with no MCP server and no project settings (project-setup
-agent_cmd), so they get no extras.
+In a folder, lane-control writes only files it creates and owns whole: never a committed file, never a file that
+was there before (or changed since it wrote it), never through a symlink. Applying is all or nothing: on any problem
+(a fetch, a pin, a changed file, a committed or foreign file) the folder is left with none of lane-control's extras and
+every problem is named. What was written is recorded in <state>/lane-control/extras/<folder>.json (with the
+worktree's identity), refresh applies every recorded worktree of the project again (so a removed extra is really
+taken out), and the repo's git exclude names exactly the files the records hold. Setup's onboarding agents run with no
+MCP server and no settings files (project-setup agent_cmd), so they get no extras.
 
-Read by core/scripts/lane-extras (the commands), core/scripts/project-setup (apply, render, check) and
+Read by core/scripts/lane-extras (the commands), core/scripts/project-setup (apply, render, launch, check) and
 core/scripts/lane-control (doctor)."""
 import hashlib
 import json
@@ -41,52 +45,44 @@ import os
 import re
 import shlex
 import shutil
-import stat
 import subprocess
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-KINDS = ("skill", "mcp", "persona", "agent-hook", "permission", "plugin", "env")
+KINDS = ("skill", "mcp", "persona", "plugin")
 SCOPES = ("lanes", "coordinator", "reviewer")
-CLAUDE_EVENTS = ("PreToolUse", "PostToolUse", "SessionStart", "Stop")
-OPENCODE_EVENTS = {"PreToolUse": "execute.before", "PostToolUse": "execute.after"}  # SessionStart, Stop: Claude only
 BUILTIN_PERSONAS = frozenset({"coordinator", "reviewer", "design-reviewer", "debugger", "machine-coordinator",
                               "design-lead", "lanes", "lane", "all"})
 TIERS = ("swift", "standard", "deep")
 HARNESSES = ("claude", "opencode")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 MCP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}")
-ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 SPEC = re.compile(r"(?P<url>.+)@(?P<commit>[0-9a-f]{40})(?::(?P<path>.*))?")
-RULE = re.compile(r"(?P<tool>[A-Za-z][A-Za-z0-9_]*)(?:\((?P<spec>[^()\n]*)\))?")
+REF = re.compile(r"\$\{([A-Z][A-Z0-9_]{0,127})\}")
 SECRET_WORDS = frozenset({"KEY", "KEYS", "TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWD", "PASS", "PWD",
-                          "CREDENTIAL", "CREDENTIALS", "CRED", "CREDS", "AUTH", "PRIVATE", "COOKIE", "SESSION",
-                          "SIGNATURE", "SALT", "CERT", "PAT", "BEARER", "APIKEY", "OTP"})
-RESERVED_ENV = frozenset({"HOME", "PATH", "USER", "SHELL", "LANE_ROLE", "LANE_PERSONA", "XDG_CONFIG_HOME",
-                          "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR",
-                          "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "LD_PRELOAD",
-                          "LD_LIBRARY_PATH", "NODE_OPTIONS", "PYTHONPATH", "GIT_DIR", "GIT_WORK_TREE"})
+                          "CREDENTIAL", "CREDENTIALS", "CRED", "CREDS", "AUTH", "AUTHORIZATION", "PRIVATE", "COOKIE",
+                          "SESSION", "SIGNATURE", "SIG", "SALT", "CERT", "PAT", "BEARER", "APIKEY", "OTP", "DSN",
+                          "WEBHOOK"})
 TOKEN_VALUE = re.compile(r"(sk-|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abposr]-|AKIA|ASIA|AIza|ya29\.|"
-                         r"eyJ[A-Za-z0-9_-]{8,}\.|-----BEGIN)")
-# What an allow rule may never reach: lane-control's secret and privacy line (keys, tokens, credentials, .env files).
-PROTECTED = re.compile(r"(^|[/\\*.(:\s~])(\.env(\b|[.*])|\.ssh\b|\.gnupg\b|\.aws\b|\.netrc\b|\.pypirc\b|\.npmrc\b|"
-                       r"\.docker/config|\.kube\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|[^/]*\.pem\b|[^/]*\.key\b|"
-                       r"[^/]*\.p12\b|credentials|auth\.json|\.credentials\.json|hosts\.yml|secret|token|password|"
-                       r"\.git/config|\.git-credentials|keychain|keyring)", re.I)
-FILE_TOOLS = frozenset({"Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep"})
-BROAD = frozenset({"", "*", "**", "/**", "//**", "~/**", "./**", "/*", "**/*", "//*"})
-OC_TOOL = {"shell": "Bash", "bash": "Bash", "edit": "Edit", "write": "Write", "read": "Read", "glob": "Glob",
-           "grep": "Grep", "webfetch": "WebFetch"}
-EXCLUDE_BEGIN = "# lane-control extras: begin (lane-control project extras; never committed)"
-EXCLUDE_END = "# lane-control extras: end"
+                         r"eyJ[A-Za-z0-9_-]{8,}\.|-----BEGIN|hooks\.slack\.com/|discord(app)?\.com/api/webhooks)")
+USERINFO = re.compile(r"://[^/@\s]*:[^/@\s]*@|://[^/@\s]{16,}@")  # user:password@, or a token as the user
+SECRET_QUERY = re.compile(r"[?&;](access_token|token|key|api_key|apikey|secret|password|pass|sig|signature|auth|"
+                          r"client_secret)=(?!\$\{)", re.I)
+AUTH_TEXT = re.compile(r"(authorization\s*:|\bbearer\s+|\bbasic\s+[A-Za-z0-9+/=]{8,})", re.I)
+PACKAGE_AT_VERSION = re.compile(r"(@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+@[0-9][A-Za-z0-9._+-]*")
+FILE_LIKE = re.compile(r"[^\s:]*\.(py|js|mjs|cjs|ts|sh|bash|rb|pl|php|lua|exe|bin|jar)$", re.I)
 PERSONAS_DIR = ".lane-control/personas"
-OC_PLUGIN = ROOT / "core" / "harnesses" / "opencode" / "lane-extras.js"
+EXCLUDE_BEGIN = "# lane-control extras: begin (files lane-control extras wrote; never committed)"
+EXCLUDE_END = "# lane-control extras: end"
+PLUGIN_NAME = "lane-control-extras"  # the coordinator's skills reach Claude as this session-only plugin
 
 
 class ExtrasError(Exception):
-    """An extra refused, or a store that cannot be read: the message says why and what to do."""
+    """An extra refused, or a store that cannot be read: the message says why and what to do. It never carries a
+    value an extra was refused for."""
 
 
 # --- where things live -------------------------------------------------------------------------------------------
@@ -113,12 +109,23 @@ def project_file(store: Path) -> Path:
     return Path(store) / "extras.json"
 
 
-def skill_sources() -> Path:
+def default_sources() -> Path:
+    """The default design skills' checkouts (as before this mechanism)."""
     return home() / ".agents" / "skill-sources"
 
 
-def script_sources() -> Path:
-    return home() / ".agents" / "extras-sources"
+def extra_sources() -> Path:
+    """The owner's pinned skills, apart from the defaults' so neither pass ever removes the other's."""
+    return home() / ".agents" / "extras-sources" / "skills"
+
+
+def launch_dir(store: Path) -> Path:
+    """The coordinator's own Claude files, given at its launch (never read by a lane)."""
+    return Path(store) / "extras" / "coordinator"
+
+
+def records_dir() -> Path:
+    return state_home() / "lane-control" / "extras"
 
 
 def encode(folder: Path) -> str:
@@ -126,12 +133,11 @@ def encode(folder: Path) -> str:
 
 
 def record_file(folder: Path) -> Path:
-    return state_home() / "lane-control" / "extras" / f"{encode(folder)}.json"
+    return records_dir() / f"{encode(folder)}.json"
 
 
 def store_for(repo: Path) -> Path:
-    """The project's settings store, keyed as project-setup keys it (store_key): <folder name>-<10 hex of sha256 of
-    the real path>."""
+    """The project's settings store, keyed as project-setup keys it (store_key)."""
     real = Path(repo).resolve()
     key = f"{real.name}-{hashlib.sha256(str(real).encode()).hexdigest()[:10]}"
     return config_home() / "lane-control" / "projects" / key
@@ -150,26 +156,58 @@ def known() -> list:
     return out
 
 
-def roots() -> list:
-    """Every project checkout on this machine, attached repos included: where an extra's script may not live."""
+def git(folder: Path, *args, timeout: int = 30):
+    try:
+        return subprocess.run(["git", "-C", str(folder), *args], capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def common_dir(folder: Path) -> "Path | None":
+    """The git common dir of the repo holding folder (every worktree of a repo shares it), or None."""
+    d = Path(folder)
+    d = d if d.is_dir() else d.parent
+    r = git(d, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return Path(r.stdout.strip()).resolve() if r and r.returncode == 0 and r.stdout.strip() else None
+
+
+def worktrees(repo: Path) -> list:
+    r = git(repo, "worktree", "list", "--porcelain")
+    if not r or r.returncode != 0:
+        return [Path(repo)]
+    return [Path(line[9:]) for line in r.stdout.splitlines() if line.startswith("worktree ")] or [Path(repo)]
+
+
+def checkouts() -> list:
+    """Every checkout of every project on this machine: roots, attached repos and all their worktrees."""
     out = []
     for root, st in known():
-        out.append(root)
-        out += [Path(a) for a in st.get("attached") or [] if isinstance(a, str)]
-    return out
+        for r in [root, *[Path(a) for a in st.get("attached") or [] if isinstance(a, str)]]:
+            out += [r, *worktrees(r)] if r.is_dir() else [r]
+    seen, uniq = set(), []
+    for p in out:
+        k = os.path.abspath(p)
+        if k not in seen:
+            seen.add(k)
+            uniq.append(Path(k))
+    return uniq
 
 
 def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
 
 
+def native(root: Path, st: dict) -> bool:
+    return st.get("orchestrator", "native-orca") == "native-orca" and not (Path(root) / ".cotal").is_dir()
+
+
 def find_project(arg: str) -> tuple:
     """(root, settings, store) of a project named by its folder or its name; ExtrasError when there is none."""
     d = Path(arg).expanduser()
     if d.is_dir():
-        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=d, capture_output=True, text=True,
-                           stdin=subprocess.DEVNULL)
-        if r.returncode != 0:
+        r = git(d, "rev-parse", "--show-toplevel")
+        if not r or r.returncode != 0:
             raise ExtrasError(f"{d} is not a git repository")
         root = Path(r.stdout.strip()).resolve()
         for kroot, st in known():
@@ -187,18 +225,15 @@ def find_project(arg: str) -> tuple:
     return found[0][0].resolve(), found[0][1], store_for(found[0][0])
 
 
-def write_atomic(path: Path, text: str, mode: "int | None" = None) -> None:
-    """Through a temp file and a rename beside it (a symlink stays a link, its target is replaced); the mode kept."""
-    target = path.resolve() if path.is_symlink() else path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    keep = stat.S_IMODE(target.stat().st_mode) if target.exists() else mode
-    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+def write_file(path: Path, text: str, mode: int = 0o644) -> None:
+    """Through a temp file and a rename beside it. A symlink at the path is replaced, never followed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        if keep is not None:
-            os.chmod(tmp, keep)
-        os.replace(tmp, target)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -207,8 +242,12 @@ def write_atomic(path: Path, text: str, mode: "int | None" = None) -> None:
         raise
 
 
+def digest(text) -> str:
+    return hashlib.sha256(text if isinstance(text, bytes) else text.encode()).hexdigest()
+
+
 def sha256(path: Path) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return digest(Path(path).read_bytes())
 
 
 # --- the store -----------------------------------------------------------------------------------------------------
@@ -235,7 +274,7 @@ def save(path: Path, data: dict) -> None:
     except OSError:
         pass
     body = {"version": 1, "extras": data["extras"], "off": sorted(set(data.get("off", [])))}
-    write_atomic(path, json.dumps(body, indent=2, ensure_ascii=False) + "\n", 0o600)
+    write_file(path, json.dumps(body, indent=2, ensure_ascii=False) + "\n", 0o600)
 
 
 def ident(e: dict) -> str:
@@ -282,34 +321,34 @@ def user_level(e: dict) -> bool:
     return e.get("origin") == "default"
 
 
-# --- adding: parse and refuse ------------------------------------------------------------------------------------
+# --- adding: parse and refuse (never echoing a value refused) -----------------------------------------------------
 
 def url_problem(url: str) -> "str | None":
-    """Why a git URL is refused (an owner's extra): https, ssh, git@host:path or file only; no option or helper."""
+    """Why a git URL is refused (an owner's extra): https, ssh, git@host:path or file only; no option, helper or
+    credential in it."""
     if not url or url.startswith("-") or any(c.isspace() or ord(c) < 32 for c in url) or "::" in url:
         return "it is not a plain git URL (no leading dash, spaces or `::` helpers)"
+    if USERINFO.search(url) or TOKEN_VALUE.search(url) or SECRET_QUERY.search(url):
+        return "it carries a password or token; give a URL without one (git's credential helper supplies it)"
     if url.startswith(("https://", "ssh://", "file://")) or re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^-].*",
                                                                           url):
         return None
     return "it is not https://, ssh://, git@host:path or file:// (http and other transports are refused)"
 
 
-def path_problem(rel: str, need: bool) -> "str | None":
-    if not rel:
-        return "a path inside the repo is needed after the commit (`@<commit>:<path>`)" if need else None
-    if rel.startswith("/") or any(p in ("", ".", "..") for p in rel.split("/")):
+def path_problem(rel: str) -> "str | None":
+    if rel and (rel.startswith("/") or any(p in ("", ".", "..") for p in rel.split("/"))):
         return "the path in the repo is not a plain relative path"
     return None
 
 
-def git_spec(text: str, need_path: bool) -> dict:
+def git_spec(text: str) -> dict:
     m = SPEC.fullmatch(text or "")
     if not m:
-        raise ExtrasError(f"{text!r} is not <git-url>@<full 40-hex commit>[:<path>] (a branch or short sha is not a "
-                          "pin)")
-    why = url_problem(m["url"]) or path_problem(m["path"] or "", need_path)
+        raise ExtrasError("a skill is <git-url>@<full 40-hex commit>[:<path>] (a branch or short sha is not a pin)")
+    why = url_problem(m["url"]) or path_problem(m["path"] or "")
     if why:
-        raise ExtrasError(f"{text!r}: {why}")
+        raise ExtrasError(f"--skill is refused: {why}")
     return {"url": m["url"], "commit": m["commit"], "path": m["path"] or ""}
 
 
@@ -318,87 +357,88 @@ def secretish_name(name: str) -> bool:
     return bool(words & SECRET_WORDS) or name.upper().endswith(("KEY", "TOKEN", "SECRET", "PASSWORD"))
 
 
-def secretish_value(value: str) -> bool:
-    if TOKEN_VALUE.search(value):
-        return True
-    compact = value.strip()
-    return (len(compact) >= 32 and not re.search(r"\s", compact) and re.search(r"[0-9]", compact) is not None
-            and re.search(r"[A-Za-z]", compact) is not None and "/" not in compact)
+def opaque(value: str) -> bool:
+    """A long run of letters and digits with nothing else: how a key or token looks."""
+    v = value.strip()
+    if PACKAGE_AT_VERSION.fullmatch(v) or "/" in v or "://" in v:
+        return False
+    return len(v) >= 32 and not re.search(r"\s", v) and bool(re.search(r"[0-9]", v)) and \
+        bool(re.search(r"[A-Za-z]", v))
 
 
-def common_dir(folder: Path) -> "Path | None":
-    """The git common dir of the repo holding folder (every worktree of a repo shares it), or None."""
-    d = folder if folder.is_dir() else folder.parent
-    try:
-        r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=d,
-                           capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return Path(r.stdout.strip()).resolve() if r.returncode == 0 and r.stdout.strip() else None
-
-
-def inside_projects(path: Path, roots: list) -> "Path | None":
-    """The project checkout (any worktree of it) that holds path, or None."""
-    mine = common_dir(Path(path))
-    if mine is None:
-        return None
-    for r in roots:
-        if Path(r).is_dir() and common_dir(Path(r)) == mine:
-            return Path(r)
+def arg_problem(args: list) -> "str | None":
+    """Why an MCP command line is refused for holding a secret (`${NAME}` references are fine), or None."""
+    for i, a in enumerate(args):
+        bare = REF.sub("", a)
+        if TOKEN_VALUE.search(bare) or USERINFO.search(bare) or SECRET_QUERY.search(a) or AUTH_TEXT.search(bare) or \
+                opaque(bare):
+            return f"argument {i + 1} looks like it carries a key, token or password"
+        m = re.fullmatch(r"(-{1,2})?([A-Za-z_][A-Za-z0-9_.-]*)(=(.*))?", a, re.S)
+        if not m or not secretish_name(m[2].replace("-", "_").replace(".", "_")):
+            continue
+        if m[3] is not None:
+            if not REF.fullmatch(m[4] or ""):
+                return f"argument {i + 1} sets a secret-named option or variable to a value"
+        elif m[1] and i + 1 < len(args) and not args[i + 1].startswith("-") and not REF.fullmatch(args[i + 1]):
+            return f"argument {i + 2} is the value of the secret-named option {m[1]}{m[2]}"
     return None
 
 
-def owners_file(given: str, roots: list, allow_repo: bool, what: str, executable: bool) -> tuple:
+def inside_checkout(path: Path) -> "Path | None":
+    """The project checkout (any root, attached repo or worktree, by path, and by its git common dir) that holds
+    path as given or as its links resolve; None when it is in none."""
+    given = Path(os.path.abspath(path))
+    real = Path(os.path.realpath(path))
+    homes = checkouts()
+    for p in (given, real):
+        for c in homes:
+            c_real = Path(os.path.realpath(c))
+            for base in (Path(os.path.abspath(c)), c_real):
+                if p == base or base in p.parents:
+                    return c
+    commons = {common_dir(c) for c in homes if c.is_dir()} - {None}
+    for p in (given, real):
+        cd = common_dir(p)
+        if cd is not None and cd in commons:
+            return p
+    return None
+
+
+def owners_file(given: str, allow_repo: bool, what: str, executable: bool) -> tuple:
     """(absolute path, sha256, warning or '') of a file an extra names; refused when missing, or inside a project
-    checkout without allow_repo."""
+    checkout (as given or resolved) without allow_repo."""
     p = Path(given).expanduser()
     if not p.is_absolute():
-        p = Path.cwd() / p
+        raise ExtrasError(f"{what} must be an absolute path: a relative one resolves in the session's folder, "
+                          "which a lane controls")
     p = Path(os.path.abspath(p))
     if not p.is_file():
         raise ExtrasError(f"{what} {p} is not a file")
     if executable and not os.access(p, os.X_OK):
         raise ExtrasError(f"{what} {p} is not executable (chmod +x it)")
-    inside = inside_projects(p, roots)
+    inside = inside_checkout(p)
     warning = ""
     if inside is not None:
         if not allow_repo:
-            raise ExtrasError(f"{what} {p} is inside the project checkout {inside}: a lane can change it. Keep it "
-                              "outside any project repo, or pin it as <git-url>@<commit>:<path>; --allow-repo-path "
-                              "takes it anyway")
+            raise ExtrasError(f"{what} {p} is inside the project checkout {inside} (as given or through a link): a "
+                              "lane can change it. Keep it outside every project repo; --allow-repo-path takes it "
+                              "anyway")
         warning = (f"warning: {what} {p} is inside the project checkout {inside}; it is pinned by its hash, and a "
-                   "lane that changes it makes check flag it")
+                   "lane that changes it stops the extra until you add it again")
     return str(p), sha256(p), warning
-
-
-def rule_problem(action: str, rule: str, private: list) -> "str | None":
-    m = RULE.fullmatch(rule or "")
-    if not m and not re.fullmatch(r"mcp__[A-Za-z0-9_-]+(__[A-Za-z0-9_-]+)?", rule or ""):
-        return "it is not a permission rule such as Bash(npm test:*), WebFetch(domain:example.com) or mcp__server"
-    if action == "deny":
-        return None  # a deny only ever narrows
-    tool, spec = (m["tool"], m["spec"]) if m else (rule, None)
-    if PROTECTED.search(rule):
-        return "it reaches secrets (keys, tokens, credentials or .env files), which lane-control's denies keep out"
-    if tool in FILE_TOOLS and (spec is None or spec.strip() in BROAD):
-        return f"{tool} on every file reaches secrets too; allow the folders the agents need instead"
-    for g in private:
-        if g and g.strip("/*") and g.strip("/*") in (spec or ""):
-            return f"it reaches {g}, one of the project's --private paths"
-    return None
 
 
 def parse_plugin(text: str) -> dict:
     harness, _, rest = (text or "").partition(":")
     source, _, pin = rest.rpartition("@")
     if harness not in HARNESSES or not source or not pin:
-        raise ExtrasError(f"{text!r} is not claude:<plugin>@<marketplace>@<version> or opencode:<package>@<version>")
+        raise ExtrasError("--plugin is claude:<plugin>@<marketplace>@<version> or opencode:<package>@<version>")
     if harness == "claude":
         if not re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9._-]+", source) or not re.fullmatch(r"[A-Za-z0-9._+-]+", pin):
-            raise ExtrasError(f"{text!r}: a Claude plugin is <plugin>@<marketplace>@<version or commit>")
+            raise ExtrasError("--plugin: a Claude plugin is <plugin>@<marketplace>@<version or commit>")
     elif not re.fullmatch(r"(@[a-z0-9._-]+/)?[a-z0-9._-]+", source) or \
             not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", pin):
-        raise ExtrasError(f"{text!r}: an OpenCode plugin is <npm package>@<exact version> (no range, no latest)")
+        raise ExtrasError("--plugin: an OpenCode plugin is <npm package>@<exact version> (no range, no latest)")
     return {"harness": harness, "source": source, "pin": pin}
 
 
@@ -415,112 +455,79 @@ def parse_scope(words: list) -> list:
     return [s for s in SCOPES if s in out]
 
 
-def make(kind: str, value, opts: dict, roots: list, private: list = ()) -> tuple:
-    """(entry, warnings) for one `extras add`. opts: name, for, command (list), env (list of names), matcher,
-    prompt_file, tier, harness, allow_repo_path."""
+def make(kind: str, value, opts: dict) -> tuple:
+    """(entry, warnings) for one `extras add`. opts: name, for, command (list), env (names), prompt_file, tier,
+    harness, allow_repo_path."""
     scope = parse_scope(opts.get("for"))
     warnings = []
     e = {"kind": kind, "for": scope}
     name = opts.get("name")
     allow_repo = bool(opts.get("allow_repo_path"))
     if kind == "skill":
-        e.update(git_spec(value, False))
+        e.update(git_spec(value))
         name = name or Path(e["path"] or re.sub(r"\.git$", "", e["url"].rstrip("/"))).name.lower()
         if not NAME.fullmatch(name or ""):
-            raise ExtrasError(f"skill name {name!r} is not lowercase letters, digits and dashes: give --name")
+            raise ExtrasError("the skill's name is not lowercase letters, digits and dashes: give --name")
     elif kind == "mcp":
         name = value
         if not MCP_NAME.fullmatch(name or ""):
-            raise ExtrasError(f"MCP server name {name!r}: letters, digits, - and _ only")
+            raise ExtrasError("an MCP server's name is letters, digits, - and _ only")
         cmd = list(opts.get("command") or [])
         if not cmd:
             raise ExtrasError("an MCP server needs its command after `--`: --mcp <name> [--env NAME]... -- "
                               "<command> [args]")
-        for a in cmd:
-            if secretish_value(a):
-                raise ExtrasError("an argument of the MCP command looks like a key or token; give the secret as "
-                                  "--env NAME (its name only) and let the server read it from its environment")
-        if "/" in cmd[0]:
-            cmd[0], digest, warn = owners_file(cmd[0], roots, allow_repo, "the MCP command", True)
-            e["sha256"] = digest
-            warnings += [warn] if warn else []
+        why = arg_problem(cmd)
+        if why:
+            raise ExtrasError(f"--mcp is refused: {why}. Give the secret as --env NAME (its name only) and pass it "
+                              "as ${NAME}, or let the server read it from its environment")
+        files = {}
+        for i, a in enumerate(cmd):
+            if REF.search(a):
+                continue
+            if a.startswith("/") or a.startswith("~"):
+                if i == 0 or Path(a).expanduser().exists():
+                    path, h, warn = owners_file(a, allow_repo, "the MCP command" if i == 0 else "an MCP argument",
+                                                i == 0)
+                    cmd[i], files[path] = path, h
+                    warnings += [warn] if warn else []
+            elif (i == 0 and "/" in a) or (not a.startswith("-") and not PACKAGE_AT_VERSION.fullmatch(a) and
+                                           "://" not in a and (a.startswith(".") or FILE_LIKE.fullmatch(a))):
+                raise ExtrasError(f"argument {i + 1} of the MCP command is a relative path: it resolves in the "
+                                  "session's folder, which a lane controls. Give an absolute path outside every "
+                                  "project")
         envs = []
         for n in opts.get("env") or []:
             if "=" in n:
-                raise ExtrasError(f"--env {n.split('=')[0]}=...: an MCP server's --env takes a name only; the value "
-                                  "is never stored, the server gets it from the agent's environment")
-            if not ENV_NAME.fullmatch(n):
-                raise ExtrasError(f"--env {n!r} is not an environment variable name")
+                raise ExtrasError("--env takes a NAME only (for example GITHUB_TOKEN): the value is never stored, the "
+                                  "server gets it from the agent's environment")
+            if not ENV_NAME.fullmatch(n) or opaque(n) or TOKEN_VALUE.search(n):
+                raise ExtrasError("--env takes an environment variable NAME in capitals (for example GITHUB_TOKEN)")
             envs.append(n)
-        e.update(command=cmd[0], args=cmd[1:], env=envs)
+        envs += [r for a in cmd for r in REF.findall(a) if r not in envs]
+        e.update(command=cmd[0], args=cmd[1:], env=envs, files=files)
+        warnings.append("note: an interpreter's own module or script lookup (python3 -m x, npx x) is not pinned: "
+                        "only absolute paths given on the command line are")
     elif kind == "persona":
         name = value
         if not NAME.fullmatch(name or "") or name in BUILTIN_PERSONAS:
-            raise ExtrasError(f"persona name {name!r}: lowercase letters, digits and dashes, and not a built-in role "
+            raise ExtrasError("a persona's name is lowercase letters, digits and dashes, and not a built-in role "
                               f"({', '.join(sorted(BUILTIN_PERSONAS - {'lanes', 'lane', 'all'}))})")
         if not opts.get("prompt_file"):
             raise ExtrasError("a persona needs --prompt-file <path>")
         tier, harness = opts.get("tier") or "standard", opts.get("harness") or "claude"
         if tier not in TIERS or harness not in HARNESSES:
             raise ExtrasError(f"--tier takes {', '.join(TIERS)}; --harness takes {', '.join(HARNESSES)}")
-        path, digest, _ = owners_file(opts["prompt_file"], roots, True, "the prompt file", False)
-        text = Path(path).read_text()
-        if not text.strip():
+        path, h, warn = owners_file(opts["prompt_file"], allow_repo, "the prompt file", False)
+        warnings += [warn] if warn else []
+        if not Path(path).read_text().strip():
             raise ExtrasError(f"the prompt file {path} is empty")
-        e.update(prompt_file=path, sha256=digest, tier=tier, harness=harness)
+        e.update(prompt_file=path, sha256=h, tier=tier, harness=harness)
         e["for"] = ["lanes"]
-    elif kind == "agent-hook":
-        event = value
-        if event not in CLAUDE_EVENTS:
-            raise ExtrasError(f"--agent-hook {event!r}: it takes {', '.join(CLAUDE_EVENTS)}")
-        cmd = list(opts.get("command") or [])
-        if len(cmd) != 1:
-            raise ExtrasError("an agent hook names one script after `--`: a path outside any project repo, or "
-                              "<git-url>@<commit>:<path>")
-        if SPEC.fullmatch(cmd[0]) and not Path(cmd[0]).exists():
-            e.update(git_spec(cmd[0], True))
-            base = Path(e["path"]).name
-        else:
-            e["script"], e["sha256"], warn = owners_file(cmd[0], roots, allow_repo, "the hook script", True)
-            warnings += [warn] if warn else []
-            base = Path(e["script"]).name
-        matcher = opts.get("matcher") or ""
-        if matcher and event not in ("PreToolUse", "PostToolUse"):
-            raise ExtrasError(f"--matcher is for PreToolUse and PostToolUse only (tool names), not {event}")
-        e.update(event=event, matcher=matcher)
-        name = name or f"{event.lower()}-{re.sub(r'[^a-z0-9-]+', '-', Path(base).stem.lower()).strip('-') or 'hook'}"
-        if not NAME.fullmatch(name):
-            raise ExtrasError(f"hook name {name!r} is not lowercase letters, digits and dashes: give --name")
-        if event not in OPENCODE_EVENTS:
-            warnings.append(f"note: {event} is Claude only: OpenCode v2 has no session {event} hook for plugins")
-    elif kind == "permission":
-        action, rule = value
-        if action not in ("allow", "deny"):
-            raise ExtrasError("--permission takes allow or deny, then the rule")
-        why = rule_problem(action, rule, list(private))
-        if why:
-            raise ExtrasError(f"--permission {action} {rule!r} is refused: {why}")
-        e.update(action=action, rule=rule)
-        name = f"{action} {rule}"
     elif kind == "plugin":
         e.update(parse_plugin(value))
         name = f"{e['harness']}:{e['source']}"
-    elif kind == "env":
-        n, eq, v = (value or "").partition("=")
-        if not eq or not ENV_NAME.fullmatch(n):
-            raise ExtrasError("--env takes NAME=value (a non-secret value; an MCP server's secret is --mcp ... --env "
-                              "NAME)")
-        if n.upper() in RESERVED_ENV or n.upper().startswith(("LANE_", "ORCA_", "XDG_")):
-            raise ExtrasError(f"--env {n}: lane-control, Orca or the system sets it")
-        if secretish_name(n) or secretish_value(v):
-            raise ExtrasError(f"--env {n}: it looks like a key, token or password, and no secret is ever stored. "
-                              "Put it in the agent's own environment (a secret manager, direnv) instead")
-        if "\n" in v or len(v) > 4096:
-            raise ExtrasError(f"--env {n}: one line of at most 4096 characters")
-        e.update(value=v)
-        name = n
     else:
-        raise ExtrasError(f"no extra kind {kind!r}")
+        raise ExtrasError(f"no extra kind {kind!r} (kinds: {', '.join(KINDS)})")
     e["name"] = name
     return e, warnings
 
@@ -536,7 +543,6 @@ def add(path: Path, entry: dict) -> str:
 
 
 def find(entries: list, word: str) -> list:
-    """The entries `word` names: an id (`kind:name`) or a bare name."""
     return [e for e in entries if word in (ident(e), e["name"])]
 
 
@@ -570,42 +576,30 @@ def describe(e: dict) -> str:
         return shlex.join([e["command"], *e.get("args", [])]) + env
     if k == "persona":
         return f"{e['prompt_file']} (tier {e['tier']}, {e['harness']})"
-    if k == "agent-hook":
-        src = e.get("script") or f"{e['url']}@{e['commit'][:12]}:{e['path']}"
-        return f"{e['event']}{'[' + e['matcher'] + ']' if e.get('matcher') else ''} {src}"
-    if k == "permission":
-        return f"{e['action']} {e['rule']}"
-    if k == "plugin":
-        return f"{e['harness']}:{e['source']}@{e['pin']}"
-    return f"{e['name']}={e['value']}"
+    return f"{e['harness']}:{e['source']}@{e['pin']}"
 
 
-# --- fetching pinned sources -------------------------------------------------------------------------------------
+# --- pinned skill sources ------------------------------------------------------------------------------------------
 
-def fetch(url: str, commit: str, path: str, dest: Path, want: str, folder: bool = True) -> "str | None":
-    """A sparse checkout of `path` (a folder, or one file when not folder; the whole repo when '') at `commit` into
-    dest, made by rename so never half there; `want` is the file that must be there after (relative to dest). None
-    when done, else why not."""
+def fetch(url: str, commit: str, path: str, dest: Path) -> "str | None":
+    """A sparse checkout of `path` (the whole repo when '') at `commit` into dest, made by rename so never half
+    there; SKILL.md must be in it. None when done, else why not."""
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
     shutil.rmtree(tmp, ignore_errors=True)
-
-    def g(*args):
-        return subprocess.run(["git", "-C", str(tmp), *args], capture_output=True, text=True, timeout=300,
-                              stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-    sparse = [f"/{path.strip('/')}" + ("/" if folder else ""), "/LICENSE*", "/COPYING*"]
+    want = f"{path}/SKILL.md" if path else "SKILL.md"
     try:
         tmp.mkdir(parents=True)
         steps = [("init", "-q"), ("remote", "add", "origin", url)]
         if path:
-            steps.append(("sparse-checkout", "set", "--no-cone", *sparse))
+            steps.append(("sparse-checkout", "set", "--no-cone", f"/{path.strip('/')}/", "/LICENSE*", "/COPYING*"))
         steps += [("fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", commit),
                   ("checkout", "-q", "--detach", "FETCH_HEAD")]
         for step in steps:
-            r = g(*step)
-            if r.returncode != 0:
-                last = (r.stderr or r.stdout).strip().splitlines()
-                return f"git {step[0]} failed: {last[-1] if last else r.returncode}"
-        if g("rev-parse", "HEAD").stdout.strip() != commit:
+            r = git(tmp, *step, timeout=300)
+            if r is None or r.returncode != 0:
+                last = ((r.stderr or r.stdout).strip().splitlines() if r else []) or ["timed out"]
+                return f"git {step[0]} failed: {last[-1]}"
+        if git(tmp, "rev-parse", "HEAD").stdout.strip() != commit:
             return f"fetched commit is not {commit[:12]}"
         if not (tmp / want).is_file():
             return f"no {want} at that commit"
@@ -613,38 +607,46 @@ def fetch(url: str, commit: str, path: str, dest: Path, want: str, folder: bool 
         shutil.rmtree(dest, ignore_errors=True)
         os.replace(tmp, dest)
         return None
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except OSError as e:
         return str(e)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def source_dir(e: dict) -> Path:
+    """The checkout of a skill: the defaults' as before; an owner's keyed by URL, commit and path."""
+    if user_level(e):
+        return default_sources() / f"{e['name']}@{e['commit'][:12]}"
+    key = digest(f"{e['url']}\0{e['path']}")[:10]
+    return extra_sources() / f"{e['name']}@{e['commit'][:12]}-{key}"
+
+
 def skill_dir(e: dict) -> Path:
-    """Where a skill's pinned checkout keeps the skill (its SKILL.md)."""
-    src = skill_sources() / f"{e['name']}@{e['commit'][:12]}"
+    src = source_dir(e)
     return src / e["path"] if e.get("path") else src
 
 
+def source_state(e: dict) -> "str | None":
+    """None when the skill's checkout is there at its pinned commit with nothing changed in it, else what is wrong."""
+    src = source_dir(e)
+    if not (skill_dir(e) / "SKILL.md").is_file():
+        return f"commit {e['commit'][:12]} not fetched"
+    head = git(src, "rev-parse", "HEAD")
+    if head is None or head.stdout.strip() != e["commit"]:
+        return f"{src} is not at {e['commit'][:12]} any more"
+    st = git(src, "status", "--porcelain", "--untracked-files=all")
+    if st is None or st.returncode != 0 or st.stdout.strip():
+        return f"{src} changed since it was fetched"
+    return None
+
+
 def ensure_skill(e: dict) -> "str | None":
-    target = skill_dir(e)
-    if (target / "SKILL.md").is_file():
-        return None
-    src = skill_sources() / f"{e['name']}@{e['commit'][:12]}"
-    return fetch(e["url"], e["commit"], e.get("path", ""), src, f"{e['path']}/SKILL.md" if e.get("path") else
-                 "SKILL.md")
-
-
-def hook_script(e: dict) -> Path:
-    if e.get("script"):
-        return Path(e["script"])
-    return script_sources() / f"{e['name']}@{e['commit'][:12]}" / e["path"]
-
-
-def ensure_hook(e: dict) -> "str | None":
-    if e.get("script") or hook_script(e).is_file():
-        return None
-    return fetch(e["url"], e["commit"], e["path"], script_sources() / f"{e['name']}@{e['commit'][:12]}", e["path"],
-                 folder=False)
+    """The skill's pinned checkout, fetched when it is not there; None when it is right, else what is wrong."""
+    if not (skill_dir(e) / "SKILL.md").is_file():
+        why = fetch(e["url"], e["commit"], e.get("path", ""), source_dir(e))
+        if why:
+            return why
+    return source_state(e)
 
 
 # --- the default design skills, for the whole user (as project-setup always installed them) ----------------------
@@ -675,34 +677,36 @@ def bad_default(row: tuple, override: bool) -> "str | None":
     return None
 
 
+def ours_default(link: Path) -> bool:
+    return link.is_symlink() and os.readlink(link).startswith(str(default_sources()) + os.sep)
+
+
 def user_skills(entries: list) -> list:
     """The default design skills in ~/.agents/skills (where OpenCode v2 reads them), each a link into a sparse checkout
     of its repo at the pinned commit under ~/.agents/skill-sources/; Claude gets a link in ~/.claude/skills unless its
     own plugin carries the skill. One the owner installed is left alone; a fetch that fails is named, never a stop.
     A default turned off (or replaced by an extra of the owner's) loses only the links of ours. [(name, state)]."""
-    skills, sources = home() / ".agents" / "skills", skill_sources()
+    skills, sources = home() / ".agents" / "skills", default_sources()
     plugins = set(claude_plugins())
     want = {e["name"]: e for e in entries if e["kind"] == "skill" and user_level(e)}
     override = bool(os.environ.get("LANE_DESIGN_SKILLS"))
     done = []
     for row in default_rows():
-        if row[0] not in want:
-            link = skills / row[0]
-            if link.is_symlink() and os.readlink(link).startswith(str(sources) + os.sep):
-                link.unlink()
-                claude = home() / ".claude" / "skills" / row[0]
-                if claude.is_symlink() and os.readlink(claude) == str(link):
-                    claude.unlink()
-                done.append((row[0], "removed (turned off)"))
+        link = skills / row[0]
+        if row[0] not in want and NAME.fullmatch(row[0]) and ours_default(link):
+            link.unlink()
+            claude = home() / ".claude" / "skills" / row[0]
+            if claude.is_symlink() and os.readlink(claude) == str(link):
+                claude.unlink()
+            done.append((row[0], "removed (turned off)"))
     for e in want.values():
-        row = (e["name"], e["url"], e["commit"], e["path"])
         name = e["name"]
-        why = bad_default(row, override)
+        why = bad_default((name, e["url"], e["commit"], e["path"]), override)
         if why:
             done.append((name, f"missing (refused: {why})"))
             continue
         link, target = skills / name, skill_dir(e)
-        ours = link.is_symlink() and os.readlink(link).startswith(str(sources) + os.sep)
+        ours = ours_default(link)
         if (link.exists() or link.is_symlink()) and not ours:
             done.append((name, "exists (not lane-control's)"))
             continue
@@ -710,7 +714,7 @@ def user_skills(entries: list) -> list:
             state = "exists"
         else:
             if not (target / "SKILL.md").is_file():
-                why = ensure_skill(e)
+                why = fetch(e["url"], e["commit"], e["path"], source_dir(e))
                 if why:
                     done.append((name, f"missing ({why})"))
                     continue
@@ -720,8 +724,8 @@ def user_skills(entries: list) -> list:
             tmp_link.symlink_to(target)
             os.replace(tmp_link, link)
             state = "updated" if ours else "created"
-        for old in sources.glob(f"{name}@*"):
-            if old.name != f"{name}@{e['commit'][:12]}":
+        for old in sources.glob(f"{name}@*"):  # the defaults' own folder only: an owner's pins live elsewhere
+            if old.name != source_dir(e).name:
                 shutil.rmtree(old, ignore_errors=True)
         claude = home() / ".claude" / "skills" / name
         if e.get("claude_plugin") not in plugins and not claude.exists() and not claude.is_symlink():
@@ -731,374 +735,336 @@ def user_skills(entries: list) -> list:
     return done
 
 
-# --- applying to a session's folder --------------------------------------------------------------------------------
+# --- what a role's sessions get ---------------------------------------------------------------------------------
 
-def tracked(folder: Path, rel: str) -> bool:
-    try:
-        r = subprocess.run(["git", "ls-files", "--error-unmatch", "--", rel], cwd=folder, capture_output=True,
-                           timeout=30, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return r.returncode == 0
-
-
-def read_json(path: Path, what: str) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text().strip() or "{}")
-    except (OSError, ValueError) as e:
-        raise ExtrasError(f"{path}: not valid JSON ({e}); fix it by hand, it was left as it is")
-    if not isinstance(data, dict):
-        raise ExtrasError(f"{path}: not a JSON object ({what}); fix it by hand, it was left as it is")
-    return data
-
-
-def claude_hook(e: dict) -> dict:
-    entry = {"hooks": [{"type": "command", "command": shlex.quote(str(hook_script(e)))}]}
-    if e.get("matcher"):
-        entry = {"matcher": e["matcher"], **entry}
-    return entry
-
-
-def oc_rule(e: dict):
-    """(permission key, pattern or None, action) of a rule OpenCode can carry, or None (Claude only)."""
-    m = RULE.fullmatch(e["rule"])
-    if not m:
-        return None
-    tool, spec, action = m["tool"], m["spec"], e["action"]
-    if tool == "Bash":
-        if spec is None or spec.strip() in ("", "*"):
-            return ("bash", "*", action)
-        return ("bash", spec[:-2] + "*" if spec.endswith(":*") else spec, action)
-    if tool in ("Edit", "Write", "MultiEdit") and spec is None:
-        return ("edit", None, action)
-    if tool == "WebFetch" and spec is None:
-        return ("webfetch", None, action)
+def mcp_problem(e: dict) -> "str | None":
+    """None when an MCP server can be put in place as added: its command found, every pinned file unchanged."""
+    cmd = e["command"]
+    if "/" in cmd and not (os.path.isfile(cmd) and os.access(cmd, os.X_OK)):
+        return f"the command {cmd} is not there or not executable"
+    if "/" not in cmd and shutil.which(cmd) is None:
+        return f"the command {cmd} is not found"
+    for f, h in (e.get("files") or {}).items():
+        if not os.path.isfile(f):
+            return f"{f} is missing"
+        if sha256(Path(f)) != h:
+            return f"{f} changed since it was added (add it again to accept it)"
     return None
 
 
-def plan(entries: list) -> dict:
-    """What one folder gets from these entries (folder-level only: no default skill, no persona)."""
+def claude_mcp(e: dict) -> dict:
+    return {"type": "stdio", "command": e["command"], "args": e.get("args", []),
+            **({"env": {n: "${%s}" % n for n in e["env"]}} if e.get("env") else {})}
+
+
+def opencode_mcp(e: dict) -> dict:
+    cmd = [REF.sub(lambda m: "{env:%s}" % m[1], a) for a in [e["command"], *e.get("args", [])]]
+    return {"type": "local", "command": cmd, "enabled": True,
+            **({"environment": {n: "{env:%s}" % n for n in e["env"]}} if e.get("env") else {})}
+
+
+def wanted(entries: list) -> tuple:
+    """(problems, by kind) for a folder's entries: what may go in, after every source and pin was checked."""
     es = [e for e in entries if not user_level(e) and e["kind"] != "persona"]
-    p = {"skills": [e for e in es if e["kind"] == "skill"], "mcp": [e for e in es if e["kind"] == "mcp"],
-         "hooks": [e for e in es if e["kind"] == "agent-hook"],
-         "permissions": [e for e in es if e["kind"] == "permission"],
-         "plugins": [e for e in es if e["kind"] == "plugin"], "env": [e for e in es if e["kind"] == "env"]}
-    return p
+    problems = []
+    for e in es:
+        why = ensure_skill(e) if e["kind"] == "skill" else mcp_problem(e) if e["kind"] == "mcp" else None
+        if why:
+            problems.append(f"{ident(e)}: {why}")
+    kinds = {k: [e for e in es if e["kind"] == k] for k in ("skill", "mcp", "plugin")}
+    return problems, kinds
 
 
-def opencode_config(p: dict) -> dict:
+def json_text(data: dict) -> str:
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
+def opencode_files(kinds: dict) -> dict:
+    files = {}
     cfg = {}
-    mcp = {e["name"]: {"type": "local", "command": [e["command"], *e.get("args", [])], "enabled": True,
-                       **({"environment": {n: "{env:%s}" % n for n in e["env"]}} if e.get("env") else {})}
-           for e in p["mcp"]}
-    if mcp:
-        cfg["mcp"] = mcp
-    perm = {}
-    for e in p["permissions"]:
-        r = oc_rule(e)
-        if r is None:
-            continue
-        key, pattern, action = r
-        if pattern is None:
-            perm[key] = action
-        else:
-            cur = perm.get(key)
-            perm[key] = {**(cur if isinstance(cur, dict) else {}), pattern: action}
-    if perm:
-        cfg["permission"] = perm
-    plugins = [f"{e['source']}@{e['pin']}" for e in p["plugins"] if e["harness"] == "opencode"]
+    if kinds["mcp"]:
+        cfg["mcp"] = {e["name"]: opencode_mcp(e) for e in kinds["mcp"]}
+    plugins = [f"{e['source']}@{e['pin']}" for e in kinds["plugin"] if e["harness"] == "opencode"]
     if plugins:
         cfg["plugin"] = plugins
-    return {"$schema": "https://opencode.ai/config.json", **cfg} if cfg else {}
+    if cfg:
+        files[".opencode/opencode.json"] = json_text({"$schema": "https://opencode.ai/config.json", **cfg})
+    for e in kinds["skill"]:
+        files[f".opencode/skills/{e['name']}"] = skill_dir(e)
+    return files
 
 
-def opencode_sidecar(p: dict) -> dict:
-    hooks = [{"event": e["event"], "matcher": e.get("matcher", ""), "command": str(hook_script(e))}
-             for e in p["hooks"] if e["event"] in OPENCODE_EVENTS]
-    env = {e["name"]: e["value"] for e in p["env"]}
-    return {k: v for k, v in (("env", env), ("hooks", hooks)) if v}
+def tracked(folder: Path, rel: str) -> bool:
+    r = git(folder, "ls-files", "--", rel)
+    return bool(r and r.returncode == 0 and r.stdout.strip())
 
 
-def exclude_names(p: dict) -> list:
-    names = [f"/.claude/skills/{e['name']}" for e in p["skills"]] + \
-            [f"/.opencode/skills/{e['name']}" for e in p["skills"]]
-    if p["mcp"]:
-        names.append("/.mcp.json")
-    names += ["/.claude/settings.local.json", "/.opencode/opencode.json", "/.opencode/plugins/lane-extras.js",
-              "/.opencode/lane-extras.json",
-              f"/{PERSONAS_DIR}/"]
-    return names
+def claude_worktree_files(folder: Path, kinds: dict) -> dict:
+    """A lane's or reviewer's Claude files in its own worktree."""
+    files = {}
+    if kinds["mcp"]:
+        files[".mcp.json"] = json_text({"mcpServers": {e["name"]: claude_mcp(e) for e in kinds["mcp"]}})
+    settings = {}
+    if kinds["mcp"]:
+        settings["enabledMcpjsonServers"] = [e["name"] for e in kinds["mcp"]]  # only what this .mcp.json holds
+    plugins = {e["source"]: True for e in kinds["plugin"] if e["harness"] == "claude"}
+    if plugins:
+        settings["enabledPlugins"] = plugins
+    if settings:
+        rel = ".claude/settings.json" if not tracked(folder, ".claude/settings.json") else \
+            ".claude/settings.local.json"
+        files[rel] = json_text(settings)
+    for e in kinds["skill"]:
+        files[f".claude/skills/{e['name']}"] = skill_dir(e)
+    return files
 
 
-def exclude(folder: Path, names: list, dry: bool) -> str:
-    """Our own block in the repo's git exclude (shared by every worktree): the union of what any apply wrote."""
+def claude_launch_files(kinds: dict) -> dict:
+    """The coordinator's Claude files, in its launch folder (paths relative to it)."""
+    files = {}
+    if kinds["mcp"]:
+        files["mcp.json"] = json_text({"mcpServers": {e["name"]: claude_mcp(e) for e in kinds["mcp"]}})
+    plugins = {e["source"]: True for e in kinds["plugin"] if e["harness"] == "claude"}
+    if plugins:
+        files["settings.json"] = json_text({"enabledPlugins": plugins})
+    if kinds["skill"]:
+        files["plugin/.claude-plugin/plugin.json"] = json_text({
+            "name": PLUGIN_NAME, "version": "1.0.0",
+            "description": "The coordinator's skill extras (lane-control project|machine extras), for this session"})
+        for e in kinds["skill"]:
+            files[f"plugin/skills/{e['name']}"] = skill_dir(e)
+    return files
+
+
+def launch_args(store: Path) -> list:
+    """Claude flags that give the coordinator its own extras at launch (project-setup's launcher puts them in)."""
+    d = launch_dir(store)
+    out = []
+    if (d / "mcp.json").is_file():
+        out += ["--mcp-config", str(d / "mcp.json")]
+    if (d / "settings.json").is_file():
+        out += ["--settings", str(d / "settings.json")]
+    if (d / "plugin" / ".claude-plugin" / "plugin.json").is_file():
+        out += ["--plugin-dir", str(d / "plugin")]
+    return out
+
+
+def apply_launch(store: Path, entries: list, dry: bool = False) -> tuple:
+    """The coordinator's Claude launch folder holding exactly what its entries give (all or nothing: on a problem
+    it is emptied). (lines, problems)."""
+    d = launch_dir(store)
+    problems, kinds = wanted(entries)
+    want = {} if problems else claude_launch_files(kinds)
+    have = {}
+    if d.is_dir():
+        for p in d.rglob("*"):
+            if p.is_symlink() or p.is_file():
+                have[str(p.relative_to(d))] = Path(os.readlink(p)) if p.is_symlink() else p.read_text()
+    lines = []
+    for rel, content in want.items():
+        if have.get(rel) != content:
+            lines.append(f"{d / rel}: {'would write' if dry else 'wrote'} (the coordinator's, at its launch)")
+    for rel in have:
+        if rel not in want:
+            lines.append(f"{d / rel}: {'would remove' if dry else 'removed'}")
+    if not dry and lines:
+        shutil.rmtree(d, ignore_errors=True)
+        for rel, content in want.items():
+            f = d / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(content, Path):
+                f.symlink_to(content)
+            else:
+                write_file(f, content, 0o600)
+    return lines, problems
+
+
+# --- writing a folder: only files lane-control creates and owns whole ---------------------------------------------
+
+def identity(folder: Path) -> str:
+    """A worktree's identity: its .git entry's inode and change time (a new worktree at the same path is another)."""
+    try:
+        st = os.lstat(Path(folder) / ".git")
+    except OSError:
+        return ""
+    return f"{st.st_ino}:{st.st_ctime_ns}"
+
+
+def read_record(folder: Path) -> dict:
+    try:
+        rec = json.loads(record_file(folder).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(rec, dict) or rec.get("identity") != identity(folder):
+        return {}  # another worktree now at this path: nothing in it is ours
+    return rec
+
+
+def unsafe(folder: Path, rel: str) -> "str | None":
+    """Why a path under folder may not be written: a symlinked folder on the way (it would lead out of the folder)."""
+    p = Path(folder)
+    for part in Path(rel).parts[:-1]:
+        p = p / part
+        if p.is_symlink():
+            return f"{p} is a symlink"
+        if p.exists() and not p.is_dir():
+            return f"{p} is not a folder"
+    return None
+
+
+def current(folder: Path, rel: str):
+    """What is at a path now: a Path (a link's target), the text, or None."""
+    f = Path(folder) / rel
+    if f.is_symlink():
+        return Path(os.readlink(f))
+    if f.is_file():
+        try:
+            return f.read_text()
+        except (OSError, UnicodeDecodeError):
+            return "\0unreadable"
+    return None if not f.exists() else "\0folder"
+
+
+def mark(content) -> str:
+    return f"link:{content}" if isinstance(content, Path) else digest(content)
+
+
+def apply_folder(folder: Path, entries: list, scopes: list, claude: bool = True, dry: bool = False,
+                 project: "Path | None" = None) -> tuple:
+    """Make folder hold exactly what `entries` give a session there: Claude's worktree files (claude=True: a lane's
+    or reviewer's) and OpenCode's. All or nothing: on any problem the folder keeps none of lane-control's files.
+    (lines, problems). dry: change nothing, say what would change."""
+    folder = Path(folder).resolve()
+    rec = read_record(folder)
+    had = {k: v for k, v in (rec.get("files") or {}).items() if isinstance(v, str)}
+    problems, kinds = wanted(entries)
+    want = {}
+    if not problems:
+        want = {**(claude_worktree_files(folder, kinds) if claude else {}), **opencode_files(kinds)}
+    if not want and not had and not problems:
+        return [], []
+    for rel in sorted(set(want) | set(had)):
+        why = unsafe(folder, rel)
+        if why:
+            problems.append(f"{rel}: {why}; lane-control writes nothing through it")
+            continue
+        now = current(folder, rel)
+        if rel in want and tracked(folder, rel):
+            problems.append(f"{rel} is committed in the project: lane-control never changes it")
+        elif rel in want and now is not None and mark(now) != had.get(rel) and \
+                not (isinstance(now, Path) and now == want[rel]) and now != want[rel]:
+            problems.append(f"{folder / rel} is there and is not lane-control's (or changed since it was written); "
+                            "left so")
+    if problems:
+        want = {}  # all or nothing: none of ours stays where something could not be done
+    lines = []
+    for rel in sorted(set(want) | set(had)):
+        if unsafe(folder, rel):
+            continue
+        now = current(folder, rel)
+        if rel in want:
+            if now == want[rel]:
+                continue
+            lines.append(f"{folder / rel}: {'would write' if dry else 'wrote'}")
+        elif now is not None and mark(now) == had[rel]:
+            lines.append(f"{folder / rel}: {'would remove' if dry else 'removed'} (no longer an extra here)")
+        elif now is not None:
+            problems.append(f"{folder / rel} changed since lane-control wrote it; left so, take it out by hand")
+    if dry:
+        return lines, problems
+    files = {rel: mark(c) for rel, c in want.items()}
+    pending = {**had, **files}
     common = common_dir(folder)
-    if common is None:
-        return "skipped"
+    rec_body = {"folder": str(folder), "identity": identity(folder), "common": str(common or ""),
+                "project": str(project or ""), "scopes": scopes}
+    records_dir().mkdir(parents=True, exist_ok=True)
+    write_file(record_file(folder), json_text({**rec_body, "files": pending, "pending": True}), 0o600)
+    for rel in sorted(set(want) | set(had)):
+        if unsafe(folder, rel):
+            continue
+        f, now = folder / rel, current(folder, rel)
+        if rel in want and now != want[rel]:
+            if f.is_symlink() or f.is_file():
+                f.unlink()
+            f.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(want[rel], Path):
+                f.symlink_to(want[rel])
+            else:
+                write_file(f, want[rel])
+        elif rel not in want and now is not None and mark(now) == had[rel]:
+            f.unlink()
+            for parent in f.parents:  # folders lane-control made and left empty
+                if parent == folder or not parent.is_dir() or any(parent.iterdir()):
+                    break
+                parent.rmdir()
+    kept = {rel: had[rel] for rel in had if rel not in want and current(folder, rel) is not None
+            and mark(current(folder, rel)) == had[rel]}  # what could not be taken out stays recorded
+    final = {**files, **kept}
+    if final:
+        write_file(record_file(folder), json_text({**rec_body, "files": final}), 0o600)
+    else:
+        record_file(folder).unlink(missing_ok=True)
+    if common:
+        exclude(common)
+    return lines, problems
+
+
+def exclude(common: Path) -> None:
+    """Our own block in the repo's git exclude (shared by every worktree): exactly the files the records hold."""
+    names = set()
+    for f in records_dir().glob("*.json") if records_dir().is_dir() else []:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("common") == str(common):
+            names |= {f"/{rel}" for rel in rec.get("files") or {}}
     f = common / "info" / "exclude"
     text = f.read_text() if f.exists() else ""
-    old = []
     if EXCLUDE_BEGIN in text and EXCLUDE_END in text.split(EXCLUDE_BEGIN, 1)[1]:
         head, rest = text.split(EXCLUDE_BEGIN, 1)
-        body, tail = rest.split(EXCLUDE_END, 1)
-        old = [x for x in body.splitlines() if x.strip()]
+        tail = rest.split(EXCLUDE_END, 1)[1].lstrip("\n")
     else:
-        head, tail = text + ("" if not text or text.endswith("\n") else "\n"), "\n"
-    lines = sorted(set(old) | set(names))
-    if lines == sorted(old) and old:
-        return "exists"
-    if dry:
-        return "would update"
-    block = "\n".join((EXCLUDE_BEGIN, *lines, EXCLUDE_END))
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(head + block + (tail if tail.startswith("\n") else "\n" + tail))
-    return "updated" if old else "created"
+        head, tail = text, ""
+    head = head if not head or head.endswith("\n") else head + "\n"
+    block = "\n".join((EXCLUDE_BEGIN, *sorted(names), EXCLUDE_END)) + "\n" if names else ""
+    new = head + block + tail
+    if new != text:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(new)
 
 
-def _link(link: Path, target: Path, mine: list, dry: bool) -> str:
-    if link.is_symlink() and os.readlink(link) == str(target):
-        mine.append(str(link))
-        return "exists"
-    if link.exists() or link.is_symlink():
-        ours = link.is_symlink() and os.readlink(link).startswith(str(skill_sources()) + os.sep)
-        if not ours:
-            return "exists (not lane-control's)"
-    if not dry:
-        link.parent.mkdir(parents=True, exist_ok=True)
-        tmp = link.with_name(f".{link.name}.{os.getpid()}.link")
-        tmp.unlink(missing_ok=True)
-        tmp.symlink_to(target)
-        os.replace(tmp, link)
-    mine.append(str(link))
-    return "updated"
-
-
-def apply_folder(folder: Path, entries: list, scopes: list, dry: bool = False) -> tuple:
-    """Make folder hold what `entries` give a session there (Claude and OpenCode both), taking out what an earlier
-    apply added and is no longer wanted. Returns (lines, problems): what changed, and what could not be done.
-    dry: change nothing, and say what would change (`check`)."""
-    folder = Path(folder).resolve()
-    p = plan(entries)
-    rec_path = record_file(folder)
-    try:
-        rec = json.loads(rec_path.read_text()) if rec_path.exists() else {}
-    except (OSError, ValueError):
-        rec = {}
-    rec = rec if isinstance(rec, dict) else {}
-    new = {"scopes": scopes, "claude": {}, "mcp": {}, "links": [], "opencode": {}}
-    lines, problems = [], []
-
-    # pinned sources first: a skill or hook that cannot be fetched is named, and the rest still goes in
-    if not any(p.values()) and not rec:
-        return [], []  # nothing to put here and nothing put before: the folder is left exactly as it is
-    for e in list(p["skills"]):
-        have = (skill_dir(e) / "SKILL.md").is_file()
-        why = None if have else ("not fetched" if dry else ensure_skill(e))
-        if why:
-            problems.append(f"skill {e['name']}: {why}")
-            p["skills"].remove(e)
-    for e in list(p["hooks"]):
-        have = hook_script(e).is_file()
-        why = None if have else ("not fetched" if dry else ensure_hook(e))
-        if why is None and not hook_script(e).is_file():
-            why = f"{hook_script(e)} is missing"
-        elif why is None and not os.access(hook_script(e), os.X_OK):
-            why = f"{hook_script(e)} is not executable"
-        elif why is None and e.get("sha256") and sha256(hook_script(e)) != e["sha256"]:
-            why = f"{hook_script(e)} changed since it was added (add it again to accept the new text)"
-        if why:
-            problems.append(f"agent-hook {e['name']}: {why}")
-            p["hooks"].remove(e)
-
-    # Claude: settings.local.json
-    sf = folder / ".claude" / "settings.local.json"
-    sf_existed = sf.exists()
-    data = read_json(sf, "Claude's settings")
-    before = json.dumps(data, sort_keys=True)
-    old = rec.get("claude", {}) if isinstance(rec.get("claude"), dict) else {}
-    hooks = data.get("hooks", {}) if isinstance(data.get("hooks", {}), dict) else None
-    perms = data.get("permissions", {}) if isinstance(data.get("permissions", {}), dict) else None
-    env = data.get("env", {}) if isinstance(data.get("env", {}), dict) else None
-    if hooks is None or perms is None or env is None:
-        raise ExtrasError(f"{sf}: hooks, permissions or env is not an object; fix it by hand, it was left as it is")
-    for ev, items in (old.get("hooks") or {}).items():
-        if isinstance(hooks.get(ev), list):
-            hooks[ev] = [h for h in hooks[ev] if h not in items]
-            if not hooks[ev]:
-                hooks.pop(ev)
-    for key in ("allow", "deny"):
-        if isinstance(perms.get(key), list):
-            perms[key] = [r for r in perms[key] if r not in (old.get(key) or [])]
-    for n, v in (old.get("env") or {}).items():
-        if env.get(n) == v:
-            env.pop(n)
-    if isinstance(data.get("enabledPlugins"), dict):
-        for k in old.get("enabledPlugins") or []:
-            data["enabledPlugins"].pop(k, None)
-    if isinstance(data.get("enabledMcpjsonServers"), list):
-        data["enabledMcpjsonServers"] = [n for n in data["enabledMcpjsonServers"]
-                                         if n not in (old.get("enabledMcpjsonServers") or [])]
-    mine = {"hooks": {}, "allow": [], "deny": [], "env": {}, "enabledPlugins": [], "enabledMcpjsonServers": []}
-    for e in p["hooks"]:
-        h = claude_hook(e)
-        lst = hooks.setdefault(e["event"], [])
-        if h not in lst:
-            lst.append(h)
-            mine["hooks"].setdefault(e["event"], []).append(h)
-    for e in p["permissions"]:
-        lst = perms.setdefault(e["action"], [])
-        if e["rule"] not in lst:
-            lst.append(e["rule"])
-            mine[e["action"]].append(e["rule"])
-    for e in p["env"]:
-        if e["name"] in env and env[e["name"]] != e["value"]:
-            problems.append(f"env {e['name']}: {sf} already sets it to another value (not lane-control's); left so")
+def recorded_worktrees(repo: Path) -> list:
+    """(folder, record) of every worktree of the project that lane prepare wrote in; a record whose folder is gone
+    or is another worktree now is dropped."""
+    out = []
+    for f in sorted(records_dir().glob("*.json")) if records_dir().is_dir() else []:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError):
             continue
-        if e["name"] not in env:
-            env[e["name"]] = e["value"]
-            mine["env"][e["name"]] = e["value"]
-    claude_plugins_wanted = [e for e in p["plugins"] if e["harness"] == "claude"]
-    if claude_plugins_wanted:
-        ep = data.setdefault("enabledPlugins", {})
-        for e in claude_plugins_wanted:
-            if e["source"] not in ep:
-                ep[e["source"]] = True
-                mine["enabledPlugins"].append(e["source"])
-    mcp_tracked = bool(p["mcp"]) and tracked(folder, ".mcp.json")
-    if p["mcp"] and not mcp_tracked:
-        lst = data.setdefault("enabledMcpjsonServers", [])
-        for e in p["mcp"]:
-            if e["name"] not in lst:
-                lst.append(e["name"])
-                mine["enabledMcpjsonServers"].append(e["name"])
-    for k, v in (("hooks", hooks), ("permissions", perms), ("env", env)):
-        if v:
-            data[k] = {kk: vv for kk, vv in v.items() if vv != []} if k == "permissions" else v
-        else:
-            data.pop(k, None)
-    for k in ("enabledPlugins", "enabledMcpjsonServers"):
-        if k in data and not data[k]:
-            data.pop(k)
-    if isinstance(data.get("permissions"), dict) and not data["permissions"]:
-        data.pop("permissions")
-    if json.dumps(data, sort_keys=True) != before:
-        lines.append(f"{sf}: {'would update' if dry else 'updated'} the extras (hooks, permissions, env, plugins)")
-        if not dry:
-            if not data and rec.get("claude_created"):
-                sf.unlink(missing_ok=True)
-            else:
-                write_atomic(sf, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-    new["claude"] = mine
-    new["claude_created"] = rec.get("claude_created", not sf_existed) if "claude_created" in rec else not sf_existed
-
-    # Claude: .mcp.json
-    mf = folder / ".mcp.json"
-    if tracked(folder, ".mcp.json"):
-        if p["mcp"]:
-            problems.append(f"mcp {', '.join(e['name'] for e in p['mcp'])}: {mf} is committed in the project, so its "
-                            "MCP servers are the project's; lane-control writes no MCP extras into it")
-    else:
-        existed = mf.exists()
-        mdata = read_json(mf, "MCP servers")
-        servers = mdata.get("mcpServers", {}) if isinstance(mdata.get("mcpServers", {}), dict) else {}
-        mbefore = json.dumps(mdata, sort_keys=True)
-        for n, v in (rec.get("mcp") or {}).items():
-            if servers.get(n) == v:
-                servers.pop(n)
-        mine_mcp = {}
-        for e in p["mcp"]:
-            want = {"type": "stdio", "command": e["command"], "args": e.get("args", []),
-                    **({"env": {n: "${%s}" % n for n in e["env"]}} if e.get("env") else {})}
-            if e["name"] in servers and servers[e["name"]] != want:
-                problems.append(f"mcp {e['name']}: {mf} has a server of that name that is not lane-control's; "
-                                "left so")
-                continue
-            servers[e["name"]] = want
-            mine_mcp[e["name"]] = want
-        if servers:
-            mdata["mcpServers"] = servers
-        else:
-            mdata.pop("mcpServers", None)
-        if json.dumps(mdata, sort_keys=True) != mbefore:
-            lines.append(f"{mf}: {'would update' if dry else 'updated'} the MCP servers")
-            if not dry:
-                if mdata:
-                    write_atomic(mf, json.dumps(mdata, indent=2, ensure_ascii=False) + "\n")
-                elif mf.exists() and rec.get("mcp_created"):
-                    mf.unlink()
-        new["mcp"] = mine_mcp
-        new["mcp_created"] = ((rec["mcp_created"] if rec.get("mcp") and "mcp_created" in rec else not existed)
-                              if mine_mcp else False)
-
-    # skills: links for both harnesses
-    links = []
-    for e in p["skills"]:
-        for d in (".claude", ".opencode"):
-            link = folder / d / "skills" / e["name"]
-            if tracked(folder, f"{d}/skills/{e['name']}/SKILL.md"):
-                problems.append(f"skill {e['name']}: the project commits {d}/skills/{e['name']}; left so")
-                continue
-            state = _link(link, skill_dir(e), links, dry)
-            if state == "updated":
-                lines.append(f"{link}: {'would link' if dry else 'linked'} to {skill_dir(e)}")
-            elif state.startswith("exists ("):
-                problems.append(f"skill {e['name']}: {link} {state}; left so")
-    for old_link in rec.get("links") or []:
-        lk = Path(old_link)
-        if old_link not in links and lk.is_symlink() and os.readlink(lk).startswith(str(skill_sources()) + os.sep):
-            lines.append(f"{lk}: {'would remove' if dry else 'removed'} (no longer an extra here)")
-            if not dry:
-                lk.unlink()
-    new["links"] = links
-
-    # OpenCode: .opencode/opencode.json, and the plugin with its sidecar
-    oc_old = rec.get("opencode") if isinstance(rec.get("opencode"), dict) else {}
-    for rel, content in ((".opencode/opencode.json", opencode_config(p)),
-                         (".opencode/lane-extras.json", opencode_sidecar(p)),
-                         (".opencode/plugins/lane-extras.js", OC_PLUGIN.read_text() if opencode_sidecar(p) else None)):
-        f = folder / rel
-        text = (json.dumps(content, indent=2, ensure_ascii=False) + "\n" if isinstance(content, dict) and content
-                else content if isinstance(content, str) else None)
-        ours = f.exists() and (oc_old.get(rel) == hashlib.sha256(f.read_bytes()).hexdigest() or
-                               (text is not None and f.read_text() == text))
-        if tracked(folder, rel):
-            if text:
-                problems.append(f"{rel} is committed in the project; the OpenCode extras for this folder are not "
-                                "written")
+        if not isinstance(rec, dict) or rec.get("project") != str(Path(repo).resolve()) or \
+                not set(rec.get("scopes") or []) & {"lanes", "reviewer"}:
+            continue  # another project's, or the coordinator's own folder
+        folder = Path(rec.get("folder", ""))
+        if not folder.is_dir() or rec.get("identity") != identity(folder):
+            f.unlink(missing_ok=True)
             continue
-        if f.exists() and not ours:
-            if text:
-                problems.append(f"{f} exists and is not lane-control's; the OpenCode extras it would hold are not "
-                                "written")
-            continue
-        if text is None:
-            if ours:
-                lines.append(f"{f}: {'would remove' if dry else 'removed'} (no extras left for it)")
-                if not dry:
-                    f.unlink()
-            continue
-        if not (f.exists() and f.read_text() == text):
-            lines.append(f"{f}: {'would write' if dry else 'wrote'} the OpenCode extras")
-            if not dry:
-                write_atomic(f, text)
-        new["opencode"][rel] = hashlib.sha256(text.encode()).hexdigest()
+        out.append((folder, rec))
+    return out
 
-    names = exclude_names(p)
-    ex = exclude(folder, names, dry)
-    if ex in ("created", "updated", "would update"):
-        lines.append(f"git exclude: {ex} (lane-control extras block)")
-    if not dry:
-        rec_path.parent.mkdir(parents=True, exist_ok=True)
-        write_atomic(rec_path, json.dumps({**new, "folder": str(folder)}, indent=2) + "\n")
-    return lines, problems
+
+def prepare_entries(entries: list, scopes: list) -> list:
+    chosen = {}
+    for s in scopes:
+        for e in for_scope(entries, s):
+            chosen[ident(e)] = e
+    return list(chosen.values())
 
 
 # --- personas -----------------------------------------------------------------------------------------------------
 
 def persona_text(e: dict, additions: str) -> "str | None":
-    """The rendered text of a custom persona, or None when its prompt file is missing or changed."""
     f = Path(e["prompt_file"])
     if not f.is_file() or sha256(f) != e.get("sha256"):
         return None
@@ -1127,41 +1093,53 @@ def summary(e: dict) -> str:
 
 
 def render_personas(repo: Path, entries: list, additions) -> tuple:
-    """Each custom persona into <repo>/.lane-control/personas/<name>.md (with the project's additions for it, from
-    additions(name)), and a persona of ours no longer an extra taken out. (lines, problems)."""
+    """Each custom persona into <repo>/.lane-control/personas/<name>.md (with the project's additions for it), and a
+    persona of ours no longer an extra taken out. (lines, problems)."""
     d = Path(repo) / PERSONAS_DIR
     want = {e["name"]: e for e in entries if e["kind"] == "persona"}
     lines, problems = [], []
-    if want:
-        exclude(Path(repo), [f"/{PERSONAS_DIR}/"], False)
+    if (want or d.is_dir()) and unsafe(repo, f"{PERSONAS_DIR}/x.md"):
+        return [], [f"{PERSONAS_DIR}: {unsafe(repo, PERSONAS_DIR + '/x.md')}; no persona is rendered through it"]
     for name, e in want.items():
         text = persona_text(e, additions(name))
         if text is None:
             f = Path(e["prompt_file"])
-            problems.append(f"persona {name}: {f} " + ("is missing" if not f.is_file() else
+            problems.append(f"persona:{name}: {f} " + ("is missing" if not f.is_file() else
                                                         "changed since it was added (add it again to accept it)"))
             continue
         f = d / f"{name}.md"
+        if tracked(repo, f"{PERSONAS_DIR}/{name}.md"):
+            problems.append(f"persona:{name}: {f} is committed in the project; left so")
+            continue
+        if f.is_symlink():
+            problems.append(f"persona:{name}: {f} is a symlink; left so")
+            continue
         if not (f.exists() and f.read_text() == text):
-            d.mkdir(parents=True, exist_ok=True)
             state = "updated" if f.exists() else "created"
-            f.write_text(text)
+            write_file(f, text)
             lines.append(f"persona {name}: {state} ({f})")
     if d.is_dir():
         for f in d.glob("*.md"):
-            if f.stem not in want and f.read_text().startswith("<!-- lane-control persona"):
+            if f.stem not in want and not f.is_symlink() and f.read_text().startswith("<!-- lane-control persona"):
                 f.unlink()
                 lines.append(f"persona {f.stem}: removed (no longer an extra)")
+    common = common_dir(repo)
+    if common:  # the personas folder is the main checkout's own; keep it out of git while it exists
+        f = common / "info" / "exclude"
+        text = f.read_text() if f.exists() else ""
+        line = f"/{PERSONAS_DIR}/"
+        if d.is_dir() and any(d.iterdir()) and line not in text.splitlines():
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text + ("" if not text or text.endswith("\n") else "\n") + line + "\n")
     return lines, problems
 
 
 def coordinator_section(repo: Path, entries: list, lane_control: str) -> str:
     """The coordinator persona's part about this project's extras: its custom personas, and the prepare step when
-    lanes or reviewers have folder extras. '' when there is nothing to tell (the default design skills alone)."""
+    lanes or reviewers have extras of their own. '' when there is nothing to tell (the default design skills alone)."""
     personas = [e for e in entries if e["kind"] == "persona"]
-    lanes = plan(for_scope(entries, "lanes"))
-    reviewers = plan(for_scope(entries, "reviewer"))
-    has = {s: any(v for v in pl.values()) for s, pl in (("lanes", lanes), ("reviewer", reviewers))}
+    has = {s: any(not user_level(e) and e["kind"] != "persona" for e in for_scope(entries, s))
+           for s in ("lanes", "reviewer")}
     if not personas and not any(has.values()):
         return ""
     lc = f"{lane_control}/scripts/lane-control"
@@ -1178,16 +1156,13 @@ def coordinator_section(repo: Path, entries: list, lane_control: str) -> str:
         out.append("")
     if any(has.values()):
         who = " and ".join(x for x, v in (("lanes", has["lanes"]), ("reviewers", has["reviewer"])) if v)
-        out.append(f"The {who} of this project have extras (skills, MCP servers, hooks, permissions, plugins or env) "
-                   "that must be in their worktree before the agent starts:")
-        if has["lanes"]:
-            out.append(f"- A lane: make its worktree first (`orca-ide worktree create ... --json`, as for an OpenCode "
-                       f"lane, for Claude too), then `{lc} lane prepare {repo} <worktree> --role lanes`, then "
-                       "`worker-start --worktree path:<worktree>`.")
-        if has["reviewer"]:
-            out.append(f"- A reviewer: `{lc} lane prepare {repo} <lane worktree> --role reviewer` before its "
-                       "worker-start. It shares the lane's worktree, so the lane sees those extras too from its next "
-                       "start.")
+        out.append(f"The {who} of this project have extras (skills, MCP servers or plugins) that must be in their "
+                   "worktree before the agent starts:")
+        out.append(f"- A lane: make its worktree first (`orca-ide worktree create ... --json`, as for an OpenCode "
+                   f"lane, for Claude too), then `{lc} lane prepare {repo} <worktree> --role lanes`, then "
+                   "`worker-start --worktree path:<worktree>`.")
+        out.append(f"- A reviewer: `{lc} lane prepare {repo} <lane worktree> --role reviewer` before its "
+                   "worker-start. It shares the lane's worktree, so both then have both roles' extras.")
         out.append("- If prepare exits non-zero, hold the lane and tell the owner what it printed. A lane on another "
                    "host gets none of them (prepare runs on this machine).")
     return "\n".join(out) + "\n"
@@ -1195,30 +1170,28 @@ def coordinator_section(repo: Path, entries: list, lane_control: str) -> str:
 
 # --- checking ----------------------------------------------------------------------------------------------------
 
-def which(cmd: str) -> bool:
-    if "/" in cmd:
-        return os.path.isfile(cmd) and os.access(cmd, os.X_OK)
-    return shutil.which(cmd) is not None
-
-
 def check_entry(e: dict) -> tuple:
-    """(state, detail) of one extra, read only: ok, missing, changed, failing, or a note."""
+    """(state, detail) of one extra, read only: ok, missing, changed or failing."""
     k = e["kind"]
     if k == "skill":
         if user_level(e):
             link = home() / ".agents" / "skills" / e["name"]
-            if link.is_symlink() and os.readlink(link) == str(skill_dir(e)) and (skill_dir(e) / "SKILL.md").is_file():
-                return "ok", f"installed for the user ({link})"
-            if link.exists() and not link.is_symlink():
+            if ours_default(link):
+                return ("ok", f"installed for the user ({link})") if (Path(os.readlink(link)) / "SKILL.md").is_file() \
+                    and os.readlink(link) == str(skill_dir(e)) else ("missing", f"{link} is not at its pinned commit")
+            if link.is_symlink() and not link.exists():
+                return "missing", f"{link} is a dangling link"
+            if link.exists():
                 return "ok", f"the owner's own install at {link}"
             return "missing", f"commit {e['commit'][:12]} not fetched or not linked"
-        return ("ok", f"fetched at {e['commit'][:12]}") if (skill_dir(e) / "SKILL.md").is_file() else \
-            ("missing", f"commit {e['commit'][:12]} not fetched")
+        why = source_state(e)
+        if why is None:
+            return "ok", f"fetched at {e['commit'][:12]}"
+        return ("missing" if "not fetched" in why else "changed"), why
     if k == "mcp":
-        if not which(e["command"]):
-            return "failing", f"the command {e['command']} is not found"
-        if e.get("sha256") and sha256(Path(e["command"])) != e["sha256"]:
-            return "changed", f"{e['command']} changed since it was added"
+        why = mcp_problem(e)
+        if why:
+            return ("changed" if "changed" in why or "missing" in why else "failing"), why
         unset = [n for n in e.get("env", []) if n not in os.environ]
         return "ok", f"{e['command']} found" + (f"; not set in this shell: {', '.join(unset)} (the agent needs them)"
                                                  if unset else "")
@@ -1229,49 +1202,37 @@ def check_entry(e: dict) -> tuple:
         if sha256(f) != e.get("sha256"):
             return "changed", f"{f} changed since it was added"
         return "ok", f"{f}, tier {e['tier']}, {e['harness']}"
-    if k == "agent-hook":
-        f = hook_script(e)
-        oc = "" if e["event"] in OPENCODE_EVENTS else "; Claude only"
-        if not f.is_file():
-            return "missing", (f"{f} is missing" if e.get("script") else f"commit {e['commit'][:12]} not fetched")
-        if not os.access(f, os.X_OK):
-            return "failing", f"{f} is not executable"
-        if e.get("sha256") and sha256(f) != e["sha256"]:
-            return "changed", f"{f} changed since it was added"
-        return "ok", f"{f}{oc}"
-    if k == "permission":
-        return "ok", ("" if oc_rule(e) else "Claude only (OpenCode has no rule like it)")
-    if k == "plugin":
-        if e["harness"] == "opencode":
-            return "ok", "OpenCode installs it at start"
-        recs = claude_plugins().get(e["source"])
-        if not recs:
-            return "missing", f"not installed in Claude: claude plugin install {e['source']}"
-        recs = recs if isinstance(recs, list) else [recs]
-        pins = {str(r.get(x)) for r in recs if isinstance(r, dict) for x in ("version", "gitCommitSha") if r.get(x)}
-        if e["pin"] not in pins and not any(p.startswith(e["pin"]) for p in pins if len(e["pin"]) >= 7):
-            return "changed", f"installed {', '.join(sorted(pins)) or 'with no version'}, pinned {e['pin']}"
-        return "ok", f"installed at {e['pin']}"
-    return "ok", ""
+    if e["harness"] == "opencode":
+        return "ok", "OpenCode installs it at start"
+    recs = claude_plugins().get(e["source"])
+    if not recs:
+        return "missing", f"not installed in Claude: claude plugin install {e['source']}"
+    recs = recs if isinstance(recs, list) else [recs]
+    pins = {str(r.get(x)) for r in recs if isinstance(r, dict) for x in ("version", "gitCommitSha") if r.get(x)}
+    if e["pin"] not in pins and not any(p.startswith(e["pin"]) for p in pins if len(e["pin"]) >= 7):
+        return "changed", f"installed {', '.join(sorted(pins)) or 'with no version'}, pinned {e['pin']}"
+    return "ok", f"installed at {e['pin']}"
 
 
 def check(store: "Path | None", folder: "Path | None" = None) -> list:
-    """Every extra of a project (or the machine, store None), with its roles and state; and, with the coordinator's
-    folder, whether it holds what refresh would put there. [{id, origin, for, state, detail}]."""
+    """Every extra of a project (or the machine, store None), with its roles and state; and, with the main checkout,
+    whether the coordinator has what refresh would give it. [{id, origin, for, state, detail, what}]."""
     rows = []
     entries = effective(store)
     for e in entries:
         state, detail = check_entry(e)
         rows.append({"id": ident(e), "origin": e.get("origin"), "for": e.get("for") or list(SCOPES),
                      "state": state, "detail": detail, "what": describe(e)})
-    if folder is not None:
-        try:
-            lines, _ = apply_folder(folder, for_scope(entries, "coordinator"), ["coordinator"], dry=True)
-        except ExtrasError as e:
-            lines = [str(e)]
-        if lines:
-            rows.append({"id": "coordinator folder", "origin": "project", "for": ["coordinator"],
-                         "state": "not applied", "detail": "; ".join(lines), "what": str(folder)})
+    if folder is not None and store is not None:
+        coord = for_scope(entries, "coordinator")
+        lines, problems = apply_launch(store, coord, dry=True)
+        more, more_problems = apply_folder(folder, coord, ["coordinator"], claude=False, dry=True)
+        if problems or more_problems:
+            rows.append({"id": "coordinator", "origin": "project", "for": ["coordinator"], "state": "failing",
+                         "detail": "; ".join(problems + more_problems), "what": str(folder)})
+        elif lines or more:
+            rows.append({"id": "coordinator", "origin": "project", "for": ["coordinator"], "state": "not applied",
+                         "detail": "; ".join(lines + more), "what": str(folder)})
     return rows
 
 

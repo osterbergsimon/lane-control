@@ -13,22 +13,23 @@ where each harness reads it). Run through the front door:
 Kinds:
   --skill <git-url>@<commit>[:<path>]                      a skill pinned at a full commit
   --mcp <name> [--env NAME]... -- <command> [args]         an MCP server; each --env names a variable the server
-                                                           reads from the agent's environment (never a value)
+                                                           reads from the agent's environment (never a value); an
+                                                           argument may say ${NAME} for one
   --persona <name> --prompt-file <path> [--tier swift|standard|deep] [--harness claude|opencode]
                                                            a lane role the coordinator can brief a lane with
-  --agent-hook <event> [--matcher <tools>] -- <script>     PreToolUse, PostToolUse, SessionStart or Stop; the script
-                                                           a path outside any project repo, or <git-url>@<commit>:<path>
-  --permission allow|deny <rule>                           Claude's rule syntax, e.g. 'Bash(npm test:*)'
   --plugin claude:<plugin>@<marketplace>@<version> | opencode:<package>@<version>
-  --env NAME=value                                         a non-secret environment variable
 
-A script or MCP command inside a project checkout is refused unless --allow-repo-path is given. The same id again
-replaces the extra (and accepts a changed file). A project's extras add to the machine's. After a change, run
-`lane-control project refresh <project>` for each project it touches: that puts them in place for the coordinator
-and renders the personas; lanes and reviewers get theirs from `lane prepare` as they start."""
+add and remove are a person's only, at a terminal (an agent is refused, as for lane new). A file an extra names (an
+MCP command or argument, a prompt file) must be an absolute path outside every project checkout unless
+--allow-repo-path is given; it is pinned by its hash. The same id again replaces the extra (and accepts a changed
+file). A project's extras add to the machine's. After a change, run `lane-control project refresh <project>`: it
+gives the coordinator its extras, renders the personas, and applies every worktree lane prepare wrote in again (a
+removed extra is taken out there too)."""
 import argparse
+import importlib.machinery
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -43,70 +44,88 @@ def _load(name, rel):
 
 
 X = _load("lc_extras", "core/extras.py")
-KIND_FLAGS = {"skill": "--skill", "mcp": "--mcp", "persona": "--persona", "agent-hook": "--agent-hook",
-              "permission": "--permission", "plugin": "--plugin"}
+KIND_FLAGS = ("skill", "mcp", "persona", "plugin")
+
+
+class Parser(argparse.ArgumentParser):
+    """argparse that never repeats what it could not parse: a misplaced value may be a secret."""
+
+    def error(self, message):
+        safe = message.split(":")[0] if "unrecognized arguments" in message else message
+        self.exit(2, f"{self.prog}: {safe} (not shown: one may be a secret); see --help\n")
+
+
+def person(what: str) -> None:
+    """project-setup's person check (as CLI-2's lane new and --force): an agent is refused."""
+    loader = importlib.machinery.SourceFileLoader("project_setup_extras",
+                                                  str(HERE / "core" / "scripts" / "project-setup"))
+    spec = importlib.util.spec_from_loader("project_setup_extras", loader)
+    ps = importlib.util.module_from_spec(spec)
+    loader.exec_module(ps)
+    place = None
+    if os.environ.get("ORCA_TERMINAL_HANDLE"):
+        ps.add_orca_cli_to_path()
+        ps.ORCA = ps.orca_cli()
+        place = ps.Place()
+    why = ps.agent_caller(place)
+    if why:
+        raise X.ExtrasError(f"{what} is for a person at a terminal, and {why}. Nothing was changed")
 
 
 def add_parser(prog: str, project: bool) -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog=prog, add_help=True)
+    ap = Parser(prog=prog)
     if project:
         ap.add_argument("project")
     ap.add_argument("--skill")
     ap.add_argument("--mcp")
     ap.add_argument("--persona")
-    ap.add_argument("--agent-hook", dest="agent_hook")
-    ap.add_argument("--permission", nargs=2, metavar=("ALLOW_OR_DENY", "RULE"))
     ap.add_argument("--plugin")
-    ap.add_argument("--env", action="append", default=[])
+    ap.add_argument("--env", action="append", default=[], metavar="NAME")
     ap.add_argument("--for", dest="for_", action="append", default=[])
     ap.add_argument("--name")
     ap.add_argument("--prompt-file", dest="prompt_file")
     ap.add_argument("--tier")
     ap.add_argument("--harness")
-    ap.add_argument("--matcher")
     ap.add_argument("--allow-repo-path", dest="allow_repo_path", action="store_true")
     return ap
 
 
-def kind_of(a) -> tuple:
-    given = [(k, getattr(a, k.replace("-", "_"))) for k in KIND_FLAGS if getattr(a, k.replace("-", "_"))]
-    if not given and len(a.env) == 1 and "=" in a.env[0]:
-        return "env", a.env[0]
-    if len(given) != 1 or (given[0][0] != "mcp" and a.env):
-        raise X.ExtrasError("give exactly one kind: --skill, --mcp, --persona, --agent-hook, --permission, --plugin "
-                            "or --env NAME=value (one at a time)")
-    return given[0]
-
-
 def target(group: str, a):
-    """(store file, label, roots, private globs, project root or None) for machine or project."""
+    """(store file, label, project root or None) for machine or project; a project on another orchestrator is
+    refused, since nothing there would apply its extras."""
     if group == "machine":
-        return X.machine_file(), "this machine", X.roots(), [], None
+        return X.machine_file(), "this machine", None
     root, st, store = X.find_project(a.project)
-    private = [g for g in st.get("private") or [] if isinstance(g, str)]
-    return X.project_file(store), f"project {st.get('name') or root.name}", [*X.roots(), root], private, root
+    if not X.native(root, st):
+        raise X.ExtrasError(f"{root} runs on Orca + Cotal (parked): extras are applied on native Orca only")
+    return X.project_file(store), f"project {st.get('name') or root.name}", root
+
+
+def next_line(root) -> str:
+    return (f"next: lane-control project refresh {root}" if root else
+            "next: lane-control project refresh <project> for each project on this machine")
 
 
 def cmd_add(group: str, argv: list) -> int:
     head, tail = (argv[:argv.index("--")], argv[argv.index("--") + 1:]) if "--" in argv else (argv, [])
-    if "--agent-hook" in head and len(tail) > 1 and tail[1].startswith("--"):
-        head, tail = head + tail[1:], tail[:1]  # a hook names one script: options after it are still options
     a = add_parser(f"lane-control {group} extras add", group == "project").parse_args(head)
-    kind, value = kind_of(a)
-    if kind not in ("mcp", "agent-hook") and tail:
-        raise X.ExtrasError(f"`--` and a command are for --mcp and --agent-hook only, not --{kind}")
-    path, label, roots, private, root = target(group, a)
-    opts = {"name": a.name, "for": a.for_, "command": tail, "env": a.env if kind == "mcp" else [],
-            "matcher": a.matcher, "prompt_file": a.prompt_file, "tier": a.tier, "harness": a.harness,
-            "allow_repo_path": a.allow_repo_path}
-    entry, warnings = X.make(kind, value, opts, roots, private)
+    given = [(k, getattr(a, k)) for k in KIND_FLAGS if getattr(a, k)]
+    if len(given) != 1:
+        raise X.ExtrasError("give exactly one kind: --skill, --mcp, --persona or --plugin (agent hooks, permission "
+                            "rules and env values are not extras yet: lc-yw1g)")
+    kind, value = given[0]
+    if kind != "mcp" and (tail or a.env):
+        raise X.ExtrasError("`--` with a command, and --env, are for --mcp only")
+    path, label, root = target(group, a)
+    person(f"lane-control {group} extras add")
+    opts = {"name": a.name, "for": a.for_, "command": tail, "env": a.env, "prompt_file": a.prompt_file,
+            "tier": a.tier, "harness": a.harness, "allow_repo_path": a.allow_repo_path}
+    entry, warnings = X.make(kind, value, opts)
     for w in warnings:
         print(w, file=sys.stderr)
     state = X.add(path, entry)
     print(f"{state} {X.ident(entry)} for {', '.join(entry['for'])} ({label}): {X.describe(entry)}")
-    where = f"lane-control project refresh {root}" if root else \
-        "lane-control project refresh <project> for each project on this machine"
-    print(f"next: {where}")
+    print(next_line(root))
     return 0
 
 
@@ -116,7 +135,7 @@ def rows_of(store) -> list:
 
 
 def cmd_list(group: str, argv: list) -> int:
-    ap = argparse.ArgumentParser(prog=f"lane-control {group} extras list")
+    ap = Parser(prog=f"lane-control {group} extras list")
     if group == "project":
         ap.add_argument("project")
     ap.add_argument("--json", action="store_true")
@@ -127,9 +146,8 @@ def cmd_list(group: str, argv: list) -> int:
     if a.json:
         print(json.dumps({"extras": rows, "off": off}, indent=2))
         return 0
-    title = f"extras of {a.project} (the machine's, then its own)" if group == "project" else \
-        "extras of this machine (defaults and the machine's own; every project gets them)"
-    print(title)
+    print(f"extras of {a.project} (the machine's, then its own)" if group == "project" else
+          "extras of this machine (defaults and the machine's own; every project gets them)")
     if not rows:
         print("  none")
     w = max([len(r["id"]) for r in rows] + [10])
@@ -145,21 +163,21 @@ def cmd_list(group: str, argv: list) -> int:
 
 
 def cmd_remove(group: str, argv: list) -> int:
-    ap = argparse.ArgumentParser(prog=f"lane-control {group} extras remove")
+    ap = Parser(prog=f"lane-control {group} extras remove")
     if group == "project":
         ap.add_argument("project")
     ap.add_argument("id")
     a = ap.parse_args(argv)
-    path, label, *_rest, root = target(group, a)
+    path, label, root = target(group, a)
+    person(f"lane-control {group} extras remove")
     print(f"{X.remove(path, a.id, group == 'machine')} ({label})")
-    where = f"lane-control project refresh {root}" if root else \
-        "lane-control project refresh <project> for each project on this machine"
-    print(f"next: {where} (it takes it out of the folders lane-control put it in)")
+    print(next_line(root) + ": it takes it out of the coordinator's files and of every worktree lane prepare wrote "
+          "in, and names each file it removes")
     return 0
 
 
 def cmd_prepare(argv: list) -> int:
-    ap = argparse.ArgumentParser(prog="lane-control lane prepare", description=(
+    ap = Parser(prog="lane-control lane prepare", description=(
         "Put a lane's or reviewer's extras in its worktree before its worker starts (Claude and OpenCode). A reviewer "
         "in the lane's worktree adds its own: the folder then holds both roles' extras."))
     ap.add_argument("project")
@@ -167,7 +185,10 @@ def cmd_prepare(argv: list) -> int:
     ap.add_argument("--role", required=True, choices=("lanes", "reviewer"))
     a = ap.parse_args(argv)
     root, st, store = X.find_project(a.project)
-    wt = Path(a.worktree).expanduser().resolve()
+    wt = Path(a.worktree).expanduser()
+    if wt.is_symlink():
+        raise X.ExtrasError(f"{wt} is a symlink: give the worktree's own path")
+    wt = wt.resolve()
     if not wt.is_dir():
         raise X.ExtrasError(f"{wt} is not a folder")
     repos = [root, *[Path(x) for x in st.get("attached") or [] if isinstance(x, str)]]
@@ -175,27 +196,22 @@ def cmd_prepare(argv: list) -> int:
     if mine is None or mine not in [X.common_dir(r) for r in repos if r.is_dir()]:
         raise X.ExtrasError(f"{wt} is not a worktree of {root} (or of a repo attached to it)")
     if wt in [r.resolve() for r in repos]:
-        raise X.ExtrasError(f"{wt} is a main checkout, the coordinator's folder: lane-control project refresh puts "
-                            "its extras there")
-    try:
-        rec = json.loads(X.record_file(wt).read_text())
-        had = [s for s in rec.get("scopes", []) if s in ("lanes", "reviewer")]
-    except (OSError, ValueError, AttributeError):
-        had = []
+        raise X.ExtrasError(f"{wt} is a main checkout, the coordinator's folder: lane-control project refresh gives "
+                            "the coordinator its extras")
+    had = [s for s in X.read_record(wt).get("scopes", []) if s in ("lanes", "reviewer")]
     scopes = [s for s in X.SCOPES if s in set(had) | {a.role}]
-    entries = X.effective(store)
-    chosen = {}
-    for s in scopes:
-        for e in X.for_scope(entries, s):
-            chosen[X.ident(e)] = e
-    lines, problems = X.apply_folder(wt, list(chosen.values()), scopes)
+    entries = X.prepare_entries(X.effective(store), scopes)
+    lines, problems = X.apply_folder(wt, entries, scopes, project=root)
     for line in lines:
         print(f"prepare: {line}")
     for p in problems:
         print(f"prepare: problem: {p}")
-    print(f"prepare: {'done' if not problems else 'incomplete'} ({', '.join(scopes)} extras in {wt}; "
-          f"{len(chosen)} extra(s))")
-    return 1 if problems else 0
+    if problems:
+        print(f"prepare: failed: none of lane-control's extras are in {wt} (all or nothing); hold the lane")
+        return 1
+    n = len([e for e in entries if not X.user_level(e) and e["kind"] != "persona"])
+    print(f"prepare: done ({', '.join(scopes)} extras in {wt}; {n} extra(s))")
+    return 0
 
 
 def main(argv=None) -> int:

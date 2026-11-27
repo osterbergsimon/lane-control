@@ -143,7 +143,8 @@ def project_todos(root: str, sha, cur) -> list:
 EXTRA_FIX = {"missing": "run lane-control project refresh {root}",
              "not applied": "run lane-control project refresh {root}",
              "changed": "add it again (lane-control project|machine extras add) to accept it, or remove it",
-             "failing": "install the command or fix the script"}
+             "failing": "fix what it names (a command, a pinned file, a committed or foreign file), then run "
+                        "lane-control project refresh {root}"}
 
 
 def extras(root: str, out: dict) -> None:
@@ -304,7 +305,7 @@ def cmd_doctor(a) -> int:
         rows = d["extras"].get(p["root"]) or []
         if rows:
             for s in X.SCOPES:
-                ids = [r["id"] for r in rows if s in r["for"] and r["id"] != "coordinator folder"]
+                ids = [r["id"] for r in rows if s in r["for"] and r["id"] != "coordinator"]
                 print(f"  extras for {s}: {', '.join(ids) or 'none'}")
             bad = [f"{r['id']} {r['state']}" for r in rows if r["state"] in X.PROBLEMS]
             print(f"  extras: {len(rows)} checked" + (f"; {', '.join(bad)}" if bad else ", all ok"))

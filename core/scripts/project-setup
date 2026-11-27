@@ -3113,26 +3113,52 @@ def extras_section(repo: Path) -> str:
     return EXTRAS.coordinator_section(repo, project_extras(repo), str(LC))
 
 
-def apply_extras(repo: Path) -> None:
-    """The custom personas rendered into .lane-control/personas/, and the coordinator's extras put in its folder, the
-    main checkout (Claude's and OpenCode's files there; lanes and reviewers get theirs from `lane-control lane
-    prepare`). What cannot be done is named, never a stop."""
+EXTRAS_FAILED = []  # what apply_extras could not do this run: refresh exits 1 after doing everything else
+
+
+def apply_extras(repo: Path) -> bool:
+    """The project's extras put in place (core/extras.py): every pinned skill fetched, whatever role it is for; the
+    custom personas rendered into .lane-control/personas/; the coordinator's own extras (Claude: files in the
+    settings store given at its launch; OpenCode: the main checkout's .opencode/); and every worktree `lane-control
+    lane prepare` wrote in applied again, so a removed extra is taken out there too. Each part is all or nothing; what
+    cannot be done is named and makes refresh exit 1. True when the coordinator's extras changed (it must restart)."""
     entries = project_extras(repo)
+    coord = EXTRAS.for_scope(entries, "coordinator")
+    lines, problems = [], []
     try:
-        lines, problems = EXTRAS.render_personas(repo, entries, lambda name: additions(repo, name))
-        more, more_problems = EXTRAS.apply_folder(repo, EXTRAS.for_scope(entries, "coordinator"), ["coordinator"])
+        for e in entries:
+            if e["kind"] == "skill" and not EXTRAS.user_level(e):
+                why = EXTRAS.ensure_skill(e)
+                if why:
+                    problems.append(f"{EXTRAS.ident(e)}: {why}")
+        more, more_problems = EXTRAS.render_personas(repo, entries, lambda name: additions(repo, name))
+        lines, problems = lines + more, problems + more_problems
+        launch, launch_problems = EXTRAS.apply_launch(store_dir(repo), coord)
+        folder, folder_problems = EXTRAS.apply_folder(repo, coord, ["coordinator"], claude=False, project=repo)
+        changed = bool(launch or folder)
+        lines, problems = lines + launch + folder, problems + [f"coordinator: {p}" for p in
+                                                               launch_problems + folder_problems]
+        for wt, rec in EXTRAS.recorded_worktrees(repo):
+            scopes = [x for x in rec.get("scopes", []) if x in ("lanes", "reviewer")]
+            got, wt_problems = EXTRAS.apply_folder(wt, EXTRAS.prepare_entries(entries, scopes), scopes, project=repo)
+            lines += got
+            problems += [f"worktree {wt}: {p}" for p in wt_problems]
     except EXTRAS.ExtrasError as e:
         raise Fail(f"extras: {e}")
-    lines, problems = lines + more, problems + more_problems
-    if not entries or (not lines and not problems and all(EXTRAS.user_level(e) for e in entries)):
-        return
+    except OSError as e:
+        raise Fail(f"extras: {e}")
     for line in lines:
         say("extras", "updated", line)
-    for line in problems:
+    for line in dict.fromkeys(problems):
         say("extras", "missing", line)
-    if not lines and not problems:
+    if problems:
+        EXTRAS_FAILED.append(repo)
+        say("extras", "failed", "where a problem is named, that folder keeps none of lane-control's extras (all or "
+                                f"nothing): fix it, then lane-control project refresh {shlex.quote(str(repo))}")
+    elif not lines and any(not EXTRAS.user_level(e) for e in entries):
         say("extras", "exists", f"{len([e for e in entries if not EXTRAS.user_level(e)])} extra(s) in place "
                                 f"(lane-control project extras list {shlex.quote(str(repo))})")
+    return changed
 
 
 def exclude_local(repo: Path) -> str:
@@ -3183,7 +3209,8 @@ def native_personas(repo: Path, project: str, pins: dict, mode: str, tier_text: 
         if state == "updated":
             changed.append(role)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
-    apply_extras(repo)
+    if apply_extras(repo) and before and "coordinator" not in changed:
+        changed.append("coordinator")  # its extras changed: it loads them at its next start
     persona_anchor(repo, project)
     record_version(repo, before)
     return changed
@@ -3264,7 +3291,8 @@ def check_extras(repo: Path) -> bool:
     fix = {"missing": f"lane-control project refresh {shlex.quote(str(repo))}",
            "not applied": f"lane-control project refresh {shlex.quote(str(repo))}",
            "changed": "add it again (lane-control project|machine extras add) to accept it, or remove it",
-           "failing": "install the command or fix the script, then check again"}
+           "failing": "fix what it names (a command, a committed or foreign file), then lane-control project "
+                      f"refresh {shlex.quote(str(repo))}"}
     for r in rows:
         roles = ",".join(r["for"])
         say(f"check extra {r['id']}", r["state"], f"({r['origin']}; for {roles}; {r['detail'] or r['what']}" +
@@ -3579,6 +3607,9 @@ def launcher(repo: Path, role: str, pin: tuple, mode: str, checkout: Path, title
     shell, so it only gets `sh <this file>`; the first message and the JSON go in here, quoted for sh."""
     harness, model = pin
     cmd = load_harness(harness).start_command(role, repo / ADAPTED / f"{role}.md", model, mode)
+    if harness == "claude" and role == "coordinator":  # its own extras, given at launch: no lane reads them (lc-7c6)
+        at = cmd.index("claude") + 3  # after `claude --model <model>`: every flag here takes its own value
+        cmd[at:at] = EXTRAS.launch_args(store_dir(repo))
     if harness == "claude":  # --name: SendMessage addresses the session by it
         cmd += ["--name", title] + (["--resume", resume] if resume else []) + [kickoff]
     else:
@@ -3915,16 +3946,16 @@ def native_refresh(repo: Path, a, tiers: Path) -> int:
         live = {r for r, s in session_states(place, repo, p["project"]).items() if s.live or s.doubt}  # may run
     except Fail as e:
         say("restart", "unknown", f"no Orca terminal list ({e}); restart these if running: {', '.join(changed) or 'none'}")
-        return 0
+        return 1 if repo in EXTRAS_FAILED else 0
     todo = [session_title(r, p["project"]) for r in changed if r in live]
     if todo:
-        say("restart", "needed", "; ".join(todo) + ": the persona changed. It is given again at the next compaction; "
-            "to have it now, restart (project-pause stop, then start)")
+        say("restart", "needed", "; ".join(todo) + ": the persona or its extras changed. The persona is given again at "
+            "the next compaction; the extras only at a start: restart (lane-control coordinator restart)")
     else:
         say("restart", "none", "no changed standing session is running")
     if a.name:
         settings(repo, name=a.name)
-    return 0
+    return 1 if repo in EXTRAS_FAILED else 0
 
 
 def resume_standing(repo: Path, force: bool = False, yes: bool = False) -> int:

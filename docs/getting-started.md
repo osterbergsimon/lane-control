@@ -468,20 +468,21 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
 
 ## Adding extras
 
-Give your agents more: a skill, an MCP server, a lane persona of your own, a hook, a permission, a plugin or an
-environment variable. One project, or every project on the machine:
+Give your agents more: a skill, an MCP server, a lane persona of your own or a plugin. One project, or every project on
+the machine:
 
 ```sh
 lane-control project extras add ~/code/<project> --mcp github --env GITHUB_TOKEN -- npx -y @modelcontextprotocol/server-github
 lane-control project extras add ~/code/<project> --persona migrations --prompt-file ~/notes/migrations.md --tier deep
 lane-control machine extras add --skill https://github.com/<owner>/<repo>.git@<full commit>:skills/<name> --for lanes
 lane-control project extras list ~/code/<project>    # every extra, and who gets it
-lane-control project refresh ~/code/<project>        # puts them in place; restart the coordinator to load them
+lane-control project refresh ~/code/<project>        # puts them in place; restart the coordinator to load its own
 ```
 
-`--for lanes|coordinator|reviewer|all` says who gets one (default all). A secret is never stored: name it with `--env`
-and keep its value in the agent's own environment. Lanes get theirs when the coordinator starts them; `lane-control
-project check` says what is missing or changed. More: [how the parts fit](how-it-fits.md#extras).
+Run `add` and `remove` yourself, in a terminal. `--for lanes|coordinator|reviewer|all` says who gets one (default
+all). A secret is never stored: name it with `--env` and keep its value in the agent's own environment. Lanes get
+theirs when the coordinator starts them; `lane-control project check` says what is missing or changed. More: [how the
+parts fit](how-it-fits.md#extras).
 
 ## Updating an existing host
 
