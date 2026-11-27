@@ -35,8 +35,9 @@ Kinds:
                                                            or git-url@commit:path, pinned), run through lane-control's
                                                            runner with no secret in its environment; OpenCode runs the
                                                            two tool events (the others are Claude only)
-  --permission allow|deny <rule>                           a Claude rule (Bash(npm run test *), Read(docs/**)); beside
-                                                           it lane-control's own denies, which no allow can reach
+  --permission deny <rule>                                 a Claude deny rule (Bash(git push --force *),
+                                                           Read(data/**)), with lane-control's own denies beside it;
+                                                           allow rules are not extras (lc-pwdq); on OpenCode advisory
   --env NAME=value                                         a non-secret environment value (no secret name or value,
                                                            never LANE_*, ORCA_*, HOME, XDG_*, PATH, ...)
 
@@ -108,7 +109,7 @@ def add_parser(prog: str, project: bool) -> argparse.ArgumentParser:
     ap.add_argument("--hook")
     ap.add_argument("--agent-hook", dest="agent_hook")
     ap.add_argument("--matcher")
-    ap.add_argument("--permission", nargs=2, metavar=("allow|deny", "RULE"))
+    ap.add_argument("--permission", nargs=2, metavar=("deny", "RULE"))
     ap.add_argument("--script")
     ap.add_argument("--timeout")
     ap.add_argument("--env", action="append", default=[], metavar="NAME")
@@ -271,7 +272,8 @@ def cmd_prepare(argv: list) -> int:
     for p in problems:
         print(f"prepare: problem: {p}")
     if problems:
-        print(f"prepare: failed: none of lane-control's extras are in {wt} (all or nothing); hold the lane")
+        print(f"prepare: failed: {wt} keeps only lane-control's protections (deny rules, the floor, agent hooks); "
+              "hold the lane")
         return 1
     n = len([e for e in entries if not X.user_level(e) and e["kind"] not in ("persona", "hook")])
     if a.role == "lanes":

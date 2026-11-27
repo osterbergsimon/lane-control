@@ -11,8 +11,10 @@ everything, ask for .env reads); `policies` with action tool.use run after every
 turn allow or ask into deny.
 
 So lane-control writes its floor (secrets, auth files, the agents' own settings, --private paths, credential commands)
-as Claude deny rules and as OpenCode tool.use deny policies, puts every deny after every allow on OpenCode, and refuses
-an allow whose shape reaches the floor by a route rules do not bind (a shell, an interpreter, a file reader)."""
+beside the owner's deny rules, as Claude deny rules and as OpenCode deny rules and tool.use deny policies, and never
+writes an allow (an allow on OpenCode would lift a deny someone else wrote; allow extras are lc-pwdq). On Claude the
+floor binds Claude's file tools and the file commands it recognises; on OpenCode it is advisory: 2.2.1's grep tool, its
+shell and a read through a link never present the resource the floor names (lc-mpb5)."""
 import os
 import re
 
@@ -49,18 +51,20 @@ class RuleError(Exception):
 
 HOME_SECRETS = (".ssh/**", ".gnupg/**", ".aws/**", ".azure/**", ".kube/**", ".config/gcloud/**", ".config/gh/**",
                 ".docker/config.json", ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".password-store/**",
-                ".local/share/keyrings/**", ".claude/.credentials.json", ".local/share/opencode/auth.json",
-                ".codex/auth.json")
+                ".local/share/keyrings/**", ".claude/.credentials.json", ".claude.json",
+                ".local/share/opencode/auth.json", ".local/share/opencode/opencode.db*", ".codex/auth.json")
 REPO_SECRETS = (".env", ".env.*")  # at any depth (templates too: Claude cannot carve one out of a deny)
 # what an agent could rewrite to change its own rules, hooks, MCP servers or instructions (not Claude's own memory and
 # plan files under ~/.claude/projects and ~/.claude/plans, which it writes itself)
 HOME_NO_EDIT = (".claude/settings.json", ".claude/settings.local.json", ".claude/CLAUDE.md", ".claude/skills/**",
                 ".claude/agents/**", ".claude/commands/**", ".claude/hooks/**", ".claude/plugins/**",
-                ".claude/output-styles/**", ".claude.json", ".config/opencode/**", ".config/lane-control/**",
+                ".claude/output-styles/**", ".config/opencode/**", ".config/lane-control/**",
                 ".local/share/lane-control/**", ".local/state/lane-control/**", ".agents/**")
 COMMANDS = ("gh auth token *", "gh auth status --show-token *", "gh auth status -t *", "git credential *",
-            "git credential-store *", "git credential-cache *", "printenv *", "env", "security find-generic-password *",
-            "security find-internet-password *", "secret-tool lookup *", "secret-tool search *")
+            "git credential-store *", "git credential-cache *", "printenv *", "env", "export -p", "declare -p *",
+            "declare -x *", "security find-generic-password *", "security find-internet-password *",
+            "secret-tool lookup *", "secret-tool search *")
+XDG = {".config/": "config", ".local/share/": "data", ".local/state/": "state", ".claude/": "claude"}
 
 
 def private_glob(g: str) -> str:
@@ -69,23 +73,49 @@ def private_glob(g: str) -> str:
     return g + "**" if g.endswith("/") else g
 
 
-def floor(home: str, folder: str, root: str, private: list, own: list = ()) -> list:
+def home_paths(home: str, rel: str, dirs: dict) -> list:
+    """A path under HOME and, when it is in an XDG folder (or Claude's config folder) the environment moved, the same
+    path there too: the floor follows XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME and CLAUDE_CONFIG_DIR."""
+    out = [f"{home}/{rel}"]
+    for prefix, key in XDG.items():
+        if rel.startswith(prefix) and dirs.get(key):
+            out.append(f"{str(dirs[key]).rstrip('/')}/{rel[len(prefix):]}")
+    return list(dict.fromkeys(out))
+
+
+def floor(home: str, folder: str, root: str, private: list, own: list = (), dirs: "dict | None" = None,
+          part: str = "full") -> list:
     """lane-control's own denies for a session in `folder` (a lane's worktree, or the main checkout `root`), as
     neutral items: {"op": "read"|"edit", "abs": absolute glob} (a read item denies edits too), {"op": "read", "any":
     glob} (anywhere: in this folder, the main checkout and every worktree of the project, wherever Orca put it),
     {"op": "cmd", "cmd": pattern}. `own`: the files lane-control writes in that folder (relative), which the session
-    may not edit."""
+    may not edit. part "guard" (agent hooks with no deny rule): only the edits that would take a guard out (the files
+    written here, the agents' settings, lane-control's own folders)."""
     home, folder, root = (str(x).rstrip("/") for x in (home, folder, root))
-    items = [{"op": "read", "abs": f"{home}/{s}"} for s in HOME_SECRETS]
-    items += [{"op": "read", "any": n} for n in REPO_SECRETS]
-    for g in private or []:
-        items.append({"op": "read", "abs": f"{root}/{private_glob(g)}"})
-        items.append({"op": "read", "any": private_glob(g)})
-    items += [{"op": "edit", "abs": f"{home}/{s}"} for s in HOME_NO_EDIT]
+    dirs = dirs or {}
+    items = []
+    if part == "full":
+        items += [{"op": "read", "abs": p} for s in HOME_SECRETS for p in home_paths(home, s, dirs)]
+        items += [{"op": "read", "any": n} for n in REPO_SECRETS]
+        for g in private or []:
+            items.append({"op": "read", "abs": f"{root}/{private_glob(g)}"})
+            items.append({"op": "read", "any": private_glob(g)})
+    items += [{"op": "edit", "abs": p} for s in HOME_NO_EDIT for p in home_paths(home, s, dirs)]
     items.append({"op": "edit", "abs": f"{root}/.claude/settings.local.json"})
     items += [{"op": "edit", "abs": f"{folder}/{rel}"} for rel in own]
-    items += [{"op": "cmd", "cmd": c} for c in COMMANDS]
-    return items
+    if part == "full":
+        items += [{"op": "cmd", "cmd": c} for c in COMMANDS]
+    seen, out = set(), []
+    for it in items:
+        k = json_key(it)
+        if k not in seen:
+            seen.add(k)
+            out.append(it)
+    return out
+
+
+def json_key(it: dict) -> str:
+    return "|".join(f"{k}={it[k]}" for k in sorted(it))
 
 
 def claude_path(abs_glob: str, home: str) -> str:
@@ -139,26 +169,10 @@ def opencode_floor(items: list, folder: str) -> list:
 
 # --- rules: parse, refuse, translate --------------------------------------------------------------------------------
 
-EFFECTS = ("allow", "deny")
+EFFECTS = ("deny",)  # allow rules are not extras: lc-pwdq
 TOOL = re.compile(r"[A-Za-z*][A-Za-z0-9_*-]{0,127}")
 MCP = re.compile(r"mcp__([A-Za-z0-9_-]+?)__([A-Za-z0-9_*-]+)")
 FILE_TOOLS = ("Read", "Edit", "Write", "NotebookEdit")
-SHELL_OPS = set(";&|<>$`\\(){}\n\r")
-# Programs a Bash allow may not name: each can read (or send) any file, or run any command, by itself, which no Read
-# deny binds (Claude says so for a program that opens files itself).
-REFUSED_PROGRAMS = frozenset("""
-sh bash zsh fish dash ksh mksh csh tcsh busybox
-python python2 python3 pypy pypy3 node nodejs deno bun ruby irb perl php lua luajit tclsh wish Rscript R julia java
-jshell kotlin scala groovy osascript pwsh powershell awk gawk mawk nawk sed vim vi nvim emacs ed ex nano
-cat head tail less more bat tac nl od xxd hexdump strings base64 base32 grep egrep fgrep rg ag ack find fd locate
-tar zip unzip gzip gunzip zcat bzip2 bzcat xz xzcat zstd 7z cpio dd cp mv ln install rsync scp sftp
-curl wget nc ncat netcat socat ssh telnet ftp http https httpie aria2c
-env sudo su doas xargs exec eval command builtin nohup timeout time nice ionice setsid stdbuf watch flock script
-expect parallel chroot unshare nsenter strace ltrace gdb
-npx bunx pnpx uvx pipx docker podman nerdctl kubectl nix nix-shell nix-build direnv devbox mise asdf
-""".split())
-GIT_REFUSED = ("config", "credential", "credential-store", "credential-cache", "filter-branch", "difftool",
-               "mergetool", "submodule", "daemon", "upload-pack", "receive-pack", "archive")
 
 
 def parse(rule: str) -> tuple:
@@ -173,42 +187,41 @@ def parse(rule: str) -> tuple:
     return m[1], (spec.strip() if spec is not None else None)
 
 
-def secretish(rule: str) -> bool:
-    """A rule that carries what looks like a key, a password in a URL or an auth header: refused, never shown."""
-    return key_like(rule) or bool(re.search(r"://[^/@\s]*:[^/@\s]*@", rule)) or \
-        bool(re.search(r"(authorization\s*:|\bbearer\s+[A-Za-z0-9._~+/-]{8,})", rule, re.I))
+# a secret-named key or option given a value: name=value, name: value, "name": "value", --name value, --name=value
+KEY_VALUE = re.compile(r"""(?P<q>["']?)(?P<k>[A-Za-z_][A-Za-z0-9_.-]{0,63})(?P=q)(?P<sep>\s*[:=]\s*)"""
+                       r"""(?P<v>"[^"]*"|'[^']*'|[^\s,;&}\]]+)""")
+OPTION_VALUE = re.compile(r"(?P<k>--?[A-Za-z][A-Za-z0-9_-]{0,63})(?P<sep>\s+)(?P<v>[^\s-]\S*)")
+REF_ONLY = re.compile(r"""["']?\$\{[A-Z][A-Z0-9_]{0,127}\}["']?""")
+MORE_KEYS = re.compile(r"(?<![A-Za-z0-9])(?:sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xapp-|npm_|pypi-|"
+                       r"AGE-SECRET-KEY-)[A-Za-z0-9_-]{12,}|X-Amz-(?:Signature|Credential|Security-Token)=", re.I)
+PASSWORD_FLAG = re.compile(r"\b(?:sshpass\s+-p\s*\S+|(?:mysql|mysqldump|mysqladmin|mariadb)\b[^|;&]*\s-p\S+)")
+
+
+def secret_text(text: str, secret_name) -> bool:
+    """Best effort: text (an env value, a rule) that carries a secret: a key's real shape, a password in a URL, an
+    auth header, a secret-named assignment, JSON key, option or query parameter given a value (a ${NAME} reference is
+    fine), or a password after sshpass -p or mysql -p. A short password after another program's -p cannot be told from
+    anything else."""
+    if key_like(text) or MORE_KEYS.search(text) or PASSWORD_FLAG.search(text) or \
+            re.search(r"://[^/@\s]*:[^/@\s]*@", text) or \
+            re.search(r"(authorization\s*:|\bbearer\s+[A-Za-z0-9._~+/-]{8,})", text, re.I):
+        return True
+    for rx in (KEY_VALUE, OPTION_VALUE):
+        for m in rx.finditer(text):
+            name = m["k"].lstrip("-").replace("-", "_").replace(".", "_")
+            if secret_name(name) and not REF_ONLY.fullmatch(m["v"]) and not re.fullmatch(r"[*?)\"']*", m["v"]):
+                return True
+    return False
+
+
+def secretish(rule: str, secret_name=None) -> bool:
+    """A rule that carries what looks like a secret: refused, never shown."""
+    return secret_text(rule, secret_name or (lambda n: False))
 
 
 def bash_spec(spec: str) -> str:
     """`:*` at the end is the same as ` *` (Claude: only recognised at the end)."""
     return spec[:-2] + " *" if spec.endswith(":*") else spec
-
-
-def glob_intersect(a: str, b: str) -> bool:
-    """Whether some text matches both wildcard patterns (`*` any run, `?` one character, the rest literal)."""
-    seen, todo = set(), [(0, 0)]
-    while todo:
-        i, j = todo.pop()
-        if (i, j) in seen:
-            continue
-        seen.add((i, j))
-        if i == len(a) and j == len(b):
-            return True
-        if i < len(a) and a[i] == "*":
-            todo.append((i + 1, j))
-        if j < len(b) and b[j] == "*":
-            todo.append((i, j + 1))
-        if i < len(a) and j < len(b):
-            x, y = a[i], b[j]
-            if x == "*" and y == "*":
-                todo += [(i, j + 1), (i + 1, j)]
-            elif x == "*":
-                todo.append((i, j + 1))
-            elif y == "*":
-                todo.append((i + 1, j))
-            elif x == "?" or y == "?" or x == y:
-                todo.append((i + 1, j + 1))
-    return False
 
 
 def command_forms(p: str) -> list:
@@ -217,83 +230,8 @@ def command_forms(p: str) -> list:
     return [p, p[:-2]] if p.endswith(" *") and p.count("*") == 1 else [p]
 
 
-def allow_problem(rule: str, privates: list) -> tuple:
-    """(why it is refused or None, notes) for an allow rule. privates: the --private globs of every project it
-    applies to, repo-relative."""
-    if secretish(rule):
-        return "it looks like it carries a key, token or password", []
-    tool, spec = parse(rule)
-    if tool in ("Glob", "Grep"):
-        return f"Claude does not match a {tool}(path) rule against a search: allow Read(<path>) instead", []
-    if tool == "WebSearch":
-        return None, []
-    m = MCP.fullmatch(tool)
-    if m:
-        if "*" in m[1] or spec is not None:
-            return "an MCP allow names one server: mcp__<server>__<tool> or mcp__<server>__*", []
-        return None, []
-    if spec is None or spec.strip("* ") == "":
-        return (f"a bare {tool} (or {tool}(*)) allows every use of it, the floor's files and commands too: name what "
-                "it may do"), []
-    if tool == "Bash":
-        return bash_problem(spec)
-    if tool in FILE_TOOLS:
-        return path_problem(spec, privates)
-    if tool == "WebFetch":
-        return (None, []) if re.fullmatch(r"domain:[A-Za-z0-9.-]+", spec) else \
-            ("a WebFetch allow is WebFetch(domain:<host>)", [])
-    if tool in ("Skill", "Agent"):
-        return (None, []) if re.fullmatch(r"[A-Za-z0-9:_.-]+", spec) and "*" not in spec else \
-            (f"a {tool} allow names one {tool.lower()}", [])
-    return f"lane-control does not know what an allow for {tool} gives, so it is not taken (a deny is)", []
-
-
-def bash_problem(spec: str) -> tuple:
-    s = bash_spec(spec)
-    if SHELL_OPS & set(s):
-        return "it holds a shell operator, redirection or substitution: allow one plain command", []
-    if s.startswith(("*", " ")) or "*" in s.rstrip("*").rstrip() or s.count("*") > 1 or \
-            ("*" in s and not s.endswith(" *")):
-        return ("a Bash allow has at most one wildcard, at the end after a space (`Bash(npm run test *)`): a "
-                "wildcard before or inside the command matches other programs"), []
-    words = s[:-2].split() if s.endswith(" *") else s.split()
-    prog = words[0]
-    if "/" in prog or prog.startswith(("~", ".")) or "=" in prog:
-        return "it names a program by a path or sets a variable first: name the program on the PATH", []
-    if prog in REFUSED_PROGRAMS:
-        return (f"{prog} can read any file or run any command by itself, which no deny rule binds (Claude's Read "
-                "denies do not reach a program's own reads): lane-control never allows it"), []
-    if s.endswith(" *") and len(words) == 1:
-        return f"name {prog}'s subcommand before the wildcard (`Bash({prog} <subcommand> *)`, Claude's advice)", []
-    if prog == "git" and len(words) > 1 and (words[1].startswith("-") or words[1] in GIT_REFUSED):
-        return f"git {words[1]} can run a program or print a credential: name a plain git subcommand", []
-    for c in COMMANDS:
-        if any(glob_intersect(x, y) for x in command_forms(s) for y in command_forms(c)):
-            return f"it overlaps lane-control's deny of `{c}` (a command that prints a credential)", []
-    return None, [f"note: Bash({spec}) runs {prog}: what that program reads or runs itself (the project's own code, "
-                  "which a lane can change) is not bound by any rule"]
-
-
-def path_problem(spec: str, privates: list) -> tuple:
-    p = spec.strip()
-    if p.startswith(("/", "~", "*", "$")) or "\\" in p:
-        return ("a file allow is a plain path relative to the session's folder (`src/**`): no leading /, //, ~ or "
-                "wildcard"), []
-    parts = p.split("/")
-    if any(x in ("", ".", "..") or x.startswith(".") for x in parts[:-1] + ([parts[-1]] if parts[-1] else [])):
-        return "a file allow has no empty, `.` or `..` part and no dot-file or dot-folder (.env, .claude, .git)", []
-    if parts[-1] == "":
-        return "end a folder with ** (`docs/**`)", []
-    pat = oc_glob(p)
-    for g in privates or []:
-        gp = oc_glob(private_glob(g))
-        if glob_intersect(pat, gp) or glob_intersect(pat, gp + "/*") or glob_intersect(pat + "/*", gp):
-            return f"it overlaps a --private path ({g}) of a project it applies to", []
-    return None, []
-
-
-def deny_problem(rule: str) -> "str | None":
-    if secretish(rule):
+def deny_problem(rule: str, secret_name=None) -> "str | None":
+    if secretish(rule, secret_name):
         return "it looks like it carries a key, token or password"
     parse(rule)
     return None
@@ -341,21 +279,17 @@ def oc_paths(spec, home: str, folder: str) -> list:
     return list(dict.fromkeys(out))
 
 
-def claude_permissions(allows: list, denies: list, items: list, home: str) -> dict:
-    out = {}
-    if allows:
-        out["allow"] = list(dict.fromkeys(allows))
-    out["deny"] = list(dict.fromkeys(list(denies) + claude_floor(items, home)))
-    return out
+def claude_permissions(denies: list, items: list, home: str) -> dict:
+    """{"deny": the owner's denies and the floor}: lane-control never writes an allow."""
+    return {"deny": list(dict.fromkeys(list(denies) + claude_floor(items, home)))}
 
 
-def opencode_permissions(allows: list, denies: list, items: list, home: str, folder: str) -> tuple:
-    """(permissions, policies): the owner's allows, then the owner's denies (a deny always after any allow: the last
-    match wins), and every deny again, with the floor, as tool.use deny policies, which no allow can lift."""
-    perms = [{"action": a, "resource": r, "effect": "allow"} for rule in allows for a, r in
-             to_opencode(rule, home, folder)]
+def opencode_permissions(denies: list, items: list, home: str, folder: str) -> tuple:
+    """(permissions, policies): the owner's denies as rules, and every deny again, with the floor, as tool.use deny
+    policies (nothing a later rule or saved approval allows lifts one). lane-control never writes an allow: on
+    OpenCode, whose last match wins, it would lift a deny the owner's global config or an agent wrote."""
     deny_pairs = [(a, r) for rule in denies for a, r in to_opencode(rule, home, folder)]
-    perms += [{"action": a, "resource": r, "effect": "deny"} for a, r in deny_pairs]
+    perms = [{"action": a, "resource": r, "effect": "deny"} for a, r in deny_pairs]
     policies = [{"action": "tool.use", "resource": f"{a}:{r}", "effect": "deny"} for a, r in deny_pairs]
     policies += opencode_floor(items, folder)
     seen, uniq = set(), []
@@ -497,10 +431,14 @@ def opencode_decision(permissions: list, policies: list, action: str, resource: 
 
 AGENT_EVENTS = ("PreToolUse", "PostToolUse", "SessionStart", "Stop")
 OPENCODE_EVENTS = {"PreToolUse": "execute.before", "PostToolUse": "execute.after"}  # the others: Claude only
-TOOL_NAMES = {"Bash": "shell", "Read": "read", "Edit": "edit", "Write": "write", "Glob": "glob", "Grep": "grep",
-              "WebFetch": "webfetch", "WebSearch": "websearch", "Task": "task", "Agent": "task", "Skill": "skill"}
+# Claude's tool names and the OpenCode 2.2.1 tools that do the same: Edit and Write also run as `patch` (2.2.1 offers
+# patch instead of edit and write to some models), Task and Agent are `subagent`.
+TOOL_NAMES = {"Bash": ["shell"], "Read": ["read"], "Edit": ["edit", "patch"], "MultiEdit": ["edit", "patch"],
+              "Write": ["write", "patch"], "Glob": ["glob"], "Grep": ["grep"], "WebFetch": ["webfetch"],
+              "WebSearch": ["websearch"], "Task": ["subagent"], "Agent": ["subagent"], "Skill": ["skill"]}
 AGENT_HOOK_TIMEOUT = 60
 AGENT_HOOK_TIMEOUT_MAX = 600
+HOOK_MARGIN = 30  # Claude's (and the plugin's) timeout past the runner's: its start, the copy, the stop grace
 
 
 def matcher(text: "str | None", event: str) -> "str | None":
@@ -515,22 +453,36 @@ def matcher(text: "str | None", event: str) -> "str | None":
     return text
 
 
-def opencode_tools(m: "str | None") -> "list | None":
+def opencode_tools(m: "str | None") -> tuple:
+    """(OpenCode tool ids a matcher means, or None for every tool; the names it holds with no OpenCode tool)."""
     if m is None:
-        return None
-    out = []
+        return None, []
+    out, none = [], []
     for n in m.split("|"):
         mm = MCP.fullmatch(n)
-        out.append(re.sub(r"[^A-Za-z0-9_*-]", "_", f"{mm[1]}_{mm[2]}") if mm else TOOL_NAMES.get(n, n.lower()))
-    return out
+        if mm:
+            out.append(re.sub(r"[^A-Za-z0-9_*-]", "_", f"{mm[1]}_{mm[2]}"))
+        elif n in TOOL_NAMES:
+            out += TOOL_NAMES[n]
+        else:
+            none.append(n)
+    return list(dict.fromkeys(out)), none
 
 
 # --- env values ---------------------------------------------------------------------------------------------------
 
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
-RESERVED = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "BASH_ENV", "ENV", "NODE_OPTIONS", "PYTHONSTARTUP",
-            "PYTHONHOME", "PROMPT_COMMAND", "IFS")
-RESERVED_PREFIXES = ("LANE_", "ORCA_", "XDG_", "LD_", "DYLD_", "CLAUDE_", "ANTHROPIC_", "OPENCODE_", "GIT_", "SSH_")
+# names lane-control, the harness or the shell run on, or that redirect where an agent talks to or what it runs
+RESERVED = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS", "CDPATH",
+            "NO_PROXY", "MAKEFLAGS", "MFLAGS", "MAKEFILES", "PAGER", "EDITOR", "VISUAL", "BROWSER", "LESSOPEN",
+            "PERL5OPT", "PERL5LIB", "PERLLIB", "RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS",
+            "JDK_JAVA_OPTIONS", "CLASSPATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE", "GOFLAGS", "RUSTC_WRAPPER", "CC", "CXX", "LD", "PKG_CONFIG_PATH")
+RESERVED_PREFIXES = ("LANE_", "ORCA_", "XDG_", "LD_", "DYLD_", "CLAUDE_", "ANTHROPIC_", "OPENCODE_", "OPENAI_",
+                     "CODEX_", "GIT_", "GH_", "SSH_", "GPG_", "NODE_", "NPM_CONFIG_", "PYTHON", "DOCKER_", "AWS_",
+                     "OTEL_", "BUN_", "DENO_", "CARGO_", "PIP_", "UV_", "PNPM_", "YARN_")
+RESERVED_SUFFIXES = ("_PROXY", "_PRELOAD", "_BASE_URL", "_API_BASE", "_ENDPOINT", "_CA_BUNDLE", "_CA_CERTS",
+                     "_OPTIONS", "_OPTS", "_SHELL", "_HOOK", "_HOOKS", "_COMMAND", "_WRAPPER")
 
 
 def env_problem(name: str, value: str, secret_name, opaque, token_value, userinfo, secret_query,
@@ -538,15 +490,17 @@ def env_problem(name: str, value: str, secret_name, opaque, token_value, userinf
     """Why an env value is refused (the checks of core/extras.py passed in), or None. Never says the value."""
     if not ENV_NAME.fullmatch(name or ""):
         return "the name is capitals, digits and _ (for example APP_MODE)"
-    if name in RESERVED or name.startswith(RESERVED_PREFIXES):
-        return (f"{name} is one lane-control, the harness or the shell runs on (LANE_*, ORCA_*, HOME, XDG_*, PATH, "
-                "CLAUDE_*, GIT_*, LD_*, ...): it is never set by an extra")
+    if name in RESERVED or name.startswith(RESERVED_PREFIXES) or name.endswith(RESERVED_SUFFIXES):
+        return (f"{name} is one lane-control, the harness or the shell runs on, or one that redirects where an agent "
+                "talks to or what it runs (LANE_*, ORCA_*, HOME, XDG_*, PATH, CLAUDE_*, GIT_*, NODE_*, PYTHON*, "
+                "*_PROXY, *_PRELOAD, *_BASE_URL, ...): it is never set by an extra")
     if secret_name(name):
         return f"{name} looks like a secret's name: a secret is never stored; keep it in the agent's own environment"
     if value is None or len(value) > 1000 or any(ord(c) < 32 or ord(c) == 127 for c in value):
         return "the value is one line of at most 1000 characters"
-    if key_like(value) or token_value.search(value) or userinfo.search(value) or secret_query.search(value) or \
-            auth_text.search(value) or opaque(value) or any(opaque(x) for x in re.split(r"[\s=:,;\"'{}@/]+", value)):
+    if secret_text(value, secret_name) or token_value.search(value) or userinfo.search(value) or \
+            secret_query.search(value) or auth_text.search(value) or opaque(value) or \
+            any(opaque(x) for x in re.split(r"[\s=:,;\"'{}@/]+", value)):
         return "the value looks like a key, token or password: a secret is never stored or shown"
     return None
 

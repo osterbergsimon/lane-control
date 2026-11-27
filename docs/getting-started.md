@@ -484,23 +484,24 @@ all). A secret is never stored: name it with `--env` and keep its value in the a
 theirs when the coordinator starts them; `lane-control project check` says what is missing or changed. More: [how the
 parts fit](how-it-fits.md#extras).
 
-Permission rules, the agents' own hooks and plain env values are extras too:
+Deny rules, the agents' own hooks and plain env values are extras too:
 
 ```sh
-lane-control project extras add ~/code/<project> --permission allow 'Bash(npm run test *)' --for lanes
 lane-control project extras add ~/code/<project> --permission deny 'Bash(git push --force *)'
 lane-control project extras add ~/code/<project> --agent-hook PreToolUse --matcher 'Bash' -- ~/hooks/guard.sh
 lane-control project extras add ~/code/<project> --env APP_MODE=test --for lanes
 ```
 
-Beside any rule, lane-control keeps its own denies: no allow reaches your secrets, auth files, `.env` files,
-`--private` paths, the agents' own settings or a command that prints a credential, on Claude and OpenCode alike. An
-allow that could get there another way (a bare `Bash`, a shell or interpreter, a file reader, a path outside the
-folder) is refused, and add tells you what a program you allow reads by itself is not bound by any rule. An agent
-hook is your own script, pinned like a lifecycle hook and run from a checked copy with no secret in its environment;
-after editing it, add it again (until then it is refused, and a PreToolUse one blocks). An env value is never a
-secret, and never one of lane-control's or the harness's own names (`LANE_*`, `ORCA_*`, `HOME`, `XDG_*`, `PATH`,
-...). More: [rules, agent hooks and env](how-it-fits.md#permission-rules-agent-hooks-and-env-values).
+Only deny rules: an allow is refused for now (lc-pwdq). Beside a deny rule lane-control writes its own denies, for
+your secrets, auth files, `.env` files, `--private` paths, the agents' own settings and the commands that print a
+credential. On Claude they hold over any allow. On OpenCode they are advisory: its grep tool, its shell and a read
+through a link get past them (lc-mpb5), so do not count on them to keep a secret from an OpenCode lane. An agent hook
+is your own script, pinned like a lifecycle hook and run from a checked copy with no secret in its environment; a
+PreToolUse one fails closed (a timeout, a crash or a changed script blocks the call), so after editing it, add it
+again. A refresh or prepare that hits a problem keeps every deny and hook in place and takes out only what grants.
+An env value is never a secret, and never a name lane-control, the harness or the shell runs on, or one that
+redirects traffic or code (`LANE_*`, `ORCA_*`, `HOME`, `XDG_*`, `PATH`, `*_PROXY`, `NODE_OPTIONS`, ...). More: [deny
+rules, agent hooks and env](how-it-fits.md#deny-rules-agent-hooks-and-env-values).
 
 Hooks are your own scripts that lane-control runs at a moment of a lane's life, not an agent's extras:
 

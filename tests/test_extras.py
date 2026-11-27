@@ -217,7 +217,7 @@ class StoreTests(Scratch):
 
     def test_one_kind_at_a_time_and_env_names_only_with_mcp(self):
         # agent hooks, permission rules and env values are kinds since lc-yw1g: tests/test_extras_rules.py
-        self.refused("project", "add", self.repo, "--permission", "allow", "Bash(make:*)", says="subcommand")
+        self.refused("project", "add", self.repo, "--permission", "allow", "Bash(make:*)", says="deny rules only")
         self.refused("project", "add", self.repo, "--env", "GITHUB_TOKEN", says="exactly one kind")
         self.refused("project", "add", self.repo, "--plugin", "opencode:x@1.0.0", "--env", "A", says="for --mcp only")
         self.assertEqual(self.stored(), [])
@@ -794,7 +794,7 @@ class RoundTwoTests(Scratch):
     def test_m6_no_text_names_the_removed_kinds_as_extras(self):
         self.assertIn("skills, MCP, personas, rules, env", F.ROUTES[("project", "extras")][3])
         text = (ROOT / "docs" / "how-it-fits.md").read_text()
-        self.assertIn("your skills, MCP servers, personas, plugins, agent hooks, permission rules and env",
+        self.assertIn("your skills, MCP servers, personas, plugins, agent hooks, deny rules and env",
                       " ".join(text.split()))
         self.assertNotIn("are not extras yet", text)
 

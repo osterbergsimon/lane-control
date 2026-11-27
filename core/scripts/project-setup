@@ -3170,8 +3170,9 @@ def apply_extras(repo: Path) -> bool:
         say("extras", "missing", line)
     if problems:
         EXTRAS_FAILED.append(repo)
-        say("extras", "failed", "where a problem is named, that folder keeps none of lane-control's extras (all or "
-                                f"nothing): fix it, then lane-control project refresh {shlex.quote(str(repo))}")
+        say("extras", "failed", "where a problem is named, that folder keeps only lane-control's protections (deny "
+                                "rules, the floor, agent hooks) and none of what grants: fix it, then lane-control "
+                                f"project refresh {shlex.quote(str(repo))}")
     elif not lines and any(not EXTRAS.user_level(e) for e in entries):
         say("extras", "exists", f"{len([e for e in entries if not EXTRAS.user_level(e)])} extra(s) in place "
                                 f"(lane-control project extras list {shlex.quote(str(repo))})")

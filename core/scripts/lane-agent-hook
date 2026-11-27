@@ -13,9 +13,10 @@ JSON on stdin passed through and its stdout, stderr and exit code passed back. I
 _NAME, _HARNESS: none of the agent's other variables, so no token or key. Its own process group, stopped at its
 timeout and when the runner is stopped.
 
-A hook it cannot run as added (changed, missing, removed, not fetched) is refused, never skipped in silence: for
-PreToolUse the tool call is blocked (exit 2, the reason on stderr), for the other events the error is reported (exit
-1) and the session goes on. A timeout is the same."""
+A hook it cannot run as added (changed, missing, removed, not fetched), a timeout, and any error of the runner's own
+are refused, never skipped in silence: for PreToolUse the tool call is blocked (exit 2, the reason on stderr), for the
+other events the error is reported (exit 1) and the session goes on. Claude also has onFailure block on a PreToolUse
+entry, with its timeout past this one, so a runner that hangs or cannot start blocks too."""
 import importlib.util
 import os
 import shutil
@@ -53,6 +54,16 @@ def env_for(H, e: dict, event: str, harness: str) -> dict:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    event = next((a for a in argv if a in ("PreToolUse", "PostToolUse", "SessionStart", "Stop")), "PreToolUse")
+    try:
+        return run(argv)
+    except BaseException as err:  # anything unforeseen fails closed for a guard
+        if isinstance(err, SystemExit) and err.code in (0, None):
+            return 0
+        return refuse(event, "agent-hook", f"the runner failed ({type(err).__name__})")
+
+
+def run(argv: list) -> int:
     harness = "claude"
     if "--harness" in argv:
         i = argv.index("--harness")
@@ -91,7 +102,10 @@ def main(argv=None) -> int:
         exe, why = H.prepared(e, d)
         if why:
             return refuse(event, what, why)
-        timeout = int(e.get("timeout") or 60)
+        try:
+            timeout = int(e.get("timeout") or 60)
+        except (TypeError, ValueError):
+            return refuse(event, what, "its timeout in the store is not a number")
         with H.guarded():
             try:
                 p = subprocess.Popen([str(exe)], env=env_for(H, e, event, harness), start_new_session=True)

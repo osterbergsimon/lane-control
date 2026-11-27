@@ -91,7 +91,7 @@ the tier rules allow for the project (`core/scripts/lane-tier`).
 - 2026-11-27 extras (lc-7c6): a folder's extras for OpenCode go in `.opencode/opencode.json` (`mcp`, with
   `{env:NAME}` for each secret; `plugin`, pinned npm packages) and `.opencode/skills/<name>` (links): the coordinator's
   in the main checkout, a lane's or reviewer's in its own worktree. Since lc-yw1g also `permissions`
-  (the owner's allows, then every deny) and `policies` (every deny and lane-control's floor as `tool.use` deny
+  (the owner's deny rules; never an allow) and `policies` (every deny and lane-control's floor as `tool.use` deny
   statements), and `.opencode/plugins/lane-control-extras.js` (env values at `shell.create.before`, agent hooks at
   `tool.execute.before|after`; 2.2.1 loads the mixed file, checked with `debug config --standalone`).
   **Not verified against a real OpenCode 2, and the first live check to run (lc-hat1):** that it reads
