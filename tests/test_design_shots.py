@@ -306,7 +306,8 @@ def real_playwright():
                      "real browser: set DESIGN_SHOTS_REAL=1 and have Playwright (DESIGN_SHOTS_PLAYWRIGHT or PATH)")
 class RealBrowserTest(unittest.TestCase):
     def test_light_and_dark_differ_on_a_themed_page(self):
-        with tempfile.TemporaryDirectory() as d:
+        # opt-out: Playwright's installed browsers are under the real ~/.cache
+        with testhome.real_home(), tempfile.TemporaryDirectory() as d:
             t = Path(d)
             site = t / "site"
             site.mkdir()

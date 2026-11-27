@@ -33,6 +33,7 @@ class DefaultHomeTests(unittest.TestCase):
         for k in ("LANE_AWAY_FILE", "LANE_BUDGET_STOPPED_FILE", "LANE_LIMITS_FILE", "LANE_PRIVATE_NAMES"):
             self.assertIn(k, testhome.FILE_OVERRIDES)
         self.assertNotIn("LANE_TEST_WATCH_HOMES", os.environ)  # WholeRunTests' child only; never handed on
+        self.assertNotIn("LANE_TEST_HOME_GUARD", os.environ)  # read once; a child run is strict unless told
 
     def test_real_home_is_the_opt_out_and_is_undone(self):
         before = dict(os.environ)
@@ -65,14 +66,31 @@ class WatchTests(unittest.TestCase):
     def changed(self):
         return testhome.differences(self.before, testhome.snapshot(self.roots))
 
-    def test_the_watched_folders(self):
-        self.assertEqual([str(r.relative_to(self.home)) for r in self.roots],
-                         [".agents", ".config/lane-control", ".local/share/lane-control", ".local/state/lane-control"])
+    def test_the_watched_folders(self):  # None: the whole tree; 1: the folder and its own entries
+        self.assertEqual({str(r.relative_to(self.home)): depth for r, depth in self.roots.items()},
+                         {".agents": None, ".cache/lane-control": None, ".config/lane-control": None,
+                          ".local/share/lane-control": None, ".local/state/lane-control": None,
+                          ".cache/fish": 1, ".cache/go-build": 1, ".cache/pnpm": 1, ".cache/pypoetry": 1,
+                          ".cache/uv": 1, ".cache/yarn": 1})
+
+    def test_a_package_cache_is_watched_one_level_down_only(self):  # the real ones are too big to walk whole
+        uv = self.home / ".cache" / "uv"
+        (uv / "sdists-v9" / "deep").mkdir(parents=True)
+        for d in (uv, uv / "sdists-v9"):
+            os.utime(d, (1_000_000, 1_000_000))
+        self.before = testhome.snapshot(self.roots)
+        (uv / "sdists-v9" / "deep" / "f").write_text("x")
+        self.assertEqual(self.changed(), [])
+        (uv / ".tmpX").mkdir()  # what `uv sync` did: a temp folder in the cache, gone again
+        (uv / ".tmpX").rmdir()
+        self.assertEqual(self.changed(), [f"changed: {uv}"])
 
     def test_a_real_xdg_dir_is_watched_too(self):
-        roots = testhome.watch_roots([self.home], {"XDG_CONFIG_HOME": "/c", "XDG_STATE_HOME": "relative"})
+        env = {"XDG_CONFIG_HOME": "/c", "XDG_STATE_HOME": "relative", "XDG_CACHE_HOME": "/k"}
+        roots = testhome.watch_roots([self.home], env)
         self.assertIn(Path("/c/lane-control"), roots)
         self.assertNotIn(Path("relative/lane-control"), roots)
+        self.assertEqual((roots[Path("/k/lane-control")], roots[Path("/k/uv")]), (None, 1))
 
     def test_nothing_changed(self):
         self.assertEqual(self.changed(), [])
@@ -108,6 +126,11 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(self.changed(), [])
 
 
+AWAY = 'mkdir -p "$REAL/.config/lane-control" && : >"$REAL/.config/lane-control/away"'
+SUITE = ("discover", "-s", "tests")
+ONE_MODULE = (*SUITE, "-p", "test_leak.py")
+
+
 class WholeRunTests(unittest.TestCase):
     """A copy of the helper and the guard module beside one leaking test, run the way the suite is run. The child's
     HOME is a temp dir standing for the real one."""
@@ -123,12 +146,15 @@ class Leak(unittest.TestCase):
                        env={"PATH": os.environ["PATH"], "REAL": str(testhome.ORIGINAL_ENV["HOME"])})
 """
 
-    def run_suite(self, leak, *args):
+    def run_suite(self, leak, *args, there=(), **extra):
         t = tempfile.TemporaryDirectory()
         self.addCleanup(t.cleanup)
         top = Path(t.name)
         (top / "tests").mkdir()
         (top / "real").mkdir()
+        for rel in there:  # folders the stand-in already has when the run starts
+            (top / "real" / rel).mkdir(parents=True)
+            os.utime(top / "real" / rel, (1_000_000, 1_000_000))
         for name in ("testhome.py", "test_zz_real_home.py"):
             shutil.copy(TESTS / name, top / "tests" / name)
         (top / "tests" / "test_leak.py").write_text(self.LEAK)
@@ -137,6 +163,8 @@ class Leak(unittest.TestCase):
             env.pop(k)
         # only the stand-in is watched here: the machine's own folders may change while this runs
         env["LANE_TEST_WATCH_HOMES"] = str(top / "real")
+        env.pop("CI", None)  # CI's own run of this suite sets it; each child run says for itself
+        env.update(extra)
         return subprocess.run([sys.executable, "-m", "unittest", *args], cwd=top, env=env, capture_output=True,
                               text=True, timeout=60), top / "real"
 
@@ -156,6 +184,43 @@ class Leak(unittest.TestCase):
         r, real = self.run_suite('mkdir -p "$REAL/.agents"', "discover", "-s", "tests", "-p", "test_leak.py")
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn(f"new: {real / '.agents'}", r.stderr)
+
+
+    def test_a_write_to_lane_controls_cache_folder_fails_the_suite(self):  # review M1
+        leak = 'mkdir -p "$REAL/.cache/lane-control/night" && : >"$REAL/.cache/lane-control/night/p.improve"'
+        r, real = self.run_suite(leak, *SUITE)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn(f"new: {real / '.cache' / 'lane-control'}", r.stderr)
+
+    def test_a_uv_run_against_the_real_cache_fails_the_suite(self):  # review M1: the leak lc-oh7l found
+        r, real = self.run_suite('mkdir "$REAL/.cache/uv/.tmpX" && rmdir "$REAL/.cache/uv/.tmpX"', *SUITE,
+                                 there=[".cache/uv"])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn(f"changed: {real / '.cache' / 'uv'}", r.stderr)
+
+    def test_the_message_names_the_machines_own_writers_and_the_opt_out(self):  # review m1
+        r, _ = self.run_suite(AWAY, *SUITE)
+        for needle in ("a write by this machine's own running services trips this too", "a coordinator's session hook",
+                       "an install", "the night automations", "LANE_TEST_HOME_GUARD=warn", "CI"):
+            self.assertIn(needle, r.stderr)
+
+    def test_warn_prints_the_paths_and_passes(self):
+        for how in (SUITE, ONE_MODULE):
+            r, real = self.run_suite(AWAY, *how, LANE_TEST_HOME_GUARD="warn")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"new: {real / '.config' / 'lane-control'}", r.stderr, how)
+            self.assertIn("WARNING, not failed (LANE_TEST_HOME_GUARD=warn)", r.stderr, how)
+            self.assertEqual(r.stderr.count("the real home changed"), 1, how)
+
+    def test_ci_stays_strict(self):
+        for how in (SUITE, ONE_MODULE):
+            r, _ = self.run_suite(AWAY, *how, LANE_TEST_HOME_GUARD="warn", CI="true")
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertNotIn("WARNING, not failed", r.stderr)
+
+    def test_only_the_word_warn_opts_out(self):
+        r, _ = self.run_suite(AWAY, *SUITE, LANE_TEST_HOME_GUARD="1")
+        self.assertEqual(r.returncode, 1, r.stderr)
 
 
 if __name__ == "__main__":

@@ -1235,6 +1235,11 @@ class ClaudeLiveTests(TempDirTest):
     MARK = "LANE-PERSONA-LIVE-CLAUDE-4821"
 
     def test_live_persona_session_record_and_idle(self):
+        # opt-out: the owner's sign-in and transcripts; the session record still goes to a temp XDG_STATE_HOME
+        with testhome.real_home():
+            self.live_run()
+
+    def live_run(self):
         pkg = load_harnesses_pkg()
         a = pkg.load_harness("claude")
         checkout = self.t / "checkout"

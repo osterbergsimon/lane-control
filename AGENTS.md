@@ -17,8 +17,9 @@ setup, notes, adapter, docs, scripts, personas, skills, templates). `scripts/orc
   you commit; examples use `user@host`, `trial-vps`, `~/code/<project>`.
 - Never edit files outside this repo. Tests write only to their own temp dirs: each `tests/test_*.py` imports
   `testhome` first (temp `HOME` and `XDG_*`), takes its own with `testhome.env_for(<temp dir>)`, and never runs a child
-  without `HOME` (it falls back to the real one). The suite fails when the real lane-control folders or `~/.agents`
-  change while it runs.
+  without `HOME` (it falls back to the real one). The suite fails when the real lane-control folders, `~/.agents` or
+  the top of a watched package cache change while it runs (`tests/testhome.py` lists them). `LANE_TEST_HOME_GUARD=warn`
+  is only for the machine's own writes on a busy machine, after reading each path; CI ignores it.
 - Scripts never run agents as root, never copy credentials (`auth.json`, `.credentials.json`, tokens) by hand, and
   never start privileged containers.
 - Beads (`bd`, prefix `lc`) lives in `~/code/lane-control-beads`; `.beads` here is a gitignored symlink. Never commit
