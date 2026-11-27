@@ -484,6 +484,23 @@ all). A secret is never stored: name it with `--env` and keep its value in the a
 theirs when the coordinator starts them; `lane-control project check` says what is missing or changed. More: [how the
 parts fit](how-it-fits.md#extras).
 
+Hooks are your own scripts that lane-control runs at a moment of a lane's life, not an agent's extras:
+
+```sh
+lane-control project extras add ~/code/<project> --hook gate --script ~/hooks/integration-tests.sh --timeout 1200
+lane-control machine extras add --hook after-merge --script ~/hooks/notify.sh
+lane-control machine extras add --hook on-report --script https://github.com/<owner>/<hooks>.git@<full commit>:notify.sh
+lane-control project hook ~/code/<project> on-report --lane APP-3 --outcome succeeded   # try one now
+```
+
+The events: `after-setup` (end of setup or refresh), `lane-start` (a lane's worktree is ready, before its agent
+starts), `gate` (before the coordinator merges: a failing one means not green, and the ratchet's away-merge refuses),
+`after-merge` and `on-report` (a lane's report, or the away watchdog's escalation); a failing `after-merge` or
+`on-report` only warns. A script gets its facts as `LANE_HOOK_*` variables (project, PR, head sha, lane, issue,
+outcome, ...), never a secret and no argument, and runs in an empty folder of its own, never in a lane's worktree,
+with a timeout (default 10 minutes). Keep it outside every project repo; it is pinned by its hash (or commit), so
+after editing it, add it again. Its exit code and last 20 lines are shown. More: [hooks](how-it-fits.md#hooks).
+
 ## Updating an existing host
 
 Each machine and each box has one installed lane-control: the whole repo at one commit, in

@@ -7,7 +7,11 @@ Kinds (one entry each, its id `<kind>:<name>`):
   mcp      an MCP server run by a command; a secret only as the NAME of an environment variable, never a value
   persona  a named lane role the coordinator can brief a lane with (a prompt file, a default tier and harness)
   plugin   a Claude or OpenCode plugin, pinned
-Agent hooks, permission rules and env values are not kinds yet: they need their own design (lc-yw1g, EXT-1b).
+  hook     a lifecycle hook (lc-76o, EXT-2): an owner's script, at an absolute path pinned by its hash or in a git repo
+           pinned at a full commit, run by lane-control at an event (after-setup, lane-start, gate, after-merge,
+           on-report); it is no role's, runs outside every session and folder, and core/hooks.py runs it
+Agent hooks (Claude's or OpenCode's own), permission rules and env values are not kinds yet: they need their own design
+(lc-yw1g, EXT-1b).
 
 Scope per extra: lanes, coordinator, reviewer (reviewer and design reviewer), or all. Stored in the project's own
 settings store (<config>/lane-control/projects/<key>/extras.json, beside its tier table) and, machine-wide, in
@@ -51,7 +55,10 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-KINDS = ("skill", "mcp", "persona", "plugin")
+KINDS = ("skill", "mcp", "persona", "plugin", "hook")
+EVENTS = ("after-setup", "lane-start", "gate", "after-merge", "on-report")  # lifecycle hooks: core/hooks.py
+HOOK_TIMEOUT = 600  # seconds, per hook, unless the owner gives --timeout
+HOOK_TIMEOUT_MAX = 6 * 3600
 SCOPES = ("lanes", "coordinator", "reviewer")
 BUILTIN_PERSONAS = frozenset({"coordinator", "reviewer", "design-reviewer", "debugger", "machine-coordinator",
                               "design-lead", "lanes", "lane", "all"})
@@ -118,6 +125,11 @@ def default_sources() -> Path:
 def extra_sources() -> Path:
     """The owner's pinned skills, apart from the defaults' so neither pass ever removes the other's."""
     return home() / ".agents" / "extras-sources" / "skills"
+
+
+def hook_sources() -> Path:
+    """The owner's git-pinned hook scripts' checkouts."""
+    return home() / ".agents" / "extras-sources" / "hooks"
 
 
 def launch_dir(store: Path) -> Path:
@@ -313,8 +325,18 @@ def effective(store: "Path | None") -> list:
     return list(by_id.values())
 
 
+def roles(e: dict) -> list:
+    """The roles an extra is for. A hook is no role's: lane-control runs it, outside every session."""
+    return [] if e.get("kind") == "hook" else list(e.get("for") or SCOPES)
+
+
 def for_scope(entries: list, scope: str) -> list:
-    return [e for e in entries if scope in (e.get("for") or SCOPES)]
+    return [e for e in entries if scope in roles(e)]
+
+
+def hooks_for(entries: list, event: str) -> list:
+    """The hooks of one event, in the order they are in force (the machine's first, then the project's)."""
+    return [e for e in entries if e["kind"] == "hook" and e.get("event") == event]
 
 
 def user_level(e: dict) -> bool:
@@ -501,9 +523,65 @@ def parse_scope(words: list) -> list:
     return [s for s in SCOPES if s in out]
 
 
+def parse_timeout(text) -> int:
+    if text in (None, ""):
+        return HOOK_TIMEOUT
+    if not re.fullmatch(r"[0-9]{1,6}", str(text)) or not 1 <= int(text) <= HOOK_TIMEOUT_MAX:
+        raise ExtrasError(f"--timeout takes whole seconds, 1 to {HOOK_TIMEOUT_MAX} (default {HOOK_TIMEOUT})")
+    return int(text)
+
+
+def make_hook(event: str, opts: dict) -> tuple:
+    """(entry, warnings) of a lifecycle hook: --hook <event> --script <absolute path | git-url@commit:path>
+    [--timeout S]. The script is pinned at add: a path by its hash, a git one by its commit and its hash (it is fetched
+    now, so a wrong pin is refused at once). It takes no arguments and no environment of the caller's: core/hooks.py
+    gives it facts only."""
+    if event not in EVENTS:
+        raise ExtrasError(f"--hook takes {', '.join(EVENTS)}")
+    if opts.get("for"):
+        raise ExtrasError("--for is not for a hook: a hook is no role's, lane-control runs it outside every session")
+    spec = opts.get("script") or ""
+    if not spec:
+        raise ExtrasError("a hook needs --script <absolute path> or --script <git-url>@<full commit>:<path>")
+    timeout = parse_timeout(opts.get("timeout"))
+    warnings = []
+    e = {"kind": "hook", "event": event, "for": [], "timeout": timeout}
+    if spec.startswith(("/", "~")):
+        path, h, warn = owners_file(spec, bool(opts.get("allow_repo_path")), "the hook script", True)
+        warnings += [warn] if warn else []
+        e.update(script=path, sha256=h)
+        stem = Path(path).stem
+    else:
+        m = SPEC.fullmatch(spec)
+        if not m:
+            raise ExtrasError("--script is an absolute path, or <git-url>@<full 40-hex commit>:<path> (a branch or "
+                              "short sha is not a pin)")
+        why = url_problem(m["url"]) or path_problem(m["path"] or "") or (
+            "the path of the script in the repo is missing (:<path>)" if not m["path"] else None)
+        if why:
+            raise ExtrasError(f"--script is refused: {why}")
+        e.update(url=m["url"], commit=m["commit"], path=m["path"])
+        stem = Path(m["path"]).stem
+    name = opts.get("name") or slug(stem)
+    if not NAME.fullmatch(name or ""):
+        raise ExtrasError("the hook's name is not lowercase letters, digits and dashes: give --name")
+    e["name"] = name
+    if "url" in e:
+        why = fetch(e["url"], e["commit"], "", hook_source_dir(e), want=e["path"])
+        if why:
+            raise ExtrasError(f"--script: {why}")
+        f = hook_file(e)
+        if f.is_symlink() or not f.is_file() or not os.access(f, os.X_OK):
+            raise ExtrasError(f"--script: {e['path']} at that commit is not an executable file (git's mode 100755)")
+        e["sha256"] = sha256(f)
+    return e, warnings
+
+
 def make(kind: str, value, opts: dict) -> tuple:
     """(entry, warnings) for one `extras add`. opts: name, for, command (list), env (names), prompt_file, tier,
-    harness, allow_repo_path."""
+    harness, allow_repo_path, script, timeout."""
+    if kind == "hook":
+        return make_hook(value, opts)
     scope = parse_scope(opts.get("for"))
     warnings = []
     e = {"kind": kind, "for": scope}
@@ -627,17 +705,20 @@ def describe(e: dict) -> str:
         return shlex.join([e["command"], *e.get("args", [])]) + env
     if k == "persona":
         return f"{e['prompt_file']} (tier {e['tier']}, {e['harness']})"
+    if k == "hook":
+        where = e["script"] if e.get("script") else f"{e['url']}@{e['commit'][:12]}:{e['path']}"
+        return f"{e['event']}: {where} (timeout {e.get('timeout', HOOK_TIMEOUT)} s)"
     return f"{e['harness']}:{e['source']}@{e['pin']}"
 
 
 # --- pinned skill sources ------------------------------------------------------------------------------------------
 
-def fetch(url: str, commit: str, path: str, dest: Path) -> "str | None":
+def fetch(url: str, commit: str, path: str, dest: Path, want: "str | None" = None) -> "str | None":
     """A sparse checkout of `path` (the whole repo when '') at `commit` into dest, made by rename so never half
-    there; SKILL.md must be in it. None when done, else why not."""
+    there; `want` (default SKILL.md) must be in it. None when done, else why not."""
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
     shutil.rmtree(tmp, ignore_errors=True)
-    want = f"{path}/SKILL.md" if path else "SKILL.md"
+    want = want or (f"{path}/SKILL.md" if path else "SKILL.md")
     try:
         tmp.mkdir(parents=True)
         steps = [("init", "-q"), ("remote", "add", "origin", url)]
@@ -688,6 +769,46 @@ def source_state(e: dict) -> "str | None":
     st = git(src, "status", "--porcelain", "--untracked-files=all")
     if st is None or st.returncode != 0 or st.stdout.strip():
         return f"{src} changed since it was fetched"
+    return None
+
+
+def hook_source_dir(e: dict) -> Path:
+    """The checkout of a git-pinned hook, keyed by URL, commit and path."""
+    key = digest(f"{e['url']}\0{e['path']}")[:10]
+    return hook_sources() / f"{e['name']}@{e['commit'][:12]}-{key}"
+
+
+def hook_file(e: dict) -> Path:
+    """The script a hook runs: its absolute path, or its file in its pinned checkout."""
+    return Path(e["script"]) if e.get("script") else hook_source_dir(e) / e["path"]
+
+
+def hook_problem(e: dict, fetch_it: bool = False) -> "str | None":
+    """None when the hook's script is as it was added (its pin and its hash), else what is wrong. fetch_it: a git
+    hook's checkout that is not there is fetched (refresh, and a run); otherwise that is `not fetched`."""
+    f = hook_file(e)
+    if e.get("url"):
+        src = hook_source_dir(e)
+        if not f.is_file() and not f.is_symlink():
+            if not fetch_it:
+                return f"commit {e['commit'][:12]} not fetched"
+            why = fetch(e["url"], e["commit"], "", src, want=e["path"])
+            if why:
+                return why
+        head = git(src, "rev-parse", "HEAD")
+        if head is None or head.stdout.strip() != e["commit"]:
+            return f"{src} is not at {e['commit'][:12]} any more"
+        st = git(src, "status", "--porcelain", "--untracked-files=all")
+        if st is None or st.returncode != 0 or st.stdout.strip():
+            return f"{src} changed since it was fetched"
+    elif not f.is_file():
+        return f"{f} is missing"
+    if f.is_symlink() or not f.is_file():
+        return f"{f} is not a plain file"
+    if sha256(f) != e.get("sha256"):
+        return f"{f} changed since it was added (add it again to accept it)"
+    if not os.access(f, os.X_OK):
+        return f"{f} is not executable any more"
     return None
 
 
@@ -816,7 +937,7 @@ def opencode_mcp(e: dict) -> dict:
 
 def wanted(entries: list) -> tuple:
     """(problems, by kind) for a folder's entries: what may go in, after every source and pin was checked."""
-    es = [e for e in entries if not user_level(e) and e["kind"] != "persona"]
+    es = [e for e in entries if not user_level(e) and e["kind"] not in ("persona", "hook")]
     problems = []
     for e in es:
         why = ensure_skill(e) if e["kind"] == "skill" else mcp_problem(e) if e["kind"] == "mcp" else None
@@ -1209,6 +1330,8 @@ def coordinator_section(repo: Path, entries: list, lane_control: str) -> str:
     personas = [e for e in entries if e["kind"] == "persona"]
     has = {s: any(not user_level(e) and e["kind"] != "persona" for e in for_scope(entries, s))
            for s in ("lanes", "reviewer")}
+    starts = bool(hooks_for(entries, "lane-start"))
+    has["lanes"] = has["lanes"] or starts
     if not personas and not any(has.values()):
         return ""
     lc = f"{lane_control}/scripts/lane-control"
@@ -1225,11 +1348,16 @@ def coordinator_section(repo: Path, entries: list, lane_control: str) -> str:
         out.append("")
     if any(has.values()):
         who = " and ".join(x for x, v in (("lanes", has["lanes"]), ("reviewers", has["reviewer"])) if v)
-        out.append(f"The {who} of this project have extras (skills, MCP servers or plugins) that must be in their "
-                   "worktree before the agent starts:")
+        parts = []
+        if any(not user_level(e) and e["kind"] not in ("persona", "hook") for s in ("lanes", "reviewer")
+               for e in for_scope(entries, s)):
+            parts.append("extras (skills, MCP servers or plugins) that must be in their worktree")
+        if starts:
+            parts.append("lane-start hooks (the owner's scripts) that run once a lane's worktree is ready")
+        out.append(f"The {who} of this project have {' and '.join(parts)}, before the agent starts:")
         out.append(f"- A lane: make its worktree first (`orca-ide worktree create ... --json`, as for an OpenCode "
-                   f"lane, for Claude too), then `{lc} lane prepare {repo} <worktree> --role lanes`, then "
-                   "`worker-start --worktree path:<worktree>`.")
+                   f"lane, for Claude too), then `{lc} lane prepare {repo} <worktree> --role lanes --lane <KEY> "
+                   "--issue <id>`, then `worker-start --worktree path:<worktree>`.")
         out.append(f"- A reviewer: `{lc} lane prepare {repo} <lane worktree> --role reviewer` before its "
                    "worker-start. It shares the lane's worktree, so both then have both roles' extras.")
         out.append("- If prepare exits non-zero, hold the lane and tell the owner what it printed. A lane on another "
@@ -1271,6 +1399,11 @@ def check_entry(e: dict) -> tuple:
         if sha256(f) != e.get("sha256"):
             return "changed", f"{f} changed since it was added"
         return "ok", f"{f}, tier {e['tier']}, {e['harness']}"
+    if k == "hook":
+        why = hook_problem(e)
+        if why is None:
+            return "ok", f"{e['event']}: {hook_file(e)} as added"
+        return ("missing" if why.endswith(("is missing", "not fetched")) else "changed"), why
     if e["harness"] == "opencode":
         return "ok", "OpenCode installs it at start"
     recs = claude_plugins().get(e["source"])
@@ -1290,8 +1423,13 @@ def check(store: "Path | None", folder: "Path | None" = None) -> list:
     entries = effective(store)
     for e in entries:
         state, detail = check_entry(e)
-        rows.append({"id": ident(e), "origin": e.get("origin"), "for": e.get("for") or list(SCOPES),
-                     "state": state, "detail": detail, "what": describe(e)})
+        row = {"id": ident(e), "origin": e.get("origin"), "for": roles(e), "state": state, "detail": detail,
+               "what": describe(e)}
+        if e["kind"] == "hook":
+            row["event"] = e.get("event")
+            if state in PROBLEMS:
+                row["fix"] = hook_fix(e, state)
+        rows.append(row)
     if folder is not None and store is not None:
         coord = for_scope(entries, "coordinator")
         lines, problems = apply_launch(store, coord, dry=True)
@@ -1306,3 +1444,11 @@ def check(store: "Path | None", folder: "Path | None" = None) -> list:
 
 
 PROBLEMS = ("missing", "changed", "failing", "not applied")
+
+
+def hook_fix(e: dict, state: str) -> str:
+    """What to do about a hook that is missing or changed (refresh fetches a git one; nothing brings a path back)."""
+    if e.get("url") and state == "missing":
+        return "run lane-control project refresh {root} (it fetches the pin), or remove it"
+    return ("put it back or add it again (lane-control project|machine extras add --hook ...) to accept it, or remove "
+            "it")

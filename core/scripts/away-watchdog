@@ -38,6 +38,9 @@ else the single agent terminal in MACHINE_COORDINATOR_FOLDER (~/machine-coordina
 It fails loudly: a target it cannot address, a send Orca refuses, a crash, or a round cut short by its time limit is an
 `UNADDRESSED` line, and the agent puts it in front of the owner (at most every WATCHDOG_ESCALATE_MIN minutes while the same
 lines stay). A message's backoff is written before it is sent, so a crash after a send never sends it again.
+Each ESCALATE that --send takes from the outbox also runs the owner's on-report hooks (core/hooks.py; lc-76o) with the
+project, its checkout and PR and the outcome `escalation`, whether the send went through or not: each is a `HOOK` line
+with its exit code and last lines; one that fails is a `HOOK-WARN` line and only warns (the exit code is the sends').
 State: ~/.cache/lane-control/watchdog/ (outbox, backoff per project and kind, summary stamp, `last`).
 Exit (--send): 0 all sent; 1 something reached nobody; 2 usage or no Orca terminal to send from.
 """
@@ -57,6 +60,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+import hooks  # noqa: E402
 import improve  # noqa: E402
 import machineconf  # noqa: E402
 
@@ -322,7 +326,7 @@ class Round:
             self.machine_msgs.append(("ESCALATE", p, key if late is None else "deadline:" + (rec.get("deadline") or ""), budget, [
                 f"away watchdog: {p}'s away-improve cycle is stalled ({'past its deadline' if late is not None else 'quiet'}); "
                 "its coordinator has been told. Look at it, tell the owner if it stays so. The watchdog merges nothing and "
-                "changes no lane.", "", *ev]))
+                "changes no lane.", "", *ev], {"project_root": str(c.checkout), "pr": str(rec.get("pr") or "")}))
 
     def summary(self, st: "dict | None"):
         conf, now = self.conf, self.now
@@ -382,12 +386,13 @@ class Round:
                 self.lines.append(f"UNADDRESSED {p} ({why})")
                 relays.append(("RELAY", p, key, cap, [f"away watchdog: the coordinator of {p} could not be reached ({why}). "
                                                       "What it was to be told:", "", *body]))
-        for kind, p, key, cap, body in [*self.machine_msgs, *relays]:
+        for kind, p, key, cap, body, *more in [*self.machine_msgs, *relays]:
             ok, n = due(p, kind, key, conf["WATCHDOG_MIN"], cap, now)
             if not ok:
                 continue
             if mto:
-                out.append({"kind": kind, "project": p, "key": key, "n": n, "to": mto, "body": "\n".join(body) + "\n"})
+                out.append({"kind": kind, "project": p, "key": key, "n": n, "to": mto, "body": "\n".join(body) + "\n",
+                            **({"facts": more[0]} if more else {})})
             else:
                 self.lines.append(f"UNADDRESSED machine ({mwhy}; {kind.lower()} {p} reached nobody)")
         for m in out:
@@ -537,6 +542,8 @@ def send_outbox() -> int:
             if m["kind"] == "SUMMARY":
                 (cache_dir() / m["key"]).touch()
             problem = orca_send(sender, m, m["to"], m["kind"], m["body"])
+            if m["kind"] == "ESCALATE":
+                lines += on_report(m)
             if not problem:
                 lines.append(f"SENT {m['kind']} {m['project']} to {m['to']}")
                 continue
@@ -560,6 +567,22 @@ def send_outbox() -> int:
     for line in lines:
         print(line)
     return 1 if any(x.startswith("UNADDRESSED") for x in lines) else 0
+
+
+def on_report(m: dict) -> list:
+    """The owner's on-report hooks for an escalation: HOOK lines (and HOOK-WARN for one that did not pass); never fails
+    the send."""
+    facts = {"project": m["project"], "outcome": "escalation", **(m.get("facts") or {})}
+    root = facts.get("project_root")
+    if not root:
+        return []
+    try:
+        res = hooks.run(hooks.X.effective(hooks.X.store_for(Path(root))), "on-report", facts)
+    except Exception as e:  # noqa: BLE001: a hook never stops the escalation
+        return [f"HOOK-WARN {m['project']} on-report did not run ({type(e).__name__}: {e})"]
+    out = [f"HOOK {m['project']} on-report: {line}" for line in hooks.report(res)]
+    out += [f"HOOK-WARN {m['project']} on-report {r['id']} {r['state']} (it only warns)" for r in hooks.failed(res)]
+    return out
 
 
 def main(argv: list) -> int:

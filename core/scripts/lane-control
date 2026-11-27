@@ -16,7 +16,8 @@
         the current sha, the checkout's sha, and whether they differ.
   lane-control doctor [--json] [--no-ssh]
         the installed sha against each project's (from its settings store), each project's extras per role (missing,
-        changed, failing, not applied: core/extras.py), the ~/.agents/bin links, the lane skills, and each box
+        changed, failing, not applied: core/extras.py; lifecycle hooks by event, a missing or changed script
+        flagged), the ~/.agents/bin links, the lane skills, and each box
         project-setup sent a tree to (its current sha over ssh, unless --no-ssh). Exit 1 when something needs doing;
         each such line says what to run. Also, because a listening port is not proof (core/boxhealth.py):
         each tunnel unit written here (orca-tunnel-<host>, lane-tunnel@<host>) must be active/running, its restart
@@ -165,7 +166,7 @@ def extras(root: str, out: dict) -> None:
     for r in rows:
         if r["state"] in X.PROBLEMS:
             out["todo"].append(f"{root}: extra {r['id']} {r['state']} ({r['detail']}): "
-                               + EXTRA_FIX[r["state"]].format(root=root))
+                               + (r.get("fix") or EXTRA_FIX[r["state"]]).format(root=root))
 
 
 def tunnels(out: dict) -> None:
@@ -310,6 +311,10 @@ def cmd_doctor(a) -> int:
             for s in X.SCOPES:
                 ids = [r["id"] for r in rows if s in r["for"] and r["id"] != "coordinator"]
                 print(f"  extras for {s}: {', '.join(ids) or 'none'}")
+            hooks = [f"{ev} {', '.join(r['id'] for r in rows if r.get('event') == ev)}" for ev in X.EVENTS
+                     if any(r.get("event") == ev for r in rows)]
+            if hooks:
+                print(f"  hooks: {'; '.join(hooks)}")
             bad = [f"{r['id']} {r['state']}" for r in rows if r["state"] in X.PROBLEMS]
             print(f"  extras: {len(rows)} checked" + (f"; {', '.join(bad)}" if bad else ", all ok"))
     print("links: " + ", ".join(f"{n} {s}" for n, s in d["links"].items()))
@@ -374,7 +379,7 @@ def help_screen() -> str:
         out += [f"  {F.usage(gg, v):<{F.WIDTH}} {line}" for (gg, v), (_, _, _, line) in F.ROUTES.items() if gg == g]
     out.append("The install: one versioned tree per machine and per box")
     out += [f"  {'lane-control ' + usage:<{F.WIDTH}} {line}" for usage, line in INSTALL_HELP]
-    out += ["", "lane-control <group> --help: what each form runs; lane-control <group> <verb> --help: options.",
+    out += ["lane-control <group> --help: what each form runs; lane-control <group> <verb> --help: options.",
             "Old names keep working: " + ", ".join(F.OLD) + ",",
             "and lane-control improve (now ratchet)."]
     return "\n".join(out)

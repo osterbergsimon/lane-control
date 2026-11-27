@@ -8,7 +8,14 @@ where each harness reads it). Run through the front door:
   lane-control machine extras add <one kind> [--for ...] [--name N]        every project on this machine
   lane-control machine extras list [--json]
   lane-control machine extras remove <kind:name | name>                    a default design skill is turned off
-  lane-control lane prepare <project> <worktree> --role lanes|reviewer     (the coordinator, before a worker starts)
+  lane-control lane prepare <project> <worktree> --role lanes|reviewer [--lane KEY] [--issue ID]
+                                                     (the coordinator, before a worker starts; a lane's runs the
+                                                     lane-start hooks)
+  lane-control project gate <project> <PR> [--head <sha>] [--lane KEY] [--issue ID]
+                                                     the gate hooks, before a merge: exit 1 is not green
+  lane-control project hook <project> <event> [--pr N] [--head <sha>] [--merge-sha <sha>] [--lane KEY]
+                                              [--issue ID] [--outcome WORD]
+                                                     run one event's hooks now (after-merge and on-report warn only)
 
 Kinds:
   --skill <git-url>@<commit>[:<path>]                      a skill pinned at a full commit
@@ -18,15 +25,22 @@ Kinds:
   --persona <name> --prompt-file <path> [--tier swift|standard|deep] [--harness claude|opencode]
                                                            a lane role the coordinator can brief a lane with
   --plugin claude:<plugin>@<marketplace>@<version> | opencode:<package>@<version>
+  --hook after-setup|lane-start|gate|after-merge|on-report --script <absolute path | git-url@commit:path>
+         [--timeout SECONDS]                               a lifecycle hook: the owner's script, run by lane-control at
+                                                           that event with facts as LANE_HOOK_* variables, outside every
+                                                           worktree, never with a secret (core/hooks.py); default
+                                                           timeout 600 s
 
 add and remove are a person's only, at a terminal (an agent is refused, as for lane new). A file an extra names (an
-MCP command or argument, a prompt file) must be an absolute path outside every project checkout unless
---allow-repo-path is given; it is pinned by its hash. The same id again replaces the extra (and accepts a changed
+MCP command or argument, a prompt file, a hook script) must be an absolute path outside every project checkout unless
+--allow-repo-path is given; it is pinned by its hash (a git hook by its commit and hash, fetched at add). The same id again replaces the extra (and accepts a changed
 file). A project's extras add to the machine's. After a change, run `lane-control project refresh <project>`: it
 gives the coordinator its extras, renders the personas, and applies every worktree lane prepare wrote in again (a
 removed extra is taken out there too)."""
 import argparse
 import importlib.machinery
+import re
+import subprocess
 import importlib.util
 import json
 import os
@@ -43,8 +57,9 @@ def _load(name, rel):
     return mod
 
 
-X = _load("lc_extras", "core/extras.py")
-KIND_FLAGS = ("skill", "mcp", "persona", "plugin")
+H = _load("lc_hooks", "core/hooks.py")
+X = H.X  # one copy of core/extras.py, so one ExtrasError
+KIND_FLAGS = ("skill", "mcp", "persona", "plugin", "hook")
 
 
 class Parser(argparse.ArgumentParser):
@@ -80,6 +95,9 @@ def add_parser(prog: str, project: bool) -> argparse.ArgumentParser:
     ap.add_argument("--mcp")
     ap.add_argument("--persona")
     ap.add_argument("--plugin")
+    ap.add_argument("--hook")
+    ap.add_argument("--script")
+    ap.add_argument("--timeout")
     ap.add_argument("--env", action="append", default=[], metavar="NAME")
     ap.add_argument("--for", dest="for_", action="append", default=[])
     ap.add_argument("--name")
@@ -111,15 +129,18 @@ def cmd_add(group: str, argv: list) -> int:
     a = add_parser(f"lane-control {group} extras add", group == "project").parse_args(head)
     given = [(k, getattr(a, k)) for k in KIND_FLAGS if getattr(a, k)]
     if len(given) != 1:
-        raise X.ExtrasError("give exactly one kind: --skill, --mcp, --persona or --plugin (agent hooks, permission "
-                            "rules and env values are not extras yet: lc-yw1g)")
+        raise X.ExtrasError("give exactly one kind: --skill, --mcp, --persona, --plugin or --hook (agent hooks of "
+                            "Claude or OpenCode, permission rules and env values are not extras yet: lc-yw1g)")
     kind, value = given[0]
     if kind != "mcp" and (tail or a.env):
         raise X.ExtrasError("`--` with a command, and --env, are for --mcp only")
+    if kind != "hook" and (a.script or a.timeout):
+        raise X.ExtrasError("--script and --timeout are for --hook only")
     path, label, root = target(group, a)
     person(f"lane-control {group} extras add")
     opts = {"name": a.name, "for": a.for_, "command": tail, "env": a.env, "prompt_file": a.prompt_file,
-            "tier": a.tier, "harness": a.harness, "allow_repo_path": a.allow_repo_path}
+            "tier": a.tier, "harness": a.harness, "allow_repo_path": a.allow_repo_path, "script": a.script,
+            "timeout": a.timeout}
     entry, warnings = X.make(kind, value, opts)
     if kind == "skill" and group == "project" and X.find(X.defaults(), entry["name"]):
         warnings.append(f"note: {entry['name']} is also a default design skill, installed for the whole user; "
@@ -128,14 +149,19 @@ def cmd_add(group: str, argv: list) -> int:
     for w in warnings:
         print(w, file=sys.stderr)
     state = X.add(path, entry)
+    if kind == "hook":
+        print(f"{state} {X.ident(entry)} ({label}): {X.describe(entry)}")
+        print(next_line(root) + ": the coordinator's persona then says to prepare each lane" if entry["event"] ==
+              "lane-start" else f"next: nothing to refresh; it runs at the next {entry['event']}")
+        return 0
     print(f"{state} {X.ident(entry)} for {', '.join(entry['for'])} ({label}): {X.describe(entry)}")
     print(next_line(root))
     return 0
 
 
 def rows_of(store) -> list:
-    return [{**{k: e.get(k) for k in ("kind", "name", "origin")}, "id": X.ident(e), "for": e.get("for") or
-             list(X.SCOPES), "what": X.describe(e)} for e in X.effective(store)]
+    return [{**{k: e.get(k) for k in ("kind", "name", "origin", "event") if k != "event" or e.get("event")},
+             "id": X.ident(e), "for": X.roles(e), "what": X.describe(e)} for e in X.effective(store)]
 
 
 def cmd_list(group: str, argv: list) -> int:
@@ -163,6 +189,11 @@ def cmd_list(group: str, argv: list) -> int:
     for s in X.SCOPES:
         ids = [r["id"] for r in rows if s in r["for"]]
         print(f"  {s}: {', '.join(ids) or 'none'}")
+    if any(r["kind"] == "hook" for r in rows):
+        print("by event:")
+        for ev in X.EVENTS:
+            ids = [r["id"] for r in rows if r.get("event") == ev]
+            print(f"  {ev}: {', '.join(ids) or 'none'}")
     return 0
 
 
@@ -187,7 +218,10 @@ def cmd_prepare(argv: list) -> int:
     ap.add_argument("project")
     ap.add_argument("worktree")
     ap.add_argument("--role", required=True, choices=("lanes", "reviewer"))
+    ap.add_argument("--lane", help="the lane's key, for the lane-start hooks")
+    ap.add_argument("--issue", help="the lane's issue id, for the lane-start hooks")
     a = ap.parse_args(argv)
+    H.check_facts({"lane": a.lane, "issue": a.issue})  # before anything is written
     root, st, store = X.find_project(a.project)
     wt = Path(a.worktree).expanduser()
     if wt.is_symlink():
@@ -216,8 +250,102 @@ def cmd_prepare(argv: list) -> int:
     if problems:
         print(f"prepare: failed: none of lane-control's extras are in {wt} (all or nothing); hold the lane")
         return 1
-    n = len([e for e in entries if not X.user_level(e) and e["kind"] != "persona"])
+    n = len([e for e in entries if not X.user_level(e) and e["kind"] not in ("persona", "hook")])
+    if a.role == "lanes":
+        res = H.run(X.effective(store), "lane-start", {**facts_of(root, st), "worktree": str(wt), "role": a.role,
+                                                       "lane": a.lane, "issue": a.issue})
+        for line in H.report(res):
+            print(f"prepare: {line}")
+        if H.failed(res):
+            print(f"prepare: failed: {len(H.failed(res))} lane-start hook(s) did not pass; hold the lane and tell "
+                  "the owner what they printed")
+            return 1
     print(f"prepare: done ({', '.join(scopes)} extras in {wt}; {n} extra(s))")
+    return 0
+
+
+def facts_of(root: Path, st: dict) -> dict:
+    return {"project": st.get("name") or root.name, "project_root": str(root)}
+
+
+def fact_flags(ap) -> None:
+    ap.add_argument("--head", help="the PR's full head commit")
+    ap.add_argument("--lane", help="the lane's key")
+    ap.add_argument("--issue", help="the lane's issue id")
+
+
+def pr_head(root: Path, pr: str) -> "str | None":
+    """The PR's head commit by `gh pr view` (read only), or None."""
+    try:
+        r = subprocess.run(["gh", "pr", "view", pr, "--json", "headRefOid", "-q", ".headRefOid"], cwd=root,
+                           capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    sha = r.stdout.strip()
+    return sha if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", sha) else None
+
+
+def cmd_gate(argv: list) -> int:
+    ap = Parser(prog="lane-control project gate", description=(
+        "Run the project's gate hooks (the machine's, then its own) for a PR before it is merged. Exit 0: green, "
+        "merge only the head it names; exit 1: not green, do not merge."))
+    ap.add_argument("project")
+    ap.add_argument("pr")
+    fact_flags(ap)
+    a = ap.parse_args(argv)
+    root, st, store = X.find_project(a.project)
+    entries = X.effective(store)
+    gates = X.hooks_for(entries, "gate")
+    facts = H.check_facts({**facts_of(root, st), "pr": a.pr, "head_sha": a.head, "lane": a.lane, "issue": a.issue})
+    if not gates:
+        print(f"gate: passed for PR {a.pr}: no gate hooks (lane-control project|machine extras add --hook gate ...)")
+        return 0
+    head = a.head or pr_head(root, a.pr)
+    if not head:
+        print(f"gate: failed for PR {a.pr}: its head commit cannot be read (gh pr view {a.pr}); give --head <full "
+              "sha>: not green, do not merge")
+        return 1
+    res = H.run(entries, "gate", {**facts, "head_sha": head})
+    for line in H.report(res):
+        print(f"gate: {line}")
+    bad = H.failed(res)
+    if bad:
+        print(f"gate: failed for PR {a.pr} at {head}: {len(bad)} of {len(res)} gate hook(s) did not pass: not "
+              "green, do not merge; tell the owner what they printed")
+        return 1
+    print(f"gate: passed for PR {a.pr} at {head} ({len(res)} gate hook(s)): merge only this head "
+          f"(--match-head-commit {head})")
+    return 0
+
+
+def cmd_hook(argv: list) -> int:
+    ap = Parser(prog="lane-control project hook", description=(
+        "Run one event's hooks for the project now, with the facts given. A failing gate or lane-start exits 1; "
+        "after-merge and on-report only warn (exit 0); after-setup exits 1."))
+    ap.add_argument("project")
+    ap.add_argument("event", choices=X.EVENTS)
+    ap.add_argument("--pr")
+    ap.add_argument("--merge-sha", dest="merge_sha")
+    ap.add_argument("--outcome", help="one word, such as the report's first (succeeded, failed, blocked)")
+    ap.add_argument("--worktree")
+    fact_flags(ap)
+    a = ap.parse_args(argv)
+    root, st, store = X.find_project(a.project)
+    facts = H.check_facts({**facts_of(root, st), "pr": a.pr, "head_sha": a.head, "merge_sha": a.merge_sha,
+                           "lane": a.lane, "issue": a.issue, "outcome": a.outcome, "worktree": a.worktree})
+    res = H.run(X.effective(store), a.event, facts)
+    if not res:
+        print(f"hook: no {a.event} hooks for {st.get('name') or root.name}")
+        return 0
+    for line in H.report(res):
+        print(f"hook: {line}")
+    bad = H.failed(res)
+    if bad and a.event in H.BLOCKING:
+        print(f"hook: failed: {len(bad)} {a.event} hook(s) did not pass")
+        return 1
+    if bad:
+        print(f"hook: warning: {len(bad)} {a.event} hook(s) did not pass; {a.event} only warns, nothing is undone: "
+              "tell the owner what they printed")
     return 0
 
 
@@ -226,6 +354,10 @@ def main(argv=None) -> int:
     try:
         if argv[:1] == ["prepare"]:
             return cmd_prepare(argv[1:])
+        if argv[:1] == ["gate"]:
+            return cmd_gate(argv[1:])
+        if argv[:1] == ["hook"]:
+            return cmd_hook(argv[1:])
         if argv[:1] in (["project"], ["machine"]) and len(argv) > 1 and argv[1] in ("add", "list", "remove"):
             return {"add": cmd_add, "list": cmd_list, "remove": cmd_remove}[argv[1]](argv[0], argv[2:])
     except X.ExtrasError as e:
@@ -233,7 +365,8 @@ def main(argv=None) -> int:
         return 1
     asked = any(x in ("-h", "--help", "help") for x in argv[:2])
     print("usage: lane-control project extras add|list|remove <project> ..., lane-control machine extras "
-          "add|list|remove ...,\n       lane-control lane prepare <project> <worktree> --role lanes|reviewer\n\n"
+          "add|list|remove ...,\n       lane-control lane prepare <project> <worktree> --role lanes|reviewer,\n"
+          "       lane-control project gate <project> <PR>, lane-control project hook <project> <event> ...\n\n"
           + __doc__, file=sys.stdout if asked else sys.stderr)
     return 0 if asked else 2
 

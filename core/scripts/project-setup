@@ -181,6 +181,18 @@ def _extras():
 
 
 EXTRAS = _extras()
+
+
+def _hooks():
+    """core/hooks.py: the owner's lifecycle hooks (lc-76o); after-setup runs at the end of setup and refresh."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lc_hooks", HERE / "core" / "hooks.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+HOOKS = _hooks()
 HEALTH = _boxhealth()  # a listening port is not proof (BOX-1, lc-l78): --check reads units, sockets, runtimes, SHELL
 LC = HERE  # the path personas and ~/.agents/bin name: .../lane-control/current once use_install() ran
 TREE = HERE  # the installed tree it points at (what a box is sent)
@@ -3131,6 +3143,10 @@ def apply_extras(repo: Path) -> bool:
                 why = EXTRAS.ensure_skill(e)
                 if why:
                     problems.append(f"{EXTRAS.ident(e)}: {why}")
+            elif e["kind"] == "hook":  # a git-pinned hook is fetched here too, so check and doctor find it
+                why = EXTRAS.hook_problem(e, fetch_it=True)
+                if why:
+                    problems.append(f"{EXTRAS.ident(e)}: {why}")
         more, more_problems = EXTRAS.render_personas(repo, entries, lambda name: additions(repo, name))
         lines, problems = lines + more, problems + more_problems
         launch, launch_problems = EXTRAS.apply_launch(store_dir(repo), coord)
@@ -3294,9 +3310,10 @@ def check_extras(repo: Path) -> bool:
            "failing": "fix what it names (a command, a committed or foreign file), then lane-control project "
                       f"refresh {shlex.quote(str(repo))}"}
     for r in rows:
-        roles = ",".join(r["for"])
-        say(f"check extra {r['id']}", r["state"], f"({r['origin']}; for {roles}; {r['detail'] or r['what']}" +
-            (f": {fix[r['state']]})" if r["state"] in fix else ")"))
+        roles = f"at {r['event']}" if r.get("event") else "for " + ",".join(r["for"])
+        how = (r.get("fix") or "").format(root=shlex.quote(str(repo))) or fix.get(r["state"])
+        say(f"check extra {r['id']}", r["state"], f"({r['origin']}; {roles}; {r['detail'] or r['what']}" +
+            (f": {how})" if r["state"] in fix else ")"))
     return not any(r["state"] in EXTRAS.PROBLEMS for r in rows)
 
 
@@ -3918,7 +3935,31 @@ def session_states(place: Place, repo: Path, project: str) -> dict:
             for role in STANDING}
 
 
+def after_setup(repo: Path, project: str, mode: str) -> bool:
+    """The owner's after-setup hooks (core/hooks.py), last of all: each said with its exit code and last lines. False
+    when one did not pass (setup or refresh then exits 1; nothing is undone)."""
+    try:
+        res = HOOKS.run(project_extras(repo), "after-setup", {"project": project, "project_root": str(repo),
+                                                              "setup": mode})
+    except HOOKS.X.ExtrasError as e:
+        say("hook after-setup", "failed", f"({e})")
+        return False
+    for line in HOOKS.report(res):
+        print(f"hook after-setup: {line}")
+    if HOOKS.failed(res):
+        say("hook after-setup", "failed", f"{len(HOOKS.failed(res))} of {len(res)} did not pass; the {mode} itself is "
+                                          "done, nothing is undone")
+        return False
+    return True
+
+
 def native_refresh(repo: Path, a, tiers: Path) -> int:
+    code = native_refresh_steps(repo, a, tiers)
+    project = a.name or settings(repo).get("name") or repo.name
+    return 1 if not after_setup(repo, project, "refresh") else code
+
+
+def native_refresh_steps(repo: Path, a, tiers: Path) -> int:
     """Re-render the personas (stored pins, current additions) and the hooks, and install the skills and the lane
     tools (design-shots among them; the design skills are fetched from upstream). Nothing is adapted or started; the
     only commit is a retired design lead's additions moving into DESIGN.md, on the owner's yes. A running session
@@ -4093,7 +4134,7 @@ def native_main(a, tiers: Path) -> int:
                 say("restart", "maybe", "the personas of " + ", ".join(changed) + " changed: a running session "
                     "rereads it at its next compaction, or restart it (project-pause stop, then start)")
             say("start", "skipped", "--no-start")
-            return 0
+            return 0 if after_setup(repo, project, "setup") else 1
         global COORDINATOR_KICKOFF, LEFTOVER_DELIVERED
         persona = {r: repo / ADAPTED / f"{r}.md" for r in STANDING}
         COORDINATOR_KICKOFF = NATIVE_KICKOFF["coordinator"].format(persona=persona["coordinator"])
@@ -4101,7 +4142,7 @@ def native_main(a, tiers: Path) -> int:
         LEFTOVER_DELIVERED = start_standing(place, repo, project, pins, cfg["mode"], repo_id, kickoffs)
         print(f"summary: {project} · native Orca · orca repo {repo_id} · sessions "
               + ", ".join(session_title(r, project) for r in STANDING))
-        return 0
+        return 0 if after_setup(repo, project, "setup") else 1
     except Fail as e:
         print(f"project-setup: {e}", file=sys.stderr)
         return 1

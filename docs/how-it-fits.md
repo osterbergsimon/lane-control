@@ -19,7 +19,8 @@ SETUP    lane-control machine setup   once per machine   machine coordinator, 4 
          lane-control project setup   once per project   lane tools, skills, personas, tier table, coordinator
                                                           (lane-control project refresh updates them)
          lane-control project|machine extras              your skills, MCP servers, personas and plugins for
-                                                          the agents (refresh puts them in place)
+                                                          the agents (refresh puts them in place), and your
+                                                          lifecycle hooks (scripts lane-control runs)
 
 LANE     lane-room   may another lane open?        lane-tier     which model does this tier use?
 TOOLS    lane-heavy  one gate for heavy builds     design-shots  screenshots of a UI
@@ -169,10 +170,12 @@ lane-control machine extras add|list|remove ...             every project on thi
   --mcp <name> [--env NAME]... -- <command> [args]           an MCP server; --env names a secret, never its value
   --persona <name> --prompt-file <path> [--tier T] [--harness H]   a lane role the coordinator can brief a lane with
   --plugin claude:<plugin>@<marketplace>@<version> | opencode:<package>@<version>
-  --for lanes|coordinator|reviewer|all                       who gets it (default all)
+  --hook <event> --script <path | git-url@commit:path> [--timeout S]   a lifecycle hook (below)
+  --for lanes|coordinator|reviewer|all                       who gets it (default all; not for a hook)
 ```
 
-Agent hooks, permission rules and env values are not extras yet: they get their own design (lc-yw1g).
+Claude's and OpenCode's own agent hooks, permission rules and env values are not extras yet: they get their own design
+(lc-yw1g).
 
 - **Stored** in the project's settings store (`~/.config/lane-control/projects/<key>/extras.json`, beside its tier
   table) or `~/.config/lane-control/extras.json`. Never in a project repo, and never a secret. An MCP server gets
@@ -228,6 +231,49 @@ OpenCode      the main checkout's .opencode/opencode.json    .opencode/opencode.
 - Checked without starting an agent: Claude's rules above are read from its code (2.1.332) and documentation;
   OpenCode 2.2.1's `debug config` and skill list show a worktree reading only its own `.opencode/opencode.json` and
   `.opencode/skills/`, and the main checkout only its own. A live session check is lc-hat1.
+
+### Hooks
+
+Your own scripts, which lane-control runs at five moments (`core/hooks.py`; lc-76o). They are extras of kind `hook`,
+added, listed and removed like the others; the machine's run for every project, before the project's own.
+
+```
+event        when                                                where it fires                       a failure
+after-setup  the end of setup or refresh                         project-setup                        setup/refresh exit 1
+lane-start   a lane's worktree is ready, before its agent        lane-control lane prepare --role     prepare exits 1:
+             starts                                              lanes (the coordinator)              hold the lane
+gate         before a merge: checks that must be green           lane-control project gate <p> <PR>   not green: no merge
+                                                                 (the coordinator); away-merge        away-merge refuses
+after-merge  after the merge                                     lane-control project hook <p>        warns only
+                                                                 after-merge; away-merge
+on-report    a lane's report; the away watchdog's escalation     lane-control project hook <p>        warns only
+                                                                 on-report; away-watchdog --send
+```
+
+- **Never from a project repo.** Only what you add runs: an absolute path outside every project checkout (as given or
+  through a link; `--allow-repo-path` takes one anyway, with a warning), pinned by its hash, or a file in a git repo
+  pinned at a full commit, fetched at add (and by refresh) and checked against its commit and hash. A missing or
+  changed script does not run: it is `refused` (for a gate: not green) and `check` and `doctor` flag it `missing` or
+  `changed`, with what to do. A path hook runs as a copy of the bytes just checked, so a write after the check cannot
+  change what runs.
+- **Facts, never secrets.** No arguments, stdin closed. The environment is a short list (`PATH`, `HOME`, `USER`, the
+  locale, the XDG folders, `TMPDIR`, `SSH_AUTH_SOCK`) and the facts as `LANE_HOOK_<FACT>`: `EVENT`, `NAME`, `SOURCE`,
+  `PROJECT`, `PROJECT_ROOT` and, where the event has them, `PR`, `HEAD_SHA`, `MERGE_SHA`, `LANE`, `ISSUE`, `OUTCOME`,
+  `WORKTREE`, `ROLE`, `SETUP` (`setup` or `refresh`). Each fact is checked (a number, a full sha, a word); none of the
+  caller's other variables gets through, so no token or key does. A hook that needs a secret reads it itself.
+- **Where it runs.** With your HOME, in a fresh empty folder of its own under `~/.local/state/lane-control/hooks/`,
+  removed after: never in a lane's worktree or a checkout (the facts say where they are).
+- **A timeout** per hook (`--timeout`, default 600 s): then its whole process group is stopped, and so is anything
+  it left running when it ends.
+- **Shown:** each hook's exit code, its time and the last 20 lines of its output, with control characters taken out
+  and anything shaped like a token, key or password replaced by `[redacted]`.
+- **The coordinator** runs `gate` right before a merge and the after-merge and on-report hooks (its persona and the
+  `native-orca-lanes` skill say when); with no hooks they answer at once. A lane-start hook adds the prepare step to
+  the coordinator's persona at the next refresh.
+- **Orca's own features do not fit here** (read on 1.4.274): its automations start an agent from a prompt, on a
+  schedule or a GitHub, Slack or Linear event (`pr_merged` among them, through Orca's GitHub app), never a script, and
+  cannot hold a merge; `orca.yaml`'s `scripts.setup` is the project repo's own committed file, run inside each new
+  worktree (lane-control writes it for the beads link); `orca agent hooks` are Orca's agent-status hooks.
 
 ## A box: two directions
 
