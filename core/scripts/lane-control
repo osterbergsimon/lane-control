@@ -15,9 +15,10 @@
   lane-control status
         the current sha, the checkout's sha, and whether they differ.
   lane-control doctor [--json] [--no-ssh]
-        the installed sha against each project's (from its settings store), the ~/.agents/bin links, the lane skills,
-        and each box project-setup sent a tree to (its current sha over ssh, unless --no-ssh). Exit 1 when something
-        needs doing; each such line says what to run. Also, because a listening port is not proof (core/boxhealth.py):
+        the installed sha against each project's (from its settings store), each project's extras per role (missing,
+        changed, failing, not applied: core/extras.py), the ~/.agents/bin links, the lane skills, and each box
+        project-setup sent a tree to (its current sha over ssh, unless --no-ssh). Exit 1 when something needs doing;
+        each such line says what to run. Also, because a listening port is not proof (core/boxhealth.py):
         each tunnel unit written here (orca-tunnel-<host>, lane-tunnel@<host>) must be active/running, its restart
         counter must not climb over LANE_CHECK_SETTLE seconds (default 5), its own ssh must own the socket, and its
         ssh must not multiplex (ControlPath=none); this user must run at most one Orca server, and nothing of an older
@@ -139,7 +140,8 @@ def project_todos(root: str, sha, cur) -> list:
     return out
 
 
-EXTRA_FIX = {"missing": "run lane-control project refresh {root}", "not applied": "run lane-control project refresh {root}",
+EXTRA_FIX = {"missing": "run lane-control project refresh {root}",
+             "not applied": "run lane-control project refresh {root}",
              "changed": "add it again (lane-control project|machine extras add) to accept it, or remove it",
              "failing": "install the command or fix the script"}
 
@@ -147,8 +149,10 @@ EXTRA_FIX = {"missing": "run lane-control project refresh {root}", "not applied"
 def extras(root: str, out: dict) -> None:
     """Every extra of one project (the machine's and its own) with its roles and state; a todo for each missing,
     changed, failing or not applied one (core/extras.py check)."""
+    if not Path(root).is_dir():
+        return  # a project folder that is not on this machine: nothing of it to check here
     try:
-        rows = X.check(X.store_for(Path(root)), Path(root) if Path(root).is_dir() else None)
+        rows = X.check(X.store_for(Path(root)), Path(root))
     except X.ExtrasError as e:
         out["extras"][root] = []
         out["todo"].append(f"{root}: its extras cannot be read: {e}")

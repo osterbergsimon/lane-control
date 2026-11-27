@@ -6,6 +6,9 @@ once on stderr (`hint`), and nothing when the front door, another script or an a
 `lane-control coordinator ...` and `lane-control lane ...` (owner 2026-11-26, lc-wja: "commands to spawn new lanes,
 especially coordinators") run lane-spawn, which has no old name.
 
+`lane-control project extras ...`, `lane-control machine extras ...` and `lane-control lane prepare ...` (owner
+2026-11-26, lc-7c6: "centralize and improve these things") run lane-extras, which has no old name either.
+
 The ratchet is unattended improvement (owner 2026-11-26: "only moves forward"), the mode lane-improve switches; its
 docs and its skill still call it away-improve mode in places. `lane-control improve ...` is kept as an alias.
 

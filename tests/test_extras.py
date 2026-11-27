@@ -577,5 +577,81 @@ console.log(JSON.stringify(out));
         self.assertEqual(json.loads(r.stdout)["registered"], [])
 
 
+class RefreshTests(unittest.TestCase):
+    """project-setup (setup and refresh) on native Orca, against the stub orca of tests/stubs: the personas rendered,
+    the coordinator told, its folder given its extras; project check lists them."""
+
+    def setUp(self):
+        from test_project_setup_native import NativeEnv
+        self.e = NativeEnv()
+        self.addCleanup(self.e.close)
+        self.repo = self.e.repo()
+        r = self.e.run(str(self.repo), "--no-start")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.owner = self.e.home / "owner"
+        self.owner.mkdir()
+
+    def lc(self, *args):
+        return subprocess.run([sys.executable, str(LC), *map(str, args)], env=self.e.env, capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL)
+
+    def test_refresh_renders_personas_tells_the_coordinator_and_applies_its_folder(self):
+        prompt = self.owner / "migrations.md"
+        prompt.write_text("You write database migrations.\n")
+        hook = self.owner / "guard.sh"
+        hook.write_text("#!/bin/sh\nexit 0\n")
+        hook.chmod(0o755)
+        for args in (("--persona", "migrations", "--prompt-file", prompt, "--tier", "deep"),
+                     ("--env", "APP_MODE=fast", "--for", "coordinator"),
+                     ("--agent-hook", "PreToolUse", "--", hook, "--for", "coordinator"),
+                     ("--env", "APP_LANE=1", "--for", "lanes")):
+            r = self.lc("project", "extras", "add", self.repo, *args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("extras: updated", r.stdout)
+        self.assertIn("You write database migrations.",
+                      (self.repo / ".lane-control" / "personas" / "migrations.md").read_text())
+        coord = (self.repo / ".lane-control" / "coordinator.md").read_text()
+        self.assertIn("# Extras for this project", coord)
+        self.assertIn("lane prepare", coord)
+        s = json.loads((self.repo / ".claude" / "settings.local.json").read_text())
+        self.assertEqual(s["env"], {"APP_MODE": "fast"})  # the coordinator's, not the lanes'
+        self.assertEqual(s["hooks"]["PreToolUse"][0]["hooks"][0]["command"], str(hook))
+        self.assertTrue(any("persona-hook.sh" in h["command"] for e in s["hooks"]["SessionStart"]
+                            for h in e["hooks"]))  # lane-control's own hook is kept
+        self.assertEqual(git("status", "--porcelain", "--untracked-files=all", cwd=self.repo), "")
+        r = self.e.run("--check", str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("check extra persona:migrations: ok", r.stdout)
+        self.assertIn("check extra env:APP_MODE: ok (project; for coordinator", r.stdout)
+        hook.chmod(0o644)
+        r = self.e.run("--check", str(self.repo), adapt=True)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("check extra agent-hook:pretooluse-guard: failing", r.stdout)
+
+    def test_no_extras_changes_nothing_for_an_existing_project(self):
+        exclude = self.repo / ".git" / "info" / "exclude"
+        coord = (self.repo / ".lane-control" / "coordinator.md").read_text()
+        r = self.e.run(str(self.repo), "--refresh", adapt=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertNotIn("extras:", r.stdout)
+        self.assertEqual((self.repo / ".lane-control" / "coordinator.md").read_text(), coord)
+        self.assertNotIn("Extras for this project", coord)
+        self.assertNotIn("lane-control extras", exclude.read_text())
+        self.assertFalse((self.e.home / ".local" / "state" / "lane-control" / "extras").exists())
+
+    def test_the_onboarding_agents_get_no_mcp_and_no_extras(self):
+        from test_project_setup_native import load as load_setup
+        m = load_setup()
+        for write in (False, True):
+            cmd = m.agent_cmd("sonnet", "go", write)
+            self.assertIn("--strict-mcp-config", cmd)  # no MCP server, the project's .mcp.json included
+            self.assertIn("--restricted", cmd)  # no user, project or local settings: no hook, env, rule or plugin
+            tools = cmd[cmd.index("--tools") + 1].split(",")
+            self.assertNotIn("Skill", tools)
+            self.assertNotIn("Bash", tools)  # so no hook script, env or plugin of an extra is reached through it
+
+
 if __name__ == "__main__":
     unittest.main()

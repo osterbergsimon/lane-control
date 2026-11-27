@@ -1,7 +1,8 @@
 // lane-extras.js: lane-control's OpenCode v2 plugin for the agent-hook and env extras (core/extras.py). Copied into a
 // session folder's .opencode/plugins/ by `lane-control project refresh` (the coordinator's checkout) and
 // `lane-control lane prepare` (a lane's or reviewer's worktree), with lane-extras.json one folder up, in .opencode/:
-//   {"env": {"NAME": "value"}, "hooks": [{"event": "PreToolUse" | "PostToolUse", "matcher": "<regex>", "command": "<path>"}]}
+//   {"env": {"NAME": "value"},
+//    "hooks": [{"event": "PreToolUse" | "PostToolUse", "matcher": "<regex>", "command": "<path>"}]}
 // - env: set in the server's own environment at setup, so the commands its shell tool runs see them.
 // - PreToolUse: ctx.tool.hook("execute.before", fn) (OpenCode 2.2.1, probed live for lane-away-guard.js). The script
 //   gets Claude's hook input on stdin ({hook_event_name, tool_name, tool_input, session_id, cwd}, tool_name in
@@ -56,7 +57,8 @@ function runHook(hook, event, ev) {
   const name = TOOLS[ev?.tool] ?? String(ev?.tool ?? "");
   if (!matches(hook.matcher, name)) return null;
   const input = JSON.stringify({ hook_event_name: event, tool_name: name, tool_input: ev?.input ?? {},
-    session_id: ev?.sessionID ?? "", cwd: process.cwd(), ...(event === "PostToolUse" ? { tool_response: ev?.output ?? null } : {}) });
+    session_id: ev?.sessionID ?? "", cwd: process.cwd(),
+    ...(event === "PostToolUse" ? { tool_response: ev?.output ?? null } : {}) });
   const r = spawnSync(hook.command, [], { input, encoding: "utf8", timeout: 60000 });
   if (r.error) {
     say(`hook ${hook.command} did not run: ${r.error.message}`);

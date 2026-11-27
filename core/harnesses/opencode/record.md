@@ -88,6 +88,15 @@ the tier rules allow for the project (`core/scripts/lane-tier`).
   not `shell`). The real guards are `away-merge`, the persona rule and branch protection where the repo has it. A
   lane's own session has no guard.
 
+- 2026-11-27 extras (lc-7c6): a session folder's extras for OpenCode go in `.opencode/opencode.json` (`mcp`, with
+  `{env:NAME}` for each secret; `permission` for the Bash, Edit and WebFetch rules; `plugin`, pinned npm packages),
+  `.opencode/skills/<name>` (links) and `lane-extras.js` in `.opencode/plugins/` with `lane-extras.json` beside the
+  plugins folder: the env extras are set in the server's environment at setup, a PreToolUse hook runs on
+  `ctx.tool.hook("execute.before")` (exit 2 stops the call, as in Claude) and a PostToolUse hook on `"execute.after"`.
+  SessionStart and Stop have no plugin hook: Claude only. The plugin is tested under node only (tests/test_extras.py).
+  **Not verified against a real OpenCode 2, and the first live check to run:** that it reads
+  `<folder>/.opencode/opencode.json` and `.opencode/skills/`, and that `execute.after` fires.
+
 ## Retest when
 - OpenCode changes its plugin API, its `--standalone` flag or its session store: run the live check.
 

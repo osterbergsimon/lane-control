@@ -826,7 +826,8 @@ def exclude_names(p: dict) -> list:
             [f"/.opencode/skills/{e['name']}" for e in p["skills"]]
     if p["mcp"]:
         names.append("/.mcp.json")
-    names += ["/.claude/settings.local.json", "/.opencode/opencode.json", "/.opencode/plugins/lane-extras.js", "/.opencode/lane-extras.json",
+    names += ["/.claude/settings.local.json", "/.opencode/opencode.json", "/.opencode/plugins/lane-extras.js",
+              "/.opencode/lane-extras.json",
               f"/{PERSONAS_DIR}/"]
     return names
 

@@ -209,7 +209,9 @@ def main(argv=None) -> int:
         print(f"lane-control: {e}", file=sys.stderr)
         return 1
     asked = any(x in ("-h", "--help", "help") for x in argv[:2])
-    print(__doc__, file=sys.stdout if asked else sys.stderr)
+    print("usage: lane-control project extras add|list|remove <project> ..., lane-control machine extras "
+          "add|list|remove ...,\n       lane-control lane prepare <project> <worktree> --role lanes|reviewer\n\n"
+          + __doc__, file=sys.stdout if asked else sys.stderr)
     return 0 if asked else 2
 
 

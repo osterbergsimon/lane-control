@@ -92,6 +92,10 @@ orca-ide orchestration worker-start --spec-file <brief> --worktree path:<that wo
 - Orca 1.4.268 and 1.4.274 have the same rules and the same help here (source of both). Started this way on 1.4.268
   headless; on 1.4.274 read in the source, not run.
 
+**Extras.** When your persona has a part "Extras for this project", follow it for every lane and reviewer: make the
+worktree first (as above, for Claude too), run the `lane-control lane prepare` line it gives, and only then
+`worker-start --worktree path:<that worktree>`. If prepare exits non-zero, hold the lane and tell the owner.
+
 Then mirror it on the lane's worktree card, so the owner sees it at a glance:
 `orca-ide worktree set --worktree <lane> --comment "<KEY> <tier> <harness>/<model>: <one line>"`.
 
