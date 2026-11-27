@@ -2,6 +2,7 @@
 
 A scratch HOME and XDG_DATA_HOME, and a small lane-control repo made here (the marker, a lane tool, a persona), so a
 test controls its commits."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import importlib.util
 import json
 import os
@@ -38,11 +39,11 @@ class Scratch(unittest.TestCase):
         orca = self.tmp / "orca-stub"  # doctor lists Orca's automations: never the real Orca's (BOX-1)
         orca.write_text("#!/bin/sh\necho '{\"ok\": true, \"result\": {\"automations\": []}}'\n")
         orca.chmod(0o755)
-        self.env = {**os.environ, "HOME": str(self.home), "XDG_DATA_HOME": str(self.data),
-                    "XDG_CONFIG_HOME": str(self.home / ".config"), "ORCA_CLI": str(orca)}
+        self.env = {**os.environ, **testhome.env_for(self.home), "XDG_DATA_HOME": str(self.data),
+                    "ORCA_CLI": str(orca)}
         self.env.pop("LANE_CONTROL_SWITCH", None)  # these tests check when a setup may switch by itself
         self.old_env = dict(os.environ)
-        os.environ.update(HOME=str(self.home), XDG_DATA_HOME=str(self.data))
+        os.environ.update(testhome.env_for(self.home), XDG_DATA_HOME=str(self.data))
         os.environ.pop("LANE_CONTROL_SWITCH", None)
         self.src = self.tmp / "lane-control"
         (self.src / "core" / "scripts").mkdir(parents=True)
@@ -207,8 +208,8 @@ class BoxScriptTests(Scratch):
     def box(self):
         box = self.tmp / "box"
         box.mkdir(exist_ok=True)
-        env = {k: v for k, v in os.environ.items() if k != "XDG_DATA_HOME"}
-        env.update(HOME=str(box), XDG_CONFIG_HOME=str(box / ".config"))  # fish makes its folder there (n3)
+        env = dict(os.environ, **testhome.env_for(box))
+        del env["XDG_DATA_HOME"]  # a box with none set (fish makes its folder under XDG_CONFIG_HOME, n3)
         return box, env, box / ".local" / "share" / "lane-control"
 
     def send(self, shell, data=None, count=None):

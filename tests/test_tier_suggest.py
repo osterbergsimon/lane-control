@@ -1,11 +1,13 @@
 """project-setup --suggest-tiers: a tier table suggested from an OpenAI-compatible gateway's model list (lc-48m).
 The gateway is tests/stubs/fake_gateway.py on 127.0.0.1; HOME is a temp dir, so OpenCode's config is the test's own."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import contextlib
 import io
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -66,8 +68,9 @@ class PickTests(unittest.TestCase):
         self.assertEqual(T.kind("c", "openai/qwen3-32b"), "standard")
 
     def test_the_suggestion_is_a_table_lane_tier_reads(self):
-        f = Path(self.id().replace(".", "_") + ".tsv")
-        self.addCleanup(lambda: f.unlink(missing_ok=True))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        f = Path(tmp.name) / "lanes.tsv"
         f.write_text(T.table("gw", T.suggest([("chat", "x/y")])))
         r = subprocess.run(["bash", str(ROOT / "core" / "scripts" / "lane-tier"), str(f), "deep"],
                            capture_output=True, text=True)

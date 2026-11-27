@@ -1,5 +1,6 @@
 """core/cleanup.py: what Orca's workspace cleanup preview says about the merged rule (report only), and GitHub's
 "Automatically delete head branches" (recommended; set unless the owner says no). Orca's CLI and gh are stub executables."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import os
 import stat

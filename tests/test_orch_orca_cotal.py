@@ -2,6 +2,7 @@
 
 The project is a synthetic fixture (tests/fixtures/orca-cotal-project/) carrying what project-setup adds to a repo.
 """
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import importlib.util
 import shutil
 import tempfile

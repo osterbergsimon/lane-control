@@ -1,6 +1,7 @@
 """The model environment (field report E2, E3, E4; core/modelenv.py and core/scripts/model-env): one source, the homes
 generated from it, a check that compares every home value by value, and the served-model check at write time. HOME and
 XDG are temp dirs; the gateway is tests/stubs/fake_gateway.py on 127.0.0.1; systemctl is a stub."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import os
 import shutil
@@ -47,7 +48,7 @@ class ModelEnvTest(unittest.TestCase):
         (bin_ / "systemctl").write_text(SYSTEMCTL)
         (bin_ / "systemctl").chmod(0o755)
         self.manager = self.home / "manager.env"
-        self.env = {**clean_env(), "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.conf),
+        self.env = {**clean_env(), **testhome.env_for(self.home), "XDG_CONFIG_HOME": str(self.conf),
                     "PATH": f"{bin_}:{os.environ['PATH']}", "SYSTEMD_ENV_FILE": str(self.manager),
                     "PYTHONDONTWRITEBYTECODE": "1"}
         self.source = self.conf / "lane-control" / "model-env.conf"

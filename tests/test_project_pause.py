@@ -1,4 +1,5 @@
 """project-pause against the stub orca/cotal executables (tests/stubs/fake.py) in a temporary HOME."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import subprocess
 import sys

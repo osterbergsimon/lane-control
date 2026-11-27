@@ -1,5 +1,6 @@
 """lane-improve (on, off, drained, status), the improve state (core/improve.py) and what reads it (away-improve mode, lc-yzb). Temp HOME
 and temp git repos; no real away file, improve file, branch or repo is touched."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import subprocess
 import sys

@@ -1,5 +1,6 @@
 """night-precheck and improve mode: the fallback nudge (`DUE <name> improve`) and unmetered machines (lc-yzb).
 Same temp-HOME setup as the other night-precheck tests (test_machine_setup.py); improve.json is written by hand."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import sys
 import unittest

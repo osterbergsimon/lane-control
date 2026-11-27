@@ -3,6 +3,7 @@
 The project under test is a clone of a bare repo in a temp dir, so worktrees, pushes and branches are real; `gh` is a
 stub on PATH that logs its calls and prints a PR URL.
 """
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import hashlib
 import os
 import shutil
@@ -76,7 +77,7 @@ class Env:
         self.home = self.d / "home"
         self.home.mkdir()
         self.env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "GH_LOG": str(self.gh_log),
-                    "HOME": str(self.home), "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1",
+                    **testhome.env_for(self.home), "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_AUTHOR_NAME": "Owner", "GIT_AUTHOR_EMAIL": "owner@example.com",
                     "GIT_COMMITTER_NAME": "Owner", "GIT_COMMITTER_EMAIL": "owner@example.com"}
 

@@ -1,5 +1,6 @@
 """core/scripts/away-merge: the only merge route into a project's away branch. gh, git and gitleaks are stubs or temp
 repos; nothing merges anywhere real."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import subprocess
 import sys

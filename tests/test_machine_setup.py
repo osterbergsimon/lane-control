@@ -1,6 +1,7 @@
 """Machine setup for native Orca (plan phase 4; spec section 8): lane-away, night-precheck, lane-sweep, ci-presence,
 budget-state, machine-check and machine-setup. Every outside tool is a stub on a temp PATH and HOME is a temp dir: no
 test reaches the live machine, Orca's automations or a real systemd."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import os
 import sqlite3
@@ -176,9 +177,9 @@ class MachineTest(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(("LANE_", "XDG_", "CLAUDE_CONFIG", "GITHUB_ACTIONS", "PLAYBOOK", "ORCA_",
                                          "ANTHROPIC_", "OPENCODE_"))}
-        self.env.update(HOME=str(self.home), PATH=f"{self.bin}:{os.environ['PATH']}", LANE_PROC_DIR=str(self.proc),
-                        LANE_STATE_DIR=str(self.tmp / "slots"), LANE_HOUR="12", PYTHONDONTWRITEBYTECODE="1",
-                        XDG_DATA_HOME=str(self.home / ".local" / "share"), LANE_CONTROL_SWITCH="1")  # INST-1 M1
+        self.env.update(testhome.env_for(self.home), PATH=f"{self.bin}:{os.environ['PATH']}",
+                        LANE_PROC_DIR=str(self.proc), LANE_STATE_DIR=str(self.tmp / "slots"), LANE_HOUR="12", PYTHONDONTWRITEBYTECODE="1",
+                        LANE_CONTROL_SWITCH="1")  # INST-1 M1
 
     def run_script(self, name, *args, env=None, input=None):
         e = dict(self.env, **(env or {}))
@@ -206,8 +207,7 @@ class MachineTest(unittest.TestCase):
     def record_session(self, checkout: Path, harness: str, sid: str, role: str = "coordinator"):
         """What the persona hook or plugin writes for a session started with the markers."""
         from unittest import mock
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
-            os.environ.pop("XDG_STATE_HOME", None)
+        with mock.patch.dict(os.environ, testhome.env_for(self.home)):
             rec = harnesses.session_record(checkout, role, harness)
         rec.parent.mkdir(parents=True, exist_ok=True)
         rec.write_text(sid + "\n")

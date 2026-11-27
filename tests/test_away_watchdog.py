@@ -1,6 +1,7 @@
 """core/scripts/away-watchdog (field report B1, F3, F6) and what it reads: the cycle state, the ledger, the caps and
 `status --json` of lane-improve (B3, B4, B5), and the summary PR's body written over REST (B6). Temp HOME and XDG, temp git
 repos, stubs for orca-ide and gh; nothing real is sent, merged or edited."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import json
 import os
 import sys
@@ -345,8 +346,7 @@ class WatchdogReviewTests(WatchTest):
     def test_a_paused_project_gets_nothing(self):  # m3
         import machineconf
         from unittest import mock
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
-            os.environ.pop("XDG_CONFIG_HOME", None)
+        with mock.patch.dict(os.environ, testhome.env_for(self.home)):
             f = machineconf.settings_file(self.shop)
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps({"paused": True}))

@@ -2,6 +2,7 @@
 
 Temp dirs only: HOME and XDG_* point into them, so no real Claude, OpenCode or Orca state is read or written.
 """
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import os
 import shutil
 import subprocess
@@ -887,6 +888,12 @@ console.log(JSON.stringify(out));
         self.copy.write_bytes(PLUGIN.read_bytes())
         self.driver = self.t / "driver.mjs"
         self.driver.write_text(self.DRIVER)
+        self.home = self.t / "home"
+        self.home.mkdir()
+
+    def plugin_env(self, **extra) -> dict:
+        """The plugin writes the session record under HOME (or XDG_STATE_HOME): node gets this test's own."""
+        return clean_env(**{**testhome.env_for(self.home), **extra})
 
     def run_plugin(self, env):
         import json
@@ -901,20 +908,24 @@ console.log(JSON.stringify(out));
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_plugin_is_a_v2_definition(self):
-        out = self.run_plugin(clean_env())
+        out = self.run_plugin(self.plugin_env())
         self.assertEqual((out["id"], out["setup"], out["named"]), ("lane-persona", "function", []))
 
     def test_plugin_appends_persona_with_markers(self):
-        out = self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona)))
+        out = self.run_plugin(self.plugin_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona)))
         part = {"type": "text", "text": PERSONA_TEXT}
         self.assertEqual(out["hooks"], ["context", "compaction"])
         self.assertEqual(out["turn"], [{"type": "text", "text": "base"}, part])
         self.assertEqual(out["compaction"], [part])
         self.assertEqual(out["disposed"], 2)
         self.assertEqual(out["tui"], "undefined")
+        pkg = load_harnesses_pkg()
+        record = self.home / ".local" / "state" / "lane-control" / "sessions" / pkg.encode_path(self.t.resolve())
+        self.assertEqual((record / "coordinator.opencode").read_text(), "ses_1\n")  # in this test's HOME (lc-oh7l)
 
     def test_plugin_silent_without_markers(self):
-        for env in (clean_env(), clean_env(LANE_ROLE="coordinator"), clean_env(LANE_PERSONA=str(self.persona))):
+        envs = ({}, {"LANE_ROLE": "coordinator"}, {"LANE_PERSONA": str(self.persona)})
+        for env in (self.plugin_env(**e) for e in envs):
             out = self.run_plugin(env)
             self.assertEqual(out["hooks"], [])
             self.assertEqual((out["turn"], out["compaction"]), ([{"type": "text", "text": "base"}], []))
@@ -923,10 +934,11 @@ console.log(JSON.stringify(out));
         # Review M4: the marked server says which session is the coordinator's (the idle signal reads it).
         pkg = load_harnesses_pkg()
         state = self.t / "state"
-        self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona), XDG_STATE_HOME=str(state)))
+        self.run_plugin(self.plugin_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona),
+                                        XDG_STATE_HOME=str(state)))
         record = state / "lane-control" / "sessions" / pkg.encode_path(self.t.resolve()) / "coordinator.opencode"
         self.assertEqual(record.read_text(), "ses_1\n")
-        self.run_plugin(clean_env(XDG_STATE_HOME=str(self.t / "state2")))
+        self.run_plugin(self.plugin_env(XDG_STATE_HOME=str(self.t / "state2")))
         self.assertFalse((self.t / "state2").exists())
 
     TWO_COPIES = """
@@ -954,7 +966,8 @@ console.log(JSON.stringify({ registered: hooks.context.length, turn: turn.system
         second.write_bytes(PLUGIN.read_bytes())
         driver = self.t / "two.mjs"
         driver.write_text(self.TWO_COPIES)
-        env = clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona), XDG_STATE_HOME=str(self.t / "state"))
+        env = self.plugin_env(LANE_ROLE="coordinator", LANE_PERSONA=str(self.persona),
+                              XDG_STATE_HOME=str(self.t / "state"))
         r = subprocess.run([NODE, str(driver), str(self.copy), str(second)], capture_output=True, text=True,
                            cwd=self.t, env=env, timeout=30)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
@@ -968,7 +981,7 @@ console.log(JSON.stringify({ registered: hooks.context.length, turn: turn.system
     def test_plugin_silent_missing_file(self):
         (self.t / "a-dir.md").mkdir()
         for path in (self.t / "missing.md", self.t / "a-dir.md"):
-            out = self.run_plugin(clean_env(LANE_ROLE="coordinator", LANE_PERSONA=str(path)))
+            out = self.run_plugin(self.plugin_env(LANE_ROLE="coordinator", LANE_PERSONA=str(path)))
             self.assertEqual((out["turn"], out["compaction"]), ([{"type": "text", "text": "base"}], []))
 
 
@@ -1222,6 +1235,11 @@ class ClaudeLiveTests(TempDirTest):
     MARK = "LANE-PERSONA-LIVE-CLAUDE-4821"
 
     def test_live_persona_session_record_and_idle(self):
+        # opt-out: the owner's sign-in and transcripts; the session record still goes to a temp XDG_STATE_HOME
+        with testhome.real_home():
+            self.live_run()
+
+    def live_run(self):
         pkg = load_harnesses_pkg()
         a = pkg.load_harness("claude")
         checkout = self.t / "checkout"

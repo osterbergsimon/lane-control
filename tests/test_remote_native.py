@@ -6,6 +6,7 @@ The "box" is a second temporary HOME. A fake ssh runs the remote command there w
 copy, the host's own project-setup run and the box-side pairing all really run, against the stub orca. On the box the
 Orca CLI is a shim in the format Orca writes on a host (~/.orca/cli/bin/orca: exec '<node>' '<cli.js>' "$@"), whose
 fake node logs its argv and only a hash of what it reads on stdin, then answers through the stub."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import base64
 import hashlib
 import json
@@ -891,7 +892,7 @@ class ReviewRound1Tests(Case):
                             "m = runpy.run_path(sys.argv[0], run_name='probe'); m['main'](sys.argv[1:]); "
                             f"open({str(probe)!r}, 'w').write(os.environ['PATH'])",
                             str(SETUP), str(self.repo), "--via-host", "--which-orchestrator"],
-                           env={**self.e.env, "HOME": str(self.e.box)}, capture_output=True, text=True)
+                           env={**self.e.env, **testhome.env_for(self.e.box)}, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         parts = probe.read_text().split(":")
         self.assertEqual(parts[-2:], [str(self.e.box / "bin"), str(self.e.box / ".local" / "bin")])

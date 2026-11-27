@@ -1,5 +1,6 @@
 """core/privatenames.py: the names the public-repo rule keeps out of a public branch (hostnames, usernames, project
 names), read from the machine, machine.conf and a file outside the repo. Made-up names only."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import sys
 import tempfile
 import unittest

@@ -1,6 +1,7 @@
 """Beads round trip with the real bd (opt-in: LANE_TEST_REAL_BD=1). Everything happens in temp dirs against a local
 file:// Dolt remote: no real beads workspace, no GitHub. This is the gate for the restore design: issues AND memories
 must come back from the Dolt remote."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import os
 import shutil
 import stat
@@ -111,7 +112,7 @@ class AdoptAndRestoreEndToEnd(unittest.TestCase):
     def machine(self, name: str):
         home = self.tmp / name
         (home / "code").mkdir(parents=True)
-        patcher = mock.patch.dict(os.environ, {**self.env, "HOME": str(home)})
+        patcher = mock.patch.dict(os.environ, {**self.env, **testhome.env_for(home)})
         patcher.start()
         self.addCleanup(patcher.stop)
         repo = home / "code" / "widget"

@@ -3,6 +3,7 @@
 Everything is local: a fake ssh runs the host's commands with sh in a temporary "box" HOME, and the Orca server's slot
 and node runtime are small fake files in a temporary artifacts folder. Nothing is paired (no --pair), no real host is
 touched, and the real tests/test-orca-host-install.sh (which wipes a host user's Orca) is never run here."""
+import testhome  # noqa: F401,I001  first: temp HOME and XDG_*, and the watch on the real ones
 import hashlib
 import io
 import os
@@ -83,7 +84,7 @@ class HostInstallCase(unittest.TestCase):
         (self.bin / "ssh").chmod(0o755)
         self.target = target()
         make_node_archive(self.art, arch_of(self.target))
-        self.env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:{os.environ['PATH']}",
+        self.env = {**os.environ, **testhome.env_for(self.home), "PATH": f"{self.bin}:{os.environ['PATH']}",
                     "BOX": str(self.box), "ORCA_ARTIFACTS": str(self.art)}
         for k in ("LANE_SSH_CONFIG", "ORCA_CLI"):
             self.env.pop(k, None)
