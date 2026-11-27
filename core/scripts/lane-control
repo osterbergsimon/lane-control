@@ -152,6 +152,9 @@ def extras(root: str, out: dict) -> None:
     changed, failing or not applied one (core/extras.py check)."""
     if not Path(root).is_dir():
         return  # a project folder that is not on this machine: nothing of it to check here
+    st = next((st for r, st in X.known() if str(r) == root), {})
+    if not X.native(Path(root), st):
+        return  # extras are applied on native Orca only: nothing here would ever apply them
     try:
         rows = X.check(X.store_for(Path(root)), Path(root))
     except X.ExtrasError as e:

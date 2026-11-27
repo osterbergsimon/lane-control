@@ -121,6 +121,10 @@ def cmd_add(group: str, argv: list) -> int:
     opts = {"name": a.name, "for": a.for_, "command": tail, "env": a.env, "prompt_file": a.prompt_file,
             "tier": a.tier, "harness": a.harness, "allow_repo_path": a.allow_repo_path}
     entry, warnings = X.make(kind, value, opts)
+    if kind == "skill" and group == "project" and X.find(X.defaults(), entry["name"]):
+        warnings.append(f"note: {entry['name']} is also a default design skill, installed for the whole user; "
+                        "Claude may load the user's copy instead of this one (a personal skill beats a project's). "
+                        f"To be sure, turn the default off: lane-control machine extras remove {entry['name']}")
     for w in warnings:
         print(w, file=sys.stderr)
     state = X.add(path, entry)
@@ -201,7 +205,10 @@ def cmd_prepare(argv: list) -> int:
     had = [s for s in X.read_record(wt).get("scopes", []) if s in ("lanes", "reviewer")]
     scopes = [s for s in X.SCOPES if s in set(had) | {a.role}]
     entries = X.prepare_entries(X.effective(store), scopes)
-    lines, problems = X.apply_folder(wt, entries, scopes, project=root)
+    try:
+        lines, problems = X.apply_folder(wt, entries, scopes, project=root)
+    except OSError as e:  # a disk or permission error part way: said as a problem, the record knows both marks
+        lines, problems = [], [f"could not write in {wt}: {e.strerror or e}"]
     for line in lines:
         print(f"prepare: {line}")
     for p in problems:

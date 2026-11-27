@@ -38,7 +38,7 @@ ROUTES = {
     ("project", "start"): ("project-pause", ["start"], "<project>", "start its missing agents"),
     ("project", "status"): ("project-pause", ["status"], "<project>", "running, resting or paused"),
     ("project", "extras"): ("lane-extras", ["project"], "add|list|remove <project> ...",
-                            "skills, MCP, personas, hooks..."),
+                            "skills, MCP, personas, plugins"),
     ("coordinator", "start"): ("lane-spawn", ["coordinator", "start"], "<project>|machine [--force]",
                                "start it unless it runs"),
     ("coordinator", "restart"): ("lane-spawn", ["coordinator", "restart"], "<project> [--wait S]",

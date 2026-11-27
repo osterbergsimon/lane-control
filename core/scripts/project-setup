@@ -172,7 +172,7 @@ def _boxhealth():
 
 
 def _extras():
-    """core/extras.py: the owner's extras (skills, MCP servers, personas, hooks, permissions, plugins, env), lc-7c6."""
+    """core/extras.py: the owner's extras (skills, MCP servers, personas, plugins), lc-7c6."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("lc_extras", HERE / "core" / "extras.py")
     mod = importlib.util.module_from_spec(spec)

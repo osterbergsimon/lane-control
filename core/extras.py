@@ -45,6 +45,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -358,12 +359,27 @@ def secretish_name(name: str) -> bool:
 
 
 def opaque(value: str) -> bool:
-    """A long run of letters and digits with nothing else: how a key or token looks."""
+    """A long run of letters and digits with nothing else: how a key or token looks. One with `/` in it (base64)
+    counts when it has capitals, small letters and digits and does not start like a path."""
     v = value.strip()
-    if PACKAGE_AT_VERSION.fullmatch(v) or "/" in v or "://" in v:
+    if PACKAGE_AT_VERSION.fullmatch(v) or "://" in v or len(v) < 32 or re.search(r"\s", v):
         return False
-    return len(v) >= 32 and not re.search(r"\s", v) and bool(re.search(r"[0-9]", v)) and \
-        bool(re.search(r"[A-Za-z]", v))
+    if not (re.search(r"[0-9]", v) and re.search(r"[A-Za-z]", v)):
+        return False
+    if "/" not in v:
+        return True
+    return bool(re.fullmatch(r"[A-Za-z0-9+/=_-]+", v)) and not v.startswith(("/", ".", "~", "@")) and \
+        bool(re.search(r"[A-Z]", v)) and bool(re.search(r"[a-z]", v))
+
+
+def secret_value(v: str) -> bool:
+    """A value given for a secret-named header, parameter, key or option: anything but a ${NAME} reference."""
+    return not REF.fullmatch(v.strip())
+
+
+HEADER = re.compile(r"\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)", re.S)  # Name: value
+QUERY = re.compile(r"[?&;]([A-Za-z0-9_.-]+)=([^&;#]*)")
+JSON_PAIR = re.compile(r"[\"']([A-Za-z0-9_.-]+)[\"']\s*:\s*[\"']([^\"']*)[\"']")
 
 
 def arg_problem(args: list) -> "str | None":
@@ -371,17 +387,47 @@ def arg_problem(args: list) -> "str | None":
     for i, a in enumerate(args):
         bare = REF.sub("", a)
         if TOKEN_VALUE.search(bare) or USERINFO.search(bare) or SECRET_QUERY.search(a) or AUTH_TEXT.search(bare) or \
-                opaque(bare):
+                opaque(bare) or any(opaque(x) for x in re.split(r"[\s=:,;\"'{}]+", bare)):
             return f"argument {i + 1} looks like it carries a key, token or password"
+        h = HEADER.fullmatch(a)
+        if h and "://" not in a and secretish_name(h[1]) and secret_value(h[2]):
+            return f"argument {i + 1} is a secret-named header ({h[1]}) with a value"
+        if any(secretish_name(k) and secret_value(v) for k, v in QUERY.findall(a)):
+            return f"argument {i + 1} has a secret-named query parameter with a value"
+        if any(secretish_name(k) and secret_value(v) for k, v in JSON_PAIR.findall(a)):
+            return f"argument {i + 1} has a secret-named key with a value"
         m = re.fullmatch(r"(-{1,2})?([A-Za-z_][A-Za-z0-9_.-]*)(=(.*))?", a, re.S)
         if not m or not secretish_name(m[2].replace("-", "_").replace(".", "_")):
             continue
         if m[3] is not None:
             if not REF.fullmatch(m[4] or ""):
                 return f"argument {i + 1} sets a secret-named option or variable to a value"
-        elif m[1] and i + 1 < len(args) and not args[i + 1].startswith("-") and not REF.fullmatch(args[i + 1]):
+        elif m[1] and i + 1 < len(args) and not args[i + 1].startswith("--") and not REF.fullmatch(args[i + 1]):
             return f"argument {i + 2} is the value of the secret-named option {m[1]}{m[2]}"
     return None
+
+
+def path_parts(a: str, command: bool) -> list:
+    """The paths an MCP argument names: itself, the part after `=` (--opt=<path>), or after a one-letter flag
+    (-I/<path>). A URL, an npm package, an @scope/package, a ${NAME} or plain text names none. A relative one is
+    returned as it is (the caller refuses it)."""
+    if REF.search(a) or "://" in a:
+        return []
+    parts = []
+    if command:
+        parts.append(a) if "/" in a or a.startswith("~") else None
+        return parts
+    candidates = [a]
+    if a.startswith("-"):
+        _, eq, val = a.partition("=")
+        candidates = [val] if eq else ([a[2:]] if re.fullmatch(r"-[A-Za-z][/~.].*", a) else [])
+    for c in candidates:
+        if not c or c.startswith("@") or PACKAGE_AT_VERSION.fullmatch(c) or "://" in c:
+            continue
+        if c.startswith(("/", "~")) or c.startswith("./") or c.startswith("../") or \
+                ("/" in c and not re.search(r"\s", c)) or FILE_LIKE.fullmatch(c):
+            parts.append(c)
+    return parts
 
 
 def inside_checkout(path: Path) -> "Path | None":
@@ -482,19 +528,24 @@ def make(kind: str, value, opts: dict) -> tuple:
                               "as ${NAME}, or let the server read it from its environment")
         files = {}
         for i, a in enumerate(cmd):
-            if REF.search(a):
-                continue
-            if a.startswith("/") or a.startswith("~"):
-                if i == 0 or Path(a).expanduser().exists():
-                    path, h, warn = owners_file(a, allow_repo, "the MCP command" if i == 0 else "an MCP argument",
-                                                i == 0)
-                    cmd[i], files[path] = path, h
-                    warnings += [warn] if warn else []
-            elif (i == 0 and "/" in a) or (not a.startswith("-") and not PACKAGE_AT_VERSION.fullmatch(a) and
-                                           "://" not in a and (a.startswith(".") or FILE_LIKE.fullmatch(a))):
-                raise ExtrasError(f"argument {i + 1} of the MCP command is a relative path: it resolves in the "
-                                  "session's folder, which a lane controls. Give an absolute path outside every "
-                                  "project")
+            for part in path_parts(a, i == 0):
+                if part.startswith(("/", "~")):
+                    p = Path(part).expanduser()
+                    if i == 0 or p.exists():
+                        path, h, warn = owners_file(part, allow_repo, "the MCP command" if i == 0 else
+                                                    "a file an MCP argument names", i == 0 and part == a)
+                        files[path] = h
+                        if part == a:
+                            cmd[i] = path
+                        warnings += [warn] if warn else []
+                    elif inside_checkout(p) is not None and not allow_repo:
+                        raise ExtrasError(f"argument {i + 1} of the MCP command names a path inside the project "
+                                          f"checkout {inside_checkout(p)}: a lane can put a file there. Keep it "
+                                          "outside every project repo; --allow-repo-path takes it anyway")
+                else:
+                    raise ExtrasError(f"argument {i + 1} of the MCP command names a relative path: it resolves in "
+                                      "the session's folder, which a lane controls. Give an absolute path outside "
+                                      "every project")
         envs = []
         for n in opts.get("env") or []:
             if "=" in n:
@@ -503,7 +554,7 @@ def make(kind: str, value, opts: dict) -> tuple:
             if not ENV_NAME.fullmatch(n) or opaque(n) or TOKEN_VALUE.search(n):
                 raise ExtrasError("--env takes an environment variable NAME in capitals (for example GITHUB_TOKEN)")
             envs.append(n)
-        envs += [r for a in cmd for r in REF.findall(a) if r not in envs]
+        envs = list(dict.fromkeys(envs + [r for a in cmd for r in REF.findall(a)]))
         e.update(command=cmd[0], args=cmd[1:], env=envs, files=files)
         warnings.append("note: an interpreter's own module or script lookup (python3 -m x, npx x) is not pinned: "
                         "only absolute paths given on the command line are")
@@ -882,12 +933,20 @@ def apply_launch(store: Path, entries: list, dry: bool = False) -> tuple:
 # --- writing a folder: only files lane-control creates and owns whole ---------------------------------------------
 
 def identity(folder: Path) -> str:
-    """A worktree's identity: its .git entry's inode and change time (a new worktree at the same path is another)."""
+    """A checkout's identity, from facts git's own commands never change (no ctime or mtime: a commit, fetch or even
+    status changes those of a .git folder). A main checkout: its git folder's resolved path. A linked worktree: its
+    .git file's inode and the gitdir it names (a new worktree at the same path is another)."""
+    g = Path(folder) / ".git"
     try:
-        st = os.lstat(Path(folder) / ".git")
+        st = os.lstat(g)
     except OSError:
         return ""
-    return f"{st.st_ino}:{st.st_ctime_ns}"
+    if stat.S_ISDIR(st.st_mode):
+        return f"main:{g.resolve()}"
+    try:
+        return f"worktree:{st.st_ino}:{g.read_text().strip()}"
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def read_record(folder: Path) -> dict:
@@ -937,6 +996,12 @@ def apply_folder(folder: Path, entries: list, scopes: list, claude: bool = True,
     folder = Path(folder).resolve()
     rec = read_record(folder)
     had = {k: v for k, v in (rec.get("files") or {}).items() if isinstance(v, str)}
+    alt = {k: v for k, v in (rec.get("pending") or {}).items() if isinstance(v, str)} if \
+        isinstance(rec.get("pending"), dict) else {}  # the marks of a write that did not finish
+
+    def ours(rel, now):
+        return now is not None and mark(now) in {had.get(rel), alt.get(rel)} - {None}
+    had = {**{k: v for k, v in alt.items() if k not in had}, **had}
     problems, kinds = wanted(entries)
     want = {}
     if not problems:
@@ -951,8 +1016,7 @@ def apply_folder(folder: Path, entries: list, scopes: list, claude: bool = True,
         now = current(folder, rel)
         if rel in want and tracked(folder, rel):
             problems.append(f"{rel} is committed in the project: lane-control never changes it")
-        elif rel in want and now is not None and mark(now) != had.get(rel) and \
-                not (isinstance(now, Path) and now == want[rel]) and now != want[rel]:
+        elif rel in want and now is not None and not ours(rel, now):
             problems.append(f"{folder / rel} is there and is not lane-control's (or changed since it was written); "
                             "left so")
     if problems:
@@ -966,19 +1030,20 @@ def apply_folder(folder: Path, entries: list, scopes: list, claude: bool = True,
             if now == want[rel]:
                 continue
             lines.append(f"{folder / rel}: {'would write' if dry else 'wrote'}")
-        elif now is not None and mark(now) == had[rel]:
+        elif ours(rel, now):
             lines.append(f"{folder / rel}: {'would remove' if dry else 'removed'} (no longer an extra here)")
         elif now is not None:
             problems.append(f"{folder / rel} changed since lane-control wrote it; left so, take it out by hand")
     if dry:
         return lines, problems
     files = {rel: mark(c) for rel, c in want.items()}
-    pending = {**had, **files}
     common = common_dir(folder)
     rec_body = {"folder": str(folder), "identity": identity(folder), "common": str(common or ""),
                 "project": str(project or ""), "scopes": scopes}
     records_dir().mkdir(parents=True, exist_ok=True)
-    write_file(record_file(folder), json_text({**rec_body, "files": pending, "pending": True}), 0o600)
+    # the record first, with the old marks and the new: a write that stops part way leaves both recognised
+    write_file(record_file(folder), json_text({**rec_body, "files": {k: v for k, v in had.items()},
+                                                "pending": files}), 0o600)
     for rel in sorted(set(want) | set(had)):
         if unsafe(folder, rel):
             continue
@@ -991,14 +1056,14 @@ def apply_folder(folder: Path, entries: list, scopes: list, claude: bool = True,
                 f.symlink_to(want[rel])
             else:
                 write_file(f, want[rel])
-        elif rel not in want and now is not None and mark(now) == had[rel]:
+        elif rel not in want and ours(rel, now):
             f.unlink()
             for parent in f.parents:  # folders lane-control made and left empty
                 if parent == folder or not parent.is_dir() or any(parent.iterdir()):
                     break
                 parent.rmdir()
-    kept = {rel: had[rel] for rel in had if rel not in want and current(folder, rel) is not None
-            and mark(current(folder, rel)) == had[rel]}  # what could not be taken out stays recorded
+    kept = {rel: mark(current(folder, rel)) for rel in had if rel not in want
+            and ours(rel, current(folder, rel))}  # what could not be taken out stays recorded
     final = {**files, **kept}
     if final:
         write_file(record_file(folder), json_text({**rec_body, "files": final}), 0o600)
@@ -1019,6 +1084,8 @@ def exclude(common: Path) -> None:
             continue
         if isinstance(rec, dict) and rec.get("common") == str(common):
             names |= {f"/{rel}" for rel in rec.get("files") or {}}
+    if not Path(common).is_dir():
+        return  # the repo is gone
     f = common / "info" / "exclude"
     text = f.read_text() if f.exists() else ""
     if EXCLUDE_BEGIN in text and EXCLUDE_END in text.split(EXCLUDE_BEGIN, 1)[1]:
@@ -1049,6 +1116,8 @@ def recorded_worktrees(repo: Path) -> list:
         folder = Path(rec.get("folder", ""))
         if not folder.is_dir() or rec.get("identity") != identity(folder):
             f.unlink(missing_ok=True)
+            if rec.get("common"):
+                exclude(Path(rec["common"]))  # its files are gone: their exclude lines go too
             continue
         out.append((folder, rec))
     return out

@@ -679,6 +679,137 @@ class PersonaTests(Scratch):
         self.assertEqual(X.coordinator_section(self.repo, X.effective(self.store), "/lc"), "")
 
 
+class RoundTwoTests(Scratch):
+    """Review round 2 (57d1849): one test per finding, with the exact case the review gave."""
+
+    def test_b1_the_main_checkout_is_still_ours_after_ordinary_git_commands(self):
+        d, sha = self.upstream("db", "skills/db")
+        self.add("--mcp", "coordmcp", "--for", "coordinator", "--", "npx", "coord-server")
+        self.add("--skill", f"file://{d}@{sha}:skills/db", "--for", "coordinator")
+        self.assertEqual(self.coordinator()[1], [])
+        oc = self.repo / ".opencode" / "opencode.json"
+        self.assertIn("coordmcp", oc.read_text())
+        git("commit", "-q", "--allow-empty", "-m", "between", cwd=self.repo)  # the .git folder's ctime changes
+        (self.repo / "README.md").write_text("edited\n")
+        git("status", "--porcelain", cwd=self.repo)
+        git("add", "README.md", cwd=self.repo)
+        git("commit", "-q", "-m", "edit", cwd=self.repo)
+        git("worktree", "add", "-q", self.t / "workspaces" / "lane-2", "-b", "lane-2", cwd=self.repo)
+        self.add("--mcp", "coordmcp", "--for", "coordinator", "--", "npx", "coord-server-2")  # changed
+        lines, problems = self.coordinator()
+        self.assertEqual(problems, [])
+        self.assertIn("coord-server-2", oc.read_text())
+        git("commit", "-q", "--allow-empty", "-m", "again", cwd=self.repo)
+        self.ok("project", "remove", self.repo, "skill:db")  # swapped out: the link goes, and git never shows it
+        lines, problems = self.coordinator()
+        self.assertEqual(problems, [])
+        self.assertFalse((self.repo / ".opencode" / "skills" / "db").is_symlink())
+        self.clean(self.repo)
+        git("commit", "-q", "--allow-empty", "-m", "and again", cwd=self.repo)
+        self.ok("project", "remove", self.repo, "mcp:coordmcp")
+        lines, problems = self.coordinator()
+        self.assertEqual(problems, [])
+        self.assertTrue(any("removed" in l for l in lines), lines)
+        self.assertFalse(oc.exists())
+        self.assertNotIn("coordinator", {r["id"] for r in X.check(self.store, self.repo)})
+        self.clean(self.repo)
+
+    def test_m1_header_query_json_and_dash_forms_of_a_secret_are_refused(self):
+        tok = "Z9" * 18
+        for args in ((f"--header", f"X-API-Key: {tok}"), ("--header", "X-API-Key: hunter2"),
+                     ("-H", "Cookie: session=hunter2"), (f"https://api.example.com/x?access-token={tok}",),
+                     ("https://api.example.com/x?apikey=hunter2",), ('{"apiKey":"hunter2"}',),
+                     ('{"api_key": "hunter2"}',), ("--token", "-hunter2"), (f"abcdefghijklmnop/{tok}QRSTUV",),
+                     ("Authorization: Bearer hunter2",)):
+            with self.subTest(args=args):
+                self.refused("project", "add", self.repo, "--mcp", "a", "--", "srv", *args, says="")
+        self.assertEqual(self.stored(), [])
+        self.add("--mcp", "ok", "--", "srv", "--header", "X-API-Key: ${API_KEY}", "https://h/x?apikey=${API_KEY}",
+                 '{"apiKey":"${API_KEY}"}')
+        self.assertEqual({X.ident(e): e for e in self.stored()}["mcp:ok"]["env"], ["API_KEY"])
+
+    def test_m2_a_path_inside_an_option_is_refused_or_pinned_like_a_bare_one(self):
+        inside = self.wt / "tools" / "h.sh"
+        inside.parent.mkdir()
+        inside.write_text("#!/bin/sh\n")
+        self.refused("project", "add", self.repo, "--mcp", "a", "--", "node", f"--require={inside}",
+                     says="inside the project checkout")
+        self.refused("project", "add", self.repo, "--mcp", "a", "--", "srv", f"-I{self.repo}/lib",
+                     says="inside the project checkout")
+        self.refused("project", "add", self.repo, "--mcp", "a", "--", "node", "tools/server", says="relative path")
+        self.refused("project", "add", self.repo, "--mcp", "a", "--", "node", "--require=tools/h.js",
+                     says="relative path")
+        mine = self.script("pre.js", "1\n")
+        self.add("--mcp", "b", "--", "node", f"--require={mine}")
+        e = {X.ident(e): e for e in self.stored()}["mcp:b"]
+        self.assertEqual(e["files"], {str(mine): X.sha256(mine)})
+        self.assertEqual(e["args"], [f"--require={mine}"])
+        mine.write_text("2\n")
+        self.assertEqual({r["id"]: r for r in X.check(self.store)}["mcp:b"]["state"], "changed")
+
+    def test_m1_minor_a_removed_worktree_takes_its_exclude_lines_with_it(self):
+        self.add("--mcp", "github", "--for", "lanes", "--", "npx", "srv")
+        self.assertEqual(self.prepare()[0], 0)
+        exclude = self.repo / ".git" / "info" / "exclude"
+        self.assertIn("/.mcp.json", exclude.read_text())
+        git("worktree", "remove", "--force", self.wt, cwd=self.repo)
+        self.assertEqual(X.recorded_worktrees(self.repo), [])
+        self.assertNotIn("lane-control extras", exclude.read_text())
+        (self.repo / ".mcp.json").write_text("{}\n")
+        self.assertIn(".mcp.json", git("status", "--porcelain", cwd=self.repo))
+
+    def test_m2_minor_doctor_skips_a_project_not_on_native_orca(self):
+        self.ok("machine", "add", "--plugin", "claude:helper@market@2.0.1", "--for", "coordinator")
+        (self.store / "settings.json").write_text(json.dumps({"root": str(self.repo), "orchestrator": "orca-cotal"}))
+        d = json.loads(self.lc("doctor", "--no-ssh", "--json").stdout)
+        self.assertNotIn(str(self.repo), d["extras"])
+        self.assertFalse([t for t in d["todo"] if "extra" in t], d["todo"])
+
+    def test_m3_a_write_that_stops_part_way_is_a_problem_and_still_ours_after(self):
+        self.add("--mcp", "github", "--", "npx", "srv")
+        self.assertEqual(self.prepare()[0], 0)
+        self.add("--mcp", "github", "--", "npx", "srv-2")
+        real, n = X.write_file, []
+
+        def flaky(path, text, mode=0o644):
+            n.append(path)
+            if len(n) == 3:  # the record first, then one file, then the disk is full
+                raise OSError(28, "No space left on device")
+            return real(path, text, mode)
+        with mock.patch.object(LE.X, "write_file", flaky):
+            code, out, err = self.prepare()
+        self.assertEqual(code, 1)
+        self.assertIn("could not write", out)
+        self.assertNotIn("Traceback", err)
+        code, out, err = self.prepare()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("not lane-control's", out)
+        self.assertIn("srv-2", (self.wt / ".mcp.json").read_text())
+        self.assertIn("srv-2", (self.wt / ".opencode" / "opencode.json").read_text())
+
+    def test_m5_a_project_skill_with_a_default_skills_name_is_warned(self):
+        os.environ["LANE_DESIGN_SKILLS"] = str(ROOT / "core" / "design-skills.tsv")
+        out = self.add("--skill", f"https://github.com/o/r.git@{'a' * 40}:skills/frontend-design")
+        self.assertIn("also a default design skill", out)
+        self.assertIn("lane-control machine extras remove frontend-design", out)
+
+    def test_m6_no_text_names_the_removed_kinds_as_extras(self):
+        self.assertIn("skills, MCP, personas, plugins", F.ROUTES[("project", "extras")][3])
+        text = (ROOT / "docs" / "how-it-fits.md").read_text()
+        self.assertIn("your skills, MCP servers, personas and plugins", text)
+        self.assertNotIn("hooks, permissions,\n", text)
+
+    def test_n1_a_file_already_there_with_the_same_text_is_not_taken_over(self):
+        self.add("--plugin", "opencode:foo@1.0.0", "--for", "lanes")
+        want = X.opencode_files({"mcp": [], "skill": [], "plugin": [e for e in X.effective(self.store)]})
+        (self.wt / ".opencode").mkdir()
+        (self.wt / ".opencode" / "opencode.json").write_text(want[".opencode/opencode.json"])
+        code, out, err = self.prepare()
+        self.assertEqual(code, 1)
+        self.assertIn("is not lane-control's", out)
+        self.assertTrue((self.wt / ".opencode" / "opencode.json").exists())
+
+
 class RefreshTests(unittest.TestCase):
     """project-setup on native Orca, against the stub orca of tests/stubs: refresh fetches every pin, gives the
     coordinator its extras at launch, renders the personas and applies the recorded worktrees again."""
