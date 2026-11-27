@@ -109,25 +109,30 @@ worker, the idle time, the deadline).
   tells the machine coordinator when it stays stalled.
 
 ## 1b. Maintenance items (only when `lane-control ratchet status` says `maintenance: on`)
-The owner may let small docs and tests items reach the integration branch while away, so they do not wait and the away
-branch does not drift from it. `status` lists your project's maintenance paths (default `docs/**`, `**/*.md`, `tests/**`).
-- An item is maintenance only when every path it changes is one of them: no code, no CI file (`.github/**` and the like),
-  no executable or symlink. One other path and it is an ordinary item on the away branch. Never split an item to get
-  part of it in.
-- Cut its build lane from `origin/<integration branch>`, with its PR into the integration branch: in the build brief,
-  say it is a maintenance item and fill `<MAINTENANCE_PATHS>`. Review it as any item, and write the same
+The owner may let small items reach the integration branch while away, so they do not wait and the away branch does not
+drift from it. `status` says which kinds this period takes and your project's maintenance paths. These merges reach main with
+no human review: keep them small and plain.
+- **docs** (the default): content files under `docs/` and the root `README.md` and `CHANGELOG.md` (text and images); no
+  executable, build or config file. **tests** (only when `status` names it): NEW test files only; never a change to an
+  existing test, never the suite's machinery (conftest, stubs, helpers, fixtures, runners, shell scripts).
+- Never an agent instruction (AGENTS.md, CLAUDE.md, SKILL.md, a persona, a skill, a template, any `.claude/` or `.opencode/`
+  folder), no CI file, no code. An item is maintenance only when every path it changes is allowed. One other path and it is
+  an ordinary item on the away branch. Never split an item to get part of it in.
+- Cut its build lane from `origin/<integration branch>`, with its PR into the integration branch: in the build brief, say it
+  is a maintenance item and fill `<MAINTENANCE_PATHS>` with what `status` lists. Review it as any item, and write the same
   `Review: passed <head sha>` comment.
-- Merge with `away-merge --maintenance --project <your project> --pr <n> --item "<title>"`: the same checks as step 6 (no
-  `--local-suite-ok`: CI must be green on the head), plus the paths at the head, the branch protection (a required
-  review it cannot give is a refusal) and the away branch's take-in. It merges into the integration branch as
-  `maintenance: <item>`, then merges the integration branch into the away branch (never a rebase). It counts toward
-  `--max-items` and the summary PR lists it in its own section.
-- Refused because a path is not maintenance: do what the refusal says (`gh pr edit <n> --base <away branch>`, then a plain
+- Merge with `away-merge --maintenance --project <your project> --pr <n> --item "<title>"`, only while the mode is on (after
+  `off` or the end time it refuses: the drain is for the away branch). The same checks as step 6 (no `--local-suite-ok`: CI
+  must be green on the head), plus the files at the head, the branch protection (a required review it cannot give is a
+  refusal) and the away branch's take-in. It merges into the integration branch as `maintenance: <item>`, then merges it into
+  the away branch (never a rebase). It counts toward `--max-items` and the summary PR lists it in its own section.
+- Refused for a path, or while draining: do what the refusal says (`gh pr edit <n> --base <away branch>`, then a plain
   `away-merge`). Refused for protection: every maintenance item goes to the away branch this period; tell the owner once.
-- Exit 3 (merged, but the away branch did not take it in: a conflict, or a push that failed): nothing was forced. Start a
-  lane cut from the away branch that merges `origin/<integration branch>` in and resolves the conflict, its PR into the
-  away branch through `away-merge` as an item ("Take in <integration branch>"). `away-merge --maintenance` refuses the
-  next maintenance item until that is merged.
+- Exit 3 (merged, but the away branch did not take it in: the merge commit not on origin yet, a conflict, or a push that
+  failed): nothing was forced. Start a lane cut from the away branch that merges `origin/<integration branch>` in and
+  resolves the conflict, its PR into the away branch through `away-merge` as an item ("Take in <integration branch>").
+  `away-merge --maintenance` refuses the next maintenance item until the away branch holds it. If `away-merge` refuses that
+  lane's PR (it carries every commit main gained), tell the owner: they merge it.
 
 ## 2. The log: in PRs and merge commits
 There is no log file on the away branch. Each item's entry is in its build lane's PR body, under the headings What, Why,

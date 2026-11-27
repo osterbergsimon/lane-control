@@ -22,9 +22,10 @@ night and a changed budget never do, and the mode never changes presence. Fields
              could not then, by away-merge after the first merge; its body is built from the branch's merge commits (each
              carries its item's log entry) plus the coordinator's summary, refreshed by away-merge after every merge.
              Optional (a file without it is fine); never merged by an agent.
-  maintenance true while the period takes maintenance merges (`on --maintenance`; optional, missing = false): a PR whose every
-             path matches the project's maintenance globs (core/maintenance.py) merges into the integration branch through
-             `away-merge --maintenance`, and the away branch then takes the integration branch in
+  maintenance the kinds of maintenance merge the period takes, a list from core/maintenance.py KINDS (`on --maintenance
+             [docs,tests]`; bare is docs; optional, missing or [] = off): a PR whose every change those kinds allow merges into
+             the integration branch through `away-merge --maintenance` while the mode is on, and the away branch then takes
+             the integration branch in
              (docs/superpowers/specs/2026-11-27-ratchet-maintenance-merges-design.md)
 
 Every reader treats a missing, malformed or ended file as improve off; a malformed one says why on one stderr line.
@@ -133,8 +134,9 @@ def _problem(state, drain: bool = False) -> "str | None":
     mh = state.get("max_hours")
     if mh is not None and not (isinstance(mh, (int, float)) and not isinstance(mh, bool) and 0 < mh <= MAX_HOURS_LIMIT):
         return f"max_hours is not a number of hours above 0 and at most {MAX_HOURS_LIMIT}"
-    if not isinstance(state.get("maintenance", False), bool):
-        return "maintenance is not true or false"
+    mt = state.get("maintenance", [])
+    if not (isinstance(mt, list) and all(x in ("docs", "tests") for x in mt)):  # core/maintenance.py KINDS
+        return "maintenance is not a list of kinds (docs, tests)"
     prs = state.get("prs", {})
     if not (isinstance(prs, dict) and all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
                                            for k, v in prs.items())):
@@ -1364,10 +1366,11 @@ def maintenance_text(maint: "list | None", integration: str) -> str:
     sha; "" when there is none (or git could not be read)."""
     if not maint:
         return ""
-    lines = [f"\n\nMaintenance merges into {integration} (docs and tests only, merged by `away-merge --maintenance` and already "
-             f"on {integration}; the away branch took each in. To undo one, revert it on {integration}):"]
-    for title, pr, sha in maint:
-        lines.append(f"- {_neutral(title)} ({f'PR #{pr}, ' if pr else ''}{sha}): `git revert -m 1 {sha}` on {integration}")
+    lines = [f"\n\nMaintenance merges into {integration} (the project's maintenance paths only, merged by `away-merge "
+             f"--maintenance`, already on {integration}, reviewed by agents alone. To undo one, revert it on {integration}):"]
+    for title, pr, sha, held in maint:
+        lines.append(f"- {_neutral(title)} ({f'PR #{pr}, ' if pr else ''}{sha}): `git revert -m 1 {sha}` on {integration}"
+                     + ("" if held else "; NOT yet in the away branch (its take-in conflicted or failed)"))
     return "\n".join(lines)
 
 
@@ -1614,9 +1617,13 @@ def describe(s: dict, how: "dict | None" = None) -> list:
         lines.append(f"  never touching: {', '.join(s['deny_paths'])}")
     lines.append("  budget: " + ("unmetered (no budget steps for improve work; machine limits still apply)" if s["unmetered"]
                                  else "metered (follows the project's budget steps)"))
-    lines.append("  maintenance: " + ("on: a PR that changes only the project's maintenance paths (docs, tests) merges into the "
-                                      "integration branch through `away-merge --maintenance`, and the away branch takes it in"
-                                      if s.get("maintenance") else "off (every item goes to the away branch)"))
+    if s.get("maintenance"):
+        import maintenance
+        lines.append(f"  maintenance: on ({', '.join(s['maintenance'])}): an item that changes only "
+                     f"{maintenance.describe(s['maintenance'])} merges into the integration branch through `away-merge "
+                     "--maintenance` while the mode is on, and the away branch takes it in; nobody but agents reviewed it")
+    else:
+        lines.append("  maintenance: off (every item goes to the away branch)")
     if cap_text(s):
         lines.append(f"  caps: {cap_text(s)}; the lane that is running finishes, then the project wraps up (`lane-improve status` shows each project's progress)")
     return lines
@@ -1634,8 +1641,8 @@ def maintenance_lines(s: dict, cos: list) -> list:
             continue
         globs, where, why = maintenance.globs_for(c.checkout)
         n = maintenance_done(s, c.name)
-        line = (f"  {c.name}: maintenance paths {', '.join(globs)} ({where})" if not why else
-                f"  {c.name}: maintenance paths cannot be used ({why}): every maintenance merge is refused")
+        line = (f"  {c.name}: maintenance paths: {', '.join(globs) if globs else 'what the kinds allow'} ({where})" if not why
+                else f"  {c.name}: maintenance paths cannot be used ({why}): every maintenance merge is refused")
         line += f"; maintenance merges {n}"
         todo = [m for m in merges_of(s, c.name) if m.get("kind") == "maintenance" and m.get("taken_in") is not True]
         if todo:
@@ -1709,8 +1716,10 @@ def cmd_on(a) -> int:
             end = parse_until(a.until).isoformat(timespec="seconds")
         else:
             end = UNTIL_BACK if a.until_back else None  # none given: a re-run keeps the current end, a first run has none
-        if a.maintenance and a.no_maintenance:
+        if a.maintenance is not None and a.no_maintenance:
             raise ValueError("give one of --maintenance, --no-maintenance")
+        import maintenance
+        kinds = None if a.maintenance is None else maintenance.parse_kinds(a.maintenance)
         stop_at = parse_cap("--stop-at", a.stop_at, False)
         max_items = parse_cap("--max-items", a.max_items, True)
         max_hours = parse_hours(a.max_hours)
@@ -1827,7 +1836,7 @@ def cmd_on(a) -> int:
             "max_items": eff_max,
             "max_hours": eff_hours,
             "max_hours_off": bool(hours_off and eff_hours is None),
-            "maintenance": False if a.no_maintenance else bool(a.maintenance) or bool(prev.get("maintenance")),
+            "maintenance": [] if a.no_maintenance else (kinds if kinds is not None else list(prev.get("maintenance") or [])),
         }
     else:
         state = {
@@ -1844,7 +1853,7 @@ def cmd_on(a) -> int:
             "max_items": eff_max,
             "max_hours": eff_hours,
             "max_hours_off": bool(hours_off and eff_hours is None),
-            "maintenance": bool(a.maintenance),
+            "maintenance": kinds or [],
         }
     lost = period_problem(state) if prev else None  # the period's record cannot be trusted: this run makes it again
     write(state)
@@ -2148,7 +2157,7 @@ def main(argv=None) -> int:
     on.add_argument("--max-items", dest="max_items")
     on.add_argument("--max-hours", dest="max_hours")
     on.add_argument("--continue", dest="cont", action="store_true")
-    on.add_argument("--maintenance", action="store_true")
+    on.add_argument("--maintenance", nargs="?", const="", metavar="KINDS")
     on.add_argument("--no-maintenance", dest="no_maintenance", action="store_true")
     on.add_argument("--yes", action="store_true")
     sub.add_parser("off")

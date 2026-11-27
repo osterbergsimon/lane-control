@@ -5,10 +5,11 @@ item (picked by <PARENT>, who says why): <ITEM>. Why it was picked: <WHY_PICKED>
 - Your base is <AWAY_BRANCH>, not the default branch: fetch and merge `origin/<AWAY_BRANCH>` first, and open your PR
   into <AWAY_BRANCH>. Never merge it, and never push to the default or integration branch. <PARENT> merges it
   after the review, with `away-merge`.
-- Only when <PARENT> says this is a maintenance item (docs or tests only; the owner switched maintenance merges on):
-  your base is the integration branch instead, and your PR goes into it. Change only the paths <PARENT> names
-  (<MAINTENANCE_PATHS>): no code, no CI file, no executable or symlink. If the item needs one other path, say so in
-  your report: it then goes to <AWAY_BRANCH> as any item.
+- Only when <PARENT> says this is a maintenance item (docs, or new test files; the owner switched maintenance merges on):
+  your base is the integration branch instead, and your PR goes into it, with no human review after the agent's. Change
+  only the paths <PARENT> names (<MAINTENANCE_PATHS>): no code, no CI file, no agent instruction (AGENTS.md, CLAUDE.md,
+  SKILL.md, personas, skills, templates), no executable or symlink, and for tests only new test files. If the item needs
+  one other path, say so in your report: it then goes to <AWAY_BRANCH> as any item.
 - The owner's limits, verbatim; they are binding, and an item that may clash is not built but reported as skipped:
   <LIMITS>
   Paths the PR must not touch: <DENY_PATHS>

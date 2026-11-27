@@ -281,7 +281,7 @@ class ImproveOnTests(ImproveTest):
         st = self.state()
         self.assertEqual(set(st), {"started", "end", "limits", "deny_paths", "projects", "unmetered", "branches", "integration",
                                    "prs", "stop_at", "max_items", "max_hours", "max_hours_off", "maintenance"})
-        self.assertIs(st["maintenance"], False)  # maintenance merges are off unless the owner gives --maintenance
+        self.assertEqual(st["maintenance"], [])  # maintenance merges are off unless the owner gives --maintenance
         self.assertEqual(st["integration"], {"blog": "main", "shop": "main"})
         self.assertEqual(st["end"], "until-back")
         self.assertEqual(st["limits"], "nothing that needs db migrations")
@@ -1577,9 +1577,12 @@ class ReaderAgreementTests(ImproveTest):
         yield "max_items fraction", json.dumps({**g, "max_items": 2.5})
         yield "max_items true", json.dumps({**g, "max_items": True})
         yield "max_items text", json.dumps({**g, "max_items": "3"})
+        yield "maintenance docs", json.dumps({**g, "maintenance": ["docs"]})
+        yield "maintenance docs and tests", json.dumps({**g, "maintenance": ["docs", "tests"]})
+        yield "maintenance off", json.dumps({**g, "maintenance": []})
         yield "maintenance true", json.dumps({**g, "maintenance": True})
-        yield "maintenance false", json.dumps({**g, "maintenance": False})
-        yield "maintenance a string", json.dumps({**g, "maintenance": "yes"})
+        yield "maintenance a string", json.dumps({**g, "maintenance": "docs"})
+        yield "maintenance an unknown kind", json.dumps({**g, "maintenance": ["code"]})
         yield "maintenance null", json.dumps({**g, "maintenance": None})
         yield "empty", ""
         yield "spaces", "  \n"
@@ -1590,7 +1593,7 @@ class ReaderAgreementTests(ImproveTest):
     ON = {"canonical", "one line", "future end", "naive future end", "ended", "branch named end, until back",
           "limits text with end", "extra keys", "projects a list", "project named end",
           "prs good", "stop_at good", "stop_at fraction", "stop_at null", "max_items good", "max_items null",
-          "maintenance true", "maintenance false"}
+          "maintenance docs", "maintenance docs and tests", "maintenance off"}
 
     def python_says(self, text: str) -> bool:
         self.improve_file().write_text(text)

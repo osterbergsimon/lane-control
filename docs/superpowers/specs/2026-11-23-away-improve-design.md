@@ -285,7 +285,7 @@ follow-ups above; everything else there stands.
 
 ## Maintenance merges (2026-11-27, RAT-2; lc-3g6o)
 
-On the owner's ask, a period may take maintenance merges (`on --maintenance`): a docs-or-tests item merges into the integration
+On the owner's ask, a period may take maintenance merges (`on --maintenance [docs,tests]`): a docs item (or, when named, a new test file) merges into the integration
 branch through `away-merge --maintenance`, and the away branch then takes the integration branch in. This changes "Nothing
 reaches the integration branch without the owner's word" for those items only, when the owner switched it on; the design is
 `2026-11-27-ratchet-maintenance-merges-design.md`.

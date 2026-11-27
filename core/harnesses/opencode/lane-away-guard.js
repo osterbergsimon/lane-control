@@ -63,7 +63,8 @@ function problem(s, drain) {
   if ("prs" in s && !(plain(s.prs) && Object.values(s.prs).every((v) => Number.isInteger(v)))) return "prs is not {project: number}";
   if (s.stop_at != null && !(typeof s.stop_at === "number" && s.stop_at > 0 && s.stop_at < 100)) return "stop_at is not a weekly percentage";
   if (s.max_items != null && !(Number.isInteger(s.max_items) && s.max_items >= 1)) return "max_items is not a whole number above 0";
-  if ("maintenance" in s && typeof s.maintenance !== "boolean") return "maintenance is not true or false";
+  if ("maintenance" in s && !(Array.isArray(s.maintenance) && s.maintenance.every((k) => k === "docs" || k === "tests")))
+    return "maintenance is not a list of kinds (docs, tests)";
   if (drain) {
     if (!timeOk(s.ended)) return "ended is not a time";
     if (!strList(s.pending)) return "pending is not a list of names";

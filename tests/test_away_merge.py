@@ -44,9 +44,14 @@ if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/com
         print("gh: " + os.environ.get("GH_COMPARE_FAIL", "Not Found (HTTP 404)"), file=sys.stderr); sys.exit(1)
     p = found[0]
     files = p.get("compare_files")
-    if files is None:
+    if files is None:  # from the diff: a new file is "added", a deleted one "removed", the rest "modified"
         import re
-        files = [{"filename": m.group(2), "status": "modified"} for m in re.finditer(r"^diff --git a/(.*?) b/(.*)$", p.get("diff", ""), re.M)]
+        files = []
+        for block in re.split(r"^(?=diff --git )", p.get("diff", ""), flags=re.M):
+            m = re.match(r"diff --git a/(.*?) b/(.*)$", block, re.M)
+            if m:
+                st = "added" if "\\nnew file mode" in block else "removed" if "\\ndeleted file mode" in block else "modified"
+                files.append({"filename": m.group(2), "status": st})
     print(json.dumps({"status": "ahead", "files": files})); sys.exit(0)
 if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/branches/") and a[1].endswith("/protection"):
     if os.environ.get("GH_PROTECTION"):
@@ -89,6 +94,30 @@ if a[:2] == ["pr", "merge"]:
     time.sleep(float(os.environ.get("GH_MERGE_SLEEP", "0")))  # a slow merge: lets a second away-merge run beside it
     if os.environ.get("GH_MERGE_FAIL"):  # gh itself failed (a timeout, a 5xx); GH_STATE_AFTER says what GitHub did
         print("gh: " + os.environ["GH_MERGE_FAIL"], file=sys.stderr); sys.exit(1)
+    if os.environ.get("GH_REAL_MERGE") and pr.get("baseRefName") == "main" and not pr.get("merge_oid_fixed"):
+        # a maintenance merge, made for real on the temp origin's main as GitHub's button makes it (GH_REAL_MERGE: a work clone)
+        import subprocess
+        work = os.environ["GH_REAL_MERGE"]
+        def g(*x, cwd=work):
+            return subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *x],
+                                  check=True, capture_output=True, text=True).stdout
+        if not os.path.exists(work):
+            subprocess.run(["git", "clone", "-q", g("remote", "get-url", "origin", cwd=os.getcwd()).strip(), work], check=True,
+                           capture_output=True)
+        g("fetch", "-q", "origin")
+        g("checkout", "-q", "-B", "main", "origin/main")
+        g("checkout", "-q", "-B", "pr-" + a[2])
+        name = pr.get("real_file", "docs/pr-" + a[2] + ".md")
+        os.makedirs(os.path.join(work, os.path.dirname(name)), exist_ok=True)
+        open(os.path.join(work, name), "w").write(pr.get("real_text", "x\\n"))
+        g("add", name)
+        g("commit", "-qm", "the item")
+        g("checkout", "-q", "main")
+        g("merge", "-q", "--no-ff", "-m", a[a.index("--subject") + 1] + "\\n\\n" + (msg or ""), "pr-" + a[2])
+        g("push", "-q", "origin", "main")
+        pr["merge_oid"] = g("rev-parse", "HEAD").strip()
+        prs[a[2]] = pr
+        json.dump(prs, open(os.environ["GH_PRS"], "w"))
     sys.exit(0)
 print("gh stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 """

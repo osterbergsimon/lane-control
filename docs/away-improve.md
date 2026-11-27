@@ -17,7 +17,7 @@ new one.
   reviews it, and the coordinator merges it into the project's away branch with `away-merge`.
 - Everything lands on `away/<YYYY-MM-DD>`, cut from the project's integration branch (main or develop) plus one start
   commit, `away: start <date>`, that is empty (it adds no file). Nothing reaches the integration branch without your word,
-  unless you switch on maintenance merges for docs and tests (below).
+  unless you switch on maintenance merges for docs (and, if you name them, new test files; below).
 - A project has **one away branch, ever**. A second period continues the same branch; there is never a pile of
   unrelated ones.
 - There is no log file on the branch. Each item's log entry (what, why, what it builds on, existing work checked, how to
@@ -32,7 +32,7 @@ improve mode in your own words.
 
 | Command | What it does |
 |---|---|
-| `lane-control ratchet on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--max-hours H] [--maintenance\|--no-maintenance] [--continue] [--yes]` |
+| `lane-control ratchet on [--until HH:MM\|--hours N\|--until-back] [--limits "<text>"] [--deny-paths "<glob>,..."] [--project <name>]... [--unmetered] [--stop-at <weekly %>] [--max-items N] [--max-hours H] [--maintenance [docs,tests]\|--no-maintenance] [--continue] [--yes]` |
 Switches the mode on and prints what will run: projects, each branch and its draft PR, the end, your limits and caps.
 Without a terminal it refuses unless `--yes`; Claude Code's `!` prefix has no terminal, so there add `--yes` (`!
 lane-control ratchet on --yes ...`). |
@@ -100,38 +100,63 @@ branch (a plain
 
 ### Maintenance merges (optional, off by default)
 
-So that small fixes to docs and tests do not wait for you, and the away branch does not drift from main while you merge
-there, a period can take **maintenance merges**: `lane-control ratchet on --maintenance` (or `on --continue --maintenance`
-while it runs; `--no-maintenance` turns it off again; a re-run keeps what is set). It is recorded in `improve.json` and
-`status` shows `maintenance: on`, each project's maintenance paths and its maintenance merges so far. The design is
-`docs/superpowers/specs/2026-11-27-ratchet-maintenance-merges-design.md`.
+So that small fixes to docs do not wait for you, and the away branch does not drift from main while you merge there, a
+period can take **maintenance merges**: `lane-control ratchet on --maintenance` (docs), or `--maintenance docs,tests` (docs
+and new test files), also as `on --continue --maintenance ...` while it runs. `--no-maintenance` turns it off again, and a
+re-run keeps what is set. It is recorded in `improve.json` (`maintenance: ["docs"]`), and `status` shows `maintenance: on
+(docs)`, each project's maintenance paths and its maintenance merges so far. The design is
+`docs/superpowers/specs/2026-11-27-ratchet-maintenance-merges-design.md`; the rules are one table in `core/maintenance.py`.
 
-- **What counts.** A PR whose every changed path matches the project's maintenance globs: by default `docs/**`, `**/*.md`
-  and `tests/**`. A project sets its own as `maintenance_paths`, a list of globs that replaces the default, in its settings
-  store (`~/.config/lane-control/projects/<folder>-<hash>/settings.json`, which `lane-control project setup --show` names; it
-  is outside the repo, so no PR can widen it). A glob that would also match plain code (`**`, `*`, `**/*.py`) is refused, and
-  every maintenance merge with it. Whatever the globs say, never: CI and tooling files (`.github/**`, `.gitlab-ci.yml`,
-  `.circleci/**`, `Jenkinsfile`, `.pre-commit-config.yaml`, `.gitattributes`, `.gitmodules`, `.gitleaks.toml` and the like),
-  a symlink, a submodule or an executable file. One path outside and the item goes to the away branch as any item.
+**Be clear what this means: a maintenance merge reaches main with no human review.** An agent reviewer checked it and CI
+passed, nothing more. Docs are text; new test files are code that runs in your suite and in CI, and a test PR defines the tests
+that turn green, so `tests` is off unless you name it.
+
+- **docs** (the default): content files under `docs/` and the root `README.md` and `CHANGELOG.md`: `.md`, `.markdown`,
+  `.txt`, `.rst`, `.adoc`, and the images `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`. No executable, build or config file
+  (`docs/conf.py`, `docs/package.json`, `docs/Makefile`, `docs/*.sh` are refused). Images are binary, so the secret and name
+  scans cannot read them; any other binary file is refused.
+- **tests** (only when named): NEW test files under `tests/` or `test/`, named as a test (`test_*.py`, `*_test.go`,
+  `*.test.ts` and the like). Changing or deleting an existing test file is refused, and so is the suite's machinery: a
+  `conftest`, `testhome`, stubs, helpers, fixtures, runners, loaders, `__init__` and shell scripts. These go to the away branch.
+- **Never, whatever the kinds say:** agent instructions and harness config, at any depth and in any case (`AGENTS*.md`,
+  `CLAUDE*.md`, `GEMINI*.md`, `SKILL.md`, any `.claude/`, `.opencode/`, `.agents/`, `.codex/`, `.pi/`, `skills/`,
+  `personas/`, `templates/`, `prompts/` folder, `.mcp.json`, `opencode.json` and the like), CI and tooling files
+  (`.github/**`, `.gitlab-ci.yml`, `.circleci/**`, `Jenkinsfile`, `.pre-commit-config.yaml`, `.gitattributes`, `.gitmodules`,
+  `.gitleaks.toml` and the like), a symlink, a submodule, an executable, a name with a control character, and a path your deny
+  paths or the secret and name scans refuse. One path outside and the item goes to the away branch as any item.
+- **A project's own paths only narrow.** A project can set `maintenance_paths`, a list of globs, in its settings store
+  (`~/.config/lane-control/projects/<folder>-<hash>/settings.json`, which `lane-control project setup --show` names; it is
+  outside the repo, so no PR can widen it). A path must then match one of them as well as a kind. Each glob must start inside a
+  kind (`docs/`, `tests/`, `test/`) or name `README.md` or `CHANGELOG.md`: `**`, `**/*.md` or `core/**` is refused when it is
+  read, and so is every maintenance merge until it is fixed.
 - **One route.** The coordinator merges it with `away-merge --maintenance --project <name> --pr <n> --item "<title>"`, never
   by hand: the deny rules and the OpenCode guard still block every other merge and push to the integration branch. Every check
   of an away merge holds (the review comment for the exact head, the entry, the secret and private-name scans, your deny
   paths, the caps, your gate hooks), with the integration branch as the base and CI green on the head (no
-  `--local-suite-ok`). It also reads the paths at the head sha from GitHub (the compare of the integration branch with the
-  head; more than 300 files is refused), refuses a PR from an away branch, the summary PR or a fork, and reads the
-  integration branch's protection: a required approving review (or code owner's review), classic or in a ruleset, is a review
-  the coordinator cannot give, so the merge is refused with that reason; protection that cannot be read is refused too.
-  The merge is `--match-head-commit <head>`, so a push after the checks refuses. It is a merge commit titled `maintenance:
-  <item>`, its message `Pull request #<n>`, `Ratchet-maintenance: away/<date>` and the entry.
+  `--local-suite-ok`). It also reads the files at the head sha from GitHub (the compare of the integration branch with the
+  head, each with its status, so a test file is new only when GitHub says it is added; 300 files or more is refused), refuses
+  a PR from an away branch, the summary PR or a fork, and reads the integration branch's protection: a required approving
+  review (or code owner's review), classic or in a ruleset, is a review the coordinator cannot give, so the merge is refused
+  with that reason; protection that cannot be read is refused too. Under the lock, just before the merge, the mode, the kinds,
+  your deny paths and the branches must still be what the checks saw. The merge is `--match-head-commit <head>`, so a push
+  after the checks refuses. It is a merge commit titled `maintenance: <item>`, its message `Pull request #<n>`,
+  `Ratchet-maintenance: away/<date>` and the entry.
+- **Only while the mode is on.** After `lane-control ratchet off`, or once its end time has passed, maintenance merges stop at
+  once: the drain is for the running lane's last PR into the away branch, and `away-merge --maintenance` refuses.
 - **A refusal for a path** names the way to the away branch: `gh pr edit <n> --base away/<date>`, then a plain `away-merge`,
   whose own checks then apply (a deny path or a private name is refused there too).
-- **The take-in.** Right after the merge the away branch takes the integration branch in: a merge commit, `ratchet: take in
-  main after maintenance #<n>`, pushed without force (never a rebase). It is not an item. A conflict, or a push the branch
-  refuses, stops: nothing is forced, `away-merge` exits 3 and says so, `status` shows the take-in still to happen, and the next
-  maintenance merge is refused until a lane has merged main into the away branch (resolving the conflict) through
-  `away-merge`.
+- **The take-in.** Right after the merge the away branch takes in the maintenance merge commit: a merge commit, `ratchet: take
+  in main after maintenance #<n>`, pushed without force (never a rebase). It is not an item. When the merge commit is not on
+  origin's main yet (or is not known and main does not hold the PR's head), a conflict, or a push the branch refuses, it stops:
+  nothing is forced, `away-merge` exits 3 and says so, `status` shows the take-in still to happen, and the next maintenance
+  merge is refused until the away branch holds it. That is read from git (every maintenance merge on main that names this away
+  branch), so a new period does not forget it. The way out is a lane that merges main into a branch cut from the away branch,
+  resolves the conflict, and goes into the away branch through `away-merge`. That PR holds everything main gained, your own
+  commits too, so `away-merge` may refuse it (a deny path, a private name, a reached `--max-items`): then the coordinator tells
+  you, and you merge main into the away branch yourself.
 - **Counted and listed.** A maintenance merge counts toward `--max-items`, closes its cycle into the ledger, and the summary PR
-  lists it in its own section, "Maintenance merges into main", with its PR link and its `git revert -m 1 <sha>` (on main).
+  lists it in its own section, "Maintenance merges into main", with its PR link and its `git revert -m 1 <sha>` (on main), and
+  says of each one, from git, whether the away branch holds it.
 
 ### One branch per project
 
@@ -346,7 +371,7 @@ once to look for new work. Nudges go out by day or night; the plain check-ins st
 | Watchdog | `WATCHDOG_MIN`, `WATCHDOG_ESCALATE_MIN`, `MACHINE_COORDINATOR_TO`, `MACHINE_COORDINATOR_FOLDER` in `machine.conf`; its backoff and last round in `~/.cache/lane-control/watchdog/` |
 | Deny rules | each coordinator checkout's uncommitted `.claude/settings.local.json`; for OpenCode a guard plugin next to the persona plugin and a record under the user's state folder |
 | An item's log entry | its PR body, then its merge commit's message on `away/<date>` (template `core/templates/away-entry.md`) |
-| Maintenance paths | `maintenance_paths` in the project's settings store (`settings.json`, outside the repo); the default is `docs/**`, `**/*.md`, `tests/**` |
+| Maintenance rules | the kinds and the never-list in `core/maintenance.py`; a project's own narrowing, `maintenance_paths`, in its settings store (`settings.json`, outside the repo) |
 
 ## What is tested, and what is not
 

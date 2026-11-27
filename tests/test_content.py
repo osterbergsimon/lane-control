@@ -2326,15 +2326,18 @@ class AwayImproveContentTests(unittest.TestCase):
         s = flat(AWAY_SKILL)
         for needle in ("`maintenance: on`", "`away-merge --maintenance --project", "every path it changes", "no CI file",
                        "no `--local-suite-ok`", "`gh pr edit <n> --base <away branch>`", "Exit 3", "never a rebase",
-                       "Never split an item", "`--max-items`", "<MAINTENANCE_PATHS>"):
+                       "Never split an item", "`--max-items`", "<MAINTENANCE_PATHS>", "no human review",
+                       "Never an agent instruction", "NEW test files only", "only while the mode is on", "tell the owner"):
             self.assertIn(needle, s, needle)
         b = flat(AWAY_TEMPLATES / "away-build-brief.md")
-        for needle in ("maintenance item", "<MAINTENANCE_PATHS>", "no CI file", "goes to <AWAY_BRANCH> as any item"):
+        for needle in ("maintenance item", "<MAINTENANCE_PATHS>", "no CI file", "no agent instruction", "only new test files",
+                       "goes to <AWAY_BRANCH> as any item"):
             self.assertIn(needle, b, needle)
         self.assertIn("`away-merge --maintenance`", flat(PERSONA_DIR / "coordinator.md"))
         guide = flat(ROOT / "docs" / "away-improve.md")
-        for needle in ("lane-control ratchet on --maintenance", "maintenance_paths", "away-merge --maintenance", "take-in",
-                       "never a rebase", "2026-11-27-ratchet-maintenance-merges-design.md"):
+        for needle in ("lane-control ratchet on --maintenance", "--maintenance docs,tests", "maintenance_paths",
+                       "away-merge --maintenance", "take-in", "never a rebase", "no human review", "only narrow",
+                       "Only while the mode is on", "cannot read them", "2026-11-27-ratchet-maintenance-merges-design.md"):
             self.assertIn(needle, guide, needle)
 
     def test_innovation_prompt_is_strong_and_in_one_place(self):
