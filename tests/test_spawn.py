@@ -65,26 +65,37 @@ class Spawn(native.Case):
         return subprocess.run([sys.executable, str(SPAWN), *args], env=self.env(env_extra), capture_output=True,
                               text=True, stdin=subprocess.DEVNULL, timeout=180)
 
-    def as_person(self, path, name, args, answer="y", env_extra=None):
+    def as_person(self, path, name, args, answer="y", env_extra=None, patches=()):
         """main() of a script in this process, as a person at a terminal: the person check passes, `answer` is what
-        they type. (exit, stdout, stderr, the input mock)."""
-        mod = load(path, name)
-        ps = getattr(mod, "ps", mod)
-        with mock.patch.dict(os.environ, self.env(env_extra), clear=True), \
-                mock.patch.object(ps, "agent_caller", return_value=""), \
-                mock.patch("sys.stdin", Tty()), \
-                mock.patch("builtins.input", return_value=answer) as ask, \
-                contextlib.redirect_stdout(Tty()) as out, \
-                contextlib.redirect_stderr(io.StringIO()) as err:
-            code = mod.main(list(args))
-        return code, out.getvalue(), err.getvalue(), ask
+        they type; `patches`: (attribute, value) on the loaded module. (exit, stdout and the output of the scripts it
+        runs, stderr, the input mock)."""
+        with mock.patch.dict(os.environ, self.env(env_extra), clear=True), tempfile.TemporaryFile() as sub:
+            mod = load(path, name)
+            ps = getattr(mod, "ps", mod)
+            saved = os.dup(1)
+            os.dup2(sub.fileno(), 1)  # what the scripts it runs print
+            try:
+                with mock.patch.object(ps, "agent_caller", return_value=""), \
+                        mock.patch("sys.stdin", Tty()), \
+                        mock.patch("builtins.input", return_value=answer) as ask, \
+                        contextlib.ExitStack() as more, \
+                        contextlib.redirect_stdout(Tty()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    for attr, value in patches:
+                        more.enter_context(mock.patch.object(mod, attr, value))
+                    code = mod.main(list(args))
+            finally:
+                os.dup2(saved, 1)
+                os.close(saved)
+            sub.seek(0)
+            return code, out.getvalue() + sub.read().decode(errors="replace"), err.getvalue(), ask
 
     def pause_person(self, *args, answer="y"):
         return self.as_person(ROOT / "core" / "scripts" / "project-pause", "pause_t", ["start", str(self.repo), *args],
                               answer)
 
-    def spawn_person(self, *args, answer="y", env_extra=None):
-        return self.as_person(SPAWN, "spawn_t", args, answer, env_extra)
+    def spawn_person(self, *args, answer="y", env_extra=None, patches=()):
+        return self.as_person(SPAWN, "spawn_t", args, answer, env_extra, patches)
 
     def state(self):
         return json.loads(self.e.state.read_text())
@@ -283,11 +294,104 @@ class CoordinatorStart(Spawn):
             self.assertEqual(self.spawn(*args).returncode, 2, args)
 
 
+class Result:
+    def __init__(self, code, out, err):
+        self.returncode, self.stdout, self.stderr = code, out, err
+
+
 class Restart(Spawn):
     READY = {"lane-control restart": "ready to stop {code}"}
 
-    def restart(self, *args, env_extra=None):
-        return self.spawn("coordinator", "restart", str(self.repo), *args, env_extra=env_extra)
+    def restart(self, *args, env_extra=None, patches=()):
+        """restart as a person at a terminal (it refuses agents: test_an_agent_is_refused)."""
+        code, out, err, _ = self.spawn_person("coordinator", "restart", str(self.repo), *args, env_extra=env_extra,
+                                              patches=patches)
+        return Result(code, out, err)
+
+    def test_an_agent_is_refused(self):
+        # review round 2, m3
+        self.setup_project()
+        self.e.set_state(replies=self.READY)
+        for extra in ({"CLAUDECODE": "1", "LANE_ROLE": "machine-coordinator"}, {}):
+            r = self.spawn("coordinator", "restart", str(self.repo), env_extra=extra)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("restart is for a person at a terminal", r.stderr)
+        self.assertEqual((self.sent(), len(self.started())), ([], 1))
+
+    def test_the_order_claims_no_owner(self):
+        self.setup_project()
+        self.e.set_state(replies=self.READY)
+        self.assertEqual(self.restart("--wait", "5").returncode, 0)
+        body = self.sent()[0]["body"]
+        self.assertTrue(body.startswith("A restart order from `lane-control coordinator restart`"), body)
+        self.assertNotIn("The owner asks", body)
+
+    def test_a_failed_mailbox_read_is_retried_and_then_calls_the_order_off(self):
+        # review round 2, M2 (a)
+        self.setup_project()
+        self.e.set_state(inbox_fails=True)
+        r = self.restart("--wait", "1", env_extra={"LANE_RESTART_POLL": "0.2"})
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("the last mailbox read failed", r.stderr)
+        self.assertIn("`carry on", r.stderr)
+        self.assertEqual((len(self.cancels()), self.closes(), len(self.started())), (1, [], 1))
+        self.assertGreater(sum(c.startswith("orca orchestration inbox") for c in self.e.calls()), 1)
+
+    def test_a_failed_worker_list_after_ready_calls_the_order_off(self):
+        # review round 2, M2 (b)
+        self.setup_project()
+        self.e.set_state(replies=self.READY, worker_list_fails_on_reply=True)
+        r = self.restart("--wait", "5")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("worker list", r.stderr)
+        self.assertIn("`carry on", r.stderr)
+        self.assertEqual((len(self.cancels()), self.closes(), len(self.started())), (1, [], 1))
+
+    def test_ctrl_c_or_sigterm_while_waiting_calls_the_order_off(self):
+        # review round 2, M2 (c)
+        import signal
+
+        def ctrl_c(*_):
+            raise KeyboardInterrupt
+
+        def sigterm(*_):
+            os.kill(os.getpid(), signal.SIGTERM)  # handled by restart's own handler, in this thread
+            time.sleep(1)
+        before = signal.getsignal(signal.SIGTERM)
+        for name, fake in (("interrupted (Ctrl-C)", ctrl_c), ("stopped by signal", sigterm)):
+            with self.subTest(name):
+                self.setUp()
+                self.setup_project()
+                r = self.restart("--wait", "5", patches=(("reply_to", fake),))
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(name, r.stderr)
+                self.assertIn("`carry on", r.stderr)
+                self.assertEqual((len(self.cancels()), self.closes(), len(self.started())), (1, [], 1))
+                self.assertIs(signal.getsignal(signal.SIGTERM), before)  # put back
+
+    def test_a_box_lane_on_a_later_page_of_the_worker_list_is_seen(self):
+        # review round 2, m6
+        self.setup_project()
+        run = self.e.settings(self.repo)["runs"]["coordinator"]
+        done = [{"dispatchId": f"ctx_{i}", "runId": run, "liveness": "exited", "outcome": "succeeded"}
+                for i in range(100)]
+        self.e.set_state(workers=[*done, {"dispatchId": "ctx_late", "runId": run, "liveness": "live",
+                                          "outcome": "in_progress", "host": "trial-vps"}])
+        r = self.restart("--wait", "1")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("ctx_late (trial-vps, live)", r.stderr)
+        self.assertEqual(self.sent(), [])
+
+    def test_the_first_reply_is_by_number(self):
+        # review round 2, n1: sequence 999 comes before 1000
+        sp = load(SPAWN, "spawn_t")
+
+        class Place:
+            def jrun(self, *a):
+                return {"result": {"messages": [
+                    {"id": "m2", "thread_id": "m0", "from_handle": "run:r", "sequence": 1000, "body": "ready to stop x"},
+                    {"id": "m1", "thread_id": "m0", "from_handle": "run:r", "sequence": 999, "body": "not now: merging"}]}}
+        self.assertEqual(sp.reply_to(Place(), "term_me", "m0", {"run:r"})["id"], "m1")
 
     def cancels(self):
         return [m for m in self.sent() if m["subject"].endswith(": carry on")]
@@ -425,7 +529,32 @@ class Restart(Spawn):
         self.assertEqual((self.sent(), len(self.started())), ([], 2))
 
 
+class StartLock(Spawn):
+    def test_a_start_whose_agent_is_not_up_yet_is_not_started_again(self):
+        # review round 2, m2: the first start's launcher has not reached its Run, and its agent is not in /proc yet
+        self.e.set_state(run_create_fails=True, agent_exits=True)
+        self.setup_project()
+        r = self.e.pause("start", str(self.repo))
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("its launcher has not reached its Run yet", r.stdout)
+        self.assertEqual(len(self.started()), 1)
+        r = self.e.pause("start", str(self.repo), env_extra={"LANE_START_GRACE": "0"})  # long after: dead, started
+        self.assertIn("recorded but dead", r.stdout)
+        self.assertEqual(len(self.started()), 2)
+
+
 class ProjectStopHandover(Spawn):
+    def test_a_handover_never_written_is_none_yet_and_stop_asks_for_it(self):
+        # review round 2, M1: bd exits 1 for a missing key (`found: false`), which is no read failure
+        self.setup_project()
+        self.assertFalse((self.e.home / "handover-latest").exists())
+        self.e.set_state(handover_on_send={"handover-latest": "new"})
+        r = self.e.pause("stop", str(self.repo), "--wait", "5")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(len(self.sent()), 1)
+        self.assertNotIn("app coordinator", [t["title"] for t in self.terminals()])
+
+
     def test_a_failed_bd_read_is_never_a_new_handover(self):
         # review B1, for project stop (the same helper): nothing is asked or closed when bd cannot be read
         self.setup_project()
@@ -464,6 +593,16 @@ class OnHost(Spawn):
         r = self.spawn("coordinator", "status", "app", "--on", "-oProxyCommand=x")
         self.assertEqual(r.returncode, 2)
         self.assertEqual(self.ssh_calls(), [])
+
+    def test_an_empty_host_is_refused_and_nothing_runs_here(self):
+        # review round 2, m1: `--on "$BOX"` with BOX unset
+        self.setup_project()
+        self.restart_server()
+        for verb in ("start", "status", "restart"):
+            for on in (["--on", ""], ["--on="]):
+                r = self.spawn("coordinator", verb, str(self.repo), *on)
+                self.assertEqual(r.returncode, 2, (verb, on, r.stdout))
+        self.assertEqual((self.ssh_calls(), len(self.started())), ([], 1))
 
 
 class LaneNew(Spawn):
@@ -535,19 +674,28 @@ class LaneNew(Spawn):
         self.assertIn(f"recorded Run {dead_run} is not the live coordinator's", out)
         self.assertIn("terminal term_hand", out)
 
-    def test_a_terminal_not_titled_exactly_or_a_run_of_another_name_is_no_address(self):
+    def test_a_terminal_not_titled_exactly_is_no_address(self):
         self.setup_project()
         self.e.set_state(terminals=[{**t, "title": "app coordinator (old)"} for t in self.terminals()])
         code, _, err, _ = self.new("app", "app-7")
         self.assertEqual(code, 1)
-        self.e.set_state(terminals=[{**t, "title": "app coordinator"} for t in self.terminals()])
+        self.assertIn("not 'app coordinator'", err)
+        self.assertEqual(self.sent(), [])
+
+    def test_a_run_named_after_a_batch_is_the_address_when_its_coordinator_is_the_terminal(self):
+        # review round 2, M3: the coordinators here name their Runs after a batch ("2026-11-16 batch: ...")
+        self.setup_project()
         st = self.state()
-        st["runs"] = [{**r, "objective": "shop coordinator"} for r in st["runs"]]
+        st["runs"] = [{**r, "objective": "2026-11-16 batch: state-machine audit (app-3), archive"} for r in st["runs"]]
+        self.e.state.write_text(json.dumps(st))
+        code, out, err, _ = self.new("app", "app-7")
+        self.assertEqual(code, 0, err + out)
+        self.assertEqual([m["to"] for m in self.sent()], [f"run:{st['runs'][0]['runId']}"])
+        st["runs"].append({**st["runs"][0], "runId": "run_second"})  # two Runs of that terminal: never a guess
         self.e.state.write_text(json.dumps(st))
         code, _, err, _ = self.new("app", "app-7")
         self.assertEqual(code, 1)
-        self.assertIn("objective 'shop coordinator'", err)
-        self.assertEqual(self.sent(), [])
+        self.assertIn("2 Runs whose coordinator is that terminal", err)
 
     def test_outside_an_orca_terminal_nothing_is_sent(self):
         self.setup_project()
@@ -632,7 +780,7 @@ class LaneList(Spawn):
         lines = r.stdout.splitlines()
         self.assertEqual(len(lines), 4, r.stdout)  # the header and one row per lane of this project
         login = next(l for l in lines if l.startswith("app-7-login"))
-        for needed in ("app-7 ", "PR #40", "failing", "12m", "ready/live", "(+1 other)"):  # not its reviewer's
+        for needed in ("app-7 ", "PR #40", "failing", "12m", "ready/live +ctx_rev succeeded/exited"):  # its own
             self.assertIn(needed, login)
         cache = next(l for l in lines if l.startswith("app-9-cache"))
         for needed in ("app-9 ", "PR #41", "pending", "1h12m"):
@@ -649,9 +797,25 @@ class LaneList(Spawn):
         self.assertEqual(r.returncode, 0, r.stderr)
         for needed in ("app-7-login: issue app-7 · PR #40 · ci failing · idle 12m",
                        "worker ctx_fix (task task_fix): ready, live", "earlier in its chain: ctx_0",
-                       "also on it (a reviewer or another worker, not the lane): ctx_rev", "branch o/app-7-login",
+                       "also on it (another chain: a reviewer, or a worker that replaced the first): ctx_rev",
+                       "branch o/app-7-login",
                        "terminal term_w1 (active)"):
             self.assertIn(needed, r.stdout)
+
+    def test_a_worker_that_replaced_the_first_is_shown_and_not_called_not_the_lane(self):
+        # review round 2, m5
+        self.lanes()
+        st = self.state()
+        login = next(w["path"] for w in st["worktrees"] if w["name"] == "app-7-login")
+        rid = st["repos"][0]["id"]
+        st["workers"] = [self.full("ctx_new", "task_new", rid, login, "term_w0", "ready", "live"),
+                         {**self.full("ctx_0", "task_0", rid, login, "term_old", "failed", "exited")}]
+        self.e.state.write_text(json.dumps(st))
+        line = next(l for l in self.spawn("lane", "list", "app").stdout.splitlines() if l.startswith("app-7-login"))
+        self.assertIn("failed/exited +ctx_new ready/live", line)
+        out = self.spawn("lane", "status", "app").stdout
+        self.assertIn("also on it (another chain: a reviewer, or a worker that replaced the first): ctx_new", out)
+        self.assertNotIn("not the lane", out)
 
     def test_gh_that_cannot_answer_is_not_no_pr(self):
         # review m1

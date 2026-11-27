@@ -360,8 +360,9 @@ recorded session. It first asks the live check whether the coordinator runs, and
   was confirmed, from which terminal, and whether it started. `--force --yes` skips the question. Both are for a
   person at a terminal: they refuse when an agent may run them (an agent's marker such as `CLAUDECODE`, no terminal,
   an agent among the parent processes, or a terminal Orca marks as a worker's or an agent's), so run them in a plain
-  Orca terminal, not through an agent. `--force` never starts a second one beside a coordinator that is proven to
-  run: that is `lane-control coordinator restart <project>`.
+  Orca terminal, not through an agent. The check stops accidents and is no proof (an agent could open a fresh
+  terminal), so the personas also forbid agents these forms. `--force` never starts a second one beside a
+  coordinator that is proven to run: that is `lane-control coordinator restart <project>`.
 
 `lane-control coordinator status <project>` says which of these it is, and `lane-control coordinator start machine`
 (and `status machine`) does the same for the machine coordinator. On a box, add `--on <host>`: it runs the box's own
@@ -577,8 +578,9 @@ or park it. Never stop a live lane without your word.
   <project>`: it sends the coordinator an order with a one-time code, and the coordinator finishes what is in hand,
   writes its handover, backs up and, as its last step, replies `ready to stop <code>` (or `not now: <why>`, for
   example during a merge). Only that reply closes it; then it is started again. No reply within `--wait` (default 10
-  minutes) closes and starts nothing and sends `carry on`. Each step is said. Like stop, it refuses while a lane of
-  its Run runs (here or on a box) and runs from an Orca terminal. `lane-control project rest ~/code/<project>` stops no agent: it only makes
+  minutes), or any other way out before the stop (an Orca error, Ctrl-C), closes and starts nothing and sends `carry
+  on` first. Each step is said. Like stop, it refuses while a lane of its Run runs (here or on a box) and runs from an
+  Orca terminal; like `--force`, it is a person's only. `lane-control project rest ~/code/<project>` stops no agent: it only makes
   the night manager skip the project, and `lane-control project wake ~/code/<project>` undoes it.
 - **A running lane:** ask its coordinator. It stops a live lane only on your word, and puts the issue back to open.
 - **Away modes:** `lane-away off` says you are back. `lane-control ratchet off` ends the ratchet (unattended

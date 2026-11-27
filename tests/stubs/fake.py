@@ -256,8 +256,12 @@ def orca():
                              "body": answer.replace("{code}", code.group(1) if code else "")})
                 if state.get("workers_on_reply") is not None:  # a lane started while the coordinator got ready
                     state["workers"] = state["workers_on_reply"]
+                if state.get("worker_list_fails_on_reply"):  # Orca cannot list the workers after the reply
+                    state["worker_list_fails"] = True
         out({"ok": True, "result": {"message": {"id": mid}}})
     if cmd == "orchestration inbox":  # a mailbox, read without marking (Orca's --full row fields)
+        if state.get("inbox_fails"):
+            out({"ok": False, "error": {"message": "stub: inbox failed"}}, 1)
         rows = [{"id": m["id"], "thread_id": m.get("thread_id"), "from_handle": m.get("from"), "to_handle": m["to"],
                  "subject": m["subject"], "body": m["body"], "sequence": i}
                 for i, m in enumerate(state.get("sent", [])) if m["to"] == opt("--terminal")]

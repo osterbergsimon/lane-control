@@ -3650,8 +3650,21 @@ def wait_run(repo: Path, role: str, timeout: float = None):
         time.sleep(1)
 
 
+START_GRACE = float(os.environ.get("LANE_START_GRACE") or 120)  # seconds a start's launcher may take to reach its Run
+
+
 def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, checkout: Path, project: str,
                   kickoff: str, resume: "str | None" = None, force: str = "") -> bool:
+    """One start at a time per project (review m2): two starts close together never both see `recorded but dead`."""
+    import fcntl
+    store_dir(repo).mkdir(parents=True, exist_ok=True)
+    with open(store_dir(repo) / "start.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _start_session(place, repo, role, pin, mode, checkout, project, kickoff, resume, force)
+
+
+def _start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, checkout: Path, project: str,
+                   kickoff: str, resume: "str | None" = None, force: str = "") -> bool:
     """One standing session in its own Orca terminal; True when started now, False when its agent already runs, None
     when that cannot be told: nothing is started and nothing changed. A record or a terminal with no live agent is said
     (`recorded but dead`), cleared, and the session started. force (--force, how forced_start had it confirmed):
@@ -3665,6 +3678,14 @@ def start_session(place: Place, repo: Path, role: str, pin: tuple, mode: str, ch
         return False
     if state.doubt and not force:
         say(f"session {role}", "cannot tell", cannot_tell(title, state))
+        return None
+    pending = store_dir(repo) / "launch" / f"{role}.sh"  # removed once its Run is recorded; the agent follows at once
+    age = time.time() - pending.stat().st_mtime if pending.is_file() else None
+    if not state.doubt and age is not None and age < START_GRACE and \
+            stored_handle(repo, role) in [t.get("handle") for t in state.found]:
+        say(f"session {role}", "cannot tell", f"{title}: it was started {int(age)}s ago in {stored_handle(repo, role)} "
+            "and its launcher has not reached its Run yet, so its agent may still be coming up. Nothing is started; "
+            f"run this again in {int(START_GRACE - age) + 1}s")
         return None
     f = launcher(repo, role, pin, mode, checkout, title, kickoff, resume, place)
     for old_rec in (run_record(repo, role), Path(f"{run_record(repo, role)}.err"),

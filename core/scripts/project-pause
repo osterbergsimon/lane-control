@@ -65,17 +65,23 @@ RETIRED_HINT = (" (design-lead is the retired design lead: ask it for its handov
 HANDOVER_WAIT = 600  # seconds stop waits for a new handover-latest
 HANDOVER_SUBJECT = "Write your handover now: project-pause is stopping this session"
 HANDOVER_KEYS = ps.HANDOVERS  # one beads memory per standing session
-HANDOVER_BODY = ("The owner is pausing this project. Refresh your beads memory `{key}` now (bd remember), then stop "
-                 "working. Your terminal is closed once the new handover is there.")
+HANDOVER_BODY = ("lane-control project stop is pausing this project. Refresh your beads memory `{key}` now (bd "
+                 "remember), then stop working. Your terminal is closed once the new handover is there.")
 
 
 def handover(repo: Path, key: str) -> "str | None":
-    """The handover memory's text; None when it cannot be read (bd failed or timed out), which is never a change."""
+    """The handover memory's text; "" when bd says there is none yet (`found: false`, which bd exits 1 for); None when
+    it cannot be read (bd failed, timed out or printed no answer), which is never a change."""
     try:
-        r = ps.run(["bd", "recall", key], cwd=repo, check=False, timeout=30)
-    except ps.Fail:
+        r = ps.run(["bd", "recall", key, "--json"], cwd=repo, check=False, timeout=30)
+        d = json.loads(r.stdout)
+    except (ps.Fail, ValueError):
         return None
-    return r.stdout if r.returncode == 0 else None
+    if not isinstance(d, dict) or not isinstance(d.get("found"), bool):
+        return None
+    if not d["found"]:
+        return ""
+    return d.get("value") if r.returncode == 0 and isinstance(d.get("value"), str) else None
 
 
 def run_by_name(place, title: str, old: set):

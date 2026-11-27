@@ -56,10 +56,19 @@ class NativeEnv(Env):
             p.unlink(missing_ok=True)
             p.write_text(SESSION)
             p.chmod(0o755)
-        # bd: `bd recall <key>` prints $HOME/<key> (the stub's send writes it), `bd where` fails.
+        # bd: `bd recall <key> [--json]` answers from $HOME/<key> (the stub's send writes it) as bd 1.0.4 does: a
+        # missing key exits 1 (`found: false` with --json); `bd where` fails.
         bd = self.bin / "bd"
-        bd.write_text("#!/bin/sh\n[ \"$1\" = recall ] || exit 1\n"
-                      f"cat '{self.home}'/\"$2\" 2>/dev/null\nexit 0\n")
+        bd.write_text("#!/usr/bin/env python3\nimport json, os, sys\n"
+                      "a = sys.argv[1:]\n"
+                      "if a[:1] != ['recall'] or len(a) < 2:\n    sys.exit(1)\n"
+                      f"f = os.path.join({str(self.home)!r}, a[1])\n"
+                      "v = open(f).read() if os.path.isfile(f) else None\n"
+                      "if '--json' in a:\n"
+                      "    print(json.dumps({'found': v is not None, 'key': a[1], 'schema_version': 1, 'value': v or ''}))\n"
+                      "elif v is None:\n    print(f'No memory with key \"{a[1]}\"', file=sys.stderr)\n"
+                      "else:\n    print(v, end='')\n"
+                      "sys.exit(0 if v is not None else 1)\n")
         bd.chmod(0o755)
         self.env.pop("COTAL_NAME", None)  # the tests may run inside an agent's shell
         self.env["XDG_CONFIG_HOME"] = str(self.home / ".config")
@@ -302,7 +311,7 @@ class RenderTests(Case):
 
     def test_the_beads_session_hook_is_installed_once_next_to_the_persona_hook(self):
         bd = self.e.bin / "bd"
-        bd.write_text(bd.read_text().replace('[ "$1" = recall ] || exit 1', '[ "$1" = prime ] && exit 0\n[ "$1" = recall ] || exit 1'))
+        bd.write_text(bd.read_text().replace("a = sys.argv[1:]\n", "a = sys.argv[1:]\nif a[:1] == ['prime']:\n    sys.exit(0)\n"))
         r = self.e.run(str(self.repo), "--no-start")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("beads-hook claude: updated", r.stdout)

@@ -22,8 +22,9 @@ coordinator restart  closes a coordinator only on its own answer. It sends the r
                    from your Orca terminal, an order with a one-time code and an expiry: finish what is in hand, write
                    the handover, back up, and as the last step reply `ready to stop <code>`, or `not now: <why>` (a
                    merge in progress is such a why). It waits for that reply (--wait, default 600 seconds), never for
-                   a change in beads. No reply, `not now`, a lane that started meanwhile or a failed stop: it starts
-                   and closes nothing, sends `carry on <code>` (except after `not now`) and says what happened. On
+                   a change in beads. Any way out before a done stop (no reply, another answer, a lane that started
+                   meanwhile, a failed stop, an Orca error, Ctrl-C, SIGTERM) starts and closes nothing, sends `carry
+                   on <code>` first and says so; after `not now` it only says so (the coordinator carries on). On
                    `ready to stop` it closes it (project-pause stop --no-handover), waits for its process to end, and
                    starts it (project-pause start); one line per step. Refused, with nothing sent, while a lane of its
                    Run runs here or on a box, under `cannot tell`, or outside an Orca terminal.
@@ -42,15 +43,16 @@ lane new           a request, sent by Orca message to the project's running coor
                    It says it comes from `lane-control lane new` and is no approval: the coordinator confirms with the
                    owner in its terminal, then gates, briefs, reviews and merges as usual. It prints where it asks.
                    Nothing else is started.
-A person only:     lane new and --force refuse when an agent may run them: an agent's marker in the environment
-                   (LANE_ROLE, CLAUDECODE, ...), no terminal on stdin, an agent among the parent processes, or Orca
-                   naming the calling terminal a worker's or marking it an agent's. Doubt refuses.
+A person only:     lane new, restart and --force refuse when an agent may run them: an agent's marker in the
+                   environment (LANE_ROLE, CLAUDECODE, ...), no terminal on stdin, an agent among the parent processes,
+                   or Orca naming the calling terminal a worker's or marking it an agent's. Doubt refuses. This stops
+                   accidents and is no proof (an agent can open a fresh terminal): agents' personas forbid these forms.
 lane list          one line per lane in Orca's worker list (orchestration worker-list) on the project's worktrees:
                    lane, issue, PR, CI, idle time, and the lane's own worker: the current dispatch of the chain that
-                   began the lane (Orca's originDispatchId), never its reviewer. lane status: each lane in full, with
-                   any other worker on it (a reviewer) named as such. The issue is read from the PR title's `(<id>)`,
-                   else the lane brief's `(bd <id>)`; the PR and CI from GitHub (gh: `?` when gh cannot answer), the
-                   idle time from the lane worker's terminal.
+                   began the lane (Orca's originDispatchId), then each other worker on it (a reviewer, or one that
+                   replaced the first) with its state. lane status: each lane in full. The issue is read from the PR
+                   title's `(<id>)`, else the lane brief's `(bd <id>)`; the PR and CI from GitHub (gh: `?` when gh
+                   cannot answer), the idle time from the lane worker's terminal.
 Exit: 0 done; 1 refused or failed (it says why; nothing was changed unless it says so); 2 usage."""
 import argparse
 import importlib.machinery
@@ -60,6 +62,7 @@ import math
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -90,6 +93,14 @@ EXIT_WAIT = float(os.environ.get("LANE_RESTART_EXIT_WAIT") or 60)  # seconds for
 
 class Usage(Exception):
     pass
+
+
+class NotNow(ps.Fail):
+    """The coordinator answered `not now`: it carries on by itself, so nothing calls the order off."""
+
+
+class Terminated(Exception):
+    """SIGTERM during a restart, turned into an exception so the order is called off first."""
 
 
 def say(step: str, what: str, detail: str = "") -> None:
@@ -151,8 +162,10 @@ def run_rows(place) -> list:
 
 
 def coordinator_address(repo: Path, p: dict, place) -> "tuple[str, dict]":
-    """(Run id, terminal) of the live coordinator, tied exactly: its agent proven to run in that terminal, the
-    terminal titled exactly as the session, and the one Run (not an older session's) whose coordinator it is.
+    """(Run id, terminal) of the live coordinator, tied exactly: its agent proven to run in that terminal (by its
+    process), the terminal titled exactly as the session, and the one Run (not an older session's) whose
+    coordinator_handle is that terminal. The Run's objective is free text (a coordinator names its Run after a batch
+    of work) and is never matched.
     Anything else is a Fail naming what could not be tied; nothing is sent then."""
     title = ps.session_title("coordinator", p["project"])
     state = live_coordinator(repo, p, place)
@@ -178,10 +191,7 @@ def coordinator_address(repo: Path, p: dict, place) -> "tuple[str, dict]":
         raise ps.Fail(f"{title} runs in {handle}, and Orca's run-list has {len(mine)} Runs whose coordinator is that "
                       "terminal, not one, so lane-control cannot tie it to a Run. Nothing was sent: tell it in its "
                       "terminal (it makes its Run with `orca-ide orchestration run-create`)")
-    rid = mine[0].get("id") or mine[0].get("runId")
-    if mine[0].get("objective") != title:
-        raise ps.Fail(f"the Run {rid} of terminal {handle} has the objective {mine[0].get('objective')!r}, not "
-                      f"{title!r}, so lane-control cannot tie it to {title}. Nothing was sent")
+    rid = mine[0].get("id") or mine[0].get("runId")  # its objective is free text (a batch title): never matched
     recorded = (p["st"].get("runs") or {}).get("coordinator")
     if recorded and recorded != rid:
         say("note", "stale record", f"the recorded Run {recorded} is not the live coordinator's ({rid}); using {rid}")
@@ -190,17 +200,26 @@ def coordinator_address(repo: Path, p: dict, place) -> "tuple[str, dict]":
 
 def busy(place, repo: Path, rid: str) -> list:
     """The lanes that make a restart wrong: this machine's lane agents (running_lanes) and every worker of the
-    coordinator's Run in progress and live or unverifiable, a box's too (worker-list --include-remote). A list Orca
-    does not give is a Fail: never assumed empty."""
+    coordinator's Run in progress and live or unverifiable, a box's too (worker-list --include-remote), every page
+    (nextCursor). A list Orca does not give whole is a Fail: never assumed empty."""
     found = list(ps.running_lanes(place, repo))
+    rows, cursor = [], None
     try:
-        r = place.jrun("orchestration", "worker-list", "--run", rid, "--include-remote", "--limit", "100")
-        rows = (r.get("result") or {}).get("workers")
-        if not isinstance(rows, list):
-            raise KeyError("workers")
+        for _ in range(100):
+            r = place.jrun("orchestration", "worker-list", "--run", rid, "--include-remote", "--limit", "100",
+                           *(["--cursor", cursor] if cursor else []))
+            page = (r.get("result") or {}).get("workers")
+            if not isinstance(page, list):
+                raise KeyError("workers")
+            rows += page
+            cursor = (r.get("result") or {}).get("nextCursor")
+            if not cursor:
+                break
+        else:
+            raise KeyError("more than 100 pages")
     except (ps.Fail, KeyError, AttributeError) as e:
-        raise ps.Fail(f"Orca's worker list for run:{rid} could not be read ({e}), so lane-control cannot tell whether "
-                      "a lane of it runs (here or on a box). Nothing was changed") from None
+        raise ps.Fail(f"Orca's worker list for run:{rid} could not be read whole ({e}), so lane-control cannot tell "
+                      "whether a lane of it runs (here or on a box). Nothing was changed") from None
     for w in (worker(x) for x in rows if isinstance(x, dict)):  # in progress and live, or not verifiable (a box's)
         if w["outcome"] == "in_progress" and w["liveness"] in ("live", "unverifiable"):
             found.append(f"worker {w['dispatch']} ({w['host']}, {w['liveness']})")
@@ -220,7 +239,12 @@ def reply_to(place, me: str, mid: str, senders: set) -> "dict | None":
     read without marking anything (`inbox`, never a consuming check)."""
     got = place.jrun("orchestration", "inbox", "--terminal", me, "--limit", "100", "--full")
     rows = (got.get("result") or {}).get("messages") or []
-    for m in sorted((m for m in rows if isinstance(m, dict)), key=lambda m: str(m.get("sequence") or m.get("id"))):
+    def order(m):  # Orca's sequence is a number: 999 comes before 1000
+        try:
+            return (0, int(m.get("sequence")), "")
+        except (TypeError, ValueError):
+            return (1, 0, str(m.get("id")))
+    for m in sorted((m for m in rows if isinstance(m, dict)), key=order):
         if m.get("thread_id") == mid and m.get("id") != mid and m.get("from_handle") in senders:
             return m
     return None
@@ -238,6 +262,7 @@ def restart(target: str, wait: float) -> int:
         say("restart", "not running", f"{title} is not running, so there is nothing to stop: starting it")
         return script("project-pause", "start", str(repo))
     me = in_orca_terminal("restart asks the coordinator")
+    person(place, "restart")
     rid, term = coordinator_address(repo, p, place)
     lanes = busy(place, repo, rid)
     if lanes:
@@ -246,7 +271,7 @@ def restart(target: str, wait: float) -> int:
     code = secrets.token_hex(6)
     expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + wait))
     key = pp.HANDOVER_KEYS["coordinator"]
-    body = (f"The owner asks to restart you (lane-control coordinator restart, code {code}, from terminal {me}). This "
+    body = (f"A restart order from `lane-control coordinator restart`, run in terminal {me} (code {code}). This "
             f"order expires at {expires}: after that, or once `carry on {code}` arrives, ignore it. If a merge or its "
             f"bookkeeping, or anything you must not leave half-done, is in progress, reply `not now: <why>` and carry "
             f"on. Otherwise finish what is in hand, refresh your handover `{key}` (bd remember), then back up (git -C "
@@ -266,29 +291,44 @@ def restart(target: str, wait: float) -> int:
                        "--body", f"lane-control restart {code} is called off ({why}). Carry on as before: nothing "
                        "was stopped, and you are not restarted. If you stopped working for it, resume.")
             return f"`carry on {code}` was sent to it"
-        except ps.Fail as e:
-            return f"the `carry on {code}` message could not be sent ({e}): tell it in its terminal to carry on"
+        except BaseException as e:  # noqa: B036 (a second Ctrl-C here still says what to do)
+            return f"the `carry on {code}` message could not be sent ({e or type(e).__name__}): tell it in its " \
+                   "terminal to carry on"
 
-    end, answer = time.time() + wait, None
-    while answer is None:
-        answer = reply_to(place, me, mid, {f"run:{rid}", term.get("handle")})
-        if answer is None:
-            if time.time() >= end:
-                raise ps.Fail(f"no reply from {title} within {int(wait)}s: nothing was stopped or started, and "
-                              + cancel(f"no reply within {int(wait)}s") + ". Run restart again when it is free")
-            time.sleep(min(POLL, max(0.2, end - time.time())))
-    text = " ".join(str(answer.get("body") or "").split())
-    if re.fullmatch(rf"`?ready to stop {code}`?\.?", text, re.I) is None:
-        said = cancel("its answer was not `ready to stop`") if not re.match(r"`?not now\b", text, re.I) else \
-            "it carries on"
-        raise ps.Fail(f"{title} answered {text[:300]!r}: nothing was stopped or started, and {said}")
-    say("restart 2/4 ready", title, f"answered {text!r}")
-    lanes = busy(place, repo, rid)
-    if lanes:
-        raise ps.Fail(f"lanes started while it got ready: {', '.join(lanes)}. Nothing was stopped, and "
-                      + cancel("a lane started meanwhile"))
-    if script("project-pause", "stop", str(repo), "--no-handover") != 0:
-        raise ps.Fail(f"stopping {title} failed (above): nothing was started, and " + cancel("the stop failed"))
+    def terminated(signum, frame):
+        raise Terminated(f"stopped by signal {signum}")
+    old_term = signal.signal(signal.SIGTERM, terminated)
+    try:  # from the order to a done stop, every way out calls the order off first (review M2), except `not now`
+        end, answer, unread = time.time() + wait, None, ""
+        while answer is None:
+            try:
+                answer = reply_to(place, me, mid, {f"run:{rid}", term.get("handle")})
+            except ps.Fail as e:  # one failed read is retried until the deadline
+                unread = str(e)
+            if answer is None:
+                if time.time() >= end:
+                    raise ps.Fail(f"no reply from {title} within {int(wait)}s"
+                                  + (f" (the last mailbox read failed: {unread})" if unread else ""))
+                time.sleep(min(POLL, max(0.2, end - time.time())))
+        text = " ".join(str(answer.get("body") or "").split())
+        if re.match(r"`?not now\b", text, re.I):
+            raise NotNow(f"{title} answered {text[:300]!r}: nothing was stopped or started, and it carries on")
+        if re.fullmatch(rf"`?ready to stop {code}`?\.?", text, re.I) is None:
+            raise ps.Fail(f"{title} answered {text[:300]!r}, not `ready to stop {code}`")
+        say("restart 2/4 ready", title, f"answered {text!r}")
+        lanes = busy(place, repo, rid)
+        if lanes:
+            raise ps.Fail(f"lanes started while it got ready: {', '.join(lanes)}")
+        if script("project-pause", "stop", str(repo), "--no-handover") != 0:
+            raise ps.Fail(f"stopping {title} failed (above)")
+    except NotNow:
+        raise
+    except BaseException as e:
+        why = {KeyboardInterrupt: "interrupted (Ctrl-C)"}.get(type(e)) or str(e) or type(e).__name__
+        raise ps.Fail(f"{why}: nothing was stopped or started, and {cancel(why[:200])}. Run restart again when it "
+                      "is free") from None
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
     say("restart 3/4 stop", "done", f"{title} closed")
     end = time.time() + EXIT_WAIT
     while True:
@@ -591,7 +631,7 @@ def lane_list(target: str, full: bool) -> int:
             w = r["worker"]
             print(f"{r['lane']:<{width}}  {r['issue']:<16} {pr_text(r):<14} "
                   f"{'?' if r['gh'] else r['pr'].get('ci', '-'):<8} {r['idle']:<7} {w['state']}/{w['liveness']}"
-                  + (f" (+{len(r['others'])} other)" if r["others"] else ""))
+                  + "".join(f" +{o['dispatch']} {o['state']}/{o['liveness']}" for o in r["others"]))
         return 0
     for r in rows:
         w = r["worker"]
@@ -602,8 +642,8 @@ def lane_list(target: str, full: bool) -> int:
               + (f"; earlier in its chain: {', '.join(str(x['dispatch']) for x in r['chain'][1:])}"
                  if len(r["chain"]) > 1 else ""))
         for o in r["others"]:
-            print(f"  also on it (a reviewer or another worker, not the lane): {o['dispatch']} (task {o['task']}): "
-                  f"{o['state']}, {o['liveness']}, outcome {o['outcome']}")
+            print(f"  also on it (another chain: a reviewer, or a worker that replaced the first): {o['dispatch']} "
+                  f"(task {o['task']}): {o['state']}, {o['liveness']}, outcome {o['outcome']}")
         print(f"  branch {r['branch'] or '-'} · {r['path']}")
     return 0
 
@@ -683,7 +723,7 @@ def main(argv=None) -> int:
         if a.group == "coordinator":
             if getattr(a, "yes", False) and not a.force:
                 raise Usage("--yes goes with --force")
-            if a.on:
+            if a.on is not None:  # `--on ""` (an unset $BOX) is refused there, never run here
                 return on_host(a.on, on_words(argv)[1])
             if a.project == "machine":
                 if a.verb == "restart":

@@ -116,6 +116,9 @@ You plan, decide and check; lanes do the work, including the waiting.
 - The handover request of `lane-control project stop`: write the handover it names, then stop working.
 
 ## Rules
+- Never run `lane-control coordinator start --force`, `lane-control coordinator restart` or `lane-control lane
+  new` yourself, in any terminal (a new one too): they are the owner's. Their check that a person runs them stops
+  accidents and is no proof.
 - Never write or edit code yourself. Reading files and running read-only commands that answer at once (git log,
   git diff, a fast test) to plan or check work is fine (Your hands, above).
 - Never add or delegate work the owner did not ask for. Things you notice go in your reply as a list for them to pick.

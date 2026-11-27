@@ -3071,6 +3071,15 @@ class SpawnDocTests(unittest.TestCase):
             self.assertIn(needle, coord)
         self.assertLess(coord.index("write `handover-latest`"), coord.index("back beads up (as at any stop"))  # m3
 
+    def test_agents_never_run_the_persons_forms(self):
+        # CLI-2 review round 2, m4: the person check is a filter, not proof; the personas forbid the forms outright
+        for name in ("coordinator.md", "machine-coordinator.md"):
+            text = flat(NATIVE_DIR / "personas" / name)
+            for needle in ("Never run `lane-control coordinator start --force`, `lane-control coordinator restart` or "
+                           "`lane-control lane new` yourself, in any terminal", "is no proof"):
+                self.assertIn(needle, text, name)
+        self.assertIn("The check stops accidents and is no proof", flat(ROOT / "docs" / "getting-started.md"))
+
     def test_the_guides_name_the_spawn_forms(self):
         want = {"docs/getting-started.md": ("lane-control coordinator start <project>", "--force --yes",
                                             "lane-control coordinator restart <project>",
