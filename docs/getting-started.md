@@ -396,9 +396,10 @@ You do not need to poll. The lane's report wakes the coordinator, and the coordi
 `lane-control lane list <project>` shows each lane in Orca's worker list, one line each: lane, issue, PR, CI and how
 long its terminal has been quiet. The worker shown is the lane's own (the current dispatch of the chain that began it),
 never its reviewer. The issue comes from the PR title's `(<id>)`, or before there is a PR from the lane brief's `(bd
-<id>)`. The PR is found by the lane's branch name, else as the PR whose head commit is the lane's HEAD (a lane Orca
-recreated has a local `<name>-2` branch no PR is named after); `no PR found for <branch> @<commit>` means both found
-nothing, and `could not check` that GitHub could not be asked. `lane-control lane status <project>` shows each in full (worker,
+<id>)`. The PR is found by the lane's branch name. A lane Orca recreated has a local `<name>-2` branch no PR is named
+after, so next comes the PR whose head commit is the lane's HEAD, only if it is from this repo and its branch is
+`<name>`. `no PR found for <branch> @<commit>` means both found nothing, and `could not check` that GitHub could not be
+asked. `lane-control lane status <project>` shows each in full (worker,
 task, liveness, branch, and any reviewer on it, named as such).
 
 - In Orca, a new worktree appears under the project. Its card carries a comment `<KEY> <tier> <harness>/<model>: <one line>`.

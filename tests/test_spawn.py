@@ -726,8 +726,6 @@ if os.environ.get('GH_BROKEN') or (os.environ.get('GH_NO_API') and a[0] == 'api'
 prs = read('prs.json')
 if a[0] == 'api':
     print(json.dumps(read('commits.json').get(a[1].split('/commits/')[1].split('/')[0], [])))
-elif a[:2] == ['pr', 'list'] and '--base' in a:
-    print('[]')
 elif a[:2] == ['pr', 'list']:
     ref = a[a.index('--head') + 1]
     print(json.dumps([{'number': p['number'], 'state': p['state'], 'headRefOid': 'a' * 40, 'url': 'u'}
@@ -767,11 +765,21 @@ class LaneList(Spawn):
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, env=env, check=True, capture_output=True,
                               text=True).stdout.strip()
 
-    def by_commit(self, sha, head_sha, number=42, title="APP-11 docs (app-11)"):
+    def recreate(self, name):
+        """The lane's local branch gets Orca's -2, as when Orca recreated the lane: no PR has that name."""
+        st = self.state()
+        wt = next(w for w in st["worktrees"] if w["name"] == name)
+        wt["branch"] = f"refs/heads/o/{name}-2"
+        self.e.state.write_text(json.dumps(st))
+        subprocess.run(["git", "branch", "-m", f"o/{name}-2"], cwd=wt["path"], env=self.e.env, check=True,
+                       capture_output=True)
+
+    def by_commit(self, sha, head_sha, number=42, title="APP-11 docs (app-11)", ref="o/app-11-docs",
+                  fork=False):
         """GitHub lists PR `number`, whose head commit is `head_sha`, for commit `sha`; `pr view` can read it."""
         (self.e.home / "commits.json").write_text(json.dumps({sha: [
             {"number": number, "state": "open", "merged_at": None, "html_url": "u",
-             "head": {"sha": head_sha, "ref": "app-11-docs", "repo": {"full_name": "o/app"}},
+             "head": {"sha": head_sha, "ref": ref, "repo": {"full_name": "someone/app" if fork else "o/app"}},
              "base": {"ref": "main", "repo": {"full_name": "o/app", "default_branch": "main"}}}]}))
         prs = json.loads((self.e.home / "prs.json").read_text())
         prs[str(number)] = {"number": number, "title": title, "state": "OPEN",
@@ -876,6 +884,7 @@ class LaneList(Spawn):
     def test_a_branch_the_name_misses_finds_the_pr_by_its_head_commit(self):
         # lc-38y3: a lane Orca recreated has a local branch no PR is named after
         self.lanes()
+        self.recreate("app-11-docs")
         head = self.heads["app-11-docs"]
         self.by_commit(head, head)
         r = self.spawn("lane", "list", "app")
@@ -887,14 +896,25 @@ class LaneList(Spawn):
 
     def test_a_pr_that_holds_head_but_has_another_head_commit_is_not_the_lanes(self):
         self.lanes()
+        self.recreate("app-11-docs")
         head = self.heads["app-11-docs"]
         self.by_commit(head, "f" * 40)
         r = self.spawn("lane", "list", "app")
-        said = f"no PR found for o/app-11-docs @{head[:7]}"
+        said = f"no PR found for o/app-11-docs-2 @{head[:7]}"
         self.assertIn(said, self.row(r.stdout, "app-11-docs"), r.stderr)
         self.assertNotIn("#42", r.stdout)
         self.assertNotIn("never pushed", r.stdout)
         self.assertIn(said, self.spawn("lane", "status", "app").stdout)
+
+    def test_another_lanes_or_a_forks_pr_with_this_head_is_not_the_lanes(self):
+        self.lanes()
+        head = self.heads["app-11-docs"]
+        for ref, fork in (("o/app-7-docs-base", False), ("o/app-11-docs", True), ("release-1", False)):
+            with self.subTest(ref=ref, fork=fork):
+                self.by_commit(head, head, ref=ref, fork=fork)
+                r = self.spawn("lane", "list", "app")
+                self.assertIn(f"no PR found for o/app-11-docs @{head[:7]}", self.row(r.stdout, "app-11-docs"), r.stderr)
+                self.assertNotIn("#42", r.stdout)
 
     def test_a_head_commit_lookup_that_fails_is_could_not_check(self):
         self.lanes()

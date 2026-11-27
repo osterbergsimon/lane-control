@@ -2,22 +2,25 @@
 
 The name misses a lane Orca recreated: its local branch gets a `-2` suffix and no upstream, so no PR has that head name
 and a finished lane looks like it was never pushed. The fallback asks GitHub which PRs belong to HEAD
-(`gh api repos/{owner}/{repo}/commits/<sha>/pulls`) and keeps only a PR whose head commit IS HEAD: one that only
-contains HEAD is not the lane's. A name is never matched loosely. Every gh call is a read, and "GitHub could not be
-asked" (CouldNotCheck) is never the same answer as "no PR".
+(`gh api repos/{owner}/{repo}/commits/<sha>/pulls`). That HEAD is a PR's head does not make the PR the lane's: a new
+lane cut from another lane's branch, a fork's branch or a base branch sits at that PR's head too, and lane-sweep may
+remove a lane over its PR. So a PR is taken only when its head commit IS HEAD, it comes from this repo (never a fork)
+and its head branch is the lane's local branch without Orca's -<n> (`<user>/x` for `<user>/x-2`). Anything else is no
+PR. A name is never matched loosely. Every gh call is a read, and "GitHub could not be asked" (CouldNotCheck) is never
+the same answer as "no PR".
 
-The branch name is the lane's upstream branch when the upstream is that same branch on a real remote (`x` for a local
-`x` or `<user>/x`), else its local name; never a base branch it tracks. For the same reason the fallback drops a base
-branch's own PR (a promotion): a new lane sits at that branch's tip, which can be that PR's head. A base branch is the
-repo's default branch, or one other PRs were merged into; a fork's branch of such a name still counts.
+The branch name looked up first is the lane's upstream branch when the upstream is that same branch on a real remote
+(`x` for a local `x` or `<user>/x`), else its local name; never a base branch it tracks.
 """
 import json
+import re
 import subprocess
 
 GH_TIMEOUT = 120
 GIT_TIMEOUT = 60
 UNKNOWN_COMMIT = "No commit found for SHA"  # GitHub's 422 for a commit it does not have: it is in no PR
 RANK = {"open": 0, "merged": 1, "closed": 2}
+ORCA_SUFFIX = re.compile(r"-[0-9]+$")  # what Orca adds to the local branch of a lane it recreates
 
 
 class CouldNotCheck(Exception):
@@ -95,42 +98,30 @@ def _by_name(repo, name: str, timeout: float) -> list:
     return sorted((x for x in out if isinstance(x["number"], int)), key=lambda x: -x["number"])
 
 
-def _is_base(repo, ref: str, timeout: float) -> bool:
-    """A PR was merged into the branch `ref`."""
-    return bool(_gh_rows(repo, ["pr", "list", "--base", ref, "--state", "merged", "--json", "number", "--limit", "1"],
-                         f"gh pr list --base {ref}", timeout))
-
-
-def _by_head(repo, head: str, timeout: float) -> list:
-    """The PRs whose head commit is `head`: open ones first, then merged, then closed, each newest first."""
+def _by_head(repo, branch: str, head: str, timeout: float) -> "dict | None":
+    """The PR whose head commit is `head` and that can be the lane's: from this repo (never a fork), its head branch
+    named as the lane's local `branch` without Orca's -<n>, any `<user>/` prefix the same. An open one first, then a
+    merged, then a closed one, each newest first."""
+    name = ORCA_SUFFIX.sub("", branch)
     rows = _gh_rows(repo, ["api", f"repos/{{owner}}/{{repo}}/commits/{head}/pulls?per_page=100"],
                     f"gh api commits/{head[:7]}/pulls", timeout, empty_when=UNKNOWN_COMMIT)
     out = []
     for x in rows:
         h, b = x.get("head") or {}, x.get("base") or {}
-        if h.get("sha") != head or not isinstance(x.get("number"), int):
-            continue
-        home = b.get("repo") or {}
-        ours = (h.get("repo") or {}).get("full_name") == home.get("full_name")
-        if ours and h.get("ref") == home.get("default_branch"):
+        source = (h.get("repo") or {}).get("full_name")  # none: a deleted fork
+        if not (source and source == (b.get("repo") or {}).get("full_name") and h.get("sha") == head
+                and h.get("ref") == name and isinstance(x.get("number"), int)):
             continue
         state = "merged" if x.get("merged_at") else str(x.get("state") or "").lower()
-        out.append(({"number": x["number"], "state": state, "headRefOid": head, "url": x.get("html_url") or ""},
-                    h.get("ref") if ours else None))
-    out.sort(key=lambda x: (RANK.get(x[0]["state"], len(RANK)), -x[0]["number"]))
-    return out
-
-
-def _first_lane_pr(repo, candidates: list, timeout: float) -> "dict | None":
-    """The first candidate that is not a base branch's own PR (`ref`: its branch in this repo, None for a fork's)."""
-    return next((pr for pr, ref in candidates if not (ref and _is_base(repo, ref, timeout))), None)
+        out.append({"number": x["number"], "state": state, "headRefOid": head, "url": x.get("html_url") or ""})
+    return min(out, key=lambda x: (RANK.get(x["state"], len(RANK)), -x["number"]), default=None)
 
 
 def find(repo, path, branch: str, head: str, timeout: float = GH_TIMEOUT) -> "dict | None":
     """{number, state (open, merged, closed), headRefOid, url} of the PR of the lane at `path` (local branch `branch`,
     HEAD `head`; gh runs in `repo`), or None when GitHub answered and there is none. In this order: the branch's newest
-    merged PR that holds HEAD; its open PR; the open or merged PR whose head commit is HEAD; else what there is: a
-    merged PR the branch moved on from (its headRefOid does not hold HEAD), then a closed one. CouldNotCheck when
+    merged PR that holds HEAD; its open PR; the lane's open or merged PR by head commit (_by_head); else what there
+    is: a merged PR the branch moved on from (its headRefOid does not hold HEAD), then a closed one. CouldNotCheck when
     GitHub could not be asked, or HEAD is unreadable and the name shows nothing."""
     name = upstream(path, branch)[1] if branch else ""
     named = _by_name(repo, name, timeout) if name else []
@@ -145,7 +136,7 @@ def find(repo, path, branch: str, head: str, timeout: float = GH_TIMEOUT) -> "di
         if older:
             return older
         raise CouldNotCheck("the lane's HEAD cannot be read")
-    headed = _first_lane_pr(repo, _by_head(repo, head, timeout), timeout)
+    headed = _by_head(repo, branch, head, timeout)
     if headed and headed["state"] != "closed":
         return headed
     return older or headed

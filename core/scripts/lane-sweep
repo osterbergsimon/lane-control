@@ -24,10 +24,11 @@ worktree rm --delete-branch`; the PR and the remote branch are kept. Nothing els
 The PR is found by core/prlookup.py: first by the lane's upstream branch when the upstream is that same branch on a
 real remote (`x` for a local `x` or `<user>/x`), else its local name, never by a base branch it tracks (a lane on
 `origin/develop` would match develop's old merged PRs); then, when the name finds none that holds HEAD and no open one,
-by the PR whose head commit is HEAD (a lane Orca recreated has a local `x-2` with no upstream). CHECK means GitHub
-could not be asked, which is never the same as no PR. Stuck: no activity for --stuck-hours, where activity is the
-newest of Orca's lastActivityAt (which alone can be days old), the last push, the last commit and the last terminal
-output, and not parked. Parked: an open PR, a clean tree, and either the PR's head is HEAD, or HEAD is behind the
+by the PR whose head commit is HEAD, but only one from this repo whose head branch is the lane's local branch without
+Orca's -<n> (a lane Orca recreated has a local `<user>/x-2` with no upstream; a new lane at another PR's head matches
+nothing). CHECK means GitHub could not be asked, which is never the same as no PR. Stuck: no activity for
+--stuck-hours, where activity is the newest of Orca's lastActivityAt (which alone can be days old), the last push, the
+last commit and the last terminal output, and not parked. Parked: an open PR, a clean tree, and either the PR's head is HEAD, or HEAD is behind the
 pushed branch with no live terminal.
 
 Worktrees on another Orca host (hostId not local) are left to that machine's sweep. Lanes listed in

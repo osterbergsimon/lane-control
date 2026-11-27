@@ -37,8 +37,7 @@ def age(path: Path, minutes: float):
 GH_STUB = """
 #!/usr/bin/env python3
 # gh stand-in: answers `gh api repos/<r>/actions/runners`, `gh pr list --head <b> --state <s>` and
-# `gh api repos/{owner}/{repo}/commits/<sha>/pulls` from $GH_STUB_STATE; `gh pr list --base <b>` finds a PR for the
-# branches in its `merged_into`.
+# `gh api repos/{owner}/{repo}/commits/<sha>/pulls` from $GH_STUB_STATE.
 import json, os, sys
 a = sys.argv[1:]
 with open(os.environ["GH_STUB_LOG"], "a") as f:
@@ -66,8 +65,6 @@ if a[:2] == ["pr", "list"]:
         os.symlink(mk["cwd"], os.path.join(mk["dir"], "cwd"))
     if state.get("list_offline"):
         print("error connecting to api.github.com", file=sys.stderr); sys.exit(1)
-    if "--base" in a:
-        print(json.dumps([{"number": 1}] if opt("--base") in state.get("merged_into", []) else [])); sys.exit(0)
     want = opt("--state", "open")
     rows = [p for p in state.get("prs", []) if p["head"] == opt("--head") and want in ("all", p["state"])]
     print(json.dumps([{"number": p["number"], "headRefOid": p["headRefOid"], "url": "u", "state": p["state"].upper()}
@@ -626,7 +623,7 @@ class LaneSweepTests(MachineTest):
         self.gh({"prs": self.prs, **more})
 
     @staticmethod
-    def commit_pr(sha, state="open", number=8, ref="x", fork=False):
+    def commit_pr(sha, state="open", number=8, ref="user/x", fork=False):
         """A row of `gh api repos/{owner}/{repo}/commits/<sha>/pulls`: `sha` is the PR's head commit."""
         return {"number": number, "state": "open" if state == "open" else "closed",
                 "merged_at": "2026-11-27T05:00:00Z" if state == "merged" else None, "html_url": "u",
@@ -634,10 +631,27 @@ class LaneSweepTests(MachineTest):
                 "base": {"ref": "main", "repo": {"full_name": "o/app", "default_branch": "main"}}}
 
     def recreated_lane(self, hours_ago=0, activity_h=0):
-        """A lane Orca recreated: local `user/x-2` with no upstream, its commit pushed to origin's `x`."""
+        """A lane Orca recreated: local `user/x-2` with no upstream, its commit pushed to origin's `user/x`."""
         path, head = self.lane("x", branch="user/x-2", push_as=False, hours_ago=hours_ago, activity_h=activity_h)
-        self.git(path, "push", "-q", "origin", "HEAD:refs/heads/x")
+        self.git(path, "push", "-q", "origin", "HEAD:refs/heads/user/x")
         return path, head
+
+    def lane_at(self, name, start) -> Path:
+        """A new lane `name` cut at `start` with no commit and no upstream, as Orca creates one."""
+        path = self.tmp / "wt" / name
+        self.git(self.main, "worktree", "add", "-q", "--no-track", "-b", name, str(path), start)
+        self.state["worktrees"].append({"id": f"repo1::{path}", "path": str(path), "branch": f"refs/heads/{name}",
+                                        "isMainWorktree": False, "isArchived": False, "lastActivityAt": ms(9)})
+        self.orca(self.state)
+        return path
+
+    def not_the_lanes(self, path, branch, head):
+        """lane-sweep --apply removes nothing and says it found no PR for the lane."""
+        r = self.sweep("--apply")
+        self.assertEqual(self.removed(), [], r.stdout)
+        self.assertRegex(r.stdout, rf"STUCK +{path} \(branch {branch}, [^\n]*no PR found for {branch} @{head[:7]}\)",
+                         r.stdout + r.stderr)
+        self.assertNotIn("#8", r.stdout)
 
     def api_calls(self) -> list:
         log = self.tmp / "gh.log"
@@ -834,43 +848,62 @@ class LaneSweepTests(MachineTest):
         self.assertIn(f"MERGED {path} (#7 merged", self.sweep().stdout)
         self.assertEqual(self.api_calls(), [])
 
-    def test_a_reused_branch_whose_head_is_another_prs_head_is_that_pr(self):
+    # the by-HEAD PR must be able to be this lane's: our repo's, from the lane's own name without Orca's -<n>
+
+    def test_a_new_lane_stacked_at_another_lanes_pr_head_is_not_that_pr(self):
+        _, head = self.lane("a", branch="user/a", push_as="user/a", hours_ago=9, activity_h=9)
+        self.state["worktrees"].pop()  # only the new lane is swept
+        stacked = self.lane_at("user/b", head)
+        for state in ("open", "merged"):
+            with self.subTest(state=state):
+                self.gh_state(commit_prs={head: [self.commit_pr(head, state, ref="user/a")]})
+                self.not_the_lanes(stacked, "user/b", head)
+
+    def test_a_forks_pr_with_the_same_head_is_not_the_lanes(self):
+        path, head = self.recreated_lane(hours_ago=9, activity_h=9)
+        for state in ("open", "merged"):
+            with self.subTest(state=state):  # even under the very name the lane would match
+                self.gh_state(commit_prs={head: [self.commit_pr(head, state, fork=True)]})
+                self.not_the_lanes(path, "user/x-2", head)
+
+    def test_a_new_lane_at_a_base_branchs_tip_is_not_that_branchs_pr(self):
+        _, head = self.lane("seed", push_as="release-1", hours_ago=9, activity_h=9)
+        self.state["worktrees"].pop()
+        path = self.lane_at("feat", head)
+        for ref in ("release-1", "develop", "main"):  # a base with no merges, one with them, the default branch
+            for state in ("open", "merged"):
+                with self.subTest(ref=ref, state=state):
+                    self.gh_state(commit_prs={head: [self.commit_pr(head, state, ref=ref)]})
+                    self.not_the_lanes(path, "feat", head)
+
+    def test_only_orcas_suffix_and_the_same_prefix_make_a_match(self):
+        path, head = self.recreated_lane(hours_ago=9, activity_h=9)
+        for ref in ("x", "other/x", "user/x-3", "user/x-2-old", "user/xx", "user"):
+            with self.subTest(ref=ref):
+                self.gh_state(commit_prs={head: [self.commit_pr(head, ref=ref)]})
+                self.not_the_lanes(path, "user/x-2", head)
+
+    def test_a_later_suffix_and_a_branch_with_no_prefix_are_found(self):
+        path, head = self.lane("y", branch="y-13", push_as=False)
+        self.git(path, "push", "-q", "origin", "HEAD:refs/heads/y")
+        self.gh_state(commit_prs={head: [self.commit_pr(head, ref="y")]})
+        self.assertIn(f"PR-PARKED {path} (#8 open", self.sweep().stdout)
+
+    def test_the_lanes_own_pr_is_picked_among_others_with_its_head(self):
+        path, head = self.recreated_lane()
+        self.gh_state(commit_prs={head: [self.commit_pr(head, number=9, ref="user/stacked"),
+                                         self.commit_pr(head, number=10, fork=True),
+                                         self.commit_pr(head, "merged")]})
+        self.assertIn(f"MERGED {path} (#8 merged", self.sweep().stdout)
+
+    def test_a_reused_branch_does_not_take_another_names_pr(self):
         path, first = self.lane("done")
         self.pr("done", "merged", first)
         head = self.commit(path, "again")
-        self.git(path, "push", "-q", "origin", "HEAD:refs/heads/done-again")
         self.gh_state(commit_prs={head: [self.commit_pr(head, number=9, ref="done-again")]})
-        self.assertIn(f"PR-PARKED {path} (#9 open", self.sweep().stdout)
-
-    def test_the_head_commit_never_matches_a_base_branchs_own_pr(self):
-        # a new lane sits at a base branch's tip, which is also the head of that branch's own PR (a promotion)
-        main_head = self.git(self.main, "rev-parse", "HEAD")
-        self.git(self.main, "push", "-q", "origin", "HEAD:refs/heads/develop")
-        tracked, _ = self.lane("feat", track="develop")
-        self.git(self.main, "worktree", "add", "-q", "--no-track", "-b", "fresh", str(self.tmp / "wt" / "fresh"), "main")
-        fresh = self.tmp / "wt" / "fresh"
-        self.state["worktrees"].append({"id": f"repo1::{fresh}", "path": str(fresh), "branch": "refs/heads/fresh",
-                                        "isMainWorktree": False, "isArchived": False, "lastActivityAt": ms(0)})
-        self.orca(self.state)
-        self.gh_state(commit_prs={main_head: [self.commit_pr(main_head, "merged", ref="develop"),
-                                              self.commit_pr(main_head, "open", number=9, ref="main")]},
-                      merged_into=["develop"])  # PRs were merged into develop: it is a base branch
         r = self.sweep("--apply")
-        self.assertEqual(self.removed(), [], r.stdout)
-        self.assertNotIn(f"{tracked} (#", r.stdout)
-        self.assertNotIn(f"{fresh} (#", r.stdout)  # it tracks nothing, as a lane Orca creates
-        self.assertNotIn("#9", r.stdout)  # the default branch's own PR is no lane's
-
-    def test_a_branch_pushed_under_another_name_is_found_by_its_head_commit(self):
-        path, head = self.recreated_lane()
-        self.git(path, "branch", "-q", "--set-upstream-to=origin/x")
-        self.gh_state(commit_prs={head: [self.commit_pr(head)]})
-        self.assertIn(f"PR-PARKED {path} (#8 open", self.sweep().stdout)
-
-    def test_a_forks_pr_from_its_default_branch_name_still_counts(self):
-        path, head = self.recreated_lane()
-        self.gh_state(commit_prs={head: [self.commit_pr(head, ref="main", fork=True)]})
-        self.assertIn(f"PR-PARKED {path} (#8 open", self.sweep().stdout)
+        self.assertIn(f"MERGED-KEEP {path} (#7 merged; kept: commits after the merged PR head)", r.stdout)
+        self.assertEqual(self.removed(), [])
 
     def test_a_closed_pr_is_named_and_removes_nothing(self):
         path, head = self.recreated_lane(hours_ago=9, activity_h=9)
