@@ -26,7 +26,7 @@ You plan, decide and check; lanes do the work, including the waiting.
   you. A read-only command that answers at once (git log, a diff, a status, a fast test) is yours.
 - The three exceptions, and no others:
   1. Merging on the owner's word: a PR the owner said yes to, pinned to its head sha (the merge rule, below), with
-     the issue close, ledger row and beads sync that go with it.
+     its gate and after-merge hooks, the issue close, ledger row and beads sync that go with it.
   2. Closing lanes the way the rules below allow: stopping or releasing a lane's worker and reviewer (also
      `orchestration worker-abandon` of a dispatch that can no longer report, on the owner's word for that lane),
      the fallback removal of a clean, merged worktree while Orca's merged rule is off, putting a stopped lane's
@@ -127,6 +127,19 @@ You plan, decide and check; lanes do the work, including the waiting.
 - Every merge pins the head: on the owner's yes for that lane, read the PR's full head sha, check it is the commit
   you reviewed, and run `gh pr merge <n> --merge --match-head-commit <full head sha>` (a merge commit, never a
   squash or a rebase merge). Then `bd close <id>` and `bd dolt push`. The lane skill has the rest.
+- The owner's lifecycle hooks (their scripts; none is yours to add, change or skip), run in your folder:
+  - Right before the merge: `{{LANE_CONTROL}}/scripts/lane-control project gate . <n> --head <full head sha> --lane
+    <KEY> --issue <id>` (an attached repo's PR: `--repo <its folder>`). Exit non-zero is not green: do not
+    merge; tell the owner what it printed, with the way past it names (the owner's to take: `--skip-hook` is a
+    person's only). Its first line says how long it may take (the sum of its hooks' timeouts), as part of the merge:
+    give your shell that long, or run it in the background and read its output when it ends.
+  - Right after the merge, once: `{{LANE_CONTROL}}/scripts/lane-control project hook . after-merge --pr <n> --head
+    <sha> --merge-sha <merge commit> --lane <KEY> --issue <id>` (an attached repo's PR: `--repo <its folder>`).
+  - When you take a lane's report: `{{LANE_CONTROL}}/scripts/lane-control project hook . on-report --lane <KEY>
+    --issue <id> --pr <n> --outcome <status>` (an attached repo's PR: `--repo <its folder>`), the status being the
+    report's word after the key, without the colon (succeeded, failed, blocked, NEEDS_STANDARD, NEEDS_DEEP).
+  after-merge and on-report only warn: pass a warning to the owner; nothing is undone. With no hooks they say so
+  at once. `away-merge` runs the gate and after-merge hooks itself: after it, run neither.
 - Orca removes a merged lane's worktree: its own rule "Delete merged workspaces" (Settings -> Workspace Cleanup ->
   Cleanup rules), once the lane's worker is released and its reviewer stopped (a running agent or terminal keeps the
   worktree). You never change Orca's settings and never run `workspace cleanup run`. Read the lane's own row in

@@ -156,6 +156,11 @@ The lane merges origin/<BASE> into its branch (never rebase) and runs the projec
 and the report states the base sha it merged. If the base moved since (`git fetch origin`), send the lane a new Task
 to merge it again and re-run its checks before you merge.
 
+When you take the report, run the owner's on-report hooks first:
+`<lane-control>/scripts/lane-control project hook . on-report --lane <KEY> --issue <id> --pr <n> --outcome <status>`
+(an attached repo's PR: `--repo <its folder>`), the status being the report's word after the key, without the colon
+(succeeded, failed, blocked, NEEDS_STANDARD, NEEDS_DEEP). It only warns: pass a warning to the owner.
+
 `NEEDS_STANDARD` or `NEEDS_DEEP`: reopen the lane one tier up. After one failed round on swift the next runs on
 standard. `agents-md` lines go to the owner as a list, never into AGENTS.md by you.
 
@@ -195,10 +200,16 @@ takes your `LANE:` line.
 
 ## 7. Close
 Merge only on the owner's word for that lane (`DOCTRINE: owner yes, merge <KEY>-<n>`). Every merge pins the head:
-read the PR's full head sha (`gh pr view <n> --json headRefOid -q .headRefOid`), check it is the commit you
-reviewed, then `gh pr merge <n> --merge --match-head-commit <full head sha>` (a merge commit, never a squash or a
-rebase merge, never `--admin`). If the head moved, gh refuses: review the new commit first. After the merge:
-`bd close <id>`, then `bd dolt push`.
+read the PR's full head sha (`gh pr view <n> --json headRefOid -q .headRefOid`) and check it is the commit you
+reviewed. Right before the merge run the owner's gate hooks: `<lane-control>/scripts/lane-control project gate . <n>
+--head <full head sha> --lane <KEY> --issue <id>` (an attached repo's PR: `--repo <its folder>`). Exit non-zero is
+not green: do not merge, tell the owner what it printed and the way past it names (the owner's: `--skip-hook` is a
+person's only). It may take as long as its first line says: give your shell that long, or run it in the background.
+Then `gh pr merge <n> --merge --match-head-commit <full head sha>` (a merge commit, never a squash or a
+rebase merge, never `--admin`). If the head moved, gh refuses: review the new commit first. Right after the merge, once:
+`<lane-control>/scripts/lane-control project hook . after-merge --pr <n> --head <sha> --merge-sha <merge commit>
+--lane <KEY> --issue <id>` (an attached repo's PR: `--repo <its folder>`; it only warns: pass a warning to the
+owner). Then `bd close <id>`, then `bd dolt push`.
 
 Orca removes the worktree, not you. Its own cleanup rule "Delete merged workspaces" (in Orca: Settings -> Workspace
 Cleanup -> Cleanup rules) removes a merged lane's worktree and its merged branch once nothing runs in it, it is clean

@@ -8,6 +8,7 @@ especially coordinators") run lane-spawn, which has no old name.
 
 `lane-control project extras ...`, `lane-control machine extras ...` and `lane-control lane prepare ...` (owner
 2026-11-26, lc-7c6: "centralize and improve these things") run lane-extras, which has no old name either.
+`lane-control project gate ...` and `lane-control project hook ...` (lc-76o: lifecycle hooks) run it too.
 
 The ratchet is unattended improvement (owner 2026-11-26: "only moves forward"), the mode lane-improve switches; its
 docs and its skill still call it away-improve mode in places. `lane-control improve ...` is kept as an alias.
@@ -39,6 +40,8 @@ ROUTES = {
     ("project", "status"): ("project-pause", ["status"], "<project>", "running, resting or paused"),
     ("project", "extras"): ("lane-extras", ["project"], "add|list|remove <project> ...",
                             "skills, MCP, personas, plugins"),
+    ("project", "gate"): ("lane-extras", ["gate"], "<project> <PR> [--head <sha>]", "lifecycle gate: green or not"),
+    ("project", "hook"): ("lane-extras", ["hook"], "<project> <event> [--pr N] ...", "run an event's hooks now"),
     ("coordinator", "start"): ("lane-spawn", ["coordinator", "start"], "<project>|machine [--force]",
                                "start it unless it runs"),
     ("coordinator", "restart"): ("lane-spawn", ["coordinator", "restart"], "<project> [--wait S]",

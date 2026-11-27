@@ -2963,6 +2963,31 @@ class ReviewCapEndingTests(unittest.TestCase):
             self.assertIn(needle, t, needle)
 
 
+
+class LifecycleHookContentTests(unittest.TestCase):
+    """EXT-2 (lc-76o): the coordinator runs the owner's gate hooks right before a merge (a failure is not green), the
+    after-merge hooks right after it and the on-report hooks when it takes a lane's report (both only warn)."""
+
+    def test_the_persona_and_the_lanes_skill_say_when_to_run_them(self):
+        for f in (NATIVE / "coordinator.md", NATIVE_SKILL):
+            text = " ".join(f.read_text().split())
+            with self.subTest(f=f.name):
+                self.assertIn("project gate . <n> --head <full head sha>", text)
+                self.assertIn("is not green: do not merge", text)
+                self.assertIn("hook . after-merge --pr <n>", text)
+                self.assertIn("hook . on-report --lane <KEY>", text)
+                self.assertIn("only warn", text)
+                self.assertIn("the report's word after the key, without the colon", text)  # review M7
+                self.assertIn("--repo <its folder>", text)  # review m2
+                self.assertEqual(text.count("attached repo's PR"), 3, f.name)  # r2 m4: gate, after-merge, on-report
+                self.assertIn("`--skip-hook` is a person's only", text)  # review m3
+                self.assertIn("Right after the merge, once:", text)  # review m1
+        persona = " ".join((NATIVE / "coordinator.md").read_text().split())
+        self.assertIn("`away-merge` runs the gate and after-merge hooks itself: after it, run neither", persona)
+        away = " ".join((NATIVE_DIR / "skills" / "away-improve" / "SKILL.md").read_text().split())
+        self.assertIn("never run `lane-control project gate` or `project hook ... after-merge` yourself for an "
+                      "away-merge", away)
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -19,7 +19,8 @@ SETUP    lane-control machine setup   once per machine   machine coordinator, 4 
          lane-control project setup   once per project   lane tools, skills, personas, tier table, coordinator
                                                           (lane-control project refresh updates them)
          lane-control project|machine extras              your skills, MCP servers, personas and plugins for
-                                                          the agents (refresh puts them in place)
+                                                          the agents (refresh puts them in place), and your
+                                                          lifecycle hooks (scripts lane-control runs)
 
 LANE     lane-room   may another lane open?        lane-tier     which model does this tier use?
 TOOLS    lane-heavy  one gate for heavy builds     design-shots  screenshots of a UI
@@ -169,10 +170,12 @@ lane-control machine extras add|list|remove ...             every project on thi
   --mcp <name> [--env NAME]... -- <command> [args]           an MCP server; --env names a secret, never its value
   --persona <name> --prompt-file <path> [--tier T] [--harness H]   a lane role the coordinator can brief a lane with
   --plugin claude:<plugin>@<marketplace>@<version> | opencode:<package>@<version>
-  --for lanes|coordinator|reviewer|all                       who gets it (default all)
+  --hook <event> --script <path | git-url@commit:path> [--timeout S]   a lifecycle hook (below)
+  --for lanes|coordinator|reviewer|all                       who gets it (default all; not for a hook)
 ```
 
-Agent hooks, permission rules and env values are not extras yet: they get their own design (lc-yw1g).
+Claude's and OpenCode's own agent hooks, permission rules and env values are not extras yet: they get their own design
+(lc-yw1g).
 
 - **Stored** in the project's settings store (`~/.config/lane-control/projects/<key>/extras.json`, beside its tier
   table) or `~/.config/lane-control/extras.json`. Never in a project repo, and never a secret. An MCP server gets
@@ -228,6 +231,72 @@ OpenCode      the main checkout's .opencode/opencode.json    .opencode/opencode.
 - Checked without starting an agent: Claude's rules above are read from its code (2.1.332) and documentation;
   OpenCode 2.2.1's `debug config` and skill list show a worktree reading only its own `.opencode/opencode.json` and
   `.opencode/skills/`, and the main checkout only its own. A live session check is lc-hat1.
+
+### Hooks
+
+Your own scripts, which lane-control runs at five moments (`core/hooks.py`; lc-76o). They are extras of kind `hook`,
+added, listed and removed like the others. A hook never takes another's place: the machine's run for every project,
+before the project's own, even with the same name (gates: every one must pass). Each is shown and recorded with its
+level, `hook:machine:<name>` or `hook:project:<name>`; one name is one event per level (add refuses it for another).
+
+```
+event        when                                                where it fires                       a failure
+after-setup  the end of setup or refresh                         project-setup                        setup/refresh exit 1
+lane-start   a lane's worktree is ready, before its agent        lane-control lane prepare --role     prepare exits 1:
+             starts                                              lanes (the coordinator)              hold the lane
+gate         before a merge: checks that must be green           lane-control project gate <p> <PR>   not green: no merge
+                                                                 (the coordinator); away-merge        away-merge refuses
+after-merge  after the merge                                     lane-control project hook <p>        warns only
+                                                                 after-merge; away-merge
+on-report    a lane's report; the away watchdog's escalation     lane-control project hook <p>        warns only
+                                                                 on-report; away-watchdog --send
+```
+
+- **Never from a project repo.** Only what you add runs: an absolute path outside every project checkout (as given or
+  through a link; `--allow-repo-path` takes one anyway, with a warning), pinned by its hash, or a file in a git repo
+  pinned at a full commit, fetched at add (and by refresh) and checked against its commit and hash. A link is
+  resolved at add: its target is what is pinned and run (add says so), and once the link leads elsewhere the hook is
+  `changed` and refused until it is added again. A missing or changed script does not run: it
+  is `refused` (for a gate: not green) and `check` and `doctor` flag it `missing` or `changed`, with what to do.
+  Every hook runs from a private copy made and checked just before: a path hook's bytes that matched its hash; a git
+  hook's whole pinned commit, written out by lane-control itself from the commit's objects, each one hashed against
+  its id from the pinned commit down, with git run on no config but the cache's own, no replace refs, attributes,
+  filters or hooks, and none of the caller's variables. Nothing written, ignored, replaced or rewritten in the cache
+  counts (a rewritten object is refused), and what the hook writes beside itself is gone after the run. A repo with a
+  link that leads out of it is refused at add.
+- **Facts, never secrets.** No arguments, stdin closed. The environment is a short list (`PATH`, `HOME`, `USER`, the
+  locale, the XDG folders, `TMPDIR`, `SSH_AUTH_SOCK`) and the facts as `LANE_HOOK_<FACT>`: `EVENT`, `NAME`, `SOURCE`,
+  `PROJECT`, `PROJECT_ROOT` and, where the event has them, `PR`, `HEAD_SHA`, `MERGE_SHA`, `LANE`, `ISSUE`, `OUTCOME`,
+  `WORKTREE`, `ROLE`, `SETUP` (`setup` or `refresh`), and `REPO`, the checkout of the repo the PR is in (the
+  project's own, or an attached repo's with `--repo`). `OUTCOME` is a report's status (`succeeded`, `failed`,
+  `blocked`, `partial`, `NEEDS_STANDARD`, `NEEDS_DEEP`) or `escalation`. Each fact is checked: a number, a full sha
+  and a word against their shape, a name or a path only for the real shapes of a key (so `task-tracker` or
+  `fix-disk-usage` is fine). None of the caller's other variables gets through, so no token or key does. A hook that
+  needs a secret reads it itself.
+- **Where it runs.** With your HOME, in a fresh empty folder of its own under `~/.local/state/lane-control/hooks/`,
+  removed after: never in a lane's worktree or a checkout (the facts say where they are).
+- **A timeout** per hook (`--timeout`, default 600 s). Each hook runs in its own process group: at its timeout, when
+  it ends, or when the command running it is stopped (TERM, HUP, INT), the whole group is stopped. A child that
+  leaves the group (`setsid`) is not. What the command printed before (away-merge's merge line, the watchdog's sends)
+  is out before any hook runs.
+- **Shown:** each hook's exit code, its time and the last 20 lines of its output, with escape sequences and control
+  and format characters (C0, C1, bidi) taken out. Best effort, a mask, not a promise: the real shapes of a token, a
+  password in a URL, an `Authorization` header, a secret-named key or option given a value (`password=...`,
+  `DB_PASSWORD: ...`, `--token ...`, `"client_secret": "..."`) and a long opaque word (a sha lane-control passed in
+  is kept) become `[redacted]`. A hook must not print secrets.
+- **A broken blocking hook:** the failure says the way past it, which is the owner's: fix the script and add it
+  again, or `lane-control project|machine extras remove hook:<name>` (a machine hook is every project's), or, for one
+  run, `--skip-hook <name>` (or `machine:<name>`, `project:<name>`) `--reason "<why>"` on `project gate`, `project hook` or `lane prepare`: a person at a
+  terminal only (an agent is refused), recorded in `~/.local/state/lane-control/hooks/skips.jsonl`.
+- **The coordinator** runs `gate` right before a merge and the after-merge hooks once after it, and the on-report
+  hooks when it takes a report (its persona and the `native-orca-lanes` skill say when); with no hooks they answer at
+  once, green. In the ratchet `away-merge` runs the gate and after-merge hooks itself, and reads the PR again after
+  the gates: a base, head, review, body or CI that changed meanwhile refuses the merge. A lane-start hook adds the
+  prepare step to the coordinator's persona at the next refresh.
+- **Orca's own features do not fit here** (read on 1.4.274): its automations start an agent from a prompt, on a
+  schedule or a GitHub, Slack or Linear event (`pr_merged` among them, through Orca's GitHub app), never a script, and
+  cannot hold a merge; `orca.yaml`'s `scripts.setup` is the project repo's own committed file, run inside each new
+  worktree (lane-control writes it for the beads link); `orca agent hooks` are Orca's agent-status hooks.
 
 ## A box: two directions
 
