@@ -380,9 +380,12 @@ def run(a) -> int:
                   f"(ends: {suite_line})")
         extra, took = None, ("", "")
         if maint:  # the away branch takes the integration branch in at once, so it does not drift (a merge, never a rebase)
-            took = maintenance.take_in(checkout, branch, target, sha or "", a.pr)
+            try:
+                took = maintenance.take_in(checkout, branch, target, sha or "", a.pr)
+            except Exception as e:  # the merge happened: nothing after it may turn into a traceback
+                took = ("failed", f"the take-in could not run ({e})")
             extra = {"kind": "maintenance", "taken_in": took[0] in ("merged", "up to date"),
-                     "target": took[1] if took[0] in ("merged", "up to date") else (sha or ""),
+                     "target": took[1] if took[0] == "up to date" else (sha or ""),
                      "take_in": took[0] if took[0] in ("merged", "up to date") else f"{took[0]}: {took[1]}"}
             if took[0] == "merged":
                 print(f"away-merge: {branch} took in {target} (a merge commit, {took[1][:12]}): it does not drift")
