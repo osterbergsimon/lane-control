@@ -171,6 +171,16 @@ def _boxhealth():
     return mod
 
 
+def _extras():
+    """core/extras.py: the owner's extras (skills, MCP servers, personas, hooks, permissions, plugins, env), lc-7c6."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lc_extras", HERE / "core" / "extras.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+EXTRAS = _extras()
 HEALTH = _boxhealth()  # a listening port is not proof (BOX-1, lc-l78): --check reads units, sockets, runtimes, SHELL
 LC = HERE  # the path personas and ~/.agents/bin name: .../lane-control/current once use_install() ran
 TREE = HERE  # the installed tree it points at (what a box is sent)
@@ -1103,128 +1113,38 @@ def native_skills():
 
 def design_skill_rows() -> list:
     """core/design-skills.tsv (LANE_DESIGN_SKILLS overrides it): (name, url, commit, path, licence, claude plugin)."""
-    f = Path(os.environ.get("LANE_DESIGN_SKILLS") or HERE / "core" / "design-skills.tsv")
-    rows = []
-    for line in f.read_text().splitlines():
-        parts = line.split("\t")
-        if line.strip() and not line.startswith("#") and len(parts) == 6:
-            rows.append(tuple(parts))
-    return rows
+    return EXTRAS.default_rows()
 
 
-SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
-SKILL_COMMIT = re.compile(r"[0-9a-f]{40}")
+SKILL_NAME = EXTRAS.NAME
+SKILL_COMMIT = EXTRAS.COMMIT
 
 
 def bad_skill_row(row: tuple, override: bool) -> "str | None":
-    """Why a design-skills row is refused, or None. The name and path become paths under ~/.agents and the commit is
-    compared as given, so all are checked here, not only in the shipped file's test. The shipped table fetches over
-    https only; a LANE_DESIGN_SKILLS table (tests' local stand-ins for upstream) may also use file://."""
-    name, url, commit, path = row[:4]
-    if not SKILL_NAME.fullmatch(name):
-        return "the name is not lowercase letters, digits and dashes"
-    if not SKILL_COMMIT.fullmatch(commit):
-        return "the commit is not a full 40-hex commit"
-    if any(part in ("", ".", "..") for part in path.split("/")):  # also refuses "" and a leading or double "/"
-        return "the path is not a plain relative path"
-    schemes = ("https://", "file://") if override else ("https://",)
-    if not url.startswith(schemes):
-        return f"the URL is not {' or '.join(s[:-3] for s in schemes)}"
-    return None
-
-
-def claude_plugins(home: Path) -> set:
-    """The plugins Claude Code has installed (~/.claude/plugins/installed_plugins.json), as `<plugin>@<marketplace>`."""
-    try:
-        data = json.loads((home / ".claude" / "plugins" / "installed_plugins.json").read_text())
-    except (OSError, ValueError):
-        return set()
-    plugins = data.get("plugins", {}) if isinstance(data, dict) else {}
-    return set(plugins) if isinstance(plugins, dict) else set()
-
-
-def fetch_skill(url: str, commit: str, path: str, dest: Path) -> "str | None":
-    """A sparse checkout of `path` at `commit` into dest (made by rename, so never half there). None when done, else
-    why not."""
-    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
-    shutil.rmtree(tmp, ignore_errors=True)
-
-    def g(*args):
-        return subprocess.run(["git", "-C", str(tmp), *args], capture_output=True, text=True, timeout=300,
-                              stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-    try:
-        tmp.mkdir(parents=True)
-        for step in (("init", "-q"), ("remote", "add", "origin", url),
-                     ("sparse-checkout", "set", "--no-cone", f"/{path.strip('/')}/", "/LICENSE*", "/COPYING*"),
-                     ("fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", commit),
-                     ("checkout", "-q", "--detach", "FETCH_HEAD")):
-            r = g(*step)
-            if r.returncode != 0:
-                last = (r.stderr or r.stdout).strip().splitlines()
-                return f"git {step[0]} failed: {last[-1] if last else r.returncode}"
-        if g("rev-parse", "HEAD").stdout.strip() != commit:
-            return f"fetched commit is not {commit[:12]}"
-        if not (tmp / path / "SKILL.md").is_file():
-            return f"no SKILL.md at {path}"
-        os.replace(tmp, dest)
-        return None
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return str(e)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    """Why a design-skills row is refused, or None (core/extras.py bad_default): the name and path become paths under
+    ~/.agents and the commit is compared as given, so all are checked here, not only in the shipped file's test. The
+    shipped table fetches over https only; a LANE_DESIGN_SKILLS table (tests' local stand-ins) may also use file://."""
+    return EXTRAS.bad_default(row, override)
 
 
 def design_skills(home: Path) -> None:
-    """The design skills (design-kit spec, section 9) in ~/.agents/skills, where OpenCode v2 reads them: each a link
-    into a sparse checkout of its upstream repo at the pinned commit, under ~/.agents/skill-sources/. Claude gets a
-    link in ~/.claude/skills unless its own plugin carries the skill. One the owner installed is left alone; a fetch
-    that fails is named, never a stop."""
-    rows = design_skill_rows()
-    if not rows:
+    """The design skills (design-kit spec, section 9), now the default machine extras (core/extras.py, lc-7c6): in
+    ~/.agents/skills, where OpenCode v2 reads them, each a link into a sparse checkout of its upstream repo at the
+    pinned commit under ~/.agents/skill-sources/; Claude gets a link in ~/.claude/skills unless its own plugin carries
+    the skill. One the owner installed is left alone; a fetch that fails is named, never a stop; one the owner turned
+    off (`lane-control machine extras remove`) loses only lane-control's links."""
+    if not design_skill_rows():
         return
-    skills_dir, sources = home / ".agents" / "skills", home / ".agents" / "skill-sources"
-    plugins = claude_plugins(home)
-    done = []
-    override = bool(os.environ.get("LANE_DESIGN_SKILLS"))
-    for row in rows:
-        name, url, commit, path, _licence, plugin = row
-        why = bad_skill_row(row, override)
-        if why:
-            done.append((name, f"missing (refused: {why})"))
-            continue
-        link, src = skills_dir / name, sources / f"{name}@{commit[:12]}"
-        target = src / path
-        ours = link.is_symlink() and os.readlink(link).startswith(str(sources) + os.sep)
-        if (link.exists() or link.is_symlink()) and not ours:
-            done.append((name, "exists (not lane-control's)"))
-            continue
-        if ours and os.readlink(link) == str(target) and (target / "SKILL.md").is_file():
-            state = "exists"
-        else:
-            if not (target / "SKILL.md").is_file():
-                sources.mkdir(parents=True, exist_ok=True)
-                shutil.rmtree(src, ignore_errors=True)
-                why = fetch_skill(url, commit, path, src)
-                if why:
-                    done.append((name, f"missing ({why})"))
-                    continue
-            skills_dir.mkdir(parents=True, exist_ok=True)
-            tmp_link = skills_dir / f".{name}.{os.getpid()}.link"
-            tmp_link.unlink(missing_ok=True)
-            tmp_link.symlink_to(target)
-            os.replace(tmp_link, link)
-            state = "updated" if ours else "created"
-        for old in sources.glob(f"{name}@*"):
-            if old != src:
-                shutil.rmtree(old, ignore_errors=True)
-        claude = home / ".claude" / "skills" / name
-        if plugin not in plugins and not claude.exists() and not claude.is_symlink():
-            claude.parent.mkdir(parents=True, exist_ok=True)
-            claude.symlink_to(link)
-        done.append((name, state))
+    try:
+        done = EXTRAS.user_skills(EXTRAS.effective(None))
+    except EXTRAS.ExtrasError as e:
+        say("design-skills", "missing", f"({e})")
+        return
+    if not done:
+        return
     states = [s.split(" ")[0] for _, s in done]
-    overall = next((s for s in ("missing", "created", "updated") if s in states), "exists")
-    say("design-skills", overall, ", ".join(f"{n} {s}" for n, s in done) + f" in {skills_dir}")
+    overall = next((s for s in ("missing", "created", "updated", "removed") if s in states), "exists")
+    say("design-skills", overall, ", ".join(f"{n} {s}" for n, s in done) + f" in {home / '.agents' / 'skills'}")
 
 
 def install_skill(home: Path, name: str, want: dict, also: tuple = ()) -> bool:
@@ -3176,7 +3096,43 @@ def native_persona(repo: Path, role: str, harness: str, model: str, mode: str, p
     text = native_module("render").prepare((NATIVE / "personas" / f"{role}.md").read_text(), attached=attached)
     text = render_persona(text, harness, model, mode, project, str(store_table(repo)),
                           str(repo / ADAPTED / "reviewer.md"), attached=attached)
-    return text.rstrip("\n") + "\n" + additions(repo, role)
+    extras = extras_section(repo) if role == "coordinator" else ""
+    return text.rstrip("\n") + "\n" + extras + additions(repo, role)
+
+
+def project_extras(repo: Path) -> list:
+    """The extras in force for this project: the machine's and its own (core/extras.py)."""
+    try:
+        return EXTRAS.effective(store_dir(repo))
+    except EXTRAS.ExtrasError as e:
+        raise Fail(str(e))
+
+
+def extras_section(repo: Path) -> str:
+    """The coordinator persona's part about the project's extras ('' when it has none to tell)."""
+    return EXTRAS.coordinator_section(repo, project_extras(repo), str(LC))
+
+
+def apply_extras(repo: Path) -> None:
+    """The custom personas rendered into .lane-control/personas/, and the coordinator's extras put in its folder, the
+    main checkout (Claude's and OpenCode's files there; lanes and reviewers get theirs from `lane-control lane
+    prepare`). What cannot be done is named, never a stop."""
+    entries = project_extras(repo)
+    try:
+        lines, problems = EXTRAS.render_personas(repo, entries, lambda name: additions(repo, name))
+        more, more_problems = EXTRAS.apply_folder(repo, EXTRAS.for_scope(entries, "coordinator"), ["coordinator"])
+    except EXTRAS.ExtrasError as e:
+        raise Fail(f"extras: {e}")
+    lines, problems = lines + more, problems + more_problems
+    if not entries or (not lines and not problems and all(EXTRAS.user_level(e) for e in entries)):
+        return
+    for line in lines:
+        say("extras", "updated", line)
+    for line in problems:
+        say("extras", "missing", line)
+    if not lines and not problems:
+        say("extras", "exists", f"{len([e for e in entries if not EXTRAS.user_level(e)])} extra(s) in place "
+                                f"(lane-control project extras list {shlex.quote(str(repo))})")
 
 
 def exclude_local(repo: Path) -> str:
@@ -3227,6 +3183,7 @@ def native_personas(repo: Path, project: str, pins: dict, mode: str, tier_text: 
         if state == "updated":
             changed.append(role)
     say("tiers", write_if_changed(store_table(repo), tier_text), str(store_table(repo)))
+    apply_extras(repo)
     persona_anchor(repo, project)
     record_version(repo, before)
     return changed
@@ -3288,12 +3245,31 @@ def check_local(a) -> int:
         except anchor.AnchorError as e:
             state, why = "stale", str(e)
         say("check persona anchor", state, f"({f})" if state == "ok" else f"({why or f}: {fix} writes it)")
+        extras_ok = check_extras(repo)
     except Fail as e:
         print(f"project-setup: {e}", file=sys.stderr)
         return 1
-    ok = has and state == "ok"
+    ok = has and state == "ok" and extras_ok
     say("check", "ok" if ok else "missing", "(nothing was changed)")
     return 0 if ok else 1
+
+
+def check_extras(repo: Path) -> bool:
+    """Every extra of the project with its roles and state (core/extras.py check), and whether the coordinator's
+    folder holds what refresh would put there. True when nothing is missing, changed, failing or not applied."""
+    try:
+        rows = EXTRAS.check(store_dir(repo), repo)
+    except EXTRAS.ExtrasError as e:
+        raise Fail(str(e))
+    fix = {"missing": f"lane-control project refresh {shlex.quote(str(repo))}",
+           "not applied": f"lane-control project refresh {shlex.quote(str(repo))}",
+           "changed": "add it again (lane-control project|machine extras add) to accept it, or remove it",
+           "failing": "install the command or fix the script, then check again"}
+    for r in rows:
+        roles = ",".join(r["for"])
+        say(f"check extra {r['id']}", r["state"], f"({r['origin']}; for {roles}; {r['detail'] or r['what']}" +
+            (f": {fix[r['state']]})" if r["state"] in fix else ")"))
+    return not any(r["state"] in EXTRAS.PROBLEMS for r in rows)
 
 
 DESIGN_LEAD_FILES = (f"{ADDITIONS}/design-lead.md", f"{ADAPTED}/design-lead.md")  # committed: native, Orca + Cotal

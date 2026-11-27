@@ -56,6 +56,7 @@ def _load(name, rel):
 I = _load("lc_install", "core/install.py")
 H = _load("lc_boxhealth", "core/boxhealth.py")
 F = _load("lc_frontdoor", "core/frontdoor.py")
+X = _load("lc_extras", "core/extras.py")
 OURS = ("night manager", "lane sweep", "machine check")  # machine-setup's automations: it repairs their paths
 
 
@@ -138,6 +139,27 @@ def project_todos(root: str, sha, cur) -> list:
     return out
 
 
+EXTRA_FIX = {"missing": "run lane-control project refresh {root}", "not applied": "run lane-control project refresh {root}",
+             "changed": "add it again (lane-control project|machine extras add) to accept it, or remove it",
+             "failing": "install the command or fix the script"}
+
+
+def extras(root: str, out: dict) -> None:
+    """Every extra of one project (the machine's and its own) with its roles and state; a todo for each missing,
+    changed, failing or not applied one (core/extras.py check)."""
+    try:
+        rows = X.check(X.store_for(Path(root)), Path(root) if Path(root).is_dir() else None)
+    except X.ExtrasError as e:
+        out["extras"][root] = []
+        out["todo"].append(f"{root}: its extras cannot be read: {e}")
+        return
+    out["extras"][root] = rows
+    for r in rows:
+        if r["state"] in X.PROBLEMS:
+            out["todo"].append(f"{root}: extra {r['id']} {r['state']} ({r['detail']}): "
+                               + EXTRA_FIX[r["state"]].format(root=root))
+
+
 def tunnels(out: dict) -> None:
     """Each tunnel unit written here: active/running, not restarting, its own ssh owning the socket, never
     multiplexed. A listening port is not proof (field report lc-l78)."""
@@ -213,12 +235,13 @@ def automations(out: dict) -> None:
 def doctor(a) -> dict:
     cur = I.installed()
     out = {"current": cur, "root": str(I.data_root()), "projects": [], "links": {}, "skills": {}, "boxes": [],
-           "tunnels": [], "runtime": None, "shell": None, "automations": None, "todo": []}
+           "tunnels": [], "runtime": None, "shell": None, "automations": None, "extras": {}, "todo": []}
     if not cur:
         out["todo"].append("lane-control is not installed: run lane-control install (from a checkout)")
     for root, sha, dirty in I.projects(with_dirty=True):
         out["projects"].append({"root": root, "lane_control": sha, "dirty": dirty})
         out["todo"] += project_todos(root, sha, cur)
+        extras(root, out)
         if dirty:
             out["todo"].append(f"{root}: its personas were rendered from text that is not the installed tree "
                                f"(uncommitted changes, or an older install kept): commit, install, then "
@@ -274,6 +297,13 @@ def cmd_doctor(a) -> int:
     print(f"current: {d['current'] or 'none'} ({d['root']}/current)")
     for p in d["projects"]:
         print(f"project {p['root']}: set up with {p['lane_control'] or 'none (before the install)'}")
+        rows = d["extras"].get(p["root"]) or []
+        if rows:
+            for s in X.SCOPES:
+                ids = [r["id"] for r in rows if s in r["for"] and r["id"] != "coordinator folder"]
+                print(f"  extras for {s}: {', '.join(ids) or 'none'}")
+            bad = [f"{r['id']} {r['state']}" for r in rows if r["state"] in X.PROBLEMS]
+            print(f"  extras: {len(rows)} checked" + (f"; {', '.join(bad)}" if bad else ", all ok"))
     print("links: " + ", ".join(f"{n} {s}" for n, s in d["links"].items()))
     print("skills: " + ", ".join(f"{n} {state}" for n, state in d["skills"].items()))
     for b in d["boxes"]:
