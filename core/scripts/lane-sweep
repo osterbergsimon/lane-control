@@ -21,11 +21,15 @@ round checks the PR branch out into a new worktree. In report mode such a lane i
 information only (it waits on the owner) and not a finding. Removing closes the lane's terminals and runs `orca-ide
 worktree rm --delete-branch`; the PR and the remote branch are kept. Nothing else is ever removed.
 
-The PR is looked up by the lane's upstream branch when the upstream is that same branch on a real remote (`x` for a
-local `x` or `<user>/x`), never by a base branch it tracks (a lane on `origin/develop` would match develop's old
-merged PRs). Stuck: no activity for --stuck-hours, where activity is the newest of Orca's lastActivityAt (which
-alone can be days old), the last push, the last commit and the last terminal output, and not parked. Parked: an open
-PR, HEAD equal to or behind the pushed branch, a clean tree, and either no live terminal or the PR's head is HEAD.
+The PR is found by core/prlookup.py: first by the lane's upstream branch when the upstream is that same branch on a
+real remote (`x` for a local `x` or `<user>/x`), else its local name, never by a base branch it tracks (a lane on
+`origin/develop` would match develop's old merged PRs); then, when the name finds none that holds HEAD and no open one,
+by the PR whose head commit is HEAD, but only one from this repo whose head branch is the lane's local branch without
+Orca's -<n> (a lane Orca recreated has a local `<user>/x-2` with no upstream; a new lane at another PR's head matches
+nothing). CHECK means GitHub could not be asked, which is never the same as no PR. Stuck: no activity for
+--stuck-hours, where activity is the newest of Orca's lastActivityAt (which alone can be days old), the last push, the
+last commit and the last terminal output, and not parked. Parked: an open PR, a clean tree, and either the PR's head is HEAD, or HEAD is behind the
+pushed branch with no live terminal.
 
 Worktrees on another Orca host (hostId not local) are left to that machine's sweep. Lanes listed in
 ~/.config/lane-control/lane-sweep.hold (one worktree path per line, `#` comments; LANE_SWEEP_HOLD) are skipped (`~`
@@ -47,6 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import machineconf  # noqa: E402
+import prlookup  # noqa: E402
 
 QUIET_MIN = 30
 STATE = "lane-sweep.json"
@@ -98,18 +103,6 @@ def is_dirty(path) -> bool:
     cannot tell."""
     out = git(path, "status", "--porcelain", "--untracked-files=normal")
     return out is None or out != ""
-
-
-def pr_of(path, branch: str, state: str) -> "dict | None":
-    try:
-        r = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", state, "--json", "number,headRefOid,url",
-                            "--limit", "1"], cwd=path, capture_output=True, text=True, timeout=120)
-        rows = json.loads(r.stdout) if r.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        rows = None
-    if rows is None:
-        raise SweepError(f"gh pr list --head {branch} --state {state} failed")
-    return rows[0] if rows else None
 
 
 def can_be_agent(argv: list) -> bool:
@@ -212,16 +205,6 @@ def owner_of(path: str, table: dict) -> str:
     return f" owner={table[main]}" if main in table else ""
 
 
-def upstream(path: str, branch: str) -> tuple:
-    """(remote, branch on the remote) to look PRs and pushes up by: the upstream only when it is this branch on a real
-    remote (a local upstream, remote ".", is another branch here, like a base branch)."""
-    remote = git(path, "config", f"branch.{branch}.remote") or ""
-    merge = (git(path, "config", f"branch.{branch}.merge") or "").removeprefix("refs/heads/")
-    if remote and remote != "." and merge in (branch, branch.rsplit("/", 1)[-1]):
-        return remote, merge
-    return (remote if remote and remote != "." else "origin"), branch
-
-
 def quiet(mine: list, now: float) -> bool:
     """No terminal printed for QUIET_MIN minutes; one whose last output is unknown counts as active."""
     since = (now - QUIET_MIN * 60) * 1000
@@ -285,19 +268,15 @@ class Sweep:
         agent = agents.why(path)
         head = git(path, "rev-parse", "HEAD") or ""
         dirty = is_dirty(path)
-        remote, rb = upstream(path, branch)
+        remote, rb = prlookup.upstream(path, branch)
         terminals_n = f"{len(handles)} terminal(s)"
         try:
-            merged = pr_of(path, rb, "merged")
-            opened = None
-            reused = merged and head != merged.get("headRefOid") and not is_ancestor(path, head,
-                                                                                       merged.get("headRefOid", ""))
-            if not merged or reused:
-                opened = pr_of(path, rb, "open")
-        except SweepError as e:
-            return self.say(f"CHECK  {path} (could not look up its PRs: {e}){tag}")
-        if reused and opened:
-            merged = None  # the branch was reused after its merge: its new open PR decides
+            found = prlookup.find(path, path, branch, head)
+        except prlookup.CouldNotCheck as e:
+            return self.say(f"CHECK  {path} (could not check its PR: {e}){tag}")
+        state = found["state"] if found else ""
+        merged = found if state == "merged" else None
+        opened = found if state == "open" else None
 
         if merged:
             n, prhead = merged["number"], merged.get("headRefOid", "")
@@ -346,13 +325,21 @@ class Sweep:
         times.append(int(pushed) if pushed and pushed.isdigit() else 0)
         if self.now - max(times) < limit:
             return
-        parked = (opened is not None and is_ancestor(path, "HEAD", f"{remote}/{rb}") and not dirty
-                  and (opened.get("headRefOid") == head or not any(t.get("connected") for t in mine)))
+        # a PR whose head is HEAD has HEAD on GitHub, whether or not this branch has a remote branch to compare with
+        parked = (opened is not None and not dirty
+                  and (opened.get("headRefOid") == head
+                       or (is_ancestor(path, "HEAD", f"{remote}/{rb}") and not any(t.get("connected") for t in mine))))
         if parked:
             return
         hours = int((self.now - max(times)) // 3600)
+        if not found:
+            pr = prlookup.none_found(branch, head)
+        elif state == "closed":
+            pr = f"no merged or open PR: #{found['number']} closed without a merge"
+        else:
+            pr = "no merged PR"
         self.say(f"STUCK  {path} (branch {branch}, no push, commit, terminal output or Orca activity for {hours} h, "
-                 f"no merged PR){tag}")
+                 f"{pr}){tag}")
 
 
 def state_file() -> Path:

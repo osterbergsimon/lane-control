@@ -713,19 +713,39 @@ class LaneNew(Spawn):
         self.assertEqual(self.sent(), [])
 
 
+# gh stand-in for lane list: prs.json is {head branch or "number only": view}; `pr list --head` finds a view by its
+# branch, `pr view` by its number, and commits.json answers `gh api .../commits/<sha>/pulls`.
+LANE_GH = """#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+home = os.environ['HOME'] + '/'
+def read(name):
+    return json.load(open(home + name)) if os.path.exists(home + name) else {}
+if os.environ.get('GH_BROKEN') or (os.environ.get('GH_NO_API') and a[0] == 'api'):
+    sys.exit(print('error connecting to api.github.com', file=sys.stderr) or 1)
+prs = read('prs.json')
+if a[0] == 'api':
+    print(json.dumps(read('commits.json').get(a[1].split('/commits/')[1].split('/')[0], [])))
+elif a[:2] == ['pr', 'list']:
+    ref = a[a.index('--head') + 1]
+    print(json.dumps([{'number': p['number'], 'state': p['state'], 'headRefOid': 'a' * 40, 'url': 'u'}
+                      for k, p in prs.items() if k == ref]))
+elif a[:2] == ['pr', 'view']:
+    found = [p for p in prs.values() if str(p['number']) == a[2]]
+    if not found:
+        sys.exit(print('no pull requests found', file=sys.stderr) or 1)
+    print(json.dumps(found[0]))
+else:
+    sys.exit(print('gh stub: not modelled: ' + ' '.join(a), file=sys.stderr) or 1)
+"""
+
+
 class LaneList(Spawn):
     def setUp(self):
         super().setUp()
         gh = self.e.bin / "gh"
         gh.unlink()
-        gh.write_text("#!/usr/bin/env python3\nimport json, os, sys\n"
-                      "if os.environ.get('GH_BROKEN'):\n"
-                      "    sys.exit(print('error connecting to api.github.com', file=sys.stderr) or 1)\n"
-                      "prs = json.load(open(os.environ['HOME'] + '/prs.json'))\n"
-                      "ref = sys.argv[3]\n"
-                      "if ref not in prs:\n"
-                      "    sys.exit(print(f'no pull requests found for branch \"{ref}\"', file=sys.stderr) or 1)\n"
-                      "print(json.dumps(prs[ref]))\n")
+        gh.write_text(LANE_GH)
         gh.chmod(0o755)
 
     def full(self, dispatch, task, rid, path, terminal, state, liveness, origin=None, run="run_c"):
@@ -737,7 +757,40 @@ class LaneList(Spawn):
                 "projection": {"liveness": {"verdict": liveness}, "outcome": "in_progress",
                                "provider": {"id": "claude", "model": "opus"}, "workspace": {"id": f"{rid}::{path}"}}}
 
+    def git_lane(self, path, branch) -> str:
+        """A repo of its own at `path` on `branch` with no upstream and one commit: its HEAD."""
+        env = {**self.e.env, **testhome.env_for(self.e.home)}  # the harness's git, config and PATH
+        for args in (["init", "-q", "-b", branch], ["commit", "-q", "--allow-empty", "-m", path.name]):
+            subprocess.run(["git", *args], cwd=path, env=env, check=True, capture_output=True)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, env=env, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def recreate(self, name):
+        """The lane's local branch gets Orca's -2, as when Orca recreated the lane: no PR has that name."""
+        st = self.state()
+        wt = next(w for w in st["worktrees"] if w["name"] == name)
+        wt["branch"] = f"refs/heads/o/{name}-2"
+        self.e.state.write_text(json.dumps(st))
+        subprocess.run(["git", "branch", "-m", f"o/{name}-2"], cwd=wt["path"], env=self.e.env, check=True,
+                       capture_output=True)
+
+    def by_commit(self, sha, head_sha, number=42, title="APP-11 docs (app-11)", ref="o/app-11-docs",
+                  fork=False):
+        """GitHub lists PR `number`, whose head commit is `head_sha`, for commit `sha`; `pr view` can read it."""
+        (self.e.home / "commits.json").write_text(json.dumps({sha: [
+            {"number": number, "state": "open", "merged_at": None, "html_url": "u",
+             "head": {"sha": head_sha, "ref": ref, "repo": {"full_name": "someone/app" if fork else "o/app"}},
+             "base": {"ref": "main", "repo": {"full_name": "o/app", "default_branch": "main"}}}]}))
+        prs = json.loads((self.e.home / "prs.json").read_text())
+        prs[str(number)] = {"number": number, "title": title, "state": "OPEN",
+                            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]}
+        (self.e.home / "prs.json").write_text(json.dumps(prs))
+
+    def row(self, out, name):
+        return next(l for l in out.splitlines() if l.startswith(name))
+
     def lanes(self):
+        self.heads = {}
         self.setup_project()
         rid = self.state()["repos"][0]["id"]
         now = int(time.time() * 1000)
@@ -746,6 +799,7 @@ class LaneList(Spawn):
         for i, (name, linked) in enumerate((("app-7-login", None), ("app-9-cache", 41), ("app-11-docs", None))):
             paths[name] = path = ws / name
             path.mkdir(parents=True)
+            self.heads[name] = self.git_lane(path, f"o/{name}")
             rows.append({"repo": rid, "name": name, "path": str(path), "parent": None,
                          "branch": f"refs/heads/o/{name}", "lastActivityAt": now - 3 * 3600_000,
                          **({"linkedPR": linked} if linked else {})})
@@ -824,8 +878,52 @@ class LaneList(Spawn):
         r = self.spawn("lane", "list", "app", env_extra={"GH_BROKEN": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("no PR", r.stdout)
-        self.assertIn("PR ?", r.stdout)
-        self.assertEqual(r.stderr.count("gh could not answer (error connecting to api.github.com)"), 1)
+        self.assertIn("could not check", r.stdout)
+        self.assertEqual(r.stderr.count("error connecting to api.github.com"), 1, r.stderr)
+
+    def test_a_branch_the_name_misses_finds_the_pr_by_its_head_commit(self):
+        # lc-38y3: a lane Orca recreated has a local branch no PR is named after
+        self.lanes()
+        self.recreate("app-11-docs")
+        head = self.heads["app-11-docs"]
+        self.by_commit(head, head)
+        r = self.spawn("lane", "list", "app")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        docs = self.row(r.stdout, "app-11-docs")
+        for needed in ("app-11 ", "PR #42", "passing"):
+            self.assertIn(needed, docs)
+        self.assertIn("app-11-docs: issue app-11 · PR #42 · ci passing", self.spawn("lane", "status", "app").stdout)
+
+    def test_a_pr_that_holds_head_but_has_another_head_commit_is_not_the_lanes(self):
+        self.lanes()
+        self.recreate("app-11-docs")
+        head = self.heads["app-11-docs"]
+        self.by_commit(head, "f" * 40)
+        r = self.spawn("lane", "list", "app")
+        said = f"no PR found for o/app-11-docs-2 @{head[:7]}"
+        self.assertIn(said, self.row(r.stdout, "app-11-docs"), r.stderr)
+        self.assertNotIn("#42", r.stdout)
+        self.assertNotIn("never pushed", r.stdout)
+        self.assertIn(said, self.spawn("lane", "status", "app").stdout)
+
+    def test_another_lanes_or_a_forks_pr_with_this_head_is_not_the_lanes(self):
+        self.lanes()
+        head = self.heads["app-11-docs"]
+        for ref, fork in (("o/app-7-docs-base", False), ("o/app-11-docs", True), ("release-1", False)):
+            with self.subTest(ref=ref, fork=fork):
+                self.by_commit(head, head, ref=ref, fork=fork)
+                r = self.spawn("lane", "list", "app")
+                self.assertIn(f"no PR found for o/app-11-docs @{head[:7]}", self.row(r.stdout, "app-11-docs"), r.stderr)
+                self.assertNotIn("#42", r.stdout)
+
+    def test_a_head_commit_lookup_that_fails_is_could_not_check(self):
+        self.lanes()
+        r = self.spawn("lane", "list", "app", env_extra={"GH_NO_API": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("could not check", self.row(r.stdout, "app-11-docs"))
+        self.assertNotIn("no PR", r.stdout)
+        self.assertIn("PR #40", self.row(r.stdout, "app-7-login"))  # found by name: no head lookup needed
+        self.assertEqual(r.stderr.count("error connecting to api.github.com"), 1, r.stderr)
 
     def test_no_lanes(self):
         self.setup_project()

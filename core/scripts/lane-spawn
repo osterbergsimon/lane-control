@@ -69,6 +69,8 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import prlookup  # noqa: E402
 
 
 def _module(name: str, path: Path):
@@ -523,9 +525,26 @@ def ci_of(rollup) -> str:
     return "passing"
 
 
-def pr_of(repo: Path, ref: str) -> "tuple[dict, str]":
-    """({number, title, state, ci}, '') of the PR for a branch or number (gh pr view); ({}, '') when there is none;
-    ({}, why) when gh cannot answer."""
+def lane_pr(repo: Path, path: str, branch: str, head: str, linked=None) -> "tuple[dict, str]":
+    """pr_view of the lane's PR: the one Orca linked, else the one core/prlookup.py finds (branch name, then HEAD);
+    ({}, '') when there is none; ({}, why) when GitHub could not be asked."""
+    if linked:
+        pr, why = pr_view(repo, str(linked))
+        if pr or why:
+            return pr, why
+    try:
+        found = prlookup.find(repo, path, branch, head, timeout=30)
+    except prlookup.CouldNotCheck as e:
+        return {}, str(e)
+    if not found:
+        return {}, ""
+    pr, why = pr_view(repo, str(found["number"]))
+    return pr, why or ("" if pr else f"gh pr view {found['number']} found no PR")
+
+
+def pr_view(repo: Path, ref: str) -> "tuple[dict, str]":
+    """({number, title, state, ci}, '') of a PR by number (gh pr view); ({}, '') when there is none; ({}, why) when gh
+    cannot answer."""
     try:
         r = subprocess.run(["gh", "pr", "view", ref, "--json", "number,title,state,statusCheckRollup"], cwd=repo,
                            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
@@ -593,8 +612,8 @@ def lanes(target: str) -> "tuple[str, list, dict, str]":
         chain = [w for w in ws if w["origin"] == root or w["dispatch"] == root]
         wt = wts[path]
         branch = re.sub(r"^refs/heads/", "", wt.get("branch") or "")
-        ref = str(wt["linkedPR"]) if wt.get("linkedPR") else branch
-        pr, why = pr_of(repo, ref) if ref else ({}, "")
+        head = prlookup.head_of(path)
+        pr, why = lane_pr(repo, path, branch, head, wt.get("linkedPR"))
         gh_error = gh_error or why
         m = TITLE_ISSUE.search(pr.get("title", ""))
         issue = m.group(1) if m else brief_issue(place, chain[-1]["run"], chain[-1]["task"], tasks)
@@ -602,23 +621,24 @@ def lanes(target: str) -> "tuple[str, list, dict, str]":
         out.append({"lane": wt.get("displayName") or Path(path).name, "issue": issue or "-", "pr": pr,
                     "gh": bool(why), "idle": idle_text(term.get("lastOutputAt") or wt.get("lastActivityAt")),
                     "worker": chain[0], "chain": chain, "others": [w for w in ws if w not in chain],
-                    "branch": branch, "path": path})
+                    "branch": branch, "head": head, "path": path})
     return project, sorted(out, key=lambda r: r["lane"]), scope, gh_error
 
 
 def pr_text(r: dict) -> str:
     pr = r["pr"]
     if r["gh"]:
-        return "PR ?"
+        return "could not check"
     if not pr.get("number"):
-        return "no PR"
+        return prlookup.none_found(r["branch"], r["head"])
     return f"PR #{pr['number']}" + (f" {pr['state']}" if pr.get("state") not in ("", "open") else "")
 
 
 def lane_list(target: str, full: bool) -> int:
     project, rows, scope, gh_error = lanes(target)
     if gh_error:
-        print(f"lane-spawn: note: gh could not answer ({gh_error}), so PR and CI show `?`", file=sys.stderr)
+        print(f"lane-spawn: note: GitHub could not be asked ({gh_error}): such a lane's PR shows `could not check` "
+              "and its CI `?`", file=sys.stderr)
     if scope.get("source") == "bound":
         print("note: this terminal is bound to an Orca Run, and Orca lists only that Run's workers")
     if not rows:
@@ -626,10 +646,11 @@ def lane_list(target: str, full: bool) -> int:
         return 0
     if not full:
         width = max(len(r["lane"]) for r in rows)
-        print(f"{'lane':<{width}}  {'issue':<16} {'PR':<14} {'CI':<8} {'idle':<7} worker")
+        wide = max([14, *(len(pr_text(r)) for r in rows)])
+        print(f"{'lane':<{width}}  {'issue':<16} {'PR':<{wide}} {'CI':<8} {'idle':<7} worker")
         for r in rows:
             w = r["worker"]
-            print(f"{r['lane']:<{width}}  {r['issue']:<16} {pr_text(r):<14} "
+            print(f"{r['lane']:<{width}}  {r['issue']:<16} {pr_text(r):<{wide}} "
                   f"{'?' if r['gh'] else r['pr'].get('ci', '-'):<8} {r['idle']:<7} {w['state']}/{w['liveness']}"
                   + "".join(f" +{o['dispatch']} {o['state']}/{o['liveness']}" for o in r["others"]))
         return 0
