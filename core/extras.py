@@ -562,7 +562,8 @@ def make_hook(event: str, opts: dict) -> tuple:
             raise ExtrasError(f"--script is refused: {why}")
         e.update(url=m["url"], commit=m["commit"], path=m["path"])
         stem = Path(m["path"]).stem
-    name = opts.get("name") or slug(stem)
+    stem = slug(stem)
+    name = opts.get("name") or (stem if stem.startswith(event) else f"{event}-{stem}")  # one script at two events
     if not NAME.fullmatch(name or ""):
         raise ExtrasError("the hook's name is not lowercase letters, digits and dashes: give --name")
     e["name"] = name

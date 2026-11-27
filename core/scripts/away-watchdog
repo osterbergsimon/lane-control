@@ -39,8 +39,9 @@ It fails loudly: a target it cannot address, a send Orca refuses, a crash, or a 
 `UNADDRESSED` line, and the agent puts it in front of the owner (at most every WATCHDOG_ESCALATE_MIN minutes while the same
 lines stay). A message's backoff is written before it is sent, so a crash after a send never sends it again.
 Each ESCALATE that --send takes from the outbox also runs the owner's on-report hooks (core/hooks.py; lc-76o) with the
-project, its checkout and PR and the outcome `escalation`, whether the send went through or not: each is a `HOOK` line
-with its exit code and last lines; one that fails is a `HOOK-WARN` line and only warns (the exit code is the sends').
+project, its checkout and PR and the outcome `escalation`, whether the send went through or not, after the sends and
+outside the state lock: each is a `HOOK` line with its exit code and last lines; one that fails is a `HOOK-WARN` line
+and only warns (the exit code is the sends').
 State: ~/.cache/lane-control/watchdog/ (outbox, backoff per project and kind, summary stamp, `last`).
 Exit (--send): 0 all sent; 1 something reached nobody; 2 usage or no Orca terminal to send from.
 """
@@ -521,7 +522,7 @@ def send_outbox() -> int:
             "the automation's agent runs it; a precheck or a plain shell has none")
         return 2
     now = improve.now()
-    lines = []
+    lines, escalated = [], []
     with locked():
         f = cache_dir() / "outbox.json"
         try:
@@ -543,7 +544,7 @@ def send_outbox() -> int:
                 (cache_dir() / m["key"]).touch()
             problem = orca_send(sender, m, m["to"], m["kind"], m["body"])
             if m["kind"] == "ESCALATE":
-                lines += on_report(m)
+                escalated.append(m)  # its on-report hooks run after the lock: a slow hook never holds a round up
             if not problem:
                 lines.append(f"SENT {m['kind']} {m['project']} to {m['to']}")
                 continue
@@ -564,7 +565,15 @@ def send_outbox() -> int:
             improve._atomic(cache_dir() / "last", (cache_dir() / "last").read_text() + "".join(f"{x}\n" for x in lines))
         except OSError:
             pass
-    for line in lines:
+    hook_lines = [x for m in escalated for x in on_report(m)]
+    if hook_lines:
+        with locked():
+            try:
+                improve._atomic(cache_dir() / "last", (cache_dir() / "last").read_text()
+                                + "".join(f"{x}\n" for x in hook_lines))
+            except OSError:
+                pass
+    for line in lines + hook_lines:
         print(line)
     return 1 if any(x.startswith("UNADDRESSED") for x in lines) else 0
 

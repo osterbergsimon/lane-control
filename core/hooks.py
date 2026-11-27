@@ -152,7 +152,8 @@ def clean(line: str) -> str:
     line = CONTROL.sub("", line.replace("\t", "  "))
     line = SECRETISH.sub("[redacted]", line)
     words = re.split(r"(\s+)", line)
-    line = "".join("[redacted]" if X.opaque(w) else w for w in words)
+    line = "".join("[redacted]" if X.opaque(w) and not re.fullmatch(r"[0-9a-f]{7,64}", w) else w
+                   for w in words)  # a commit or a hash is no secret
     return line[:300]
 
 

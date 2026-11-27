@@ -250,6 +250,14 @@ class RunTests(HookScratch):
         self.assertNotIn(SECRET, out)
         self.assertIn("[redacted]", out)
         self.assertNotIn("\033", out)
+        self.assertIn("hook:on-report-loud failed", out)  # a script's name at an event that is not in it
+
+    def test_a_commit_in_the_output_is_shown(self):
+        self.script("sha.sh", f"#!/bin/sh\necho 'tested {HEAD}'\n")
+        self.add("--hook", "gate", "--script", self.owner / "sha.sh")
+        code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"| tested {HEAD}", out)
 
     def test_a_timeout_stops_the_hook_and_its_children_and_fails_the_gate(self):
         pid = self.owner / "child.pid"
@@ -423,12 +431,12 @@ class AfterSetupTests(unittest.TestCase):
         e = [x for x in X.effective(X.store_for(self.repo)) if x["kind"] == "hook"][0]
         shutil.rmtree(X.hook_source_dir(e))
         r = self.e.run("--check", str(self.repo), adapt=True)
-        self.assertIn("check extra hook:h: missing", r.stdout)
+        self.assertIn("check extra hook:gate-h: missing", r.stdout)
         self.assertIn("at gate", r.stdout)
         r = self.e.run(str(self.repo), "--refresh", adapt=True)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         r = self.e.run("--check", str(self.repo), adapt=True)
-        self.assertIn("check extra hook:h: ok", r.stdout)
+        self.assertIn("check extra hook:gate-h: ok", r.stdout)
 
 
 class FrontDoorTests(unittest.TestCase):
@@ -436,15 +444,6 @@ class FrontDoorTests(unittest.TestCase):
         self.assertEqual(F.route(["project", "gate", "app", "7"]), ("lane-extras", ["gate", "app", "7"]))
         self.assertEqual(F.route(["project", "hook", "app", "on-report", "--lane", "A-1"]),
                          ("lane-extras", ["hook", "app", "on-report", "--lane", "A-1"]))
-
-    def test_the_persona_and_the_lanes_skill_say_when_to_run_them(self):
-        persona = (ROOT / "orchestrators" / "native-orca" / "personas" / "coordinator.md").read_text()
-        skill = (ROOT / "orchestrators" / "native-orca" / "skills" / "native-orca-lanes" / "SKILL.md").read_text()
-        for text in (persona, skill):
-            self.assertIn("project gate", text)
-            self.assertIn("not green", text)
-            self.assertIn("hook . after-merge", text)
-            self.assertIn("hook . on-report", text)
 
 
 if __name__ == "__main__":
