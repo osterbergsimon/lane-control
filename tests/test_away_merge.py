@@ -37,6 +37,35 @@ if a[:2] == ["api", "graphql"]:
     if os.environ.get("GH_EDITED_FAIL"):
         print("gh: " + os.environ["GH_EDITED_FAIL"], file=sys.stderr); sys.exit(1)
     print(json.dumps({"data": {"repository": {"pullRequest": {"lastEditedAt": prs[n].get("lastEditedAt")}}}})); sys.exit(0)
+if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/compare/"):  # maintenance: files at the head
+    head = a[1].split("...", 1)[1]
+    found = [p for p in prs.values() if p.get("head_after", p.get("headRefOid")) == head or p.get("headRefOid") == head]
+    if os.environ.get("GH_COMPARE_FAIL") or not found:
+        print("gh: " + os.environ.get("GH_COMPARE_FAIL", "Not Found (HTTP 404)"), file=sys.stderr); sys.exit(1)
+    p = found[0]
+    files = p.get("compare_files")
+    if files is None:  # from the diff: a new file is "added", a deleted one "removed", the rest "modified"
+        import re
+        files = []
+        for block in re.split(r"^(?=diff --git )", p.get("diff", ""), flags=re.M):
+            m = re.match(r"diff --git a/(.*?) b/(.*)$", block, re.M)
+            if m:
+                st = "added" if "\\nnew file mode" in block else "removed" if "\\ndeleted file mode" in block else "modified"
+                files.append({"filename": m.group(2), "status": st})
+    base = p.get("merge_base")
+    if base is None:  # the merge base: by default main as the checkout last fetched it (a PR cut from main's tip)
+        import subprocess
+        r = subprocess.run(["git", "rev-parse", "refs/remotes/origin/main"], capture_output=True, text=True)
+        base = r.stdout.strip() if r.returncode == 0 else ""
+    print(json.dumps({"status": "ahead", "files": files, "merge_base_commit": {"sha": base}})); sys.exit(0)
+if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/branches/") and a[1].endswith("/protection"):
+    if os.environ.get("GH_PROTECTION"):
+        print(os.environ["GH_PROTECTION"]); sys.exit(0)
+    print(os.environ.get("GH_PROTECTION_ERR", "gh: Branch not protected (HTTP 404)"), file=sys.stderr); sys.exit(1)
+if a[:1] == ["api"] and len(a) > 1 and a[1].startswith("repos/{owner}/{repo}/rules/branches/"):
+    if os.environ.get("GH_RULES_ERR"):
+        print(os.environ["GH_RULES_ERR"], file=sys.stderr); sys.exit(1)
+    print(os.environ.get("GH_RULES", "[]")); sys.exit(0)
 pr = prs.get(a[2]) if a[:1] == ["pr"] and len(a) > 2 else None
 if pr is None:
     print("gh stub: no such PR / not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
@@ -51,8 +80,9 @@ if a[:2] == ["pr", "view"] and "mergeCommit" in a:
 if a[:2] == ["pr", "view"] and a[a.index("--json") + 1] == "headRefOid":
     print(json.dumps({"headRefOid": pr.get("head_after", pr["headRefOid"])})); sys.exit(0)
 if a[:2] == ["pr", "view"]:
-    print(json.dumps({k: pr[k] for k in ("baseRefName", "headRefOid", "state", "body", "comments", "statusCheckRollup", "files")}
-                     | {"isDraft": pr.get("isDraft", False)})); sys.exit(0)
+    want = a[a.index("--json") + 1].split(",")
+    dflt = {"isDraft": False, "headRefName": "lane/item", "isCrossRepository": False}
+    print(json.dumps({k: pr.get(k, dflt.get(k)) for k in want})); sys.exit(0)
 if a[:2] == ["pr", "ready"]:
     if os.environ.get("GH_READY_FAIL"):
         print("gh: " + os.environ["GH_READY_FAIL"], file=sys.stderr); sys.exit(1)
@@ -69,6 +99,30 @@ if a[:2] == ["pr", "merge"]:
     time.sleep(float(os.environ.get("GH_MERGE_SLEEP", "0")))  # a slow merge: lets a second away-merge run beside it
     if os.environ.get("GH_MERGE_FAIL"):  # gh itself failed (a timeout, a 5xx); GH_STATE_AFTER says what GitHub did
         print("gh: " + os.environ["GH_MERGE_FAIL"], file=sys.stderr); sys.exit(1)
+    if os.environ.get("GH_REAL_MERGE") and pr.get("baseRefName") == "main" and not pr.get("merge_oid_fixed"):
+        # a maintenance merge, made for real on the temp origin's main as GitHub's button makes it (GH_REAL_MERGE: a work clone)
+        import subprocess
+        work = os.environ["GH_REAL_MERGE"]
+        def g(*x, cwd=work):
+            return subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *x],
+                                  check=True, capture_output=True, text=True).stdout
+        if not os.path.exists(work):
+            subprocess.run(["git", "clone", "-q", g("remote", "get-url", "origin", cwd=os.getcwd()).strip(), work], check=True,
+                           capture_output=True)
+        g("fetch", "-q", "origin")
+        g("checkout", "-q", "-B", "main", "origin/main")
+        g("checkout", "-q", "-B", "pr-" + a[2])
+        name = pr.get("real_file", "docs/pr-" + a[2] + ".md")
+        os.makedirs(os.path.join(work, os.path.dirname(name)), exist_ok=True)
+        open(os.path.join(work, name), "w").write(pr.get("real_text", "x\\n"))
+        g("add", name)
+        g("commit", "-qm", "the item")
+        g("checkout", "-q", "main")
+        g("merge", "-q", "--no-ff", "-m", a[a.index("--subject") + 1] + "\\n\\n" + (msg or ""), "pr-" + a[2])
+        g("push", "-q", "origin", "main")
+        pr["merge_oid"] = g("rev-parse", "HEAD").strip()
+        prs[a[2]] = pr
+        json.dump(prs, open(os.environ["GH_PRS"], "w"))
     sys.exit(0)
 print("gh stub: not modelled: " + " ".join(a), file=sys.stderr); sys.exit(1)
 """
