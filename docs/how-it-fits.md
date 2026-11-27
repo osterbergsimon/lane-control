@@ -18,6 +18,8 @@ AGENTS   machine coordinator   one per machine, optional   splits the budget, wa
 SETUP    lane-control machine setup   once per machine   machine coordinator, 4 automations, CI limits timer
          lane-control project setup   once per project   lane tools, skills, personas, tier table, coordinator
                                                           (lane-control project refresh updates them)
+         lane-control project|machine extras              your skills, MCP servers, personas and plugins for
+                                                          the agents (refresh puts them in place)
 
 LANE     lane-room   may another lane open?        lane-tier     which model does this tier use?
 TOOLS    lane-heavy  one gate for heavy builds     design-shots  screenshots of a UI
@@ -155,6 +157,77 @@ More: [machine caps](../core/machine.md#machine-caps), [the limits example](../c
   ([remote.md](../orchestrators/native-orca/remote.md#a-listening-port-is-not-proof-lc-l78)).
 
 More: [getting started](getting-started.md), [native Orca setup](../orchestrators/native-orca/setup.md).
+
+## Extras
+
+What you add to the agents' environments, in one place (`core/extras.py`, `core/scripts/lane-extras`):
+
+```
+lane-control project extras add|list|remove <project> ...   this project's
+lane-control machine extras add|list|remove ...             every project on this machine (a project's add to these)
+  --skill <git-url>@<commit>[:<path>]                        a skill, pinned at a full commit
+  --mcp <name> [--env NAME]... -- <command> [args]           an MCP server; --env names a secret, never its value
+  --persona <name> --prompt-file <path> [--tier T] [--harness H]   a lane role the coordinator can brief a lane with
+  --plugin claude:<plugin>@<marketplace>@<version> | opencode:<package>@<version>
+  --for lanes|coordinator|reviewer|all                       who gets it (default all)
+```
+
+Agent hooks, permission rules and env values are not extras yet: they get their own design (lc-yw1g).
+
+- **Stored** in the project's settings store (`~/.config/lane-control/projects/<key>/extras.json`, beside its tier
+  table) or `~/.config/lane-control/extras.json`. Never in a project repo, and never a secret. An MCP server gets
+  its secret from the agent's own environment: `--env NAME`, or `${NAME}` in an argument (`${NAME}` in Claude's
+  `.mcp.json`, `{env:NAME}` in OpenCode's config). Refused, without the value ever being shown: a URL with a password
+  or token in it, a token-like or long opaque argument, a secret-named option, variable, header (`X-API-Key: ...`,
+  `Cookie: ...`), query parameter (`?access-token=...`) or JSON key (`{"apiKey": "..."}`) given a value, an
+  `Authorization` or bearer header, a `--env` that is not a NAME.
+- **Pinned:** a skill at a full commit (its checkout is checked against it), a file an MCP command names by its hash:
+  the command, an argument, or a path inside one (`--opt=<path>`, `-I<path>`). A relative path is refused (it would
+  resolve in the lane's folder), and so is a path inside any project checkout, as given or through a link
+  (`--allow-repo-path` takes one anyway, with a warning). What an interpreter finds by itself (`python3 -m x`,
+  `npx x`) is not pinned.
+- **Who adds them:** `add` and `remove` are a person's only, at a terminal; an agent is refused, as for `lane new`.
+- **Each role's extras go only where that role's sessions read them:**
+
+```
+              coordinator                                    lane or reviewer (its own worktree, by lane prepare)
+Claude        files in the settings store given at launch:  .mcp.json; .claude/settings.json (enabledMcpjsonServers:
+              --mcp-config, --settings (enabledPlugins),     only the servers lane-control wrote there; enabledPlugins;
+              --plugin-dir (its skills)                      .claude/settings.local.json when the project commits it);
+                                                             .claude/skills/<name>
+OpenCode      the main checkout's .opencode/opencode.json    .opencode/opencode.json (mcp, plugin) and
+              (mcp, plugin) and .opencode/skills/<name>      .opencode/skills/<name>
+```
+
+  Nothing goes in the main checkout's `.claude/` or `.mcp.json`: Claude reads the main checkout's
+  `.claude/settings.local.json`, and its `.claude/skills`, from every linked worktree. OpenCode reads `.opencode/`
+  from the session's own worktree up to its root, and Orca's lane worktrees are not under the main checkout.
+  `lane-control project refresh` (and setup) writes the coordinator's (it loads them at its next start: refresh says
+  when it must restart) and renders each persona into `.lane-control/personas/<name>.md`. Orca starts a lane or
+  reviewer with no settings of our own, so the coordinator's persona gets a part about the project's extras, and before
+  such a worker starts the coordinator runs `lane-control lane prepare <project> <worktree> --role lanes|reviewer`. A
+  reviewer shares its lane's worktree, so both then have both roles' extras, and a lane that runs beside it can still
+  change what is in its worktree. A lane on another host gets none. Once prepare puts a skill in a worktree's
+  `.claude/skills/`, Claude no longer reads the main checkout's own `.claude/skills` there (it does only when the
+  worktree has none): keep a skill lanes need committed, or add it as an extra. A project skill with a default design
+  skill's name may lose to the user's copy in Claude (add warns; turn the default off to be sure).
+- **Written safely:** in a folder, lane-control writes only files it creates and owns whole: never a committed file,
+  never one that was there before or changed since it wrote it, never through a symlink. Applying is all or
+  nothing: on any problem the folder keeps none of lane-control's extras, prepare exits 1 (the coordinator holds the
+  lane) and refresh exits 1 after doing the rest. Refresh also applies every worktree prepare wrote in again, so a
+  removed extra is taken out there too, and each file it removes is named. The repo's git exclude names exactly the
+  files lane-control has written.
+- **The design skills** (`core/design-skills.tsv`) are the default machine extras, installed for the whole user as
+  before (`~/.agents/skills`, and `~/.claude/skills` unless Claude has the skill's plugin). `lane-control machine
+  extras remove <name>` turns one off. An owner's pins of skills live apart, under `~/.agents/extras-sources/`.
+- **Checked** by `lane-control project check <project>` and `lane-control doctor`: every extra with its roles, and
+  `missing` (not fetched, not installed), `changed` (a pinned checkout, file or plugin version differs), `failing` (an
+  MCP command not found, or the coordinator cannot get its extras now, with why) or `not applied` (refresh has not
+  run yet), each with what to run.
+- Setup's onboarding agents run with no MCP server and no settings files, so they get no extras.
+- Checked without starting an agent: Claude's rules above are read from its code (2.1.332) and documentation;
+  OpenCode 2.2.1's `debug config` and skill list show a worktree reading only its own `.opencode/opencode.json` and
+  `.opencode/skills/`, and the main checkout only its own. A live session check is lc-hat1.
 
 ## A box: two directions
 

@@ -1286,6 +1286,13 @@ class NativeLaneSkillTests(unittest.TestCase):
         self.assertLess(t.index("lane-tier"), t.index("orca-ide orchestration worker-start"))
         self.assertNotIn("Exit 4", t)
 
+    def test_extras_are_put_in_a_worktree_before_its_worker_starts(self):
+        # lc-7c6: Orca starts a worker with no per-role settings, so the coordinator runs lane prepare first
+        t = self.flat
+        for needle in ('"Extras for this project"', "`lane-control lane prepare`", "make the worktree first",
+                       "`worker-start --worktree path:<that worktree>`", "If prepare exits non-zero, hold the lane"):
+            self.assertIn(needle, t, needle)
+
     def test_opencode_lane_starts_the_way_orca_accepts(self):
         # lc-69b: worktree first, then agent id opencode with --model on its path, no --effort
         create = ("orca-ide worktree create --repo <exact selector> --name <name> --base-branch origin/<BASE> "

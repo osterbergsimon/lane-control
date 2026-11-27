@@ -6,6 +6,9 @@ once on stderr (`hint`), and nothing when the front door, another script or an a
 `lane-control coordinator ...` and `lane-control lane ...` (owner 2026-11-26, lc-wja: "commands to spawn new lanes,
 especially coordinators") run lane-spawn, which has no old name.
 
+`lane-control project extras ...`, `lane-control machine extras ...` and `lane-control lane prepare ...` (owner
+2026-11-26, lc-7c6: "centralize and improve these things") run lane-extras, which has no old name either.
+
 The ratchet is unattended improvement (owner 2026-11-26: "only moves forward"), the mode lane-improve switches; its
 docs and its skill still call it away-improve mode in places. `lane-control improve ...` is kept as an alias.
 
@@ -34,6 +37,8 @@ ROUTES = {
                           "rest; close its coordinator"),
     ("project", "start"): ("project-pause", ["start"], "<project>", "start its missing agents"),
     ("project", "status"): ("project-pause", ["status"], "<project>", "running, resting or paused"),
+    ("project", "extras"): ("lane-extras", ["project"], "add|list|remove <project> ...",
+                            "skills, MCP, personas, plugins"),
     ("coordinator", "start"): ("lane-spawn", ["coordinator", "start"], "<project>|machine [--force]",
                                "start it unless it runs"),
     ("coordinator", "restart"): ("lane-spawn", ["coordinator", "restart"], "<project> [--wait S]",
@@ -44,8 +49,11 @@ ROUTES = {
                       "send its coordinator a request"),
     ("lane", "list"): ("lane-spawn", ["lane", "list"], "<project>", "lane, issue, PR, CI, idle time"),
     ("lane", "status"): ("lane-spawn", ["lane", "status"], "<project>", "each lane in full"),
+    ("lane", "prepare"): ("lane-extras", ["prepare"], "<project> <worktree> --role R",
+                          "a lane's extras, before it starts"),
     ("machine", "setup"): ("machine-setup", [], "[--host <host>] [--check]", "set it up once; --check reads only"),
     ("machine", "report"): ("machine-check", ["--peek"], "[--last]", "budget, memory, runners; read only"),
+    ("machine", "extras"): ("lane-extras", ["machine"], "add|list|remove ...", "extras for every project here"),
     ("ratchet", "on"): ("lane-improve", ["on"], "[--hours N] [--project <name>]...", "only on the owner's word"),
     ("ratchet", "off"): ("lane-improve", ["off"], "", "end it; what runs drains"),
     ("ratchet", "status"): ("lane-improve", ["status"], "[--json]", "off, on or draining, per project"),
@@ -61,7 +69,7 @@ GROUPS = {"project": "a project and its coordinator",
           "ratchet": "the ratchet, unattended improvement (presence is lane-away)"}
 ALIASES = {"improve": "ratchet"}  # the name before the owner's rename (2026-11-26): works, and says the new one
 OLD = ("project-setup", "project-pause", "machine-setup", "machine-check", "lane-improve")
-NEW = ("lane-spawn",)  # a script only its forms run (lc-wja): no old name, so no hint
+NEW = ("lane-spawn", "lane-extras")  # scripts only their forms run (lc-wja, lc-7c6): no old name, so no hint
 INTERNAL = ("--via-host", "--box-pairing")  # project-setup run by another project-setup: never a person
 
 # `<verb> --help` for the forms whose script has no help of its own for that verb (review M1); the others pass it on.

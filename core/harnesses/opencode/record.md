@@ -88,6 +88,12 @@ the tier rules allow for the project (`core/scripts/lane-tier`).
   not `shell`). The real guards are `away-merge`, the persona rule and branch protection where the repo has it. A
   lane's own session has no guard.
 
+- 2026-11-27 extras (lc-7c6): a folder's extras for OpenCode go in `.opencode/opencode.json` (`mcp`, with
+  `{env:NAME}` for each secret; `plugin`, pinned npm packages) and `.opencode/skills/<name>` (links): the coordinator's
+  in the main checkout, a lane's or reviewer's in its own worktree. Agent hooks and env values are not extras yet
+  (lc-yw1g). **Not verified against a real OpenCode 2, and the first live check to run (lc-hat1):** that it reads
+  `<folder>/.opencode/opencode.json` and `.opencode/skills/`.
+
 ## Retest when
 - OpenCode changes its plugin API, its `--standalone` flag or its session store: run the live check.
 
