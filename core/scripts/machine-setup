@@ -405,7 +405,9 @@ def check(folder: Path) -> int:
     return 0 if ok else 1
 
 
-def start_step(harness: str, model: str, mode: str, folder: Path, persona: Path, trust: bool):
+def start_step(harness: str, model: str, mode: str, folder: Path, persona: Path, trust: bool, force: bool = False):
+    """force: lane-control coordinator start machine --force, confirmed there: started also under `cannot tell`
+    (never while its agent runs). Returns what it did: exists, cannot tell or created."""
     ps = project_setup()  # its liveness proof: a terminal with the title is none (lc-l78.32)
     ps.ORCA = machineconf.orca_cli()
     try:
@@ -413,10 +415,14 @@ def start_step(harness: str, model: str, mode: str, folder: Path, persona: Path,
     except ps.Fail as e:
         raise Fail(str(e)) from None
     if state.live:
-        return say(TITLE, "exists", "(its agent runs; not started again)")
+        say(TITLE, "exists", "(its agent runs; not started again)")
+        return "exists"
+    if state.doubt and not force:
+        say(TITLE, "cannot tell", "(" + ps.cannot_tell(TITLE, state, "run machine-setup again") + ")")
+        return "cannot tell"
     if state.doubt:
-        return say(TITLE, "cannot tell", "(" + ps.cannot_tell(TITLE, state, "run machine-setup again") + ")")
-    if state.found:
+        say(TITLE, "forced", f"(the owner started it although the check cannot tell: {state.doubt})")
+    elif state.found:
         close = "; ".join(f"orca-ide terminal close --terminal {t.get('handle')}" for t in state.found)
         say(TITLE, "recorded but dead", f"(a terminal with that title and no live agent; it is left open, and if it is "
                                         f"an empty shell close it: {close})")
@@ -428,8 +434,9 @@ def start_step(harness: str, model: str, mode: str, folder: Path, persona: Path,
     cmd = harnesses.load_harness(harness).start_command(ROLE, persona, model, mode)
     if harness == "claude":
         cmd += ["--name", TITLE]
-    orca("terminal", "create", "--worktree", f"path:{folder}", "--title", TITLE, "--command", shlex.join(cmd))
+    made = orca("terminal", "create", "--worktree", f"path:{folder}", "--title", TITLE, "--command", shlex.join(cmd))
     say(TITLE, "created", f"{harness}/{model} in {folder}")
+    return "created " + str((made.get("terminal") or {}).get("handle") or "")
 
 
 def automation_specs() -> list:

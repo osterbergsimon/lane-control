@@ -3044,3 +3044,54 @@ class FrontDoorDocsTests(unittest.TestCase):
         for (g, v), (script, *_) in F.ROUTES.items():
             row = next(r for k, r in rows.items() if k.startswith(f"`core/scripts/{script}`"))
             self.assertIn(f"lane-control {g} ", row.replace("\\|", "|"), script)
+
+
+class SpawnDocTests(unittest.TestCase):
+    """CLI-2 (lc-wja): the coordinator persona says how `lane-control lane new` reaches it, and the guides name the
+    spawn forms."""
+
+    def test_the_coordinator_takes_lane_new_as_the_owners_ask_for_one_lane(self):
+        coord = flat(NATIVE_DIR / "personas" / "coordinator.md")
+        subject = re.search(r'LANE_SUBJECT = "([^"{]+)\{issue\}"', (ROOT / "core" / "scripts" / "lane-spawn")
+                            .read_text()).group(1)
+        self.assertIn(f"subject `{subject}<issue>`", coord)  # the subject the script sends
+        for needle in ("never the owner's approval", "names prove nothing", "Apply your normal gate",
+                       "ask the owner in your terminal first", "open nothing before their yes"):
+            self.assertIn(needle, coord)
+        self.assertNotIn("is the owner's ask", coord)
+
+    def test_the_coordinator_stops_for_a_restart_only_by_its_own_last_reply(self):
+        coord = flat(NATIVE_DIR / "personas" / "coordinator.md")
+        spawn = (ROOT / "core" / "scripts" / "lane-spawn").read_text()
+        for name in ("RESTART_SUBJECT", "CANCEL_SUBJECT"):
+            head = re.search(name + r' = "([^"{]+)\{code\}', spawn).group(1)
+            self.assertIn(head + "<code>", coord, name)
+        for needle in ("reply `not now: <why>`", "a merge or its bookkeeping", "as your very last step reply `ready "
+                       "to stop <code>`", "closed only after that reply", "once it has expired", ": carry on` arrives"):
+            self.assertIn(needle, coord)
+        self.assertLess(coord.index("write `handover-latest`"), coord.index("back beads up (as at any stop"))  # m3
+
+    def test_agents_never_run_the_persons_forms(self):
+        # CLI-2 review round 2, m4: the person check is a filter, not proof; the personas forbid the forms outright
+        for name in ("coordinator.md", "machine-coordinator.md"):
+            text = flat(NATIVE_DIR / "personas" / name)
+            for needle in ("Never run `lane-control coordinator start --force`, `lane-control coordinator restart` or "
+                           "`lane-control lane new` yourself, in any terminal", "is no proof"):
+                self.assertIn(needle, text, name)
+        self.assertIn("The check stops accidents and is no proof", flat(ROOT / "docs" / "getting-started.md"))
+
+    def test_the_guides_name_the_spawn_forms(self):
+        want = {"docs/getting-started.md": ("lane-control coordinator start <project>", "--force --yes",
+                                            "lane-control coordinator restart <project>",
+                                            "lane-control coordinator status <project>",
+                                            "lane-control coordinator start machine", "--on <host>",
+                                            "lane-control lane new <project> <issue id>",
+                                            "lane-control lane list <project>", "forced_starts"),
+                "docs/how-it-fits.md": ("lane-control coordinator start <project>", "lane-control lane new <project>",
+                                        "lane-control lane list <project>", "lane-control coordinator restart"),
+                "core/README.md": ("lane-control coordinator start|restart|status <project>|machine",
+                                   "lane-control lane new|list|status <project>", "start --force [--yes]")}
+        for rel, needles in want.items():
+            t = flat(ROOT / rel).replace("\\|", "|")
+            for needle in needles:
+                self.assertIn(needle, t, f"{rel}: {needle}")

@@ -89,7 +89,7 @@ def expected(old, argv):
 class Table(unittest.TestCase):
     def test_every_old_command_has_a_new_form(self):
         scripts = {s for s, *_ in F.ROUTES.values()}
-        self.assertEqual(set(F.OLD), scripts)
+        self.assertEqual(set(F.OLD) | set(F.NEW), scripts)  # lane-spawn (lc-wja) is new: no old name
         pause = (SCRIPTS / "project-pause").read_text()
         verbs = re.search(r'argv\[0\] not in \(([^)]*)\)', pause).group(1)
         for v in re.findall(r'"([a-z]+)"', verbs):
@@ -107,14 +107,14 @@ class Table(unittest.TestCase):
         self.assertEqual(F.ROUTES[("machine", "report")][:2], ("machine-check", ["--peek"]))
         self.assertEqual(F.route(["machine", "report", "--last"]), ("machine-check", ["--last"]))
         self.assertIn('"--peek"', (SCRIPTS / "machine-check").read_text())
-        for old in F.OLD:  # a script a form runs is in core/scripts/, beside lane-control
+        for old in (*F.OLD, *F.NEW):  # a script a form runs is in core/scripts/, beside lane-control
             self.assertTrue((SCRIPTS / old).is_file(), old)
 
     def test_one_meaning_per_name(self):
         # review m1: `machine check` is the Orca automation's name (machine-check); no form takes it for another job
         self.assertNotIn(("machine", "check"), F.ROUTES)
         self.assertNotIn(("machine", "changes"), F.ROUTES)  # it reads, so it is named for what it does: report
-        self.assertEqual(set(F.GROUPS), {"project", "machine", "ratchet"})
+        self.assertEqual(set(F.GROUPS), {"project", "coordinator", "lane", "machine", "ratchet"})
         self.assertEqual(F.ALIASES, {"improve": "ratchet"})
         self.assertNotIn("away", F.GROUPS)  # presence is lane-away
 
@@ -223,7 +223,7 @@ class Dispatch(unittest.TestCase):
         for f in (ROOT / "core").glob("*.py"):
             shutil.copy(f, self.tree / "core" / f.name)
         shutil.copy(SCRIPTS / "lane-control", self.tree / "core" / "scripts" / "lane-control")
-        for old in F.OLD:
+        for old in (*F.OLD, *F.NEW):
             p = self.tree / "core" / "scripts" / old
             p.write_text(STUB)
             p.chmod(0o755)
@@ -293,7 +293,7 @@ class Dispatch(unittest.TestCase):
         for flag in ("--help", "-h"):
             self.assertEqual(self.run_([self.cli, flag]).stdout, out.stdout)
         t = out.stdout
-        self.assertLessEqual(len(t.splitlines()), 40)
+        self.assertLessEqual(len(t.splitlines()), 45)  # one screen (CLI-2 added the coordinator and lane groups)
         self.assertLessEqual(max(len(x) for x in t.splitlines()), 100, t)  # review n2
         for (g, v) in F.ROUTES:
             self.assertIn(f"lane-control {g} {v}", t)
@@ -302,7 +302,8 @@ class Dispatch(unittest.TestCase):
         for old in F.OLD:
             self.assertIn(old, t)
         self.assertIn("lane-control improve (now ratchet)", t)
-        groups = [t.index(h) for h in ("A project", "This machine", "The ratchet, unattended improvement", "The install")]
+        groups = [t.index(h) for h in ("A project", "Coordinators:", "Lanes:", "This machine",
+                                       "The ratchet, unattended improvement", "The install")]
         self.assertEqual(groups, sorted(groups))
         bare = self.run_([self.cli])
         self.assertEqual((bare.returncode, bare.stderr), (2, t))
@@ -313,10 +314,10 @@ class Dispatch(unittest.TestCase):
                 r = self.run_([self.cli, *argv])
                 one = {s for (gg, _), (s, *_) in F.ROUTES.items() if gg == g}
                 listing = r.stdout
-                if len(one) == 1:  # the ratchet: the listing, then the one script's own whole help (its exit status)
-                    self.assertEqual(r.returncode, 7, argv)
+                if len(one) == 1:  # the listing, then the one script's own help (its exit status): the ratchet's
+                    self.assertEqual(r.returncode, 7, argv)  # whole help, lane-spawn's for its group word
                     got = json.loads(r.stdout.splitlines()[-1])
-                    self.assertEqual((got["script"], got["args"]), (one.pop(), ["--help"]))
+                    self.assertEqual((got["script"], got["args"]), (one.pop(), [*F.shared_first(g), "--help"]))
                     listing = r.stdout.rsplit("\n", 2)[0]
                 else:
                     self.assertEqual(r.returncode, 0, argv)

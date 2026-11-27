@@ -1,0 +1,753 @@
+#!/usr/bin/env python3
+"""lane-spawn: start coordinators and ask for lanes from the front door (owner 2026-11-26, lc-wja). Run by its forms:
+
+  lane-control coordinator start <project>|machine [--force [--yes]] [--on <host>]
+  lane-control coordinator restart <project> [--wait SECONDS] [--on <host>]
+  lane-control coordinator status <project>|machine [--on <host>]
+  lane-control lane new <project> <issue> [--tier swift|standard|deep] [--note "<text>"]
+  lane-control lane list|status <project>
+
+<project> is the project's folder or its name; `machine` is this machine's machine coordinator (its folder:
+--folder, else MACHINE_COORDINATOR_FOLDER in machine.conf, else ~/machine-coordinator; its permission mode:
+--permission-mode, default auto, since machine setup saves none).
+
+coordinator start  uses the live check (project-setup's session_state): running, it says so and starts nothing;
+                   recorded but dead, it starts it (project-pause start, resuming its session); cannot tell, it starts
+                   nothing and says what it found (exit 1). --force is a person's way out when they can tell what the
+                   check cannot: it shows what the check found (the terminals and the process it could not place),
+                   asks once (--yes skips the question), starts, and records in the settings store (forced_starts)
+                   how it was confirmed, from which terminal, and whether it started. It never overrides a coordinator
+                   proven to run (that is restart), and it refuses when an agent may run it (below).
+coordinator restart  closes a coordinator only on its own answer. It sends the running coordinator, by Orca message
+                   from your Orca terminal, an order with a one-time code and an expiry: finish what is in hand, write
+                   the handover, back up, and as the last step reply `ready to stop <code>`, or `not now: <why>` (a
+                   merge in progress is such a why). It waits for that reply (--wait, default 600 seconds), never for
+                   a change in beads. Any way out before a done stop (no reply, another answer, a lane that started
+                   meanwhile, a failed stop, an Orca error, Ctrl-C, SIGTERM) starts and closes nothing, sends `carry
+                   on <code>` first and says so; after `not now` it only says so (the coordinator carries on). On
+                   `ready to stop` it closes it (project-pause stop --no-handover), waits for its process to end, and
+                   starts it (project-pause start); one line per step. Refused, with nothing sent, while a lane of its
+                   Run runs here or on a box, under `cannot tell`, or outside an Orca terminal.
+coordinator status  running, resting, paused, recorded but dead or cannot tell (project-pause status).
+--on <host>        runs the box's own lane-control there over ssh (as project-setup <repo> <host> does), so the box's
+                   coordinator starts on the box; <project> is then the box's folder or name. restart sends its
+                   message from an Orca terminal only, and an ssh session is none: there it refuses and changes
+                   nothing (run it in an Orca terminal of the box's server).
+
+The coordinator is addressed only exactly: the terminal its agent is proven to run in (by its process), titled
+exactly `<project> coordinator` in Orca's terminal list, and the one Run whose coordinator is that terminal (Orca's
+run-list). Anything else (a recorded Run of an older session, a Run found by its name, two Runs) sends nothing and
+says why.
+
+lane new           a request, sent by Orca message to the project's running coordinator, for a lane for that issue.
+                   It says it comes from `lane-control lane new` and is no approval: the coordinator confirms with the
+                   owner in its terminal, then gates, briefs, reviews and merges as usual. It prints where it asks.
+                   Nothing else is started.
+A person only:     lane new, restart and --force refuse when an agent may run them: an agent's marker in the
+                   environment (LANE_ROLE, CLAUDECODE, ...), no terminal on stdin, an agent among the parent processes,
+                   or Orca naming the calling terminal a worker's or marking it an agent's. Doubt refuses. This stops
+                   accidents and is no proof (an agent can open a fresh terminal): agents' personas forbid these forms.
+lane list          one line per lane in Orca's worker list (orchestration worker-list) on the project's worktrees:
+                   lane, issue, PR, CI, idle time, and the lane's own worker: the current dispatch of the chain that
+                   began the lane (Orca's originDispatchId), then each other worker on it (a reviewer, or one that
+                   replaced the first) with its state. lane status: each lane in full. The issue is read from the PR
+                   title's `(<id>)`, else the lane brief's `(bd <id>)`; the PR and CI from GitHub (gh: `?` when gh
+                   cannot answer), the idle time from the lane worker's terminal.
+Exit: 0 done; 1 refused or failed (it says why; nothing was changed unless it says so); 2 usage."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+import re
+import secrets
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+
+def _module(name: str, path: Path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+pp = _module("project_pause", HERE / "project-pause")  # it loads project-setup as pp.ps
+ps = pp.ps
+TIERS = ("swift", "standard", "deep")
+ISSUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}")
+NOTE_MAX = 1000
+LANE_SUBJECT = "lane-control lane new: {issue}"  # the coordinator persona names this subject (Messages)
+RESTART_SUBJECT = "lane-control restart {code}: finish, write your handover, back up, then reply"
+CANCEL_SUBJECT = "lane-control restart {code}: carry on"  # the persona names both
+POLL = float(os.environ.get("LANE_RESTART_POLL") or 3)  # seconds between looks at the reply
+EXIT_WAIT = float(os.environ.get("LANE_RESTART_EXIT_WAIT") or 60)  # seconds for the closed session's process to end
+
+
+class Usage(Exception):
+    pass
+
+
+class NotNow(ps.Fail):
+    """The coordinator answered `not now`: it carries on by itself, so nothing calls the order off."""
+
+
+class Terminated(Exception):
+    """SIGTERM during a restart, turned into an exception so the order is called off first."""
+
+
+def say(step: str, what: str, detail: str = "") -> None:
+    print(f"{step}: {what}" + (f" {detail}" if detail else ""), flush=True)
+
+
+def script(name: str, *args) -> int:
+    """One of the scripts beside this one, its output and the owner's terminal passed through."""
+    sys.stdout.flush()
+    return subprocess.run([sys.executable, str(HERE / name), *args]).returncode
+
+
+def person(place, what: str) -> None:
+    why = ps.agent_caller(place)
+    if why:
+        raise ps.Fail(f"{what} is for a person at a terminal, and {why}. Nothing was sent or started")
+
+
+# --- a project's coordinator -----------------------------------------------------------------------------------------
+
+def native(target: str):
+    """(repo, project, place) of a native Orca project, with the Orca CLI found."""
+    repo = pp.find_repo(target)
+    if ps.attached_to(repo) is not None:
+        raise ps.Fail(f"{repo} is attached to the project at {ps.attached_to(repo)}: use that project")
+    if ps.which_orchestrator(None, repo) != "native-orca":
+        raise ps.Fail(f"{repo} runs on Orca + Cotal: use lane-control project start|stop|status there")
+    ps.ORCHESTRATOR = "native-orca"
+    ps.add_orca_cli_to_path()
+    ps.ORCA = ps.orca_cli()
+    p = ps.native_project(repo)
+    return repo, p, ps.Place()
+
+
+def in_orca_terminal(what: str) -> str:
+    me = os.environ.get("ORCA_TERMINAL_HANDLE")
+    if not me:
+        raise ps.Fail(f"{what} by Orca message, and Orca sends one only from its own terminals (ORCA_TERMINAL_HANDLE "
+                      "is not set here): run it in an Orca terminal. Nothing was sent or changed")
+    return me
+
+
+def live_coordinator(repo: Path, p: dict, place):
+    """The coordinator's Session (project-setup's live check)."""
+    return ps.session_states(place, repo, p["project"])["coordinator"]
+
+
+def run_rows(place) -> list:
+    rows, cursor = [], None
+    for _ in range(100):  # Orca serves at most 100 Runs a page
+        page = place.jrun("orchestration", "run-list", "--full", "--limit", "100",
+                          *(["--cursor", cursor] if cursor else [])).get("result") or {}
+        rows += [r for r in ((page.get("runs") or page.get("items") or []) if isinstance(page, dict) else page)
+                 if isinstance(r, dict)]
+        cursor = page.get("nextCursor") if isinstance(page, dict) else None
+        if not cursor:
+            return rows
+    return rows
+
+
+def coordinator_address(repo: Path, p: dict, place) -> "tuple[str, dict]":
+    """(Run id, terminal) of the live coordinator, tied exactly: its agent proven to run in that terminal (by its
+    process), the terminal titled exactly as the session, and the one Run (not an older session's) whose
+    coordinator_handle is that terminal. The Run's objective is free text (a coordinator names its Run after a batch
+    of work) and is never matched.
+    Anything else is a Fail naming what could not be tied; nothing is sent then."""
+    title = ps.session_title("coordinator", p["project"])
+    state = live_coordinator(repo, p, place)
+    if state.doubt:
+        raise ps.Fail(f"{title}: cannot tell if it runs ({state.doubt}), so nothing was sent: a message to a "
+                      "coordinator that is not there reaches nobody. lane-control coordinator status says more")
+    if not state.live:
+        raise ps.Fail(f"{title} is not running, so nothing was sent: start it with lane-control coordinator start "
+                      f"{p['project']}")
+    t, handle = state.live, state.live.get("handle")
+    if ps.bare_title(t.get("title")) != title:
+        raise ps.Fail(f"{title} runs, but its terminal {handle} is titled {t.get('title')!r}, not {title!r}, so "
+                      "lane-control cannot tie it to the coordinator. Nothing was sent")
+    ok, _ = place.agent_running(repo, "coordinator", handle, title, True)
+    if ok is not True:
+        raise ps.Fail(f"{title} runs, but its process could not be tied to terminal {handle} (its environment does "
+                      "not name it, as after an Orca restore), so lane-control cannot address it. Nothing was sent: "
+                      "tell it in its terminal")
+    old = set(p["st"].get("old_runs") or [])
+    mine = [r for r in run_rows(place) if (r.get("coordinator_handle") or r.get("coordinatorHandle")) == handle
+            and (r.get("id") or r.get("runId")) not in old]
+    if len(mine) != 1:
+        raise ps.Fail(f"{title} runs in {handle}, and Orca's run-list has {len(mine)} Runs whose coordinator is that "
+                      "terminal, not one, so lane-control cannot tie it to a Run. Nothing was sent: tell it in its "
+                      "terminal (it makes its Run with `orca-ide orchestration run-create`)")
+    rid = mine[0].get("id") or mine[0].get("runId")  # its objective is free text (a batch title): never matched
+    recorded = (p["st"].get("runs") or {}).get("coordinator")
+    if recorded and recorded != rid:
+        say("note", "stale record", f"the recorded Run {recorded} is not the live coordinator's ({rid}); using {rid}")
+    return rid, t
+
+
+def busy(place, repo: Path, rid: str) -> list:
+    """The lanes that make a restart wrong: this machine's lane agents (running_lanes) and every worker of the
+    coordinator's Run in progress and live or unverifiable, a box's too (worker-list --include-remote), every page
+    (nextCursor). A list Orca does not give whole is a Fail: never assumed empty."""
+    found = list(ps.running_lanes(place, repo))
+    rows, cursor = [], None
+    try:
+        for _ in range(100):
+            r = place.jrun("orchestration", "worker-list", "--run", rid, "--include-remote", "--limit", "100",
+                           *(["--cursor", cursor] if cursor else []))
+            page = (r.get("result") or {}).get("workers")
+            if not isinstance(page, list):
+                raise KeyError("workers")
+            rows += page
+            cursor = (r.get("result") or {}).get("nextCursor")
+            if not cursor:
+                break
+        else:
+            raise KeyError("more than 100 pages")
+    except (ps.Fail, KeyError, AttributeError) as e:
+        raise ps.Fail(f"Orca's worker list for run:{rid} could not be read whole ({e}), so lane-control cannot tell "
+                      "whether a lane of it runs (here or on a box). Nothing was changed") from None
+    for w in (worker(x) for x in rows if isinstance(x, dict)):  # in progress and live, or not verifiable (a box's)
+        if w["outcome"] == "in_progress" and w["liveness"] in ("live", "unverifiable"):
+            found.append(f"worker {w['dispatch']} ({w['host']}, {w['liveness']})")
+    return found
+
+
+def project_start(target: str, force: bool, yes: bool) -> int:
+    return script("project-pause", "start", target, *(["--force"] if force else []), *(["--yes"] if yes else []))
+
+
+def message_id(got) -> "str | None":
+    return (((got or {}).get("result") or {}).get("message") or {}).get("id") if isinstance(got, dict) else None
+
+
+def reply_to(place, me: str, mid: str, senders: set) -> "dict | None":
+    """The first reply in this terminal's mailbox to message `mid`, from the coordinator (its Run or its terminal);
+    read without marking anything (`inbox`, never a consuming check)."""
+    got = place.jrun("orchestration", "inbox", "--terminal", me, "--limit", "100", "--full")
+    rows = (got.get("result") or {}).get("messages") or []
+    def order(m):  # Orca's sequence is a number: 999 comes before 1000
+        try:
+            return (0, int(m.get("sequence")), "")
+        except (TypeError, ValueError):
+            return (1, 0, str(m.get("id")))
+    for m in sorted((m for m in rows if isinstance(m, dict)), key=order):
+        if m.get("thread_id") == mid and m.get("id") != mid and m.get("from_handle") in senders:
+            return m
+    return None
+
+
+def restart(target: str, wait: float) -> int:
+    repo, p, place = native(target)
+    title = ps.session_title("coordinator", p["project"])
+    state = live_coordinator(repo, p, place)
+    if state.doubt:
+        raise ps.Fail(f"{title}: cannot tell if it runs: {state.doubt}. A restart needs a running coordinator's own "
+                      "answer, so it changes nothing here. If you can tell it is not running: lane-control "
+                      "coordinator start --force")
+    if not state.live:
+        say("restart", "not running", f"{title} is not running, so there is nothing to stop: starting it")
+        return script("project-pause", "start", str(repo))
+    me = in_orca_terminal("restart asks the coordinator")
+    person(place, "restart")
+    rid, term = coordinator_address(repo, p, place)
+    lanes = busy(place, repo, rid)
+    if lanes:
+        raise ps.Fail(f"lanes still running: {', '.join(lanes)}. Their reports go to this session's Run, which a "
+                      "restart ends: restart once they have reported, or stop them first. Nothing was sent or changed")
+    code = secrets.token_hex(6)
+    expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + wait))
+    key = pp.HANDOVER_KEYS["coordinator"]
+    body = (f"A restart order from `lane-control coordinator restart`, run in terminal {me} (code {code}). This "
+            f"order expires at {expires}: after that, or once `carry on {code}` arrives, ignore it. If a merge or its "
+            f"bookkeeping, or anything you must not leave half-done, is in progress, reply `not now: <why>` and carry "
+            f"on. Otherwise finish what is in hand, refresh your handover `{key}` (bd remember), then back up (git -C "
+            f"<beads-repo> push, then bd dolt push), and as your very last step reply to this message (orca-ide "
+            f"orchestration reply --id <this message's id> --body 'ready to stop {code}') and stop working. Your "
+            "terminal is closed only after that reply, and a fresh session resumes from the handover.")
+    mid = message_id(place.jrun("orchestration", "send", "--to", f"run:{rid}", "--subject",
+                                RESTART_SUBJECT.format(code=code), "--body", body))
+    if not mid:
+        raise ps.Fail(f"Orca gave no message id for the order to run:{rid}, so no reply could be matched to it. "
+                      "Nothing was stopped")
+    say("restart 1/4 asked", title, f"(run:{rid}, {mid}, code {code}; waiting up to {int(wait)}s for its reply)")
+
+    def cancel(why: str) -> str:
+        try:
+            place.jrun("orchestration", "send", "--to", f"run:{rid}", "--subject", CANCEL_SUBJECT.format(code=code),
+                       "--body", f"lane-control restart {code} is called off ({why}). Carry on as before: nothing "
+                       "was stopped, and you are not restarted. If you stopped working for it, resume.")
+            return f"`carry on {code}` was sent to it"
+        except BaseException as e:  # noqa: B036 (a second Ctrl-C here still says what to do)
+            return f"the `carry on {code}` message could not be sent ({e or type(e).__name__}): tell it in its " \
+                   "terminal to carry on"
+
+    def terminated(signum, frame):
+        raise Terminated(f"stopped by signal {signum}")
+    old_term = signal.signal(signal.SIGTERM, terminated)
+    try:  # from the order to a done stop, every way out calls the order off first (review M2), except `not now`
+        end, answer, unread = time.time() + wait, None, ""
+        while answer is None:
+            try:
+                answer = reply_to(place, me, mid, {f"run:{rid}", term.get("handle")})
+            except ps.Fail as e:  # one failed read is retried until the deadline
+                unread = str(e)
+            if answer is None:
+                if time.time() >= end:
+                    raise ps.Fail(f"no reply from {title} within {int(wait)}s"
+                                  + (f" (the last mailbox read failed: {unread})" if unread else ""))
+                time.sleep(min(POLL, max(0.2, end - time.time())))
+        text = " ".join(str(answer.get("body") or "").split())
+        if re.match(r"`?not now\b", text, re.I):
+            raise NotNow(f"{title} answered {text[:300]!r}: nothing was stopped or started, and it carries on")
+        if re.fullmatch(rf"`?ready to stop {code}`?\.?", text, re.I) is None:
+            raise ps.Fail(f"{title} answered {text[:300]!r}, not `ready to stop {code}`")
+        say("restart 2/4 ready", title, f"answered {text!r}")
+        lanes = busy(place, repo, rid)
+        if lanes:
+            raise ps.Fail(f"lanes started while it got ready: {', '.join(lanes)}")
+        if script("project-pause", "stop", str(repo), "--no-handover") != 0:
+            raise ps.Fail(f"stopping {title} failed (above)")
+    except NotNow:
+        raise
+    except BaseException as e:
+        why = {KeyboardInterrupt: "interrupted (Ctrl-C)"}.get(type(e)) or str(e) or type(e).__name__
+        raise ps.Fail(f"{why}: nothing was stopped or started, and {cancel(why[:200])}. Run restart again when it "
+                      "is free") from None
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
+    say("restart 3/4 stop", "done", f"{title} closed")
+    end = time.time() + EXIT_WAIT
+    while True:
+        s = live_coordinator(repo, ps.native_project(repo), place)
+        if not (s.live or s.doubt):
+            break
+        if time.time() >= end:
+            raise ps.Fail(f"{title}'s old process is still there {int(EXIT_WAIT)}s after its terminal closed "
+                          f"({s.doubt or 'its agent still runs'}), so no new one was started beside it: run lane-control "
+                          f"coordinator start {target} once it has gone")
+        time.sleep(1)
+    resting = bool(p["st"].get("paused"))
+    rc = script("project-pause", "start", str(repo))
+    if resting:  # it was resting (marked paused, coordinator running): it stays so
+        ps.settings(repo, paused=True)
+    say("restart 4/4 start", "done" if rc == 0 else "failed", title + ("" if rc == 0 else
+        f": run lane-control coordinator start {target}"))
+    return rc
+
+
+# --- the machine coordinator -----------------------------------------------------------------------------------------
+
+def machine(folder: "str | None"):
+    ms = _module("machine_setup", HERE / "machine-setup")
+    try:
+        conf = ms.machineconf.load()
+    except (ms.machineconf.ConfError, OSError, ValueError):
+        conf = {}
+    f = Path(os.path.expanduser(folder or conf.get("MACHINE_COORDINATOR_FOLDER") or "~/machine-coordinator")).resolve()
+    return ms, f
+
+
+def machine_state(ms, folder: Path):
+    mps = ms.project_setup()
+    mps.ORCA = ms.machineconf.orca_cli()
+    return mps, mps.session_state(mps.Place(), ms.TITLE, None, ms.ROLE, folder)
+
+
+def machine_status(folder: "str | None") -> int:
+    ms, f = machine(folder)
+    mps, s = machine_state(ms, f)
+    if s.live:
+        say(ms.TITLE, "running", f"(terminal {s.live.get('handle')}, {f})")
+    elif s.doubt:
+        say(ms.TITLE, "cannot tell", f"({s.doubt}; found: {mps.found_text(s)})")
+    elif s.found:
+        say(ms.TITLE, "recorded but dead", "(a terminal with its title and no live agent: " + ", ".join(
+            str(t.get("handle")) for t in s.found) + "): lane-control coordinator start machine starts it")
+    else:
+        say(ms.TITLE, "not running", f"({f}): lane-control coordinator start machine starts it")
+    return 0
+
+
+def machine_start(folder: "str | None", force: bool, yes: bool, mode: str) -> int:
+    ms, f = machine(folder)
+    persona = f / ".lane-control" / f"{ms.ROLE}.md"
+    pin = ms.persona_pin(f)
+    if not pin:
+        raise ps.Fail(f"no rendered persona with a model in {persona}: run lane-control machine setup first")
+    try:
+        harness, model = ms.harness_model(pin)
+        ms.harnesses.load_harness(harness).start_command(ms.ROLE, persona, model, mode)
+    except (ms.SystemExit2, ValueError) as e:
+        raise ps.Fail(f"{persona}: {e}: run lane-control machine setup") from None
+    if force:
+        ps.add_orca_cli_to_path()
+        ps.ORCA = ps.orca_cli()
+        person(ps.Place(), "--force")
+    mps, s = machine_state(ms, f)
+    if s.live:
+        if force:
+            raise ps.Fail(f"{ms.TITLE} runs (terminal {s.live.get('handle')}): --force never starts a second one. "
+                          "Nothing was started")
+        say(ms.TITLE, "running", f"(terminal {s.live.get('handle')}): nothing was started")
+        return 0
+    if s.doubt and not force:
+        say(ms.TITLE, "cannot tell", mps.cannot_tell(ms.TITLE, s, "run lane-control coordinator start machine again"))
+        return 1
+    how = ""
+    if s.doubt:
+        print(f"{ms.TITLE}: cannot tell if it runs: {s.doubt}.\n  found: {mps.found_text(s)}", flush=True)
+        how = "--yes"
+        if not yes:
+            if not mps.has_terminal():
+                raise ps.Fail("--force asks you once in a terminal, and there is none here. Nothing was started")
+            if not mps.owner_says_yes(f"If it runs there, a second {ms.TITLE} would start beside it. Start one "
+                                      "anyway? [y/N] ", "force"):
+                raise ps.Fail("not forced: nothing was started")
+            how = "y typed in a terminal"
+    say(ms.TITLE, "mode", f"{mode} (--permission-mode; machine setup saves none)")
+    try:
+        did = ms.start_step(harness, model, mode, f, persona, False, force=bool(s.doubt)) or ""
+    except (ms.Fail, mps.Fail) as e:
+        did = f"failed: {e}"
+        if not how:
+            raise ps.Fail(str(e)) from None
+    if how:  # after the start, with what came of it
+        rec = f / ".lane-control" / "forced-starts.json"
+        try:
+            rows = json.loads(rec.read_text()) if rec.is_file() else []
+        except (OSError, ValueError):
+            rows = []
+        rows = [*(rows if isinstance(rows, list) else []), {
+            "role": ms.ROLE, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "confirmed": how,
+            "from_terminal": os.environ.get("ORCA_TERMINAL_HANDLE") or "none", "outcome": did[:300],
+            "doubt": s.doubt, "terminals": [t.get("handle") for t in s.found], "found": mps.found_text(s)}][-20:]
+        ps.write_atomic(rec, (json.dumps(rows, indent=2) + "\n").encode(), 0o600)
+        say("force", "recorded", f"{rec} ({did})")
+        if did.startswith("failed"):
+            raise ps.Fail(did)
+    return 0 if did.startswith(("created", "exists")) else 1
+
+
+# --- --on <host> -----------------------------------------------------------------------------------------------------
+
+def on_host(host: str, words: list) -> int:
+    """The box's own lane-control (its installed `current`), with these words, over ssh; a terminal (-t) when we have
+    one, so --force can ask there."""
+    why = ps.host_refusal(host)
+    if why:
+        raise Usage(why)
+    cmd = ps.remote_cmd("core/scripts/lane-control", words)
+    tty = sys.stdin.isatty()
+    sys.stdout.flush()
+    return subprocess.run([*ps.ssh_base(), *(["-t"] if tty else []), "--", host, cmd],
+                          stdin=None if tty else subprocess.DEVNULL).returncode
+
+
+# --- lanes -----------------------------------------------------------------------------------------------------------
+
+def lane_new(target: str, issue: str, tier: "str | None", note: "str | None") -> int:
+    if not ISSUE.fullmatch(issue):
+        raise Usage(f"{issue!r} is not an issue id (letters, digits, . _ -)")
+    if note is not None and (len(note) > NOTE_MAX or any(ord(c) < 32 and c not in "\t" for c in note)):
+        raise Usage(f"--note is one line of at most {NOTE_MAX} characters")
+    repo, p, place = native(target)
+    person(place, "lane new")
+    me = in_orca_terminal("lane new asks the coordinator")
+    title = ps.session_title("coordinator", p["project"])
+    rid, term = coordinator_address(repo, p, place)
+    body = (f"A request from `lane-control lane new`, run in terminal {me}: a lane for issue {issue}"
+            + (f", on the {tier} tier" if tier else "") + (f"; with the note: {note}" if note else "") + ". It is not "
+            "the owner's approval (names prove nothing): apply your normal gate. Confirm it with the owner in your "
+            "terminal first, in one question with the issue, the tier and your recommendation; on their yes, gate "
+            "it (lane-room, the budget, the issue open and unclaimed), brief, review and merge it as any lane.")
+    mid = message_id(place.jrun("orchestration", "send", "--to", f"run:{rid}", "--subject",
+                                LANE_SUBJECT.format(issue=issue), "--body", body))
+    say("lane new", "sent", f"to {title} (run:{rid}{', ' + mid if mid else ''}): a request for a lane for {issue}"
+        + (f" ({tier})" if tier else ""))
+    print(f"  it asks you in its terminal {term.get('handle')} ({title}) before it opens the lane, and answers there\n"
+          f"  the lane reports to {title}; once it runs, lane-control lane list {target} shows it with its PR and CI")
+    return 0
+
+
+def all_pages(place, *args) -> "tuple[list, dict]":
+    rows, cursor, scope = [], None, {}
+    for _ in range(20):
+        r = (place.jrun(*args, "--limit", "100", *(["--cursor", cursor] if cursor else [])).get("result") or {})
+        rows += [w for w in (r.get("workers") or []) if isinstance(w, dict)]
+        scope = scope or r.get("scope") or {}
+        cursor = r.get("nextCursor")
+        if not cursor:
+            break
+    return rows, scope
+
+
+def worker(w: dict) -> dict:
+    """One worker row, concise or --full, as the same fields."""
+    pr, res = w.get("projection") or {}, w.get("resource") or {}
+    prov = pr.get("provider") or {}
+    return {"dispatch": w.get("dispatchId"), "task": w.get("taskId"), "run": w.get("runId") or pr.get("runId"),
+            "state": w.get("state") or w.get("workerState") or "?",
+            "liveness": w.get("liveness") or (pr.get("liveness") or {}).get("verdict") or "?",
+            "outcome": w.get("outcome") or pr.get("outcome"),
+            "agent": w.get("agent") or "/".join(x for x in (prov.get("id"), prov.get("model")) if x) or "-",
+            "terminal": w.get("terminal") or w.get("agentTerminalHandle") or res.get("terminalHandle"),
+            "terminal_state": w.get("terminalState") or res.get("releaseState"),
+            "origin": res.get("originDispatchId") or w.get("dispatchId"),
+            "host": w.get("host") or (pr.get("host") or {}).get("id") or "local",
+            "workspace": str(w.get("workspace") or res.get("worktreeId") or (pr.get("workspace") or {}).get("id") or "")}
+
+
+def ci_of(rollup) -> str:
+    if not isinstance(rollup, list) or not rollup:
+        return "none"
+    states = [str(c.get("conclusion") or c.get("state") or c.get("status") or "").upper() for c in rollup
+              if isinstance(c, dict)]
+    if any(s in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE") for s in states):
+        return "failing"
+    if any(s in ("", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED") for s in states):
+        return "pending"
+    return "passing"
+
+
+def pr_of(repo: Path, ref: str) -> "tuple[dict, str]":
+    """({number, title, state, ci}, '') of the PR for a branch or number (gh pr view); ({}, '') when there is none;
+    ({}, why) when gh cannot answer."""
+    try:
+        r = subprocess.run(["gh", "pr", "view", ref, "--json", "number,title,state,statusCheckRollup"], cwd=repo,
+                           capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {}, f"gh: {type(e).__name__}"
+    if r.returncode != 0:
+        err = (r.stderr.strip() or f"exit {r.returncode}").splitlines()[-1][:200]
+        return ({}, "") if "no pull requests found" in err.lower() else ({}, err)
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        return {}, "gh printed no JSON"
+    if not isinstance(d, dict):
+        return {}, "gh printed no PR"
+    return {"number": d.get("number"), "title": d.get("title") or "", "state": (d.get("state") or "").lower(),
+            "ci": ci_of(d.get("statusCheckRollup"))}, ""
+
+
+def idle_text(ms) -> str:
+    if not isinstance(ms, (int, float)) or ms <= 0:
+        return "unknown"
+    m = max(0, int((time.time() * 1000 - ms) // 60000))
+    return f"{m}m" if m < 60 else f"{m // 60}h{m % 60:02d}m" if m < 48 * 60 else f"{m // 1440}d"
+
+
+TITLE_ISSUE = re.compile(r"\(([A-Za-z0-9][A-Za-z0-9._-]*-[A-Za-z0-9._-]+)\)\s*$")
+BRIEF_ISSUE = re.compile(r"\(bd ([A-Za-z0-9][A-Za-z0-9._]*-[A-Za-z0-9._-]+)\)")  # the lane brief's "Your task: <KEY> (bd <id>)"
+
+
+def brief_issue(place, run: "str | None", task: "str | None", cache: dict) -> str:
+    if not (run and task):
+        return ""
+    if run not in cache:
+        try:
+            got = place.jrun("orchestration", "task-list", "--run", run, "--full").get("result")
+            cache[run] = got if isinstance(got, list) else (got or {}).get("tasks") or []
+        except (ps.Fail, AttributeError):
+            cache[run] = []
+    spec = next((str(t.get("spec") or "") for t in cache[run] if isinstance(t, dict) and t.get("id") == task), "")
+    m = BRIEF_ISSUE.search(spec)
+    return m.group(1) if m else ""
+
+
+def lanes(target: str) -> "tuple[str, list, dict, str]":
+    repo = pp.find_repo(target)
+    ps.add_orca_cli_to_path()
+    ps.ORCA = ps.orca_cli()
+    place = ps.Place()
+    project = ps.settings(repo).get("name") or repo.name
+    rid = next((r["id"] for r in place.jrun("repo", "list")["result"]["repos"] if Path(r["path"]) == repo), None)
+    if rid is None:
+        raise ps.Fail(f"{repo} is not a repo in Orca (`orca-ide repo list`): lane-control project setup it first")
+    wts = {os.path.realpath(w["path"]): w for w in place.jrun("worktree", "list")["result"]["worktrees"]
+           if str(w.get("id", "")).startswith(rid + "::") and Path(w["path"]) != repo}
+    rows, scope = all_pages(place, "orchestration", "worker-list", "--full")
+    terms = {t.get("handle"): t for t in place.jrun("terminal", "list")["result"]["terminals"]}
+    on = {}
+    for w in map(worker, rows):  # Orca lists the newest first
+        path = os.path.realpath(w["workspace"].split("::", 1)[-1] or "/nonexistent")
+        if path in wts:
+            on.setdefault(path, []).append(w)
+    out, gh_error, tasks = [], "", {}
+    for path, ws in on.items():
+        root = ws[-1]["origin"]  # the chain that began the lane: its oldest worker's
+        chain = [w for w in ws if w["origin"] == root or w["dispatch"] == root]
+        wt = wts[path]
+        branch = re.sub(r"^refs/heads/", "", wt.get("branch") or "")
+        ref = str(wt["linkedPR"]) if wt.get("linkedPR") else branch
+        pr, why = pr_of(repo, ref) if ref else ({}, "")
+        gh_error = gh_error or why
+        m = TITLE_ISSUE.search(pr.get("title", ""))
+        issue = m.group(1) if m else brief_issue(place, chain[-1]["run"], chain[-1]["task"], tasks)
+        term = terms.get(chain[0]["terminal"]) or {}
+        out.append({"lane": wt.get("displayName") or Path(path).name, "issue": issue or "-", "pr": pr,
+                    "gh": bool(why), "idle": idle_text(term.get("lastOutputAt") or wt.get("lastActivityAt")),
+                    "worker": chain[0], "chain": chain, "others": [w for w in ws if w not in chain],
+                    "branch": branch, "path": path})
+    return project, sorted(out, key=lambda r: r["lane"]), scope, gh_error
+
+
+def pr_text(r: dict) -> str:
+    pr = r["pr"]
+    if r["gh"]:
+        return "PR ?"
+    if not pr.get("number"):
+        return "no PR"
+    return f"PR #{pr['number']}" + (f" {pr['state']}" if pr.get("state") not in ("", "open") else "")
+
+
+def lane_list(target: str, full: bool) -> int:
+    project, rows, scope, gh_error = lanes(target)
+    if gh_error:
+        print(f"lane-spawn: note: gh could not answer ({gh_error}), so PR and CI show `?`", file=sys.stderr)
+    if scope.get("source") == "bound":
+        print("note: this terminal is bound to an Orca Run, and Orca lists only that Run's workers")
+    if not rows:
+        print(f"{project}: no lane in Orca's worker list")
+        return 0
+    if not full:
+        width = max(len(r["lane"]) for r in rows)
+        print(f"{'lane':<{width}}  {'issue':<16} {'PR':<14} {'CI':<8} {'idle':<7} worker")
+        for r in rows:
+            w = r["worker"]
+            print(f"{r['lane']:<{width}}  {r['issue']:<16} {pr_text(r):<14} "
+                  f"{'?' if r['gh'] else r['pr'].get('ci', '-'):<8} {r['idle']:<7} {w['state']}/{w['liveness']}"
+                  + "".join(f" +{o['dispatch']} {o['state']}/{o['liveness']}" for o in r["others"]))
+        return 0
+    for r in rows:
+        w = r["worker"]
+        print(f"{r['lane']}: issue {r['issue']} · {pr_text(r)} · ci {'?' if r['gh'] else r['pr'].get('ci', '-')} · "
+              f"idle {r['idle']}")
+        print(f"  worker {w['dispatch']} (task {w['task']}): {w['state']}, {w['liveness']}, outcome {w['outcome']}, "
+              f"{w['agent']}, terminal {w['terminal']} ({w['terminal_state']})"
+              + (f"; earlier in its chain: {', '.join(str(x['dispatch']) for x in r['chain'][1:])}"
+                 if len(r["chain"]) > 1 else ""))
+        for o in r["others"]:
+            print(f"  also on it (another chain: a reviewer, or a worker that replaced the first): {o['dispatch']} "
+                  f"(task {o['task']}): {o['state']}, {o['liveness']}, outcome {o['outcome']}")
+        print(f"  branch {r['branch'] or '-'} · {r['path']}")
+    return 0
+
+
+# --- the forms -------------------------------------------------------------------------------------------------------
+
+def seconds(v: str) -> float:
+    try:
+        f = float(v)
+    except ValueError:
+        f = float("nan")
+    if not math.isfinite(f) or f < 0:
+        raise argparse.ArgumentTypeError(f"{v!r} is not a number of seconds (0 or more)")
+    return f
+
+
+def parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="lane-spawn", description=__doc__.split("\n\n")[0], allow_abbrev=False,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    group = ap.add_subparsers(dest="group", required=True)
+    c = group.add_parser("coordinator", help="a project's coordinator, or the machine coordinator", allow_abbrev=False)
+    cv = c.add_subparsers(dest="verb", required=True)
+    for verb, what in (("start", "start it unless it runs (live check)"),
+                       ("restart", "on its own 'ready to stop': stop, then start"), ("status", "whether it runs")):
+        v = cv.add_parser(verb, help=what, description=what, prog=f"lane-control coordinator {verb}", allow_abbrev=False)
+        v.add_argument("project", help="the project's folder or name" + ("" if verb == "restart" else ", or machine"))
+        v.add_argument("--on", metavar="HOST", help="run the box's own lane-control there over ssh")
+        if verb == "start":
+            v.add_argument("--force", action="store_true", help="start under `cannot tell`, asking once (a person only)")
+            v.add_argument("--yes", action="store_true", help="with --force: do not ask (a person's terminal still)")
+            v.add_argument("--permission-mode", default="auto", metavar="MODE",
+                           help="the machine coordinator's (machine only; default auto)")
+        if verb == "restart":
+            v.add_argument("--wait", type=seconds, default=pp.HANDOVER_WAIT, metavar="SECONDS",
+                           help=f"how long to wait for its reply (default {pp.HANDOVER_WAIT})")
+        if verb != "restart":
+            v.add_argument("--folder", help="the machine coordinator's folder (machine only)")
+    lane = group.add_parser("lane", help="a project's lanes", allow_abbrev=False)
+    lv = lane.add_subparsers(dest="verb", required=True)
+    v = lv.add_parser("new", prog="lane-control lane new", help="ask the coordinator for a lane", allow_abbrev=False,
+                      description="send the project's coordinator a request, by Orca message, for a lane for an issue")
+    v.add_argument("project")
+    v.add_argument("issue")
+    v.add_argument("--tier", choices=TIERS)
+    v.add_argument("--note", help="one line for the brief")
+    for verb in ("list", "status"):
+        v = lv.add_parser(verb, prog=f"lane-control lane {verb}", help="the lanes in Orca's worker list",
+                          allow_abbrev=False,
+                          description="the project's lanes from Orca's worker list: lane, issue, PR, CI, idle time")
+        v.add_argument("project")
+    return ap
+
+
+def on_words(argv: list) -> "tuple[str | None, list]":
+    """(--on's host, argv without it)."""
+    out, host, i = [], None, 0
+    while i < len(argv):
+        x = argv[i]
+        if x == "--on" and i + 1 < len(argv):
+            host, i = argv[i + 1], i + 2
+            continue
+        if x.startswith("--on="):
+            host = x[5:]
+        else:
+            out.append(x)
+        i += 1
+    return host, out
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    a = parser().parse_args(argv)
+    if os.geteuid() == 0:
+        print("lane-spawn: refusing to run as root; agents run as a normal user", file=sys.stderr)
+        return 2
+    try:
+        if a.group == "coordinator":
+            if getattr(a, "yes", False) and not a.force:
+                raise Usage("--yes goes with --force")
+            if a.on is not None:  # `--on ""` (an unset $BOX) is refused there, never run here
+                return on_host(a.on, on_words(argv)[1])
+            if a.project == "machine":
+                if a.verb == "restart":
+                    raise Usage("restart is for a project's coordinator; the machine coordinator: start or status")
+                return machine_status(a.folder) if a.verb == "status" else machine_start(
+                    a.folder, a.force, a.yes, a.permission_mode)
+            if getattr(a, "folder", None) or getattr(a, "permission_mode", "auto") != "auto":
+                raise Usage("--folder and --permission-mode are for the machine coordinator (coordinator start|status "
+                            "machine)")
+            if a.verb == "start":
+                return project_start(a.project, a.force, a.yes)
+            if a.verb == "status":
+                return script("project-pause", "status", a.project)
+            return restart(a.project, a.wait)
+        if a.verb == "new":
+            return lane_new(a.project, a.issue, a.tier, a.note)
+        return lane_list(a.project, a.verb == "status")
+    except Usage as e:
+        print(f"lane-spawn: {e}", file=sys.stderr)
+        return 2
+    except ps.Fail as e:
+        print(f"lane-spawn: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

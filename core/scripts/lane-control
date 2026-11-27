@@ -2,9 +2,10 @@
 """lane-control: the one front door (core/frontdoor.py) and the one versioned lane-control tree on this machine
 (core/install.py).
 
-  lane-control project|machine|ratchet <verb> ...
-        runs the script that form names (project-setup, project-pause, machine-setup, machine-check, lane-improve) with
-        the arguments it puts first and every other argument unchanged; `lane-control help` lists them all.
+  lane-control project|coordinator|lane|machine|ratchet <verb> ...
+        runs the script that form names (project-setup, project-pause, machine-setup, machine-check, lane-improve,
+        lane-spawn) with the arguments it puts first and every other argument unchanged; `lane-control help` lists
+        them all.
   lane-control install [--version <sha|tag|branch>] [--from <checkout>]
         lay the whole tree of that commit (default: the checkout's HEAD) at
         ${XDG_DATA_HOME:-~/.local/share}/lane-control/<sha>/, switch `current` to it by rename and link the lane tools
@@ -360,7 +361,7 @@ def front_door(argv: list) -> int:
         one = {s for (g, _), (s, *_) in F.ROUTES.items() if g == group}
         if not argv[1:] or len(one) != 1:
             return 0 if argv[1:] else 2
-        r = (one.pop(), ["--help"])  # a group of one script (ratchet): its own whole help follows
+        r = (one.pop(), [*F.shared_first(group), "--help"])  # a group of one script: its own help follows
     else:
         text = F.verb_help(argv)
         if text is not None:

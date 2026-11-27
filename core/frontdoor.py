@@ -1,7 +1,10 @@
-"""The one front door: `lane-control project|machine|ratchet ...` and the scripts each form runs (owner 2026-11-26,
+"""The one front door: `lane-control project|coordinator|lane|machine|ratchet ...` and the scripts each form runs (owner 2026-11-26,
 lc-35h). A form only names a script and the arguments it puts first; every other argument goes through unchanged, so
 the script decides everything as before. The old names keep working; run by hand in a terminal, each says its new form
 once on stderr (`hint`), and nothing when the front door, another script or an automation runs it.
+
+`lane-control coordinator ...` and `lane-control lane ...` (owner 2026-11-26, lc-wja: "commands to spawn new lanes,
+especially coordinators") run lane-spawn, which has no old name.
 
 The ratchet is unattended improvement (owner 2026-11-26: "only moves forward"), the mode lane-improve switches; its
 docs and its skill still call it away-improve mode in places. `lane-control improve ...` is kept as an alias.
@@ -31,6 +34,16 @@ ROUTES = {
                           "rest; close its coordinator"),
     ("project", "start"): ("project-pause", ["start"], "<project>", "start its missing agents"),
     ("project", "status"): ("project-pause", ["status"], "<project>", "running, resting or paused"),
+    ("coordinator", "start"): ("lane-spawn", ["coordinator", "start"], "<project>|machine [--force]",
+                               "start it unless it runs"),
+    ("coordinator", "restart"): ("lane-spawn", ["coordinator", "restart"], "<project> [--wait S]",
+                                 "stop, start on its own ready reply"),
+    ("coordinator", "status"): ("lane-spawn", ["coordinator", "status"], "<project>|machine",
+                                "running, dead or cannot tell"),
+    ("lane", "new"): ("lane-spawn", ["lane", "new"], "<project> <issue> [--tier T] [--note N]",
+                      "send its coordinator a request"),
+    ("lane", "list"): ("lane-spawn", ["lane", "list"], "<project>", "lane, issue, PR, CI, idle time"),
+    ("lane", "status"): ("lane-spawn", ["lane", "status"], "<project>", "each lane in full"),
     ("machine", "setup"): ("machine-setup", [], "[--host <host>] [--check]", "set it up once; --check reads only"),
     ("machine", "report"): ("machine-check", ["--peek"], "[--last]", "budget, memory, runners; read only"),
     ("ratchet", "on"): ("lane-improve", ["on"], "[--hours N] [--project <name>]...", "only on the owner's word"),
@@ -42,10 +55,13 @@ ROUTES = {
     ("ratchet", "cycle"): ("lane-improve", ["cycle"], "<project> [options]", "a cycle's recorded state"),
 }
 
-GROUPS = {"project": "a project and its coordinator", "machine": "this machine (or a box)",
+GROUPS = {"project": "a project and its coordinator",
+          "coordinator": "coordinators: start one (live check), restart it, or see whether it runs",
+          "lane": "lanes: ask a project's coordinator for one, or list them", "machine": "this machine (or a box)",
           "ratchet": "the ratchet, unattended improvement (presence is lane-away)"}
 ALIASES = {"improve": "ratchet"}  # the name before the owner's rename (2026-11-26): works, and says the new one
 OLD = ("project-setup", "project-pause", "machine-setup", "machine-check", "lane-improve")
+NEW = ("lane-spawn",)  # a script only its forms run (lc-wja): no old name, so no hint
 INTERNAL = ("--via-host", "--box-pairing")  # project-setup run by another project-setup: never a person
 
 # `<verb> --help` for the forms whose script has no help of its own for that verb (review M1); the others pass it on.
@@ -60,7 +76,10 @@ and waiting for it. Refuses, naming them, while a lane or reviewer runs. Runs pr
   --wait SECONDS   how long to wait for the handover (default 600)
   --no-handover    close the terminals without asking for one""",
     ("project", "start"): """Starts the project's missing standing agents, each resuming its recorded session.
-Runs project-pause start <project>.""",
+Runs project-pause start <project>.
+
+  --force   start it although the live check cannot tell (asks once; a person at a terminal only)
+  --yes     with --force: do not ask""",
     ("project", "status"): """Says whether its coordinator runs, rests or is paused, and what else runs.
 Runs project-pause status <project>.""",
     ("project", "remove-host"): """Undoes a box's desktop lanes (direction 2): the box forgets this machine's Orca
@@ -88,6 +107,17 @@ def route(argv: list):
     if script == "machine-check" and rest == ["--last"]:
         return script, rest  # what the last check found: --last alone (machine-check takes one of the two)
     return script, [*first, *rest]
+
+
+def shared_first(group: str) -> list:
+    """The first arguments every form of the group puts first (lane-spawn's group word; none for the ratchet)."""
+    firsts = [first for (g, _), (_, first, *_) in ROUTES.items() if g == group]
+    out = []
+    for words in zip(*firsts):
+        if len(set(words)) != 1:
+            break
+        out.append(words[0])
+    return out
 
 
 def usage(group: str, verb: str) -> str:

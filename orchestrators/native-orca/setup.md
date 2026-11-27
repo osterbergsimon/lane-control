@@ -40,7 +40,9 @@ record and starts it; the old terminal is left open for you to close); and `cann
 cannot be read or placed. After an Orca restore, a coordinator can run as `claude --resume <id>` in a sandbox whose
 environment lane-control cannot read: it is ruled out only when its command line names another session or Claude's
 transcript for that id is under other folders alone. `cannot tell` starts nothing, so there is never a second
-coordinator; if the terminal it names is an empty shell, close it and run again.
+coordinator; if the terminal it names is an empty shell, close it and run again. When you can tell it is not running
+and the check cannot, `lane-control coordinator start <project> --force` (a person at a terminal only) asks once,
+starts it and records how it was confirmed (`forced_starts` in the settings store); it never overrides `running`.
 
 ## Beads
 Where a project's beads lives, its backup and its restore: `core/issues.md`, "Where beads lives". `lane-control project
