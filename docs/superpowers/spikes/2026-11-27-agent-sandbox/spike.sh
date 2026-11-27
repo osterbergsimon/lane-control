@@ -39,14 +39,14 @@ KEY="fake-gateway-key-$$-$RANDOM"                    # the one secret the lane's
 P0=$((40000 + RANDOM % 9000)); OPEN_PORT=$P0; CLOSED_PORT=$((P0+1)); UDP_PORT=$((P0+2)); HOST_PORT=$((P0+3))
 INBOUND_PORT=$((P0+4)); ABSTRACT="sbx-spike-$$"
 GIT_ID=(-c user.name=spike-owner -c user.email=owner@example.invalid)
-CAP=$((10 << 20))
+CAP=$((64 << 20))   # the spec's outbox cap
 fail=0
 expect() { if eval "$2"; then echo "   ok   $1"; else echo "   FAIL $1"; fail=1; fi; }
 
 "${H_PY[@]}" serve "$OPEN_PORT" "$CLOSED_PORT" "$UDP_PORT" "$HOST_PORT" "$ABSTRACT" &
 listener=$!
 trap 'kill $listener 2>/dev/null || true' EXIT
-"${H_PY[@]}" host-addrs "$IP" "$S/addrs" | sed 's/^/   /'
+"${H_PY[@]}" host-addrs "$IP" "$S/addrs" >/dev/null   # never printed: a fact about the machine
 printf '%s\n' "$KEY" >"$S/key"
 sleep 1
 

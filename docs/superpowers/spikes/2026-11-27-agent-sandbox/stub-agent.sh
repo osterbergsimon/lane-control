@@ -128,7 +128,7 @@ ln -s "$SPIKE_OUTBOX_HOST/push.bundle" "$O/push-b"                            # 
 { printf '# v2 git bundle\n%s refs/heads/%s\n\n' "$SPIKE_LEARNED" "$branch"   # c: id-only bundle, empty pack
   git pack-objects -q --stdout </dev/null; } >"$O/push-c"
 mkfifo "$O/push-d"                                                            # d: a FIFO
-python3 -I -c 'import sys; open(sys.argv[1], "wb").truncate(20 << 20)' "$O/push-e"  # e: over the size cap
+python3 -I -c 'import sys; open(sys.argv[1], "wb").truncate(80 << 20)' "$O/push-e"  # e: over the size cap
 extra=$(git commit-tree -p HEAD -m extra "$(git write-tree)") && git update-ref refs/heads/extra "$extra" &&
   git bundle create -q "$O/push-f" "$branch" extra "^origin/main" 2>/dev/null  # f: two refs, both with new commits
 git init -q /tmp/orphan && git -C /tmp/orphan commit -q --allow-empty -m orphan &&

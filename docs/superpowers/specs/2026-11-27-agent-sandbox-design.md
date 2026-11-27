@@ -1,353 +1,365 @@
 # Agent sandbox: bwrap around agent lanes (SBX-1)
 
-Status: design, round 2, for the owner's approval. Issue lc-9r81. No product code yet: the plan is
-`docs/superpowers/plans/2026-11-27-agent-sandbox.md`; the spike is `docs/superpowers/spikes/2026-11-27-agent-sandbox/`.
+Status: design, round 3, for the owner's approval. Issue lc-9r81. No product code yet: the plan is
+`docs/superpowers/plans/2026-11-27-agent-sandbox.md`; the spike is `docs/superpowers/spikes/2026-11-27-agent-sandbox/`
+(`spike.sh`, `stub-agent.sh`, `spike_helpers.py`). What needs a measurement or the owner is filed as children of
+lc-9r81 (lc-9r81.1 to .4) and listed under "Open questions".
 
-Round 1's review (B1-B8, M1-M8, m1, m2, n1) showed that a lane working in a worktree of the shared repository
-cannot be made safe with read-only binds: the worktree, the object store and every git command run on them later
-are shared with the unsandboxed side. Round 2 changes the approach: **the lane works in its own clone**, which no
-host tool ever runs git in; its commits come back as a bundle that is checked outside; it reaches Orca, GitHub,
-beads and the base branch only through typed broker requests; and it has its own network namespace. The last
-section answers each finding in one line.
+Round 1 moved the lane into its own clone. Round 2's review (B1-B6, M1-M6, m1-m4) found that the launch kept
+capabilities, the broker trusted the lane's outbox, the launch could not start as written, the history check missed
+side branches, CI runs lane code, and a relaunch lost work. Round 3 fixes each one; every fix is a spike probe or a
+line here with its reason, and the last two sections answer round 1 and round 2 one finding per line.
 
 ## Why
 
 The owner, 2026-11-27: "go for sandbox". Protections written as agent config keep failing, because the agent can
 write that config or go around it: lc-mpb5 (OpenCode reads floor paths through grep, the shell and links),
-lc-yw1g.1 (one `allow` policy in a writable `opencode.json` lifts the floor), lc-yw1g.2-.10, and LIT-2's lc-8h1.1-.3
-(git run on an agent-written repo runs the repo's programs; a gate that checks the agent's writes afterwards can be
-fooled). What holds is a boundary the agent cannot write.
+lc-yw1g.1 (one `allow` policy in a writable `opencode.json` lifts the floor), lc-yw1g.2-.10, and LIT-2's lc-8h1.1-.3.
+What holds is a boundary the agent cannot write.
 
 ## Threat model
 
-**Who.** The agent process of a lane or a reviewer, and every process it starts (tools, shell, plugins, MCP servers,
-tests). Same uid as the owner. Its model may be steered by anything it reads (repo, issues, PR comments, web pages,
-tool output): assumed hostile. The coordinator and the owner's own sessions are trusted and stay unsandboxed; they
-must never run what a lane wrote before it is reviewed (see "Who runs lane-written code").
+**Who.** The agent process of a lane or a reviewer, and every process it starts. Same host uid as the owner. Its
+model may be steered by anything it reads: assumed hostile. The coordinator and the owner's own sessions are trusted
+and stay unsandboxed; they must never run what a lane wrote before review ("Who runs lane-written code").
 
 **Must never read** (the floor):
-- Secrets and auth anywhere on the machine: `~/.ssh`, `~/.gnupg`, OpenCode's `auth.json` and `mcp-auth.json`,
-  Claude's `.credentials.json` and `.claude.json`, `~/.config/gh`, `~/.netrc`, `~/.git-credentials`,
-  `~/.docker`, `~/.aws`, `~/.kube`; `.env` and `.env.*` files, including untracked ones in the project's checkout.
-- The project's `--private` paths, tracked or not.
-- lane-control's config and state, the beads database, Orca's settings and data (`~/.config/orca`), the owner's
-  global agent config (`~/.config/opencode`, `~/.claude`, `~/.agents`) beyond the generated copies listed below.
-- The shared repository: other lanes' branches and commits, the owner's unpushed refs and stashes, the main
-  checkout's files; other lanes' clones; the rest of `$HOME`.
-- Secret values in the environment other than the one key the lane's agent needs (see "Network").
+- Secrets and auth anywhere on the machine (`~/.ssh`, `~/.gnupg`, OpenCode's `auth.json` and `mcp-auth.json`,
+  Claude's `.credentials.json` and `.claude.json`, `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, `~/.docker`,
+  `~/.aws`, `~/.kube`), and `.env`/`.env.*` files at any depth, tracked or not, except the template names in
+  "The lane's repository".
+- The project's `--private` paths, tracked or not, anywhere in the delivered history.
+- lane-control's config and state, Orca's settings and data, the owner's global agent config beyond the generated
+  copies below; the beads database beyond the lane's own issue and the issues it lists as links; the owner's review
+  folder beyond the files `prepare` names for this ticket.
+- The shared repository (other lanes' branches and commits, the owner's unpushed refs and stashes, the main
+  checkout), other lanes' clones, the rest of `$HOME`.
+- Secret values in the environment other than the one key its agent needs, and nothing secret through host argv.
 
-**Must never write** anything outside its own clone, its outbox and its per-lane cache; in particular nothing that
-an unsandboxed process later loads or runs: the shared repo (objects, refs, config, hooks), any worktree the host
-sees, the beads folder (its `hooks/`), caches or tools another lane or a reviewer uses, Orca's or lane-control's
-files.
+**Must never write** anything outside its own clone, its outbox and its own cache and data folders; in particular
+nothing an unsandboxed process later loads or runs, and no read-only bind (remount included).
 
-**Must never start or steer anything outside the sandbox.** Every route found, and what closes it:
+**Must never start or steer anything outside.** Every route found, what closes it, and the check:
 
-| Route out | Closed by |
-|---|---|
-| Host git on a tree the agent wrote: a nested repo added as a gitlink whose config sets `core.fsmonitor` runs in any host `git status` (review B2; the spike's control shows it); a rewritten `.git` file, `commondir`, hooks or config | The lane works in its own clone. The host never runs git in it: Orca's worktree for the lane stays at the base and is not mounted inside; commits leave only as a bundle that the broker imports into the shared repo with fsck (no git runs in the clone); a reviewer gets a fresh clone of the pushed branch (git checkout never creates a nested `.git`). The spike checks all three and shows host git in the clone itself would run the program |
-| Deleting or rewriting shared objects or refs (B4) | The shared repo is not mounted at all |
-| Orca's CLI (`terminal create`, `agent launch`, `worker-start`, `send --to bot:...`, `--body-file <floor file>`) | `~/.config/orca` (its socket and `orca-runtime.json`) is not mounted. Typed broker requests only; no argv or path crosses (B1) |
-| gh with file or editor flags (`--body-file`, `--attach`, `--template`, `--web`, `--editor`), other PRs | Typed broker requests; the PR is always the lane branch's own (B1) |
-| beads hooks (`.beads/hooks/on_*`) that the coordinator's `bd` runs (B3) | The beads folder is not mounted; typed bd requests, DB path from lane-control's record |
-| The session bus, user systemd, `ssh-agent`, `gpg-agent`, Wayland, PipeWire, docker or podman sockets | `/run`, `/var/run` and `$XDG_RUNTIME_DIR` are not mounted (`/run` is a tmpfs); their variables are not passed |
-| X11's abstract socket and services on the host's loopback (an X server with XTEST is a way to type into other windows: M3) | Its own network namespace (pasta, below): no host abstract socket, no host loopback except ports forwarded on purpose. The spike checks both |
-| The nix daemon: where the user is a nix trusted user, the socket can import unsigned store paths, which is root-equivalent | Only `/nix/store` is mounted, never `/nix/var` (M4; the spike checks the connect) |
-| Another process's environment through `/proc`, including bwrap's own pid-1 helper, which keeps the environment bwrap was started with | `--unshare-pid` and a new `/proc`; bwrap and pasta are started from `env -i` (the spike's naive run shows the leak otherwise) |
-| Typing into the pane's host shell with `TIOCSTI` | `--new-session`, unless the kernel refuses `TIOCSTI` to unprivileged callers (`dev.tty.legacy_tiocsti=0`, Linux 6.2+); then the flag is dropped so the TUI keeps its controlling terminal (M2) |
-| Code another sandboxed agent runs later: a poisoned cache, a tool in a shared folder (M7) | Caches per lane, never shared; tools from `/nix/store` built outside from lane-control's own list |
-| Lane-written files that an unsandboxed agent or person loads: `.claude/settings*.json` hooks, `.mcp.json`, `.envrc`, `orca.yaml` scripts, a Makefile run by a check (B7) | No host worktree ever holds lane-written files before review: Orca's worktree stays at the base; reviewers and check reruns run sandboxed on a fresh clone (or read only the PR diff); after review the owner's merge is the normal trust step |
-| A pushed branch: `--force`, `main`, another repo, the owner's key | No key or token inside; the broker pushes only `refs/lanes/<lane>` to `origin`'s lane branch, fast-forward only |
+| Route out | Closed by | Checked by |
+|---|---|---|
+| Remount a read-only bind and write the host file (r2 B1: under pasta the agent kept `CAP_SYS_ADMIN`) | `bwrap --cap-drop ALL`: CapEff 0, no remount, no umount, no nested user namespace | spike `caps` (without the flag: the host file is written) and `sandbox` (with it: refused) |
+| Host git on a tree the agent wrote (r1 B2: a nested repo's `core.fsmonitor`) | the lane's own clone; no host git ever runs in it; Orca's worktree stays at the base | spike `control` (runs) and `sandbox` (Orca worktree, main checkout, fresh checkout of the pushed branch: nothing runs) |
+| The broker handed a lane-made path (r2 B2: a link to a lane-made repo, an id-only bundle naming the owner's unpushed commit) | the outbox file is opened no-follow, non-blocking, regular, under a size cap, and copied; it is imported first into a broker-only quarantine repo that holds only the lane's base and earlier pushes; exactly the lane ref, descending from the recorded base, fast-forward | spike: round 2's import takes entries a and c; the design refuses a-g and accepts the honest push |
+| CI running lane-written code or workflow files with the repo's token and secrets (r2 B5) | the broker refuses a push whose new commits change CI configuration unless the owner approves that sha; existing workflows still run lane code: open (question 7, lc-9r81.3) | spike: entry h refused |
+| Shared objects and refs (r1 B4) | the shared repo is not mounted | spike: the shared repo is absent |
+| Orca's CLI and socket, gh's token, beads hooks (r1 B1, B3) | not mounted; typed broker requests only | broker tests (plan task 5) |
+| Session bus, user systemd, agent sockets, Wayland, docker | `/run` and `$XDG_RUNTIME_DIR` not mounted; systemd-run gets the bus variables, bwrap unsets them by name | spike: `/run` search; the stub sees no bus variable |
+| The nix daemon (where the user is a nix trusted user, root-equivalent) | only `/nix/store` is mounted | spike: connect refused |
+| Host loopback TCP and UDP, abstract sockets (X11), ports opened inside, the host's other addresses, the LAN, a cloud box's metadata endpoint (r1 M3, r2 M1) | pasta's own network namespace with `-t none -u none -U none`, only Orca's hook port forwarded; an nft output filter, set from outside before the agent starts, that drops the host's addresses, link-local (the metadata endpoint included; pasta's DNS address excepted) and private ranges (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7, fe80::/10), with the gateway's address and port allowed when it is on the LAN | spike: UDP and TCP loopback, abstract socket, every host address, inbound from every host address; the stub's `nft flush` fails |
+| Another process's environment through `/proc`; secrets in host argv (r2 M2) | bwrap and pasta start from `env -i` with the allowlist as environment, never as arguments (no `--clearenv --setenv`) | spike `naive` (round 2's start: the token in `/proc/1/environ`, the key in host argv) and `sandbox` (neither) |
+| `TIOCSTI` into the pane's shell | `--new-session` unless `dev.tty.legacy_tiocsti=0` | `machine-check` (plan task 7) |
+| A poisoned cache or tool used by a reviewer or another lane | caches, data and run folders per ticket; tools from `/nix/store`, built outside from lane-control's list | plan task 3 |
+| A pushed branch: force, `main`, another repo | no key or token inside; the broker pushes only its quarantined lane ref, fast-forward, no `+` | spike: origin holds the lane's work and not the owner's commit |
 
-**Network.** The lane needs its gateway or API, package registries and DNS. It gets its own network namespace from
-pasta (passt, unprivileged): outbound traffic is NATed through the host, DNS is forwarded, host loopback is not
-mapped (`--no-map-gw`), and only Orca's hook port and a loopback gateway port (if the gateway runs on the host) are
-forwarded (`-T`). What stays open:
-- **Exfiltration of anything the sandbox can read**: the lane's clone (the project's code at the base, not its
-  private data) and the key its agent holds (the gateway or API key, and Orca's hook token). Phase 2's key proxy takes
-  the gateway key out.
-- **The internet and the LAN**: pasta forwards to anything the host can reach, including devices on the local
-  network and, on a cloud box, the metadata endpoint (169.254.169.254), which can hand out the box's credentials.
-  An egress allowlist (a filtering proxy) is phase 2 (open question 5).
+**Network, what stays open**: anything on the internet the host can reach (exfiltration of the clone, the agent's
+key and Orca's hook token, which the agent holds). Phase 2 (lc-0zae) adds a key proxy and an egress allowlist.
 
 ## Approaches
 
 | | What | For | Against |
 |---|---|---|---|
-| A1. bwrap on the agent command, lane in a worktree of the shared repo, read-only binds over what must not change (round 1) | — | Little copying; Orca's diff view works | **Rejected by review round 1; a patch does not hold.** The worktree is writable and host git runs in it (B2); the shared object store is writable (B4) or readable with every branch, stash and tracked private file (B5); path mounts can be renamed past (B6); unsandboxed agents run in the same worktree (B7) |
-| **A2. bwrap on the agent command, lane in its own clone mounted at the Orca worktree's path** (recommended) | `prepare` clones the base branch alone; the shim runs the real agent under pasta + bwrap with that clone at the worktree path; commits leave as a bundle | The shared repo and the host worktree never hold agent-written bytes before review; mounts are simple (no read-only holes in a writable tree); Orca launches the agent exactly as now | A full copy per lane (disk, clone time on big repos); Orca's diff view for the lane stays empty (the PR is the view); every git exchange goes through the broker |
-| B. bwrap around the whole Orca terminal | The pane's shell runs inside | — | Orca starts the pane's login shell and types into it; changing that is an Orca setting for every pane; no gain over A2 |
-| B'. Orca's per-workspace environment recipes (`environmentRecipes` in `orca.yaml`) | A fresh runtime (VM, container, SSH host) per workspace with its own `orca serve` | Orca's own feature | A whole Orca server, agent login and pairing per workspace; no local bwrap recipe in 1.4.274 to 1.4.280. Revisit if Orca adds one |
-| C. OpenCode's own sandbox | — | — | OpenCode 2.2.1 has none: its permissions and policies are config, the thing that failed |
-| C'. Claude Code's own sandbox (bwrap on Linux) | Wraps Claude's Bash tool | Built in | Bash only (not Read, Edit, Grep, MCP); set in settings files; a command may ask to run unsandboxed. An inner layer at most |
-| D. `systemd-run --user` | A transient unit with `ProtectHome=` and binds | Declarative, resource limits | A service is the user manager's child, not the pane's; `--scope` has no mount namespace. Used only for the memory cap (below) |
-| E. Landlock alone | Kernel access rules, inherited, irreversible | Strong; TCP-port and abstract-socket rules | Cannot replace paths (HOME, the clone at the worktree path); a later inner layer |
-| F. A rootless container | An image per lane | Familiar | An image to keep, the same mounts anyway; a privileged container is out (owner's rule) |
+| A1. Lane in a worktree of the shared repo with read-only binds (round 1) | — | — | Rejected by round 1's review: host git runs in it (B2), the shared store is writable or readable (B4, B5), path mounts can be renamed past (B6), unsandboxed agents share it (B7) |
+| **A2. Own clone mounted at the Orca worktree's path; pasta outside, bwrap inside with `--cap-drop ALL`** (recommended) | below | The shared repo and host worktrees never hold agent-written bytes before review; no capability inside; one launch chain the spike runs | A copy per lane; Orca's diff view empty; every git exchange through the broker; the agent is uid 0 (no capabilities) inside pasta's user namespace (lc-9r81.2) |
+| A2'. bwrap with its own user and network namespace, pasta attached from outside | uid 1000 inside, bwrap's `--info-fd` gives the host pid directly | Cleaner uid and pid | pasta refused to join bwrap's namespaces here ("Couldn't switch to pasta namespaces: Operation not permitted", by PID and by `--netns`/`--userns`), nested in Orca's FHS env; `nsenter` could. Measured again in lc-9r81.2; if pasta can attach elsewhere, A2' replaces A2's chain |
+| B. bwrap around the whole Orca terminal | — | — | Orca owns the pane's shell; an Orca setting for every pane |
+| B'. Orca's environment recipes | a runtime per workspace | Orca's feature | A whole Orca server per workspace; no local bwrap recipe up to 1.4.280 |
+| C, C'. OpenCode's or Claude's own sandbox | — | — | OpenCode 2.2.1 has none; Claude's covers Bash only and lives in settings |
+| D. `systemd-run --user` as the sandbox | — | — | Not the pane's child; used only for the memory scope |
+| E. Landlock alone | — | — | Cannot replace paths; a later inner layer |
+| F. Rootless container | — | — | Same mounts, an image to keep |
 
-## How the wrapper gets into the launch
+## The launch
 
-Checked on Orca 1.4.274 (its help, bundled skills and code, read not run) and the release notes through v1.4.280:
+**Hook** (no Orca settings edit, no internal RPC): `worker-start --agent opencode` runs Orca's catalog command
+(`opencode`, or `opencode2 --standalone`) in the pane's login shell, so the first `opencode`/`opencode2` on PATH wins;
+`machine setup --sandbox` puts links to `core/scripts/lane-sandbox-shim` in the first PATH folder ahead of the real CLI
+(after asking). This detects, not prevents, a bypass; the owner's alternative is Orca's custom command set once to the
+shim (question 1; measured in lc-9r81.1).
 
-- `worker-start --agent opencode` uses Orca's catalog (`opencode`, or `opencode2 --standalone`) and runs that
-  command line in the worker pane's login shell, so the binary is the first `opencode`/`opencode2` on that shell's
-  PATH; a chat launch resolves the same name on Orca's own PATH. Orca also runs `opencode --version` before a model
-  launch.
-- Orca's own hook is Settings → Agents → custom command (`agentCmdOverrides[<agent>]`; a plain path for the chat
-  path). The release notes add no sandbox or other agent-command feature.
-- **Mechanism, without editing Orca's settings: a PATH shim.** `lane-control machine setup --sandbox` puts
-  `opencode` and `opencode2` links to `core/scripts/lane-sandbox-shim` in the first PATH folder ahead of the real
-  CLI on both PATHs (it asks first and never edits shell rc files), and records the real binary's path.
-- **Prevention against detection.** The shim only works while it wins the PATH lookup. If PATH changes, the real
-  agent starts unsandboxed in Orca's worktree (which holds only the base, but the agent can read the floor until
-  stopped). The after-start check (below) detects that; it does not prevent it. Prevention needs an explicit path:
-  Orca's custom command set once by the owner to the shim (open question 1), measured for terminal and chat
-  launches in plan task 1. The shim passes the owner's own OpenCode tabs through unchanged either way.
-- **Tickets, not a profile per worktree (B8, M6).** `lane-control lane prepare --sandbox --role lanes|reviewer|check`
-  runs before `worker-start` and writes a one-shot launch ticket (`~/.local/state/lane-control/sandbox/tickets/
-  <worktree-id>/<nonce>.json`: role, lane, issue, project, branch, clone path). The shim takes the oldest unused
-  ticket for its worktree (an atomic rename), binds it to the pane's `ORCA_TERMINAL_HANDLE` (read outside, from the
-  environment Orca gave the shim), starts the broker under that identity, and starts pasta + bwrap. A worktree of a
-  sandbox-on project, other than the primary checkout, with no unused ticket is refused (fail closed): a relaunch
-  or resume needs a new `prepare`.
-- **After start.** The shim stays as the parent (it does not exec), reads bwrap's `--info-fd` (the sandboxed
-  child's pid) and only then writes the run record `runs/<terminal>.json` (nonce, role, child pid, its mount
-  namespace id). The coordinator's `lane-control lane started <worktree> --nonce <n>` (right after `worker-start`)
-  checks that record against `orca-ide orchestration worker-show` (same terminal, live pid, a mount namespace other
-  than the shim's) and stops the worker when it fails within 30 s.
-- **Not used**: `orca.yaml` setup (its own terminal, cannot change the agent's command); Orca's managed accounts
-  (move data, not the command); `terminal create --command` plus `worker-start --terminal` (loses Orca's OpenCode
-  launch handling; plan task 1 measures it as the fallback).
+**Tickets**: `lane-control lane prepare <project> <worktree> --sandbox --role lanes|reviewer|check` writes a one-shot
+ticket (`~/.local/state/lane-control/sandbox/tickets/<worktree-id>/<nonce>.json`) naming the lane, role, clone and
+this ticket's own cache, data and run folders. The shim takes the oldest unused ticket for its worktree (atomic
+rename), binds it to the pane's `ORCA_TERMINAL_HANDLE`, and refuses without one. The owner's own tabs, the primary
+checkout, `--version`, `models` and `--help` pass through unchanged.
+
+**Chain** (what the spike runs, in this order):
+1. The shim makes `<run>/launch/block` (a FIFO it holds open) and starts the broker.
+2. `env -i <allowlist, as environment> [DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR] systemd-run --user --scope -q -p
+   MemoryMax=<lane cap> -- pasta --config-net -q -f --no-map-gw --dns-forward 169.254.1.53 -t none -u none -U none -T
+   <hook port>[,<loopback gateway port>] -- bash -c 'exec "$@" 3>"$info" 4<"$block"' <info> <block> bwrap
+   --cap-drop ALL --unsetenv DBUS_SESSION_BUS_ADDRESS --unsetenv XDG_RUNTIME_DIR <mounts> --info-fd 3 --block-fd 4
+   <real agent> <args>`. pasta closes inherited descriptors, so the info file and the block FIFO are opened by path
+   inside pasta. Without a user manager the scope is skipped and `machine-check` says the lane has no memory cap.
+3. bwrap writes `child-pid` (pasta's pid namespace) and `mnt-namespace` and waits on fd 4. The shim finds the host
+   pid: the process whose mount namespace is that id and whose second `NSpid` field is `child-pid`.
+4. The shim sets the nft filter: `nsenter --preserve-credentials -t <host pid> -U -n nft -f <rules>` (the owner's uid
+   owns pasta's user namespace; the agent, with no capabilities, cannot change it: spike).
+5. The shim writes the run record (`runs/<terminal>.json`: nonce, role, host pid, mount namespace id), then writes to
+   the FIFO: bwrap starts the agent.
+6. The shim stays the parent, forwards SIGINT, SIGTERM, SIGHUP and SIGWINCH, and exits with the agent's status.
+
+**After start**: `lane-control lane started <worktree> --nonce <n>` (the coordinator, right after `worker-start`) checks
+the run record: same terminal as `orca-ide orchestration worker-show` gives, host pid alive and in the recorded mount
+namespace. Without it in 30 s it stops the worker. Detection, not prevention.
+
+**Inside the agent is uid 0 with no capabilities** (pasta's user namespace maps the owner's uid to 0; bwrap cannot
+map 1000 there: "setting up uid map: Operation not permitted"). Whether OpenCode and the lane's tools behave as uid
+0 is lc-9r81.2.
 
 ## The lane's repository
 
-- **Clone.** `prepare` runs, outside and before the agent exists: `git clone --no-local --single-branch --branch
-  <base> --no-tags <shared repo> <clone>` (only objects reachable from the base: no other lane's commit, no stash,
-  no unpushed ref; the spike checks two), then the lane branch, `origin/<base>` as a plain ref, and no remote. The
-  clone lives in `~/.local/state/lane-control/sandbox/<lane>/repo` and is treated as hostile data: no lane-control
-  code and no Orca view runs git in it (a test greps lane-control for git calls on that folder), and it is removed
-  with `rm -rf` when the lane ends.
-- **Private and secret files.** Untracked private data and untracked `.env` files never enter the clone. A
-  `--private` path or a `.env`/`.env.*` file that is tracked anywhere in the base's history makes `prepare` refuse
-  the lane and name the path (the spike checks it; open question 3).
-- **Commits out.** Inside, the `git push` wrapper writes `git bundle create /run/lane/outbox/push.bundle <branch>
-  ^origin/<base>` and asks the broker. The broker, outside, runs git only in the shared repo: `git -c
-  fetch.fsckObjects=true -c transfer.fsckObjects=true fetch --no-tags --no-recurse-submodules
-  --no-write-fetch-head <bundle> refs/heads/<branch>:refs/lanes/<lane>` (fast-forward only), then `git push origin
-  refs/lanes/<lane>:refs/heads/<branch>` (no `+`). The bundle is data: git's pack parser reads it as it reads any
-  remote. The shared repo is the owner's, never mounted in a sandbox, so its config and hooks are the owner's own:
-  no refusal or override list is needed (m2).
-- **The base in.** `fetch` (and the fetch half of `pull`): the broker fetches `origin/<base>` in the shared repo
-  and writes a bundle of the new commits to the lane's inbox; the wrapper fetches it into `refs/remotes/origin/<base>`;
-  the lane merges (lanes merge, never rebase: `pull --rebase` is refused with that line). The spike merges a base
-  commit that changes `orca.yaml`.
-- **Orca's worktree** for the lane stays at the base, untouched, so Orca's git status and the pane's host shell
-  see nothing the agent wrote. Inside the sandbox the clone is mounted at that path, so the agent's cwd,
-  `ORCA_WORKTREE_ID` and OpenCode's session folder match what Orca expects.
-- **A reviewer** gets its own ticket (`--role reviewer --sha <pushed sha>`): `prepare` clones `refs/lanes/<lane>` at
-  that sha from the shared repo into the reviewer's own folder, and the reviewer's sandbox mounts it at the same
-  worktree path. Two agents in one Orca worktree each see their own clone.
+- **Clone** (`prepare`, before the agent exists, git only in the shared repo and in a folder no agent has touched):
+  `git clone --no-local --single-branch --branch <base> --no-tags`, then the lane branch, `refs/remotes/origin/<base>`,
+  and `remote.origin.url` set to a path that does not exist (so `status` can say "ahead of origin"; the wrappers handle
+  every command that would contact it). A broker-only bare **quarantine** clone of the base sits beside it. The
+  recorded base is the base's sha at this point.
+- **History check** (r2 B4), on the clone before hand-over, on every base bundle, and on reviewer and check clones:
+  every path any delivered commit adds or changes against each parent (`git rev-list` of what is delivered, piped to
+  `git diff-tree --stdin -r -m --root --name-only --no-renames`), so a file added and removed on a merged side branch
+  is seen; matched case-insensitively at any depth against the normalized `--private` paths (`./x/`, `x/`, `x` are one
+  path) and against `.env`/`.env.*` other than `.env.example`, `.env.sample`, `.env.template`, `.env.dist`. A hit
+  refuses the lane or the delivery and names the path. A renamed or re-encoded copy of private data under another name
+  is not detected (stays open).
+- **Push** (r2 B2): the inside `git push` writes `/run/lane/outbox/push.bundle` and asks the broker, which (1) opens it
+  `O_NOFOLLOW|O_NONBLOCK`, requires a regular file of at most 64 MB and copies it into its own folder; (2) requires
+  `git bundle list-heads` to give exactly `refs/heads/<lane branch>`; (3) fetches it into the quarantine with fsck
+  (objects it lacks make the fetch fail, so an id-only bundle cannot name the owner's commits); (4) requires the new
+  tip to descend from the recorded base and, after the first push, from the previous push; (5) refuses when any new
+  commit changes CI configuration (`.github/workflows/`, `.github/actions/`, `.gitlab-ci.yml`, `.gitlab/`,
+  `.circleci/`, `.buildkite/`, `azure-pipelines.yml`, `Jenkinsfile`, `.travis.yml`, `bitbucket-pipelines.yml`) unless
+  the owner ran `lane-control lane approve-ci <lane> <sha>`; (6) only then fetches from the quarantine into the shared
+  repo's `refs/lanes/<lane>` and pushes that to `origin`'s lane branch without `+`. git never reads a lane-made path.
+- **Base in**: the broker fetches `origin/<base>` in the shared repo, history-checks the new commits, bundles them to
+  the inbox and updates the quarantine's base; the inside `git fetch`/`pull` takes the bundle (merge only; `pull
+  --rebase` refused).
+- **Resume** (r2 B6): `prepare` for a lane whose clone exists reuses it, untouched (no host git in it), with a new
+  ticket. A lane whose clone is gone but whose `refs/lanes/<lane>` exists gets a clone recreated from that ref
+  (`--no-checkout` from the shared repo; the checkout runs inside the sandbox). The lane identity is the lane key, not
+  the Orca worktree: `prepare` can bind the clone to a new Orca worktree of the same lane.
+- **Lane end**: `lane-control sandbox inspect <lane>` runs a sandboxed step in the clone that reports head, dirty files
+  and commits not in `refs/lanes/<lane>`; the clone, quarantine and folders are removed only on a clean report with
+  nothing unpushed, or with the owner's `--discard`. The report comes from the lane's own clone, so a hostile clone
+  can lie about itself; that loses only its own work.
 
-## Who runs lane-written code (B7)
+## Who runs lane-written code
 
-Nothing unsandboxed runs or loads a sandboxed lane's files before the owner merges a reviewed PR:
-- the reviewer is sandboxed on its own fresh clone (an OpenCode reviewer in phase 1), or, if the owner allows it
-  (open question 2), a Claude reviewer reads only `gh pr diff` and runs nothing from the branch;
-- the coordinator's "rerun its fast checks" becomes `lane-control sandbox check <lane> --sha <sha> -- <command>`,
-  a sandbox with role `check` (no broker requests but its output) on a fresh clone, or CI;
-- the coordinator never checks out a lane's branch on the host; `gh pr checkout` is out for sandboxed lanes.
+- **Reviewers and check reruns** run sandboxed, each with its own ticket and clone of the pushed sha, cache, data and
+  run folders; a Claude reviewer may instead read only `gh pr diff` and run nothing (question 2).
+- **The coordinator** never checks out a sandboxed lane's branch and never reruns its checks on the host
+  (`lane-control sandbox check <lane> --sha <sha> -- <command>` instead).
+- **CI does, before any review** (r2 B5). On `pull_request`, a same-repo branch's workflows run with the branch's own
+  workflow files, the repository's token (whatever `permissions:` and the repo's default allow) and the secrets and
+  runners the repository exposes to them. In this repo, `test.yml` runs the branch's test suite on `ubuntu-latest`
+  with `contents: read`. The broker refuses a push that changes CI configuration without the owner's approval; it
+  cannot stop an existing workflow from running lane code. So `prepare` checks with `gh api` that the repository's
+  default workflow token is read-only, that it has no Actions secrets and no self-hosted runners, and refuses a
+  sandboxed lane otherwise unless the owner accepts that project; or lanes push to a fork, where pull requests run with
+  a read-only token and no secrets (question 7, lc-9r81.3).
 
 ## Mount plan (OpenCode, phase 1)
-
-pasta and bwrap are run by absolute store path, from `env -i`. bwrap flags: `--die-with-parent --unshare-pid
---unshare-ipc --unshare-uts --unshare-cgroup-try` (and `--new-session` unless `dev.tty.legacy_tiocsti=0`); the
-network namespace is pasta's. The whole sandbox runs in `systemd-run --user --scope -p MemoryMax=<lane cap>` when a
-user manager exists (a scope keeps the process tree).
 
 | Path inside | From | Why |
 |---|---|---|
 | `/nix/store` | read-only | binaries; never `/nix/var` |
-| `/usr`, `/bin`, `/lib`, `/lib64` | read-only, if present | system binaries; Orca's FHS environment on NixOS needs them |
-| `/etc` | tmpfs, then read-only `passwd`, `group`, `hosts`, `nsswitch.conf`, `ssl`, `pki`, `static`, `localtime`, `zoneinfo`, and a generated `resolv.conf` naming pasta's DNS forward address | DNS and CAs work (M1); nothing else of `/etc` |
+| `/usr`, `/bin`, `/lib`, `/lib64` | read-only, if present | system binaries (Orca's FHS environment) |
+| `/etc` | tmpfs, then read-only `passwd`, `group`, `hosts`, `nsswitch.conf`, `ssl`, `pki`, `static`, `localtime`, `zoneinfo`, a generated `resolv.conf` naming pasta's DNS address | DNS and CAs, nothing else |
 | `/proc`, `/dev`, `/tmp`, `/run` | new proc, minimal dev, tmpfs, tmpfs | no other process, no sockets |
 | `$HOME` | tmpfs | the floor does not exist |
-| `$HOME/.gitconfig` | read-only, generated: the owner's `user.name` and `user.email` only | commits work (M1); no includes, helpers or aliases |
-| `$HOME/.config/opencode/opencode.json` | read-only, generated: the provider entry copied from the owner's global config without any inline key (refused if there is one), the model, lane-control's plugins | the lane's settings; the owner's config is not mounted |
-| `$HOME/.config/opencode/{plugins,skills}/` | read-only: lane-control's `lane-persona.js`, the skills the extras give the lane (resolved outside) | persona and skills (M1) |
-| Orca's OpenCode overlay (`OPENCODE_CONFIG_DIR` under Orca's userData) and `~/.config/orca/agent-hooks/endpoint.env` | read-only, those paths only | Orca's hooks and startup prompt (M1; plan task 1 measures which path `worker-start` takes) |
-| the persona file `LANE_PERSONA` names | read-only, that file | the persona lives in the main checkout, which is not mounted |
-| lane-control's pinned code tree | read-only | `lane-heavy` and other lane tools; no state |
-| `$HOME/.local/share/opencode/` | read-write: the lane's own folder | OpenCode's store; no `auth.json` (the key comes from the environment) |
-| `$HOME/.cache` | read-write: the lane's own folder | caches per lane, removed with it (M7) |
-| the Orca worktree's path | read-write: the lane's clone | the lane's work |
-| `/run/lane/inbox` | read-only | base bundles from the broker |
-| `/run/lane/outbox` | read-write | push bundles to the broker |
-| `/run/lane/broker.sock` | the broker's socket | the only way out |
+| `$HOME/.gitconfig` | read-only, generated: the owner's name and email only | commits work |
+| `$HOME/.config/opencode/opencode.json`, `plugins/`, `skills/` | read-only, generated: the provider entry without any inline key (refused if there is one), the model, lane-control's plugin, the lane's skills | the lane's settings |
+| Orca's OpenCode overlay folder and `agent-hooks/endpoint.env` | read-only, those paths only | Orca's hooks and startup prompt (lc-9r81.1) |
+| `/run/lane/persona.md` | read-only, the rendered persona | personas name this path for sandboxed lanes, not the main checkout (m1) |
+| lane-control's pinned code tree; the inside wrappers also at `~/.agents/bin/<name>` | read-only | `lane-heavy` and lane tools by the paths personas use (m1) |
+| `$HOME/.local/share/opencode/`, `$HOME/.cache` | read-write, this ticket's own folders | the agent's store and caches, never shared (m3) |
+| the Orca worktree's path | read-write: the lane's clone (a reviewer: its own clone) | the work |
+| `/run/lane/inbox` | read-only | base bundles, the files `prepare` names |
+| `/run/lane/outbox` | read-write | push bundles |
+| `/run/lane/broker.sock` | this ticket's broker socket | the only way out |
 
-Inside, PATH holds the tool list (lane-control's project store, never the worktree; built outside by `prepare`),
-lane-control's inside wrappers `orca`, `orca-ide`, `gh`, `git`, `bd`, `lane-heavy`, and the real `git`.
+None of these is writable by remount: `--cap-drop ALL` (spike). PATH inside holds the tool list (lane-control's
+project store, never the worktree, built outside), the inside wrappers `orca`, `orca-ide`, `gh`, `git`, `bd`,
+`lane-heavy`, and the real `git`.
 
-**Environment**: only these names are passed: `HOME`, `PATH`, `LANG`, `LC_ALL`, `TERM`, `COLORTERM`, `USER`,
-`LOGNAME`, `SHELL`, `TMPDIR`, `TZ`, `TZDIR`, `LOCALE_ARCHIVE`, `SSL_CERT_FILE`, `NIX_SSL_CERT_FILE`, `LANE_ROLE`,
-`LANE_PERSONA`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_CONFIG_DIR`, the gateway key variable the provider config names,
-and Orca's pane variables `ORCA_AGENT_HOOK_*`, `ORCA_PANE_KEY`, `ORCA_TAB_ID`, `ORCA_WORKTREE_ID`,
-`ORCA_TERMINAL_HANDLE`, `ORCA_AGENT_LAUNCH*`, `ORCA_OPENCODE_*`. Plan task 1 measures what each Orca token
-authorizes; one that reaches more than this pane's hooks is not passed. Nothing else, whatever its name (one rule:
-the list, M1). The env extras are added on top only when they name none of the above and no
-`*_TOKEN`/`*_KEY`/`*_SECRET`; MCP extras that need a secret are refused for sandboxed lanes in phase 1.
+**Environment**: only `HOME`, `PATH`, `LANG`, `LC_ALL`, `TERM`, `COLORTERM`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`,
+`TZ`, `TZDIR`, `LOCALE_ARCHIVE`, `SSL_CERT_FILE`, `NIX_SSL_CERT_FILE`, `LANE_ROLE`, `LANE_PERSONA`,
+`OPENCODE_CONFIG_CONTENT`, `OPENCODE_CONFIG_DIR`, the gateway key variable the provider config names, and Orca's pane
+variables `ORCA_AGENT_HOOK_*`, `ORCA_PANE_KEY`, `ORCA_TAB_ID`, `ORCA_WORKTREE_ID`, `ORCA_TERMINAL_HANDLE`,
+`ORCA_AGENT_LAUNCH*`, `ORCA_OPENCODE_*` (each Orca token's reach is measured in lc-9r81.1; one that reaches more than
+this pane's hooks is dropped). They reach bwrap as its environment from `env -i`, never as arguments; bwrap's own
+pid 1 then holds only what the agent has anyway. MCP extras that need a secret are refused for sandboxed lanes.
 
 ## The broker
 
-One per sandboxed agent, started by the shim before bwrap and gone with it. It runs outside with the environment
-the shim got from Orca minus the lane's env extras, listens on `/run/lane/broker.sock` (bound in from the lane's run
-folder), and takes one JSON request per connection, up to 1 MB. **No argv and no path crosses** (B1): each request
-has typed fields; text goes to the real CLI through a file the broker itself creates (mode 0600, in its own
-folder), never a path the lane names; option values are passed as `--opt=value`; unknown fields are refused; every
-request and answer goes to the lane's log.
+One per ticket, outside, with the environment the shim got from Orca minus the lane's env extras. One JSON request per
+connection on `/run/lane/broker.sock`, at most 1 MB, typed fields only: no argv and no path from the lane; text goes
+through files the broker creates (0600); option values as `--opt=value`; ids are matched against their pattern and
+passed as `--id=<id>` where the CLI has it; unknown fields refused; every request logged.
 
-| Request | Runs outside | Who |
+| Request | Runs outside | Roles |
 |---|---|---|
-| `report {task, dispatch, subject, body, outcome, files}` | `orca-ide orchestration send --from=<bound terminal> --type=worker_done --task-id= --dispatch-id= --subject= --body-file=<own file> --outcome= [--files-modified=]`, after `dispatch-show` confirms the dispatch belongs to the bound terminal | lane, reviewer |
-| `escalate {task, dispatch, subject, body}` | the same with `--type=escalation` | lane, reviewer |
-| `ask {question}` | `orchestration ask --from=<bound terminal> --question=` | lane, reviewer |
-| `check` | `orchestration check --terminal=<bound terminal> --json`; the message ids it returns are remembered | lane, reviewer |
-| `reply {id, body}` | `orchestration reply --from=<bound terminal> --id= --body-file=`, only for an id `check` returned | lane, reviewer |
-| `push` | the bundle import and push above | lane |
-| `fetch` | fetch `origin/<base>` in the shared repo, bundle the new commits to the inbox | lane, reviewer |
-| `pr-create {title, body}` | `gh pr create --repo=<repo> --head=<branch> --base=<base> --title= --body-file=` | lane |
-| `pr-view`, `pr-checks`, `pr-diff` | on the lane branch's own PR (`gh pr list --repo --head <branch>`, same repo), fixed `--json` fields | lane, reviewer |
-| `pr-comment {body}`, `pr-edit {title?, body?}` | on that PR only | lane |
-| `bd-show {id}`, `bd-list-ready` | `bd` in the beads repo from lane-control's record | lane, reviewer |
+| `report {task, dispatch, subject, body, outcome, files}` | `orca-ide orchestration send --from=<bound terminal> --type=worker_done ...`, after `orchestration dispatch-show --task=<task> --json` shows that dispatch on the bound terminal | lane, reviewer |
+| `escalate`, `ask {question}`, `check`, `reply {id, body}` | the same verbs bound to the terminal; `reply` only to ids `check` returned | lane, reviewer |
+| `push` | "Push" above | lane |
+| `fetch` | "Base in" above | lane, reviewer |
+| `pr-create {title, body}` | `gh pr create --repo=<repo> --head=<lane branch> --base=<base> --title= --body-file=` | lane |
+| `pr-view`, `pr-checks`, `pr-diff` | the lane branch's own PR, fixed `--json` fields | lane, reviewer |
+| `pr-comment {body}`, `pr-edit {title?, body?}` | that PR only | lane |
+| `run-view {run}` | `gh run view --repo=<repo> <run> --log-failed`, after `--json headBranch` shows the lane branch (m1) | lane, reviewer |
+| `bd-show {id}` | `bd show --id=<id>`, only the lane's issue and issues it lists as parent, child or dependency; ids match `^<prefix>-[a-z0-9]+(\.[0-9]+)*$` (M4) | lane, reviewer |
 | `bd-note {text}`, `bd-claim`, `bd-create {title, description, type, priority}` | on the lane's own issue; a new issue gets `discovered-from:<lane issue>` | lane |
-| `review-read {name}` | read a file from the owner's review folder (configured; name `^[a-z0-9.-]+\.md$`) | lane, reviewer |
-| `review-write {name, text}` | create (not overwrite) a file there | reviewer |
-| `heavy-slot` | holds a `lane-heavy` slot (flock outside) for as long as the connection stays open | lane, reviewer, check |
+| `review-read {name}` | a file in the owner's review folder that `prepare` named for this ticket (M4) | lane, reviewer |
+| `review-write {name, text}` | create (not overwrite) the one name `prepare` gave a reviewer ticket | reviewer |
+| `heavy-slot` | holds a `lane-heavy` slot (flock outside) while the connection is open | lane, reviewer, check |
 
-Never: `orchestration` verbs other than these, `--to`, `--environment`, `--on`, `--file`, gh `api`, `auth`,
-`secret`, `--web`, `--editor`, `--attach`, `--template`, `--recover`, another PR, `bd close`, `bd delete`,
-`bd remember`.
+Never: other Orca verbs, `--to`, `--environment`, `--on`, `--file`; gh `api`, `auth`, `secret`, `--web`, `--editor`,
+`--attach`, `--template`, `--recover`, another PR or run; `bd` list, close, delete, remember, or any flag-shaped id.
 
 ## What breaks, and what is done about it
 
 | Breaks | Handling |
 |---|---|
-| Orca's diff and changes view for the lane is empty (its worktree stays at the base) | The PR is the view; the lane comment on the worktree card names it |
-| A clone per lane and per reviewer | Disk and clone time; `prepare` says the size; a big repo is the owner's call (open question 6) |
-| Orca's transcripts read `~/.local/share/opencode/opencode*.db` on the host | Plan task 1 measures; if needed the lane's store is bound back as `opencode-lane-<id>.db` through `OPENCODE_DB`; lane-control's idle reader reads the lane's folder |
-| `nix run` / `nix build` inside | No daemon; the tool list is built outside; `nix` inside says so |
-| `git push`, `pull`, `fetch`, `gh`, `bd`, `orca-ide` | inside wrappers to the broker |
-| `git pull --rebase`, a rebased branch | refused: lanes merge; the broker pushes fast-forward only |
-| Resume or relaunch of the agent | needs a new ticket: the coordinator runs `prepare` again |
-| `lane-heavy`'s per-command memory cap and the owner's slot limits | slots through the broker; one memory cap for the whole lane (the scope); `machine.conf` values the lane needs are generated into a read-only file |
-| MCP extras that need a token | refused for sandboxed lanes in phase 1 |
-| A TUI without a controlling terminal (resize, `/dev/tty`) | only where `legacy_tiocsti` is not 0; `machine-check` says so |
-| Claude reviewers of a sandboxed lane | PR diff only, or OpenCode reviewers (open question 2) |
+| Orca's diff view for the lane is empty | the PR is the view |
+| **Closing and keeping a sandboxed lane** (r2 M3): its Orca worktree is always at the base, so Orca's rule "Delete released orchestration worker workspaces" and the skill's fallback close checks (`status --porcelain --ignored`, `merge-base --is-ancestor HEAD origin/<base>`) always pass | for a sandboxed lane the coordinator never uses those checks; `lane-control sandbox close <lane>` checks the PR (merged, or the owner's word), runs `sandbox inspect` (clean, nothing unpushed), then removes the clone, quarantine and folders, then the worktree. If Orca removes the worktree earlier, nothing is lost: the work is in the clone and `refs/lanes/<lane>`, and `prepare` binds the clone to a new worktree of the lane. How Orca's rules treat it is measured in lc-9r81.1 |
+| A clone per lane and reviewer | disk and time; question 6 |
+| Orca's transcripts | measured in lc-9r81.1; the lane's store may be bound back as `opencode-lane-<id>.db` |
+| `nix` inside | no daemon; tools built outside |
+| `git push -u`, "up to date with origin" (m1) | the push wrapper updates `refs/remotes/origin/<branch>` and the upstream config in the clone after the broker accepts |
+| A rebased branch | refused: lanes merge; pushes are fast-forward |
+| Resume or relaunch | `prepare` again: reuses the clone, or recreates it from `refs/lanes/<lane>` |
+| `lane-heavy`'s per-command memory cap | one cap for the lane (the scope); slots through the broker |
+| A host with no user manager | no memory cap; `machine-check` says so |
+| uid 0 inside | lc-9r81.2 |
+| MCP extras with a secret | refused for sandboxed lanes |
+| Failed CI logs | `run-view` |
+| A TUI without a controlling terminal | only where `legacy_tiocsti` is not 0 |
 
-## Availability of bwrap and pasta
+## Availability
 
-- Pinned at machine setup: `nix build --no-link --print-out-paths nixpkgs#bubblewrap nixpkgs#passt`, absolute paths
-  in `machine.conf` (`SANDBOX_BWRAP`, `SANDBOX_PASTA`), kept from garbage collection by GC roots in lane-control's data
-  folder (`nix build --out-link`). The spike used bubblewrap 0.12.0 and passt 2025_09_19.
-- Needs unprivileged user namespaces. On NixOS, Orca itself runs inside a buildFHSEnv bwrap; the spike ran its pasta
-  and bwrap nested inside that one.
-- A remote box: the same nix pins where nix exists, else the distro's packages, used only when not setuid. Ubuntu
-  23.10+ restricts unprivileged user namespaces through AppArmor; bwrap then needs the distro's profile.
-  `machine-check` probes (`bwrap --unshare-user --ro-bind / / true`, and pasta with one forwarded port); when either
-  fails the sandbox stays off on that box and its lanes are refused. Never a setuid helper or a privileged
-  container installed by lane-control.
-- `lane-control sandbox selftest` (the spike's checks, grown into the plan's adversarial suite) must pass on the
-  machine before `machine setup --sandbox` turns the sandbox on, and again after a pin or lane-control update; a
-  skipped check counts as a failure (M8).
+- Pinned at machine setup: `nix build --no-link --print-out-paths nixpkgs#bubblewrap nixpkgs#passt
+  nixpkgs#util-linux.bin nixpkgs#nftables`, absolute paths in `machine.conf`, GC roots in lane-control's data folder.
+  The spike used bubblewrap 0.12.0, passt 2025_09_19, util-linux 2.42.3, nftables 1.1.6.
+- Needs unprivileged user namespaces. Orca on NixOS runs inside a buildFHSEnv bwrap; the spike's chain runs nested in it.
+- A remote box: the same pins where nix exists, else the distro's packages, only when not setuid; Ubuntu 23.10+ needs
+  its AppArmor profile for bwrap. `machine-check` probes the whole chain; a failure keeps the sandbox off on that box.
+- `lane-control sandbox selftest` (the spike's probes, grown into the plan's adversarial suite, run through the real
+  shim and broker) must pass before `machine setup --sandbox` turns it on and after any pin or lane-control update; a
+  skip counts as a failure.
 
 ## The spike
 
-`docs/superpowers/spikes/2026-11-27-agent-sandbox/spike.sh` runs the design's own launch in small: the clone,
-pasta with one forwarded port, the mount plan above (without the Orca and OpenCode paths, which need a real launch),
-and the broker's import and push done by hand after the run. Result (bubblewrap 0.12.0, passt 2025_09_19, nested in
-Orca's FHS bwrap): PASS.
-- control (no sandbox, in the Orca worktree as today): 19 leaks, and a host `git status` there runs the program the
-  stub planted (B2 reproduced).
-- naive (bwrap from the owner's environment): exactly the `/proc/1/environ` leak.
-- sandbox: no floor file, link or search hit; no token in any visible process; the nix daemon socket, a host
-  loopback port that is not forwarded and a host abstract socket unreachable, the forwarded port reachable; the
-  shared repo absent, another lane's commit and an unpushed ref not in the clone; commit with the generated
-  identity; base merged from an inbox bundle (it changes `orca.yaml`); push by bundle. Outside: the bundle imports
-  with fsck and pushes fast-forward; host git in the Orca worktree, the main checkout and a fresh checkout of the
-  pushed branch runs nothing; host git in the lane's own clone does (why no host tool may).
-- refuse: a tracked private file makes prepare refuse the lane.
+`spike.sh` runs the chain above with the stub as the agent, and the broker's push and fetch as the commands above
+(`spike_helpers.py` does the outbox read, history and CI checks, host-pid lookup and nft rules). Result (2026-11-27,
+the pins above, nested in Orca's FHS env): **PASS**.
+- `control` (no sandbox): 23 leaks; host `git status` runs the planted program.
+- `caps` (the chain without `--cap-drop ALL`): a read-only bind remounted, its host file written (r2 B1).
+- `naive` (round 2's start, owner's environment, `--clearenv --setenv`): the token in `/proc/1/environ`, the key in 3
+  host processes' argv (r2 M2).
+- `sandbox`: no floor file, link or search hit; no token in any visible process; CapEff 0 (uid 0); every read-only
+  bind refuses remount and write; no nested user namespace; `nft flush` refused; nix daemon, loopback TCP and UDP, an
+  abstract socket and every host address unreachable, the forwarded port reachable; the key in no host argv; a port
+  opened inside unreachable from every host address; the shared repo absent, another lane's commit and the owner's
+  unpushed commit not in the clone; commit, base merge (a change to `orca.yaml`) and push by bundle work; the scope
+  ran; the host pid was found by mount namespace.
+- Outside: round 2's import takes the link-to-repo and the id-only entries (r2 B2 reproduced); the design's broker
+  refuses a link to a repo, a link to a file, the id-only bundle, a FIFO, an 80 MB file, two refs, an orphan and a CI
+  workflow change, and accepts the honest push; origin has the lane's work and not the owner's commit; host git in the
+  Orca worktree, the main checkout and a fresh checkout runs nothing.
+- Resume: a second `prepare` reuses the clone (head is the pushed work); an unpushed commit and a dirty file are
+  reported; a removed clone is recreated from `refs/lanes/<lane>`.
+- History: round 2's check misses a private file added and removed on a merged side branch; the design refuses it, a
+  tracked private file, a nested `sub/.env.local`, and a private file committed to the base after `prepare`; a tracked
+  `.env.example` is accepted.
 
-Not covered by the spike, and in the plan: Orca's launch through the shim, the broker's socket and its checks,
-OpenCode itself, a pty.
+Not in the spike, in the plan or children: Orca's launch through the shim (lc-9r81.1), OpenCode itself as uid 0
+(lc-9r81.2), CI (lc-9r81.3), the broker's socket and Orca, gh and bd requests (plan task 5), a pty (plan task 7).
 
-## Claude lanes (phase 3)
+## Claude lanes (phase 3, lc-d2wk)
 
-The same shim, clone and broker for `claude`, plus: auth by a `CLAUDE_CODE_OAUTH_TOKEN` in the environment (readable
-by the agent, like the gateway key) or phase 2's key proxy, never the credentials file; a generated
-`CLAUDE_CONFIG_DIR` per lane (settings, `.claude.json` without tokens), read-write only for `projects/`, `todos/`,
-`shell-snapshots/`; Orca's Claude plugin folder and hook scripts bound read-only; how Orca reads a relocated Claude
-transcript folder is measured first. Claude's own Bash sandbox can stay on inside.
+The same chain, clone and broker for `claude`, plus auth by `CLAUDE_CODE_OAUTH_TOKEN` or phase 2's key proxy (never
+the credentials file), a generated `CLAUDE_CONFIG_DIR` per ticket, Orca's Claude plugin and hook scripts read-only.
+Claude refuses some modes as root, so uid 0 inside (lc-9r81.2) matters more there.
 
 ## What this closes, and what stays
 
-| Issue | For sandboxed OpenCode lanes, phase 1 |
-|---|---|
-| lc-mpb5 | **Closed for floor paths**: nothing outside the clone is mounted; untracked private data and `.env` are not in the clone; tracked ones refuse the lane; no path crosses the broker. The agent's own gateway key and Orca hook token stay readable in its environment (lc-yw1g.8) |
-| lc-yw1g.1 | **Closed for lanes**: no shared config is mounted and no unsandboxed agent loads the clone; a root `opencode.json` the agent writes changes only its own session's advisory rules. Stays for the coordinator and the owner's own sessions |
-| lc-yw1g.2 | **Stays**: the coordinator's launch folder is not sandboxed |
-| lc-yw1g.3 | Partly: a lane's settings no longer reach an unsandboxed Claude (the worktree stays at the base, reviewers get their own clone); **stays** for Claude sessions until phase 3 |
-| lc-yw1g.4 | **Stays** until phase 3 |
-| lc-yw1g.5 | **Stays**: a guard-matching bug |
-| lc-yw1g.6 | Partly: code-running names run only inside a lane; the broker drops the lane's env extras. **Stays** for unsandboxed sessions |
-| lc-yw1g.7, lc-yw1g.9 | **Stay**: unrelated |
-| lc-yw1g.8 | Partly: no gh token, `hosts.yml` or Orca runtime token inside, whatever the flag order. **Stays** for `env -0` and `printenv`, which print the gateway key and Orca's hook token (phase 2 removes the gateway key) |
-| lc-yw1g.10 | Closed for lanes: private data is not mounted by path any more; `prepare` normalizes the forms for its history check |
-| lc-8h1.1 | **Stays** (project-setup's git); the broker runs the owner's git unchanged in the owner's repo |
-| lc-8h1.2 | **Stays** for project-setup; a sandboxed lane cannot write the shared repo's config, and no host git runs in its clone. Onboarding is lc-pk2c's, not this plan's |
-| lc-8h1.3 | **Stays**; lc-pk2c may make it moot |
+All "Open" rows stay open until SBX-2's adversarial suite passes on the implementation; the probe column says where the
+design's fix is shown.
+
+| Issue | Status for sandboxed OpenCode lanes | Probe |
+|---|---|---|
+| lc-mpb5 | Open, designed: no floor path is mounted, private and `.env` data in history refuse the lane, no read-only bind can be remounted, the broker takes no path. The agent's own key and Orca's hook token stay readable inside | spike `sandbox`, `refuse` |
+| lc-yw1g.1 | Open, designed: no shared config mounted; the lane's own config is advisory; no unsandboxed agent loads the clone before review | spike `sandbox` |
+| lc-yw1g.2 | Stays (the coordinator's folder) | — |
+| lc-yw1g.3 | Stays until phase 3; before merge a lane's settings reach no unsandboxed Claude | — |
+| lc-yw1g.4, .5, .7, .9 | Stay | — |
+| lc-yw1g.6 | Partly: code-running names run only inside; the broker drops the lane's extras. Stays for unsandboxed sessions | — |
+| lc-yw1g.8 | Partly: no gh token or Orca runtime token inside, no secret in host argv; `env -0`/`printenv` still print the gateway key and the hook token inside | spike `naive`, `sandbox` |
+| lc-yw1g.10 | Open, designed: the forms are normalized before the history check | `spike_helpers.py history-hits` |
+| lc-8h1.1 | Stays (project-setup) | — |
+| lc-8h1.2 | Stays for project-setup; for lanes, no host git in a lane-made repo | spike `sandbox` |
+| lc-8h1.3 | Stays (lc-pk2c) | — |
 
 ## What stays open
 
 - The coordinator and the owner's own sessions are unsandboxed.
-- Exfiltration of what a lane can read (its clone, its key); the internet and the LAN, including a cloud box's
-  metadata endpoint.
-- A detected, not prevented, unsandboxed start while the PATH shim is the hook (open question 1).
-- After the owner merges a PR, its code runs like any merged code.
-- A kernel, bwrap, pasta or git pack-parser bug.
+- The internet: exfiltration of the clone and the agent's key and hook token (phase 2).
+- CI runs lane code before review with whatever the repository grants (question 7).
+- An unsandboxed start is detected, not prevented, with the PATH shim (question 1).
+- A renamed or re-encoded copy of private data in history.
+- Code runs like any merged code after the owner merges a reviewed PR.
+- A kernel, bwrap, pasta, nft or git bug.
 
-## Open questions for the owner
+## Open questions for the owner (lc-9r81.4, measurements lc-9r81.1-.3)
 
-1. Launch: the PATH shim (no Orca change; an unsandboxed start is detected and stopped, not prevented), or Orca's
-   custom command for OpenCode set once by you to the shim (prevents it; your own OpenCode tabs pass through the
-   shim unchanged)?
-2. Reviewers and check reruns of a sandboxed lane: must they be sandboxed (OpenCode reviewers only until phase 3),
-   or may a Claude reviewer review from the PR diff without running anything?
-3. `--private` and `.env` files tracked in the base's history: refuse the lane (this design), or allow it with those
-   files listed as readable by the lane?
-4. Beads: may a lane add notes, claim its issue and file follow-ups through the broker, or no beads writes?
-5. Network: phase 1 reaches the internet and the LAN (and a cloud box's metadata endpoint). Add an egress allowlist
-   before the first sandboxed lane, or in phase 2?
-6. A clone per lane and per reviewer: fine for every project, or a size limit above which a project is not
-   sandboxed?
+1. Launch: the PATH shim (detects an unsandboxed start and stops it) or Orca's custom command set once by you
+   (prevents it)? lc-9r81.1 measures both.
+2. Reviewers and check reruns: always sandboxed, or may a Claude reviewer read only the PR diff and run nothing?
+3. History: refuse a lane whose base history holds a `--private` path or a `.env` file (this design), and is the
+   template list `.env.example`, `.env.sample`, `.env.template`, `.env.dist` right?
+4. Reads: may a lane read its own issue and the issues it links (and nothing else of beads), and only the review files
+   `prepare` names for it?
+5. Network: private ranges and link-local are dropped, with only the gateway allowed; may a lane reach anything else
+   on the LAN? The internet stays open until phase 2.
+6. A clone per lane and per reviewer: fine for every project, or a size limit?
+7. CI (lc-9r81.3): require a read-only default token, no Actions secrets and no self-hosted runners for a sandboxed
+   project, or push lane branches to a fork, or accept the repository as it is?
+
+## Review round 2, answered
+
+| Finding | Answer |
+|---|---|
+| B1 capabilities under pasta | fixed: `--cap-drop ALL` in the chain and mount plan; spike `caps` reproduces, `sandbox` refuses remount, write, umount, nested userns and `nft flush`; uid 0 inside filed (lc-9r81.2) |
+| B2 broker follows the outbox | fixed: no-follow regular-file copy, quarantine with only base and earlier pushes, one ref, descent from the recorded base, fast-forward ("Push"); spike: entries a-g refused, round 2's import shown taking a and c |
+| B3 launch cannot start | fixed: info and block fds opened by path inside pasta, host pid by mount namespace and `NSpid`, systemd-run given its bus variables and bwrap unsetting them ("Chain"); spike runs it; pasta attaching to bwrap failed here (A2', lc-9r81.2) |
+| B4 history check | fixed: every changed path of every delivered commit against each parent, any depth, case-insensitive, on clone, base bundles, reviewer and check clones; renamed copies not detected (stated); spike `refuse` |
+| B5 CI runs lane code | fixed for workflow changes (broker refuses without the owner's approval; spike entry h); stated plainly what CI runs ("Who runs lane-written code"); the rest filed (lc-9r81.3, question 7) |
+| B6 relaunch loses work | fixed: resume reuses the clone, recreate from `refs/lanes/<lane>`, end only on a clean inspect or `--discard`; spike resume |
+| M1 pasta defaults, host addresses | fixed: `-t none -u none -U none`, the nft filter; spike checks UDP, inbound, every host address |
+| M2 key in host argv | fixed: allowlist as environment from `env -i`, no `--setenv`; spike `naive` reproduces, `sandbox` shows 0 |
+| M3 close and keep rules | fixed: `sandbox close`, never the worktree checks; work survives a removed worktree; Orca's rule measured in lc-9r81.1 |
+| M4 broker reads | fixed: `bd-show` limited to the lane's issue and links, `--id=`, id pattern, `bd-list-ready` removed; `review-read` limited to named files; question 4 |
+| M5 spike and tests miss escapes | fixed: the spike runs the chain and every attack above with controls; the plan's suite runs through the real shim and broker (plan task 7) |
+| M6 claim table | fixed: "Open, designed" with the probe, until SBX-2's suite passes |
+| m1 normal work | fixed: persona and wrapper paths, `run-view`, tracking refs ("Mount plan", "What breaks") |
+| m2 `.env.example` | fixed: template list, spike accepts `.env.example`; question 3 |
+| m3 reviewer folders, check role | fixed: cache, data and run folders per ticket; `check` gets `heavy-slot` in spec and plan |
+| m4 questions | fixed: questions 4, 5, 7 added; resume settled in the design |
 
 ## Review round 1, answered
 
 | Finding | Where |
 |---|---|
-| B1 broker passes file and recipient flags | Typed requests, no argv or path crosses, bound mailbox and own PR ("The broker") |
-| B2 nested repo runs in host `git status` | Own clone; no host git in it; worktree at base; fresh checkout for reviewers; spike checks it and shows the control |
-| B3 beads hooks | Beads folder not mounted; typed bd requests; DB path from lane-control's record |
-| B4 writable shared objects | Shared repo not mounted; bundle import with fsck |
-| B5 tracked private files, other refs, stashes | Single-branch clone; tracked private and `.env` refuse the lane; spike checks both |
-| B6 renamed parent of a private mount | Moot: no private path is mounted or masked; private data is never in the clone |
-| B7 lane code run by unsandboxed reviewer or checks | "Who runs lane-written code"; open question 2 |
-| B8 broker cannot know the dispatch; reviewer shares the profile | Tickets bound to the pane's terminal handle; dispatch checked with Orca per request; a ticket per agent and role |
-| M1 DNS, identity, merges, lane-heavy, personas, Orca overlay, tokens, CAs | Mount plan, environment list, "What breaks". The spike checks identity and a merge that changes `orca.yaml`; DNS and outbound TCP through pasta's forward were checked by hand (they need the internet, so they are not in the spike); the Orca paths are plan task 1 |
-| M2 `--new-session` | Dropped where `legacy_tiocsti=0`, kept otherwise; pty test in the plan |
-| M3 shared network is a way out | Own network namespace in phase 1; spike checks abstract socket and loopback |
-| M4 spike mounts `/nix` and writable common dir | Spike rewritten to the design's mounts; only `/nix/store`; daemon connect checked |
-| M5 claim table overstated | Rewritten above |
-| M6 `lane started` proves nothing | Record after bwrap's `--info-fd`, nonce per ticket, checked against `worker-show`; said to detect, not prevent |
-| M7 shared caches | Per lane; tool list from lane-control's store |
-| M8 no tests for the escapes | Adversarial suite and `sandbox selftest` as a required gate where a skip fails (plan) |
-| m1 open questions | Rewritten above |
-| m2 refusal lists differ | No list needed: the broker runs git only in the owner's repo, which no sandbox mounts |
-| n1 machine fact | Removed; written as a condition |
+| B1 broker argv and paths | typed requests ("The broker") |
+| B2 nested repo, host git | own clone, no host git in it (spike) |
+| B3 beads hooks | folder not mounted; typed bd requests |
+| B4 shared objects | shared repo not mounted |
+| B5 tracked private, other refs | single-branch clone, full-history check (spike) |
+| B6 rename past a mount | moot: nothing is masked by path |
+| B7 unsandboxed agents run lane code | "Who runs lane-written code" |
+| B8 dispatch identity | tickets bound to the terminal, dispatch checked per request |
+| M1-M8, m1, m2, n1 | see round 2's rows and the sections above |
