@@ -162,7 +162,7 @@ def cmd_add(group: str, argv: list) -> int:
 
 def rows_of(store) -> list:
     return [{**{k: e.get(k) for k in ("kind", "name", "origin", "event") if k != "event" or e.get("event")},
-             "id": X.ident(e), "for": X.roles(e), "what": X.describe(e)} for e in X.effective(store)]
+             "id": X.label(e), "for": X.roles(e), "what": X.describe(e)} for e in X.effective(store)]
 
 
 def cmd_list(group: str, argv: list) -> int:
@@ -347,7 +347,7 @@ def cmd_gate(argv: list) -> int:
     facts["head_sha"] = head
     if skip:
         H.record_skip(skip, "gate", facts)
-    total = sum(int(e.get("timeout") or X.HOOK_TIMEOUT) for e in gates if e["name"] not in skip)
+    total = sum(int(e.get("timeout") or X.HOOK_TIMEOUT) for e in gates if H.scoped(e) not in skip)
     print(f"gate: running {len(gates)} gate hook(s) for PR {a.pr} at {head}, up to {total} s in all", flush=True)
     res = H.run(entries, "gate", facts, skip)
     for line in H.report(res):
@@ -360,8 +360,15 @@ def cmd_gate(argv: list) -> int:
         for line in H.way_past(res, "gate", cmd):
             print(f"gate: {line}")
         return 1
-    print(f"gate: passed for PR {a.pr} at {head} ({len(res)} gate hook(s)): merge only this head "
-          f"(--match-head-commit {head})")
+    ran = [r for r in res if r["state"] == "ok"]
+    skipped = [r["id"] for r in res if r["state"] == "skipped"]
+    if not ran:
+        print(f"gate: not run for PR {a.pr} at {head}: every gate hook was skipped by a person ({', '.join(skipped)});"
+              f" green only on that person's word: merge only this head (--match-head-commit {head})")
+        return 0
+    print(f"gate: passed for PR {a.pr} at {head} ({len(ran)} gate hook(s) run" +
+          (f", {len(skipped)} skipped by a person: {', '.join(skipped)}" if skipped else "") +
+          f"): merge only this head (--match-head-commit {head})")
     return 0
 
 

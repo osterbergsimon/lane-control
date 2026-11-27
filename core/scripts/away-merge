@@ -266,6 +266,11 @@ def run(a) -> int:
     facts = {"project": a.project, "project_root": str(checkout), "repo": str(checkout), "pr": a.pr, "head_sha": head}
     try:
         entries = hooks.X.effective(hooks.X.store_for(checkout))
+        gates = hooks.X.hooks_for(entries, "gate")
+        if gates:
+            total = sum(int(e.get("timeout") or hooks.X.HOOK_TIMEOUT) for e in gates)
+            print(f"away-merge: running {len(gates)} of the owner's gate hook(s) for PR {a.pr} at {head}, up to "
+                  f"{total} s in all", flush=True)
         res = hooks.run(entries, "gate", facts)
     except hooks.X.ExtrasError as e:
         print(f"away-merge: refused (gate): the gate hooks cannot be read ({e})", file=sys.stderr)
@@ -275,6 +280,8 @@ def run(a) -> int:
     if hooks.failed(res):
         print(f"away-merge: refused (gate): {len(hooks.failed(res))} of {len(res)} of the owner's gate hooks did not "
               f"pass for PR {a.pr} at {head} (above): not green", file=sys.stderr)
+        for line in hooks.way_past(res, "gate", ""):
+            print(f"away-merge: {line} (away-merge has no --skip-hook: the owner decides)", file=sys.stderr)
         return 1
     # The cap is counted, the merge made and the merge recorded under one hold of the improve lock (lc-jpg): two merges at
     # once cannot both see the last free slot. The state is read again under the lock, so a cap reached while the checks

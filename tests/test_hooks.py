@@ -69,7 +69,7 @@ class StoreTests(HookScratch):
         self.clean(self.repo)
         out = self.ok("project", "list", self.repo)
         self.assertIn("by event:", out)
-        self.assertIn("gate: hook:tests", out)
+        self.assertIn("gate: hook:project:tests", out)
         self.assertIn("lanes: none", out)  # a hook is no role's: it runs outside every session
 
     def test_m3_a_linked_script_pins_and_runs_its_target(self):
@@ -83,7 +83,7 @@ class StoreTests(HookScratch):
         self.assertIn(f"the file pinned and run is {real}", out)
         (e,) = self.stored()
         self.assertEqual(e["script"], str(real))
-        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:gate"]["state"], "ok")
+        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:project:gate"]["state"], "ok")
         code, so, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
         self.assertEqual(code, 0, so)
         self.assertIn("| real", so)
@@ -139,11 +139,11 @@ class StoreTests(HookScratch):
         code, out, err = self.run_le("gate", self.repo, "7", "--head", HEAD)
         self.assertEqual(code, 0, out + err)
         self.assertIn("from git", out)
-        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:gate"]["state"], "ok")
+        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:project:gate"]["state"], "ok")
         # review M4, M5: the checkout's working files never count; the hook runs from an export of the pinned commit
-        (X.hook_file(e)).write_text("#!/bin/sh\necho UNCHECKED\n")
+        (X.hook_source_dir(e) / "gate.sh").write_text("#!/bin/sh\necho UNCHECKED\n")  # planted in the cache
         (X.hook_source_dir(e) / "local.sh").write_text("echo planted\n")
-        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:gate"]["state"], "ok")
+        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:project:gate"]["state"], "ok")
         code, out, err = self.run_le("gate", self.repo, "7", "--head", HEAD)
         self.assertEqual(code, 0, out)
         self.assertIn("from git", out)
@@ -167,8 +167,7 @@ class StoreTests(HookScratch):
             self.assertEqual(code, 0, out + err)
             self.assertIn("| gate ok", out)
         e = [x for x in X.effective(self.store) if x["kind"] == "hook"][0]
-        self.assertEqual(sorted(p.name for p in X.hook_source_dir(e).iterdir() if p.name != ".git"),
-                         ["gate.py", "lib.py"])  # it wrote into its run folder, never its checkout
+        self.assertFalse([p for p in X.hook_source_dir(e).rglob("log")])  # it wrote into its run folder only
 
 
 class EventTests(HookScratch):
@@ -188,9 +187,9 @@ class EventTests(HookScratch):
         self.hook("gate", name="lint", code=3)
         code, so, err = self.run_le("gate", self.repo, "7", "--head", HEAD)
         self.assertEqual(code, 1, so)
-        self.assertIn("hook:lint failed: exit 3", so)
+        self.assertIn("hook:project:lint failed: exit 3", so)
         self.assertIn("not green", so)
-        self.assertIn("hook:tests ok", so)  # every gate runs, and each is said
+        self.assertIn("hook:project:tests ok", so)  # every gate runs, and each is said
 
     def test_no_gate_hooks_pass_without_asking_github(self):
         code, out, err = self.run_le("gate", self.repo, "7")
@@ -251,7 +250,7 @@ class EventTests(HookScratch):
         code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
         self.assertEqual(code, 0, out)
         self.assertTrue(m.exists() and p.exists())
-        self.assertLess(out.index("hook:machine-gate"), out.index("hook:project-gate"))
+        self.assertLess(out.index("hook:machine:machine-gate"), out.index("hook:project:project-gate"))
 
     def test_facts_are_checked_and_never_echoed(self):
         self.hook("on-report")
@@ -319,17 +318,17 @@ class SkipTests(HookScratch):
         code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
         self.assertEqual(code, 1)
         self.assertIn("lane-control project extras remove hook:broken", out)
-        self.assertIn("--skip-hook broken --reason", out)
+        self.assertIn("--skip-hook project:broken --reason", out)
         self.refused("gate", self.repo, "7", "--head", HEAD, "--skip-hook", "broken", says="needs --reason")
         self.refused("gate", self.repo, "7", "--head", HEAD, "--skip-hook", "nope", "--reason", "the CI box is down",
                      says="no gate hook of that name")
         code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD, "--skip-hook", "broken", "--reason",
                                    "the CI box is down today")
         self.assertEqual(code, 0, out)
-        self.assertIn("hook:broken skipped by a person", out)
+        self.assertIn("hook:project:broken skipped by a person", out)
         (rec,) = [json.loads(x) for x in LE.H.skips_file().read_text().splitlines()]
         self.assertEqual((rec["hook"], rec["reason"], rec["pr"], rec["event"]),
-                         ("broken", "the CI box is down today", "7", "gate"))
+                         ("hook:project:broken", "the CI box is down today", "7", "gate"))
         self.assertEqual(oct(LE.H.skips_file().stat().st_mode & 0o777), "0o600")
 
     def test_an_agent_cannot_skip(self):
@@ -364,7 +363,7 @@ class RunTests(HookScratch):
         self.hook("after-merge", code=5)
         code, out, _ = self.run_le("hook", self.repo, "after-merge", "--pr", "7")
         self.assertEqual(code, 0)
-        self.assertIn("hook:after-merge failed: exit 5", out)
+        self.assertIn("hook:project:after-merge failed: exit 5", out)
         self.assertIn("line 30", out)
         self.assertIn("line 11", out)
         self.assertNotIn("line 10\n", out)
@@ -376,7 +375,7 @@ class RunTests(HookScratch):
         self.assertNotIn(SECRET, out)
         self.assertIn("[redacted]", out)
         self.assertNotIn("\033", out)
-        self.assertIn("hook:on-report-loud failed", out)  # a script's name at an event that is not in it
+        self.assertIn("hook:project:on-report-loud failed", out)  # a script's name at an event that is not in it
 
     def test_m6_common_secret_forms_are_masked_and_n1_control_characters_go(self):
         H = LE.H
@@ -423,9 +422,9 @@ class RunTests(HookScratch):
         self.assertIn("changed since it was added", so)
         self.assertFalse(out.exists(), "a changed script never runs")
         rows = {r["id"]: r for r in X.check(self.store)}
-        self.assertEqual(rows["hook:gate"]["state"], "changed")
+        self.assertEqual(rows["hook:project:gate"]["state"], "changed")
         f.unlink()
-        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:gate"]["state"], "missing")
+        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:project:gate"]["state"], "missing")
         self.assertEqual(self.run_le("hook", self.repo, "after-merge")[0], 0)  # no after-merge hook: nothing
 
     def test_a_script_swapped_after_the_check_is_not_what_runs(self):
@@ -449,10 +448,10 @@ class CheckTests(HookScratch):
     def test_doctor_lists_hooks_and_flags_a_missing_one(self):
         f, _ = self.hook("gate")
         r = self.lc("doctor", "--no-ssh")
-        self.assertIn("hooks: gate hook:gate", r.stdout)
+        self.assertIn("hooks: gate hook:project:gate", r.stdout)
         f.unlink()
         d = json.loads(self.lc("doctor", "--no-ssh", "--json").stdout)
-        todo = [t for t in d["todo"] if "hook:gate" in t]
+        todo = [t for t in d["todo"] if "hook:project:gate" in t]
         self.assertTrue(todo, d["todo"])
         self.assertIn("put it back or add it again", todo[0])
         self.assertNotIn("run lane-control project refresh", todo[0])
@@ -486,7 +485,7 @@ class AwayMergeHookTests(AwayMergeTest):
         out = store_hook(self.env, self.shop, self.tmp / "owner", "gate", code=2)
         r = self.merge()
         self.assertRefused(r, "gate")
-        self.assertIn("hook:gate failed: exit 2", r.stdout)
+        self.assertIn("hook:project:gate failed: exit 2", r.stdout)
         got = facts(out)
         self.assertEqual((got["LANE_HOOK_PR"], got["LANE_HOOK_HEAD_SHA"], got["LANE_HOOK_PROJECT"]),
                          ("7", OID, "shop"))
@@ -498,12 +497,20 @@ class AwayMergeHookTests(AwayMergeTest):
         r = self.merge()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(self.merged()), 1)
-        self.assertIn("hook:gate ok", r.stdout)
+        self.assertIn("hook:project:gate ok", r.stdout)
         self.assertIn("warning: 1 after-merge hook(s) did not pass; the merge stands", r.stderr)
         got = facts(am)
         self.assertEqual((got["LANE_HOOK_EVENT"], got["LANE_HOOK_MERGE_SHA"], got["LANE_HOOK_PR"]),
                          ("after-merge", MERGE, "7"))
 
+
+    def test_r2_m1_away_merge_says_how_long_and_the_way_past(self):
+        store_hook(self.env, self.shop, self.tmp / "owner", "gate", code=2)
+        r = self.merge()
+        self.assertRefused(r, "gate")
+        self.assertIn("up to 60 s in all", r.stdout)
+        self.assertIn("lane-control project extras remove hook:gate", r.stderr)
+        self.assertIn("away-merge has no --skip-hook", r.stderr)
 
     def test_m1_a_pr_retargeted_during_the_gates_is_not_merged(self):
         owner = self.tmp / "owner"
@@ -564,6 +571,143 @@ def stopped_hook(test, p, pid: Path) -> None:
     test.fail("the hook outlived the command that ran it")
 
 
+def hook_repo(t: Path, files: dict) -> tuple:
+    """A scratch git repo of hook files {path: (text, executable)}: (folder, commit)."""
+    up = t / "upstream" / f"r{len(list((t / 'upstream').glob('r*'))) if (t / 'upstream').exists() else 0}"
+    up.mkdir(parents=True)
+    for rel, (text, ex) in files.items():
+        (up / rel).parent.mkdir(parents=True, exist_ok=True)
+        (up / rel).write_text(text)
+        (up / rel).chmod(0o755 if ex else 0o644)
+    git("init", "-q", "-b", "main", cwd=up)
+    git("add", "-A", cwd=up)
+    git("commit", "-q", "-m", "v1", cwd=up)
+    return up, git("rev-parse", "HEAD", cwd=up)
+
+
+class RoundTwoTests(HookScratch):
+    """Review round 2 (6fddc8b): each finding's exact case."""
+
+    def test_b1_a_project_hook_never_replaces_a_machine_hook(self):
+        # (a) two gate.sh, default names: the machine's fails, the project's passes: both run, not green
+        mdir, pdir = self.owner / "machine", self.owner / "proj"
+        for d, code in ((mdir, 1), (pdir, 0)):
+            d.mkdir()
+            (d / "gate.sh").write_text(f"#!/bin/sh\nexit {code}\n")
+            (d / "gate.sh").chmod(0o755)
+        self.ok("machine", "add", "--hook", "gate", "--script", mdir / "gate.sh")
+        self.add("--hook", "gate", "--script", pdir / "gate.sh")
+        code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
+        self.assertEqual(code, 1, out)
+        self.assertIn("hook:machine:gate failed: exit 1", out)
+        self.assertIn("hook:project:gate ok", out)
+        self.assertIn("not green", out)
+        listed = self.ok("project", "list", self.repo)
+        self.assertIn("gate: hook:machine:gate, hook:project:gate", listed)
+        self.assertEqual(sorted(r["id"] for r in X.check(self.store) if r.get("event")),
+                         ["hook:machine:gate", "hook:project:gate"])
+        # (b) one name at two events of one level: refused, naming the other; the gate stays
+        self.add("--hook", "gate", "--script", pdir / "gate.sh", "--name", "checks")
+        self.refused("project", "add", self.repo, "--hook", "after-merge", "--script", pdir / "gate.sh", "--name",
+                     "checks", says="already the gate hook here")
+        self.assertEqual([e["event"] for e in self.stored() if e["name"] == "checks"], ["gate"])
+
+    def test_m1_a_git_hooks_cache_is_not_trusted(self):
+        up, sha = hook_repo(self.t, {"gate.sh": ("#!/bin/sh\n. \"$(dirname \"$0\")/lib.sh\"\n", True),
+                                     "lib.sh": ("exit 1\n", False)})
+        self.add("--hook", "gate", "--script", f"file://{up}@{sha}:gate.sh")
+        e = [x for x in X.effective(self.store) if x["kind"] == "hook"][0]
+        cache = X.hook_source_dir(e)
+        self.assertEqual(self.run_le("gate", self.repo, "7", "--head", HEAD)[0], 1)  # lib.sh exits 1: not green
+        lib = git("rev-parse", f"{sha}:lib.sh", cwd=up)
+        # (a) a replace ref to a passing lib.sh: ignored, still not green
+        good = subprocess.run(["git", "-C", str(cache), "hash-object", "-w", "--stdin"], input="exit 0\n",
+                              capture_output=True, text=True, check=True).stdout.strip()
+        git("-C", cache, "replace", lib, good, cwd=self.t)
+        self.assertEqual(self.run_le("gate", self.repo, "7", "--head", HEAD)[0], 1)
+        # (b) a planted filter (info/attributes and a smudge command that sees the caller's environment): never run
+        marker = self.t / "filter-ran"
+        (cache / "info").mkdir(exist_ok=True)
+        (cache / "info" / "attributes").write_text("lib.sh filter=x\n")
+        git("-C", cache, "config", "filter.x.smudge", f"sh -c 'env > {marker}; echo exit 0'", cwd=self.t)
+        os.environ["FAKE_API_TOKEN"] = SECRET
+        self.assertEqual(self.run_le("gate", self.repo, "7", "--head", HEAD)[0], 1)
+        self.assertFalse(marker.exists(), "a planted filter ran")
+        # (c) the lib.sh object rewritten in place: refused (its bytes are not the object of its id)
+        obj = cache / "objects" / lib[:2] / lib[2:]
+        if not obj.exists():  # a packed object: unpack it first
+            for pack in (cache / "objects" / "pack").glob("*.pack"):
+                subprocess.run(["git", "-C", str(cache), "unpack-objects", "-q"], stdin=open(pack, "rb"), check=True,
+                               env={**os.environ, "GIT_DIR": str(cache)})
+                pack.unlink()
+                pack.with_suffix(".idx").unlink()
+        import zlib
+        obj.chmod(0o644)
+        obj.write_bytes(zlib.compress(b"blob 7\0exit 0\n"))
+        code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
+        self.assertEqual(code, 1, out)
+        self.assertIn("refused", out)
+        self.assertIn("is not the object of that id", out)
+        self.assertEqual({r["id"]: r for r in X.check(self.store)}["hook:project:gate"]["state"], "changed")
+
+    def test_m2_a_repo_with_a_link_out_of_it_is_refused_at_add(self):
+        up, _ = hook_repo(self.t, {"gate.sh": ("#!/bin/sh\nexit 0\n", True)})
+        (up / "etc").symlink_to("/etc/passwd")
+        git("add", "etc", cwd=up)
+        git("commit", "-q", "-m", "link", cwd=up)
+        sha = git("rev-parse", "HEAD", cwd=up)
+        self.refused("project", "add", self.repo, "--hook", "after-merge", "--script", f"file://{up}@{sha}:gate.sh",
+                     says="a link that leads out of the repo")
+
+    def test_m3_a_repointed_link_is_changed_and_refused(self):
+        v1, v2 = self.owner / "v1.sh", self.owner / "v2.sh"
+        v1.write_text("#!/bin/sh\nexit 0\n")
+        v2.write_text("#!/bin/sh\nexit 1\n")
+        v1.chmod(0o755)
+        v2.chmod(0o755)
+        link = self.t / "hooks-gate.sh"
+        link.symlink_to(v1)
+        self.add("--hook", "gate", "--script", link, "--name", "g")
+        link.unlink()
+        link.symlink_to(v2)
+        row = {r["id"]: r for r in X.check(self.store)}["hook:project:g"]
+        self.assertEqual(row["state"], "changed")
+        code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD)
+        self.assertEqual(code, 1, out)
+        self.assertIn("now leads elsewhere", out)
+
+    def test_m5_skipped_gates_are_not_counted_as_passed(self):
+        self.hook("gate", name="a", code=1)
+        self.hook("gate", name="b")
+        code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD, "--skip-hook", "a", "--reason",
+                                   "the CI box is down today")
+        self.assertEqual(code, 0, out)
+        self.assertIn("(1 gate hook(s) run, 1 skipped by a person: hook:project:a)", out)
+        code, out, _ = self.run_le("gate", self.repo, "7", "--head", HEAD, "--skip-hook", "a", "--skip-hook", "b",
+                                   "--reason", "the CI box is down today")
+        self.assertIn("not run for PR 7", out)
+        self.assertNotIn("passed", out.splitlines()[-1])
+
+    def test_m6_an_ignored_sighup_stays_ignored(self):
+        H = LE.H
+        old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            with H.guarded():
+                self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+                self.assertIs(signal.getsignal(signal.SIGTERM), H._on_signal)
+        finally:
+            signal.signal(signal.SIGHUP, old)
+
+    def test_m7_only_real_key_shapes_are_refused_in_names(self):
+        H = LE.H
+        for v in ("/srv/w/sk-1234-add-login-validation", "sk-learn-experiments-2"):
+            self.assertEqual(H.check_facts({"worktree" if v.startswith("/") else "project": v}),
+                             {"worktree" if v.startswith("/") else "project": v})
+        for v in ("/srv/w/" + SECRET, "/srv/w/sk-ant-api03-Ab12Cd34Ef56Gh78Ij90"):
+            with self.assertRaises(H.HookError):
+                H.check_facts({"worktree": v})
+
+
 class StopTests(HookScratch):
     def test_m2_a_stopped_command_stops_its_hook(self):
         pid = self.owner / "hook.pid"
@@ -581,8 +725,8 @@ class WatchdogHookTests(WatchTest):
         self.build_lane(live=False)
         r = self.watch(130)
         self.assertIn("SENT ESCALATE shop to term_mc", r.stdout)
-        self.assertIn("HOOK shop on-report: hook:on-report failed: exit 1", r.stdout)
-        self.assertIn("HOOK-WARN shop on-report hook:on-report failed", r.stdout)
+        self.assertIn("HOOK shop on-report: hook:project:on-report failed: exit 1", r.stdout)
+        self.assertIn("HOOK-WARN shop on-report hook:project:on-report failed", r.stdout)
         self.assertEqual(r.send.returncode, 0, "a hook only warns")
         got = facts(out)
         self.assertEqual((got["LANE_HOOK_OUTCOME"], got["LANE_HOOK_PR"], got["LANE_HOOK_PROJECT"]),
@@ -615,7 +759,7 @@ class AfterSetupTests(unittest.TestCase):
         out = store_hook(self.e.env, self.repo, self.owner, "after-setup")
         r = self.e.run(str(self.repo), "--refresh", adapt=True)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
-        self.assertIn("hook after-setup: hook:after-setup ok", r.stdout)
+        self.assertIn("hook after-setup: hook:project:after-setup ok", r.stdout)
         got = facts(out)
         self.assertEqual((got["LANE_HOOK_SETUP"], got["LANE_HOOK_PROJECT_ROOT"]), ("refresh", str(self.repo)))
         self.assertTrue(got["LANE_HOOK_PROJECT"])
@@ -625,7 +769,7 @@ class AfterSetupTests(unittest.TestCase):
         store_hook(self.e.env, self.repo, self.owner, "after-setup", code=9, name="fails")
         r = self.e.run(str(self.repo), "--refresh", adapt=True)
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("hook:fails failed: exit 9", r.stdout)
+        self.assertIn("hook:project:fails failed: exit 9", r.stdout)
         self.assertIn("nothing is undone", r.stdout)
 
     def test_a_git_hook_is_fetched_by_refresh_and_checked(self):
@@ -643,12 +787,12 @@ class AfterSetupTests(unittest.TestCase):
         e = [x for x in X.effective(X.store_for(self.repo)) if x["kind"] == "hook"][0]
         shutil.rmtree(X.hook_source_dir(e))
         r = self.e.run("--check", str(self.repo), adapt=True)
-        self.assertIn("check extra hook:gate-h: missing", r.stdout)
+        self.assertIn("check extra hook:project:gate-h: missing", r.stdout)
         self.assertIn("at gate", r.stdout)
         r = self.e.run(str(self.repo), "--refresh", adapt=True)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         r = self.e.run("--check", str(self.repo), adapt=True)
-        self.assertIn("check extra hook:gate-h: ok", r.stdout)
+        self.assertIn("check extra hook:project:gate-h: ok", r.stdout)
 
 
 class FrontDoorTests(unittest.TestCase):

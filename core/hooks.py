@@ -15,7 +15,7 @@ Never from a project repo: the owner registers each one, and a script inside a p
 How one runs (run_one):
   - Checked against its pin first: a missing or changed script is `refused` and does not run. It runs from a private
     copy in its run folder: a path hook's bytes that matched its hash (the original path is LANE_HOOK_SOURCE); a git
-    hook's pinned commit exported whole from the commit's objects (`git archive`), its script's hash checked there.
+    hook's pinned commit written out from its objects, each hashed against its id (extras.export_hook).
   - No arguments, stdin closed, in a fresh empty folder of its own (removed after): never in a lane's worktree or a
     checkout. LANE_HOOK_WORKTREE and LANE_HOOK_PROJECT_ROOT say where those are.
   - Its environment is a short list (PATH, HOME, USER, the locale, XDG folders, TMPDIR, SSH_AUTH_SOCK) and its
@@ -36,7 +36,6 @@ these events, so lane-control does.
 Read by core/scripts/lane-extras (gate, hook, prepare), core/scripts/project-setup (after-setup), away-merge and
 away-watchdog."""
 import contextlib
-import io
 import json
 import os
 import re
@@ -44,7 +43,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import unicodedata
@@ -95,6 +93,19 @@ KEY_VALUE = re.compile(r"""(?P<q>["']?)(?P<k>[A-Za-z_][A-Za-z0-9_.-]{0,63})(?P=q
 OPTION_VALUE = re.compile(r"(?P<k>--?[A-Za-z][A-Za-z0-9_-]{0,63})(?P<sep>\s+)(?P<v>[^\s-]\S*)")
 
 
+def key_like(text: str) -> bool:
+    """A real key in a name or a path: a SECRET_SHAPE match that also holds one unbroken run of 16 or more letters
+    and digits with both in it (`sk-1234-add-login-validation` or `sk-learn-experiments-2` is a name; a key's body is
+    one long run)."""
+    for m in SECRET_SHAPE.finditer(text):
+        for run in re.findall(r"[A-Za-z0-9]{16,}", m.group(0)):
+            if re.search(r"[0-9]", run) and re.search(r"[A-Za-z]", run):
+                return True
+        if m.group(0).startswith("-----BEGIN"):
+            return True
+    return False
+
+
 class HookError(X.ExtrasError):
     """A fact refused: the message names the fact, never its value."""
 
@@ -111,7 +122,7 @@ def check_facts(facts: dict) -> dict:
             raise HookError(f"no hook fact {k!r}")
         v = str(v)
         pattern, what = FACTS[k]
-        if not re.fullmatch(pattern, v) or (k in FREE and (SECRET_SHAPE.search(v) or X.USERINFO.search(v))):
+        if not re.fullmatch(pattern, v) or (k in FREE and (key_like(v) or X.USERINFO.search(v))):
             raise HookError(f"--{k.replace('_', '-')} is not {what} (not shown: it may be a secret)")
         out[k] = v
     return out
@@ -138,26 +149,24 @@ def env_for(e: dict, facts: dict) -> dict:
 
 def prepared(e: dict, d: Path) -> tuple:
     """(what to run, None) after the pin check, or (None, why not). Always a private copy in the run folder `d`,
-    checked there: a path hook's bytes that matched its hash; a git hook's pinned commit exported whole (`git archive`,
-    the commit's own objects: nothing written, ignored or marked unchanged in its checkout counts), its script's hash
-    checked in the export."""
+    checked there: a path hook's bytes that matched its hash; a git hook's pinned commit written out from its objects,
+    each checked against its id (extras.export_hook: nothing written, replaced or rewritten in its cache counts), its
+    script's hash checked in the export."""
     if e.get("url"):
         why = X.hook_problem(e, fetch_it=True)
         if why:
             return None, why
-        data = X.git_bytes(X.hook_source_dir(e), "archive", "--format=tar", e["commit"])
-        if data is None:
-            return None, f"commit {e['commit'][:12]} could not be exported"
         src = d / "src"
         src.mkdir(mode=0o700)
-        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-            tar.extractall(src, filter="data")
-        f = src / e["path"]
-        if f.is_symlink() or not f.is_file() or X.sha256(f) != e.get("sha256"):
-            return None, f"{e['path']} in the export of {e['commit'][:12]} is not the script that was added"
-        f.chmod(0o700)
-        return f, None
+        try:
+            return X.export_hook(e, src), None
+        except X.ExportError as err:
+            return None, f"{err} (the hook's cache: {X.hook_source_dir(e)})"
+        except OSError as err:
+            return None, f"its pinned commit could not be written out ({err.strerror or err})"
     f = Path(e["script"])
+    if e.get("link") and os.path.realpath(e["link"]) != str(f):
+        return None, f"{e['link']} now leads elsewhere, not to the pinned {f} (add it again to accept it)"
     try:
         if f.is_symlink() or not f.is_file():
             return None, (f"{f} is missing" if not f.exists() else f"{f} is not a plain file") + \
@@ -217,6 +226,8 @@ def guarded():
     old = {}
     try:
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            if signal.getsignal(sig) is signal.SIG_IGN:
+                continue  # an ignored signal stays ignored (nohup): the caller asked not to be stopped by it
             old[sig] = signal.signal(sig, _on_signal)
     except ValueError:
         pass
@@ -267,7 +278,7 @@ def tail_of(log: Path, keep: tuple = ()) -> list:
 
 def run_one(e: dict, facts: dict) -> dict:
     """Run one hook: {id, name, origin, event, state (ok | failed | timeout | refused), exit, seconds, tail, why}."""
-    res = {"id": X.ident(e), "name": e["name"], "origin": e.get("origin") or "", "event": e.get("event"),
+    res = {"id": X.label(e), "name": e["name"], "origin": e.get("origin") or "", "event": e.get("event"),
            "state": "refused", "exit": None, "seconds": 0.0, "tail": [], "why": "",
            "timeout": int(e.get("timeout") or X.HOOK_TIMEOUT)}
     base = runs_dir()
@@ -316,9 +327,9 @@ def run(entries: list, event: str, facts: dict, skip: "dict | None" = None) -> l
     facts = check_facts({**facts, "event": event})
     out = []
     for e in hooks:
-        if e["name"] in (skip or {}):
-            out.append({"id": X.ident(e), "name": e["name"], "origin": e.get("origin") or "", "event": event,
-                        "state": "skipped", "exit": None, "seconds": 0.0, "tail": [], "why": skip[e["name"]],
+        if scoped(e) in (skip or {}):
+            out.append({"id": X.label(e), "name": e["name"], "origin": e.get("origin") or "", "event": event,
+                        "state": "skipped", "exit": None, "seconds": 0.0, "tail": [], "why": skip[scoped(e)],
                         "timeout": 0})
             continue
         out.append(run_one(e, facts))
@@ -328,18 +339,28 @@ def run(entries: list, event: str, facts: dict, skip: "dict | None" = None) -> l
     return out
 
 
+def scoped(e: dict) -> str:
+    """A hook's name with its level: machine:<name> or project:<name>."""
+    return f"{e.get('origin') or 'project'}:{e['name']}"
+
+
 def check_skip(entries: list, event: str, names: list, reason: "str | None") -> dict:
-    """{name: reason} for --skip-hook: each name must be a hook of that event, and the reason real text."""
+    """{level:name: reason} for --skip-hook: each name (`<name>`, `machine:<name>` or `project:<name>`) must be one
+    hook of that event, and the reason real text."""
     if not names:
         return {}
     reason = " ".join((reason or "").split())
     if len(reason) < 8 or SECRET_SHAPE.search(reason) or X.USERINFO.search(reason):
         raise HookError("--skip-hook needs --reason \"<why>\" (a sentence, recorded; never a secret)")
-    have = {e["name"] for e in X.hooks_for(entries, event)}
+    have = [scoped(e) for e in X.hooks_for(entries, event)]
+    out = {}
     for n in names:
-        if n not in have:
-            raise HookError(f"--skip-hook {n}: no {event} hook of that name ({', '.join(sorted(have)) or 'none'})")
-    return {n: reason for n in names}
+        hit = [h for h in have if n in (h, h.split(":", 1)[1])]
+        if len(hit) != 1:
+            raise HookError(f"--skip-hook {n}: " + ("names both " + " and ".join(hit) + ": say which" if hit else
+                                                    f"no {event} hook of that name ({', '.join(have) or 'none'})"))
+        out[hit[0]] = reason
+    return out
 
 
 def record_skip(skip: dict, event: str, facts: dict) -> Path:
@@ -349,7 +370,7 @@ def record_skip(skip: dict, event: str, facts: dict) -> Path:
     fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
         for name, reason in skip.items():
-            fh.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event, "hook": name,
+            fh.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event, "hook": f"hook:{name}",
                                  "reason": reason, **{k: v for k, v in facts.items() if v}}) + "\n")
     return f
 
@@ -368,7 +389,7 @@ def way_past(results: list, event: str, command: str) -> list:
                        f"hook:{r['name']}" for r in failed(results)) + "; a machine hook is every project's)"]
     if command:
         out.append(f"or, a person at a terminal only, once and recorded: {command} "
-                   + " ".join(f"--skip-hook {n}" for n in names) + " --reason \"<why>\"")
+                   + " ".join(f"--skip-hook {scoped(r)}" for r in failed(results)) + " --reason \"<why>\"")
     return out
 
 

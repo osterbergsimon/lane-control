@@ -235,7 +235,9 @@ OpenCode      the main checkout's .opencode/opencode.json    .opencode/opencode.
 ### Hooks
 
 Your own scripts, which lane-control runs at five moments (`core/hooks.py`; lc-76o). They are extras of kind `hook`,
-added, listed and removed like the others; the machine's run for every project, before the project's own.
+added, listed and removed like the others. A hook never takes another's place: the machine's run for every project,
+before the project's own, even with the same name (gates: every one must pass). Each is shown and recorded with its
+level, `hook:machine:<name>` or `hook:project:<name>`; one name is one event per level (add refuses it for another).
 
 ```
 event        when                                                where it fires                       a failure
@@ -253,11 +255,15 @@ on-report    a lane's report; the away watchdog's escalation     lane-control pr
 - **Never from a project repo.** Only what you add runs: an absolute path outside every project checkout (as given or
   through a link; `--allow-repo-path` takes one anyway, with a warning), pinned by its hash, or a file in a git repo
   pinned at a full commit, fetched at add (and by refresh) and checked against its commit and hash. A link is
-  resolved at add: its target is what is pinned and run (add says so). A missing or changed script does not run: it
+  resolved at add: its target is what is pinned and run (add says so), and once the link leads elsewhere the hook is
+  `changed` and refused until it is added again. A missing or changed script does not run: it
   is `refused` (for a gate: not green) and `check` and `doctor` flag it `missing` or `changed`, with what to do.
   Every hook runs from a private copy made and checked just before: a path hook's bytes that matched its hash; a git
-  hook's whole pinned commit, exported from the commit's own objects (`git archive`), so nothing written, ignored or
-  marked unchanged in its checkout counts, and what the hook writes beside itself is gone after the run.
+  hook's whole pinned commit, written out by lane-control itself from the commit's objects, each one hashed against
+  its id from the pinned commit down, with git run on no config but the cache's own, no replace refs, attributes,
+  filters or hooks, and none of the caller's variables. Nothing written, ignored, replaced or rewritten in the cache
+  counts (a rewritten object is refused), and what the hook writes beside itself is gone after the run. A repo with a
+  link that leads out of it is refused at add.
 - **Facts, never secrets.** No arguments, stdin closed. The environment is a short list (`PATH`, `HOME`, `USER`, the
   locale, the XDG folders, `TMPDIR`, `SSH_AUTH_SOCK`) and the facts as `LANE_HOOK_<FACT>`: `EVENT`, `NAME`, `SOURCE`,
   `PROJECT`, `PROJECT_ROOT` and, where the event has them, `PR`, `HEAD_SHA`, `MERGE_SHA`, `LANE`, `ISSUE`, `OUTCOME`,
@@ -280,7 +286,7 @@ on-report    a lane's report; the away watchdog's escalation     lane-control pr
   is kept) become `[redacted]`. A hook must not print secrets.
 - **A broken blocking hook:** the failure says the way past it, which is the owner's: fix the script and add it
   again, or `lane-control project|machine extras remove hook:<name>` (a machine hook is every project's), or, for one
-  run, `--skip-hook <name> --reason "<why>"` on `project gate`, `project hook` or `lane prepare`: a person at a
+  run, `--skip-hook <name>` (or `machine:<name>`, `project:<name>`) `--reason "<why>"` on `project gate`, `project hook` or `lane prepare`: a person at a
   terminal only (an agent is refused), recorded in `~/.local/state/lane-control/hooks/skips.jsonl`.
 - **The coordinator** runs `gate` right before a merge and the after-merge hooks once after it, and the on-report
   hooks when it takes a report (its persona and the `native-orca-lanes` skill say when); with no hooks they answer at

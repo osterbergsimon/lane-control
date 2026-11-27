@@ -129,15 +129,15 @@ You plan, decide and check; lanes do the work, including the waiting.
   squash or a rebase merge). Then `bd close <id>` and `bd dolt push`. The lane skill has the rest.
 - The owner's lifecycle hooks (their scripts; none is yours to add, change or skip), run in your folder:
   - Right before the merge: `{{LANE_CONTROL}}/scripts/lane-control project gate . <n> --head <full head sha> --lane
-    <KEY> --issue <id>` (a PR of an attached repo: add `--repo <its folder>`). Exit non-zero is not green: do not
+    <KEY> --issue <id>` (an attached repo's PR: `--repo <its folder>`). Exit non-zero is not green: do not
     merge; tell the owner what it printed, with the way past it names (the owner's to take: `--skip-hook` is a
     person's only). Its first line says how long it may take (the sum of its hooks' timeouts), as part of the merge:
     give your shell that long, or run it in the background and read its output when it ends.
   - Right after the merge, once: `{{LANE_CONTROL}}/scripts/lane-control project hook . after-merge --pr <n> --head
-    <sha> --merge-sha <merge commit> --lane <KEY> --issue <id>`.
+    <sha> --merge-sha <merge commit> --lane <KEY> --issue <id>` (an attached repo's PR: `--repo <its folder>`).
   - When you take a lane's report: `{{LANE_CONTROL}}/scripts/lane-control project hook . on-report --lane <KEY>
-    --issue <id> --pr <n> --outcome <status>`, the status being the report's word after the key, without the colon
-    (succeeded, failed, blocked, NEEDS_STANDARD, NEEDS_DEEP).
+    --issue <id> --pr <n> --outcome <status>` (an attached repo's PR: `--repo <its folder>`), the status being the
+    report's word after the key, without the colon (succeeded, failed, blocked, NEEDS_STANDARD, NEEDS_DEEP).
   after-merge and on-report only warn: pass a warning to the owner; nothing is undone. With no hooks they say so
   at once. `away-merge` runs the gate and after-merge hooks itself: after it, run neither.
 - Orca removes a merged lane's worktree: its own rule "Delete merged workspaces" (Settings -> Workspace Cleanup ->

@@ -157,9 +157,9 @@ and the report states the base sha it merged. If the base moved since (`git fetc
 to merge it again and re-run its checks before you merge.
 
 When you take the report, run the owner's on-report hooks first:
-`<lane-control>/scripts/lane-control project hook . on-report --lane <KEY> --issue <id> --pr <n> --outcome <status>`,
-the status being the report's word after the key, without the colon (succeeded, failed, blocked, NEEDS_STANDARD,
-NEEDS_DEEP). It only warns: pass a warning to the owner.
+`<lane-control>/scripts/lane-control project hook . on-report --lane <KEY> --issue <id> --pr <n> --outcome <status>`
+(an attached repo's PR: `--repo <its folder>`), the status being the report's word after the key, without the colon
+(succeeded, failed, blocked, NEEDS_STANDARD, NEEDS_DEEP). It only warns: pass a warning to the owner.
 
 `NEEDS_STANDARD` or `NEEDS_DEEP`: reopen the lane one tier up. After one failed round on swift the next runs on
 standard. `agents-md` lines go to the owner as a list, never into AGENTS.md by you.
@@ -208,7 +208,8 @@ person's only). It may take as long as its first line says: give your shell that
 Then `gh pr merge <n> --merge --match-head-commit <full head sha>` (a merge commit, never a squash or a
 rebase merge, never `--admin`). If the head moved, gh refuses: review the new commit first. Right after the merge, once:
 `<lane-control>/scripts/lane-control project hook . after-merge --pr <n> --head <sha> --merge-sha <merge commit>
---lane <KEY> --issue <id>` (it only warns: pass a warning to the owner). Then `bd close <id>`, then `bd dolt push`.
+--lane <KEY> --issue <id>` (an attached repo's PR: `--repo <its folder>`; it only warns: pass a warning to the
+owner). Then `bd close <id>`, then `bd dolt push`.
 
 Orca removes the worktree, not you. Its own cleanup rule "Delete merged workspaces" (in Orca: Settings -> Workspace
 Cleanup -> Cleanup rules) removes a merged lane's worktree and its merged branch once nothing runs in it, it is clean

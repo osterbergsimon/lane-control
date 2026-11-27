@@ -2979,6 +2979,7 @@ class LifecycleHookContentTests(unittest.TestCase):
                 self.assertIn("only warn", text)
                 self.assertIn("the report's word after the key, without the colon", text)  # review M7
                 self.assertIn("--repo <its folder>", text)  # review m2
+                self.assertEqual(text.count("attached repo's PR"), 3, f.name)  # r2 m4: gate, after-merge, on-report
                 self.assertIn("`--skip-hook` is a person's only", text)  # review m3
                 self.assertIn("Right after the merge, once:", text)  # review m1
         persona = " ".join((NATIVE / "coordinator.md").read_text().split())
