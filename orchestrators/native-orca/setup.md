@@ -294,9 +294,15 @@ project and nothing else of the machine (design: `docs/superpowers/specs/2026-11
 3. In `machine.conf`: `SANDBOX_PROJECTS=<project> ...`; where OpenCode is not installed from nixpkgs,
    `SANDBOX_AGENT_DIRS=<its install folder>` (bound read-only; the check names it); optionally `SANDBOX_LANE_MEMORY`
    (default 8G) and `SANDBOX_REVIEW_DIR` (the review folder a ticket may read named files from).
-4. Each sandboxed project's GitHub Actions: a read-only default workflow token, no Actions secrets and no
-   self-hosted runners (owner 2026-11-28); `lane prepare --sandbox` refuses a project that fails it, and the check
-   reports it.
+4. Each sandboxed project's GitHub Actions: a read-only default workflow token, no Actions secrets (repository,
+   organization or environment) and no self-hosted runners (the repository's or its organization's), and no base
+   workflow asking for a write token (owner 2026-11-28); `lane prepare --sandbox` refuses a project that fails it,
+   and the check reports it. An origin that is not a GitHub remote lane-control can read refuses too; for a project
+   with no CI at all, record `"sandbox_no_ci": true` in its settings store.
+
+A project in SANDBOX_PROJECTS is always sandboxed: the launcher refuses an OpenCode start in any of its lane
+worktrees that has no ticket, even after a refused prepare. Not given to sandboxed lanes in phase 1: the project's
+extras (skills, MCP servers, plugins, personas) and the idle and watchdog signals.
 
 `lane-control machine setup --check --sandbox` (read only) ends with `sandbox: on|off|broken (<why>)`. Then the coordinator
 follows the lane skill's "Sandboxed lanes": `lane prepare --sandbox`, `worker-start`, `lane started`; close with

@@ -45,7 +45,7 @@ nothing an unsandboxed process later loads or runs, and no read-only bind (remou
 
 | Route out | Closed by | Checked by |
 |---|---|---|
-| Remount a read-only bind and write the host file (r2 B1: under pasta the agent kept `CAP_SYS_ADMIN`) | `bwrap --cap-drop ALL`: CapEff 0, no remount, no umount, no nested user namespace | spike `caps` (without the flag: the host file is written) and `sandbox` (with it: refused) |
+| Remount a read-only bind and write the host file (r2 B1: under pasta the agent kept `CAP_SYS_ADMIN`) | `bwrap --cap-drop ALL`: CapEff 0, no remount, no umount; a seccomp filter (`--seccomp`): no nested user namespace (SBX-2 r1 M3: without it `unshare -U` worked, with every capability inside) | spike `caps` (without the flag: the host file is written) and `sandbox` (with it: refused) |
 | Host git on a tree the agent wrote (r1 B2: a nested repo's `core.fsmonitor`) | the lane's own clone; no host git ever runs in it; Orca's worktree stays at the base | spike `control` (runs) and `sandbox` (Orca worktree, main checkout, fresh checkout of the pushed branch: nothing runs) |
 | The broker handed a lane-made path (r2 B2: a link to a lane-made repo, an id-only bundle naming the owner's unpushed commit) | the outbox file is opened no-follow, non-blocking, regular, under a size cap, and copied; it is imported first into a broker-only quarantine repo that holds only the lane's base and earlier pushes; exactly the lane ref, descending from the recorded base, fast-forward | spike: round 2's import takes entries a and c; the design refuses a-g and accepts the honest push |
 | CI running lane-written code or workflow files with the repo's token and secrets (r2 B5) | the broker refuses a push whose new commits change CI configuration unless the owner approves that sha; existing workflows still run lane code: open (question 7, lc-9r81.3) | spike: entry h refused |
@@ -53,7 +53,7 @@ nothing an unsandboxed process later loads or runs, and no read-only bind (remou
 | Orca's CLI and socket, gh's token, beads hooks (r1 B1, B3) | not mounted; typed broker requests only | broker tests (plan task 5) |
 | Session bus, user systemd, agent sockets, Wayland, docker | `/run` and `$XDG_RUNTIME_DIR` not mounted; systemd-run gets the bus variables, bwrap unsets them by name | spike: `/run` search; the stub sees no bus variable |
 | The nix daemon (where the user is a nix trusted user, root-equivalent) | only `/nix/store` is mounted | spike: connect refused |
-| Host loopback TCP and UDP, abstract sockets (X11), ports opened inside, the host's other addresses, the LAN, a cloud box's metadata endpoint (r1 M3, r2 M1) | pasta's own network namespace with `-t none -u none -U none`, only Orca's hook port forwarded; an nft output filter, set from outside before the agent starts, that drops the host's addresses, link-local (the metadata endpoint included; pasta's DNS address excepted) and private ranges (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7, fe80::/10), with the gateway's address and port allowed when it is on the LAN | spike: UDP and TCP loopback, abstract socket, every host address, inbound from every host address; the stub's `nft flush` fails |
+| Host loopback TCP and UDP, abstract sockets (X11), ports opened inside, the host's other addresses, the LAN, a cloud box's metadata endpoint (r1 M3, r2 M1) | pasta's own network namespace with `-t none -u none -U none`, only Orca's hook port forwarded; an nft output filter, set from outside before the agent starts, that drops the host's addresses, its on-link prefixes (LAN machines with global addresses, SBX-2 r1 M7), link-local (the metadata endpoint included; pasta's DNS address excepted), private ranges (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7, fe80::/10), multicast and broadcast, after IPv6 neighbour discovery, with the gateway's address and port allowed when it is on the LAN (a named gateway resolved on the host) | spike: UDP and TCP loopback, abstract socket, every host address, inbound from every host address; the stub's `nft flush` fails |
 | Another process's environment through `/proc`; secrets in host argv (r2 M2) | bwrap and pasta start from `env -i` with the allowlist as environment, never as arguments (no `--clearenv --setenv`) | spike `naive` (round 2's start: the token in `/proc/1/environ`, the key in host argv) and `sandbox` (neither) |
 | `TIOCSTI` into the pane's shell | `--new-session` unless `dev.tty.legacy_tiocsti=0` | `machine-check` (plan task 7) |
 | A poisoned cache or tool used by a reviewer or another lane | caches, data and run folders per ticket; tools from `/nix/store`, built outside from lane-control's list | plan task 3 |
@@ -269,7 +269,8 @@ the pins above, nested in Orca's FHS env): **PASS**.
 - `naive` (round 2's start, owner's environment, `--clearenv --setenv`): the token in `/proc/1/environ`, the key in 3
   host processes' argv (r2 M2).
 - `sandbox`: no floor file, link or search hit; no token in any visible process; CapEff 0 (uid 0); every read-only
-  bind refuses remount and write; no nested user namespace; `nft flush` refused; nix daemon, loopback TCP and UDP, an
+  bind refuses remount and write; no nested user namespace (only `unshare -Urm` was tried: SBX-2's review found the
+  unmapped `unshare -U` worked; the seccomp filter now refuses it); `nft flush` refused; nix daemon, loopback TCP and UDP, an
   abstract socket and every host address unreachable, the forwarded port reachable; the key in no host argv; a port
   opened inside unreachable from every host address; the shared repo absent, another lane's commit and the owner's
   unpushed commit not in the clone; commit, base merge (a change to `orca.yaml`) and push by bundle work; the scope
@@ -356,6 +357,32 @@ owner said.
   the links resolve inside where personas name them; the lane's PATH starts with them.
 - The agent binary must resolve under `/nix/store` or a folder in `SANDBOX_AGENT_DIRS` (bound read-only); an npm
   install outside the store is named by `machine setup --check --sandbox` with the line to add.
+- Review round 1 of SBX-2 (r1) changed these:
+  - Lane state is `sandbox/lanes/<project key>/<lane>`: a project's and a lane's, never the lane key's alone (B2).
+  - The launcher fails closed: in any linked worktree of a SANDBOX_PROJECTS project, and in any linked worktree
+    while the config cannot be read, it starts only with a ticket; `prepare` binds the worktree before its first
+    check; `sandbox: on` needs both custom commands set (B3).
+  - The agent starts only on a release token the launcher writes to the read-only inbox after the network filter
+    and the run record (`lane-enter` checks it): bwrap's block fd alone also goes on at the launcher's death. The
+    chain gets `PR_SET_PDEATHSIG`, and a stop signal before the release ends the launch (M2).
+  - A seccomp filter: no `CLONE_NEWUSER` in `unshare`/`clone`, `clone3` fails with ENOSYS, no `TIOCSTI`/`TIOCLINUX`,
+    no other ABI (M3).
+  - git's paths are read with `-z` (a quoted, escaped or non-UTF-8 name is the name itself); `.github` and the CI
+    folders as links or submodules count; CI is judged on the lane's own changes, merges by `--cc`, so merging the
+    base's workflow change needs no approval while an edit in the merge does (B1, m2).
+  - A push after a failed origin push pushes again (M1); `sandbox close` counts stashes and every branch and refuses
+    when it cannot tell (M4); a resumed lane keeps its first branch (M5).
+  - An origin lane-control cannot read as GitHub refuses unless the owner records `"sandbox_no_ci": true` in the
+    project's settings store; organization runners, base workflows asking for a write token (a text scan of
+    `origin/<base>`'s `.github/workflows`) and a second page of environments refuse too (M6, m1).
+  - The provider config is an allowlist copy; a secret-looking key whose value is not `{env:NAME}`, at any depth,
+    and credentials in a URL refuse (M9).
+  - Orca's settings are read from a private copy of the database and its WAL (M8).
+  - Not given to sandboxed lanes in phase 1, and `prepare` says so: the project's extras (skills, MCP servers,
+    plugins, personas: lc-yh5m) and the idle and watchdog signals (the agent's store is never opened outside:
+    lc-um5m) (m5, m6).
+  - `sandbox check` and `inspect` run in a new session with no stdin; their output reaches the caller without
+    control characters (m7).
 - The broker exits with the launcher that started it; the socket is bound by its relative name (a long `$HOME` would
   pass the 108-byte socket path limit).
 - `lane-control sandbox inspect|close|check` run the spec's sandboxed step through the same launcher, with the clone
