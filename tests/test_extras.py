@@ -952,13 +952,14 @@ class SandboxPrepareTests(Scratch):
                    "app": {"owner": {"type": "User"}}, "environments": {"total_count": 0, "environments": []}}
 
         def gh_json(path):
-            leaf = path.rsplit("/", 1)[-1]
+            leaf = path.split("?")[0].rsplit("/", 1)[-1]
             if leaf not in self.ci or self.ci[leaf] is None:
                 raise self.SB.SandboxError("no")
             return self.ci[leaf]
         p = mock.patch.object(self.SP, "gh_json", gh_json)
         p.start()
         self.addCleanup(p.stop)
+        self.real_slug = self.SP.github_slug
         p = mock.patch.object(self.SP, "github_slug", lambda root: "owner/app")
         p.start()
         self.addCleanup(p.stop)
@@ -1138,7 +1139,7 @@ class SandboxPrepareTests(Scratch):
             "options": {"baseURL": "https://gw.example.com/v1", "apiKey": key}}}}))
         code, out, err = self.sprep()
         self.assertNotEqual(code, 0)
-        self.assertIn("inline apiKey", out)
+        self.assertIn("inline secret at provider.gw.options.apiKey", out)
         self.assertNotIn(key, out + err)
         for f in self.SB.state_root().rglob("*"):
             if f.is_file():
@@ -1184,6 +1185,89 @@ class SandboxPrepareTests(Scratch):
         self.assertEqual((rc / ".git" / "HEAD").read_text().strip(), sha)
         self.assertEqual(rev["checkout"], sha)
         self.assertFalse((rc / "lane-file").exists())
+
+    def test_github_remote_forms(self):
+        """r1 M6: every ordinary GitHub URL form is read; one that is not (an ssh alias gh cannot name, a path)
+        refuses, unless the owner recorded that the project has no CI."""
+        for u in ("git@github.com:o/r.git", "ssh://git@ssh.github.com:443/o/r.git", "https://user@github.com/o/r",
+                  "https://GitHub.com/o/r.git", "ssh://git@github.com:22/o/r.git", "git://github.com/o/r.git",
+                  "git+ssh://git@github.com/o/r"):
+            self.assertEqual(self.SP.parse_github(u).lower(), "o/r", u)
+        for u in ("github-work:o/r.git", "/srv/git/r.git", "https://gitlab.com/o/r"):
+            self.assertIsNone(self.SP.parse_github(u), u)
+        with mock.patch.object(self.SP, "github_slug", lambda root: None):
+            slug, lines = self.SP.ci_target(self.repo, {})
+            self.assertFalse(lines[0][0])
+            self.assertIn("sandbox_no_ci", lines[0][1])
+            self.assertTrue(self.SP.ci_target(self.repo, {"sandbox_no_ci": True})[1][0][0])
+            self.no_prep(says="not a GitHub remote")
+        git("remote", "set-url", "origin", "github-work:o/r.git", cwd=self.repo)  # an ssh host alias
+        with mock.patch.object(self.SP, "gh_resolve", lambda root: "o/r"):
+            self.assertEqual(self.real_slug(self.repo), "o/r")  # gh names it: its CI is checked
+        with mock.patch.object(self.SP, "gh_resolve", lambda root: None):
+            self.assertIsNone(self.real_slug(self.repo))  # nobody can name it: ci_target refuses (above)
+
+    def test_org_runners_write_workflows_and_pages(self):
+        """r1 m1: an organization's runners, a base workflow that asks for a write token, a second page of
+        environments: each refuses."""
+        self.ci["app"] = {"owner": {"type": "Organization"}}
+        self.ci["runners"] = {"total_count": 1}  # the organization's (and the repo's) runners
+        self.no_prep(says="self-hosted runners: 1")
+        self.ci["runners"] = {"total_count": 0}
+        self.ci["environments"] = {"total_count": 150, "environments": [{"name": "e"}] * 0}
+        self.no_prep(says="more than one page")
+        self.ci["environments"] = {"total_count": 0, "environments": []}
+        self.push_main(".github/workflows/t.yml", "on: push\npermissions:\n  contents: write\n")
+        self.no_prep(says="base workflows ask for a write token: .github/workflows/t.yml")
+
+    def test_provider_secrets_refused(self):
+        """r1 M9: a secret anywhere in the owner's provider entry refuses; only allowlisted fields are copied."""
+        cfgf = self.home / ".config" / "opencode" / "opencode.json"
+        planted = {
+            "model headers": {"models": {"m": {"headers": {"Authorization": "Bearer SECRET-1"}}}},
+            "model apiKey": {"models": {"m": {"options": {"apiKey": "SECRET-2"}}}},
+            "api-key name": {"options": {"baseURL": "https://gw.example.com", "api-key": "SECRET-3"}},
+            "secretAccessKey": {"options": {"secretAccessKey": "SECRET-4"}},
+            "userinfo in baseURL": {"options": {"baseURL": "https://u:SECRET-5@gw.example.com/v1"}},
+        }
+        for what, entry in planted.items():
+            cfgf.write_text(json.dumps({"provider": {"gw": {"npm": "x", **entry}}}))
+            out = self.no_prep(says="nothing was prepared")
+            self.assertNotIn("SECRET-", out, what)
+        for f in self.SB.state_root().rglob("*"):
+            if f.is_file():
+                self.assertNotIn("SECRET-", f.read_text(errors="replace"), f)
+        cfgf.write_text(json.dumps({"model": "gw/m", "mcp": {"x": {}}, "provider": {"gw": {
+            "npm": "x", "extra": "dropped", "options": {"baseURL": "http://127.0.0.1:1/v1",
+                                                       "apiKey": "{env:GW_KEY}", "other": 1},
+            "models": {"m": {"name": "M", "limit": {"context": 1}, "unknown": 2}}}}}))
+        nonce, _ = self.ok_prep()
+        gen = json.loads(Path(self.ticket(nonce)["home_files"]["opencode.json"]).read_text())
+        self.assertEqual(gen["provider"]["gw"], {"npm": "x", "options": {"baseURL": "http://127.0.0.1:1/v1",
+                                                                         "apiKey": "{env:GW_KEY}"},
+                                                 "models": {"m": {"name": "M", "limit": {"context": 1}}}})
+        self.assertNotIn("mcp", gen)
+        self.assertEqual(self.ticket(nonce)["gateway_key_env"], "GW_KEY")
+
+    def test_reviewer_keeps_the_lanes_issue(self):
+        """r1 m4: a reviewer prepared without --issue reads the lane's; the lane's record is not rewritten."""
+        self.sprep("--issue", "app-1x")
+        sha = self.push_lane()
+        rec = self.SB.lane_dir("app-1", self.repo) / "lane.json"
+        before = json.loads(rec.read_text())
+        self.wt = self.t / "workspaces" / "review-9"
+        git("worktree", "add", "-q", self.wt, "-b", "review-9", cwd=self.repo)
+        nonce, _ = self.ok_prep("--sha", sha, role="reviewer")
+        self.assertEqual(self.ticket(nonce)["issue"], "app-1x")
+        after = json.loads(rec.read_text())
+        self.assertEqual({k: after[k] for k in before if k != "worktrees"},
+                         {k: before[k] for k in before if k != "worktrees"})
+
+    def test_prepare_names_what_it_leaves_out(self):
+        """r1 m5: extras, skills and the idle signal are not given to sandboxed lanes in phase 1, and it says so."""
+        nonce, out = self.ok_prep()
+        self.assertIn("not given to a sandboxed lane in phase 1", out)
+        self.assertNotIn("(spec)", Path(self.ticket(nonce)["persona"]).read_text())
 
     def test_new_prepare_drops_unused_tickets(self):
         """r1 m3: the next start takes the newest prepare's ticket, never an older unused one."""

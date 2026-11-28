@@ -113,7 +113,7 @@ class Fixture:
                    "environments": {"total_count": 0, "environments": []}, **(ci or {})}
         stack = [mock.patch.dict(os.environ, self.env, clear=True),
                  mock.patch.object(SP, "github_slug", lambda root: "owner/app"),
-                 mock.patch.object(SP, "gh_json", lambda path: answers.get(path.rsplit("/", 1)[-1],
+                 mock.patch.object(SP, "gh_json", lambda path: answers.get(path.split("?")[0].rsplit("/", 1)[-1],
                                                                             {"total_count": 0}))]
         return stack
 

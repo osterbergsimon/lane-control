@@ -113,19 +113,77 @@ def gh_json(path: str) -> dict:
     return json.loads(r.stdout or "{}")
 
 
+GH_URL = re.compile(r"""(?ix)^(?:
+      (?:[a-z0-9._-]+@)?(?:ssh\.)?github\.com:(?P<a>[^/]+/[^/]+?)                       # scp form
+    | (?:ssh|git\+ssh|git|https?)://(?:[^@/]+@)?(?:ssh\.)?github\.com(?::\d+)?/(?P<b>[^/]+/[^/]+?)  # URL forms
+    )(?:\.git)?/?$""")
+
+
+def parse_github(url: str) -> "str | None":
+    """owner/repo from a GitHub remote URL in any of git's forms (scp, ssh, ssh.github.com:443, https with userinfo,
+    git://, any case), or None."""
+    m = GH_URL.match(url.strip())
+    slug = m and (m.group("a") or m.group("b"))
+    return slug if slug and GH_SLUG.fullmatch(slug) else None
+
+
+def gh_resolve(root: Path) -> "str | None":
+    """What gh makes of the checkout's remote (it resolves ssh host aliases), or None."""
+    try:
+        r = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd=root,
+                           capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    slug = r.stdout.strip()
+    return slug if r.returncode == 0 and GH_SLUG.fullmatch(slug) else None
+
+
 def github_slug(root: Path) -> "str | None":
     try:
         url = git("-C", root, "remote", "get-url", "origin")
     except SB.SandboxError:
         return None
-    m = re.match(r"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)([^/]+/[^/]+?)(?:\.git)?/?$", url)
-    return m.group(1) if m and GH_SLUG.fullmatch(m.group(1)) else None
+    return parse_github(url) or gh_resolve(root)
+
+
+def ci_target(root: Path, st: dict) -> tuple:
+    """(slug or None, [(ok, line)]). A remote lane-control cannot read as GitHub refuses, unless the owner recorded
+    in the project's settings store that it has no CI (`"sandbox_no_ci": true`) (review r1 M6)."""
+    slug = github_slug(root)
+    if slug:
+        return slug, ci_check(slug)
+    if st.get("sandbox_no_ci") is True:
+        return None, [(True, "no GitHub repository; the owner recorded that this project has no CI")]
+    return None, [(False, "origin is not a GitHub remote lane-control can read (gh repo view could not name it), so "
+                          "its CI cannot be checked; when the project has no CI, record \"sandbox_no_ci\": true in "
+                          "its settings store")]
+
+
+def workflow_writes(root: Path, base: str) -> list:
+    """Base workflow files that ask for a write token (`permissions: write-all` or `<scope>: write`), read from the
+    shared repo's origin/<base> (never a lane-written tree) (review r1 m1)."""
+    ref = f"refs/remotes/origin/{base}"
+    try:
+        names = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", ref, "--",
+                                ".github/workflows"], capture_output=True, check=True).stdout.split(b"\0")
+    except subprocess.CalledProcessError:
+        return []
+    out = []
+    for n in names:
+        if not n:
+            continue
+        name = n.decode("utf-8", "surrogateescape")
+        r = subprocess.run(["git", "-C", str(root), "cat-file", "blob", f"{ref}:{name}"], capture_output=True)
+        text = r.stdout.decode("utf-8", "replace")
+        if re.search(r"(?im)^[^#\n]*\bwrite-all\b|^[^#\n]*[a-z-]+\s*:\s*['\"]?write['\"]?\s*(#.*)?$", text):
+            out.append(name)
+    return out
 
 
 def ci_check(slug: "str | None") -> list:
     """[(ok, line)] for the project's GitHub Actions settings; a value that cannot be read is not ok."""
     if not slug:
-        return [(True, "no GitHub remote: no Actions to check")]
+        return [(False, "no GitHub repository named: its CI cannot be checked")]
     out = []
 
     def one(what, path, good, show):
@@ -146,11 +204,16 @@ def ci_check(slug: "str | None") -> list:
     if org:
         one("organization secrets for the repo", f"repos/{slug}/actions/organization-secrets",
             lambda d: int(d["total_count"]) == 0, lambda d: str(int(d["total_count"])))
+        one("organization self-hosted runners", f"orgs/{slug.split('/')[0]}/actions/runners",
+            lambda d: int(d["total_count"]) == 0, lambda d: str(int(d["total_count"])))
     one("self-hosted runners", f"repos/{slug}/actions/runners", lambda d: int(d["total_count"]) == 0,
         lambda d: str(int(d["total_count"])))
     try:
-        envs = [e.get("name") for e in gh_json(f"repos/{slug}/environments").get("environments") or []]
-    except (SB.SandboxError, ValueError, OSError, subprocess.TimeoutExpired, AttributeError):
+        d = gh_json(f"repos/{slug}/environments?per_page=100")
+        envs = [e.get("name") for e in d.get("environments") or []]
+        if int(d.get("total_count") or len(envs)) > len(envs):
+            out.append((False, "environments: more than one page; check their secrets by hand"))
+    except (SB.SandboxError, ValueError, OSError, subprocess.TimeoutExpired, AttributeError, TypeError):
         envs = None
     if envs is None:
         out.append((False, "environments: cannot be read"))
@@ -245,35 +308,71 @@ def owner_opencode() -> dict:
     return {}
 
 
+ENV_REF = re.compile(r"\{env:([A-Z_][A-Z0-9_]{0,63})\}")
+SECRETY = re.compile(r"(?i)(key|token|secret|passw|auth|credential|cookie|header|bearer|session|signature)")
+PROVIDER_FIELDS = ("npm", "name", "api", "id")
+OPTION_FIELDS = ("baseURL", "apiKey", "timeout")
+MODEL_FIELDS = ("id", "name", "limit", "modalities", "reasoning", "tool_call", "attachment", "temperature", "cost",
+                "release_date", "options", "variants")
+
+
+def _no_secrets(obj, where: str, envs: set) -> None:
+    """Refuse a secret-looking key whose value is not an {env:NAME} reference, at any depth, and credentials in a
+    URL (review r1 M9). Every env name referenced is collected in envs."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            here = f"{where}.{k}"
+            if SECRETY.search(str(k)):
+                m = ENV_REF.fullmatch(v) if isinstance(v, str) else None
+                if not m:
+                    raise SB.SandboxError(f"the owner's OpenCode config has an inline secret at {here}: a sandboxed "
+                                          "lane takes a key only by an environment variable ({env:NAME}); nothing "
+                                          "was prepared")
+                envs.add(m.group(1))
+            else:
+                _no_secrets(v, here, envs)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            _no_secrets(v, f"{where}[{i}]", envs)
+    elif isinstance(obj, str):
+        for m in ENV_REF.finditer(obj):
+            envs.add(m.group(1))
+        if re.search(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s@]+@", obj):
+            raise SB.SandboxError(f"the owner's OpenCode config has credentials in a URL at {where}: nothing was "
+                                  "prepared")
+
+
 def lane_opencode(owner: dict, model: "str | None") -> tuple:
-    """(config, key env name, gateway (host, port) or None): the owner's provider entries without any inline key
-    (one with an inline key refuses), the model, nothing else (no MCP, no permission rules, no plugins list)."""
-    providers, key_env, gateway = {}, None, None
+    """(config, key env name, gateway (host, port) or None): an allowlist copy of the owner's provider entries
+    (npm, name, api, baseURL, an {env:} apiKey, timeout, the models' own fields), refused when any secret is inline
+    anywhere in them; the model; nothing else (no MCP, no permission rules, no plugins list)."""
+    providers, envs, gateway = {}, set(), None
     for name, p in (owner.get("provider") or {}).items():
         if not isinstance(p, dict):
             continue
-        opts = dict(p.get("options") or {})
-        for k in list(opts):
-            if k.lower() in ("apikey", "api_key", "token", "authorization", "headers"):
-                v = opts[k]
-                m = re.fullmatch(r"\{env:([A-Z_][A-Z0-9_]{0,63})\}", v) if isinstance(v, str) else None
-                if not m:
-                    raise SB.SandboxError(f"OpenCode provider {name!r} has an inline {k} in the owner's config: "
-                                          "a sandboxed lane takes a key only by an environment variable "
-                                          "({env:NAME}); nothing was prepared")
-                key_env = key_env or m.group(1)
+        _no_secrets(p, f"provider.{name}", envs)
+        opts = p.get("options") or {}
+        copy = {k: p[k] for k in PROVIDER_FIELDS if k in p}
+        copy["options"] = {k: opts[k] for k in OPTION_FIELDS if k in opts}
+        models = p.get("models") or {}
+        if isinstance(models, dict) and models:
+            copy["models"] = {mid: {k: m[k] for k in MODEL_FIELDS if k in m} if isinstance(m, dict) else m
+                              for mid, m in models.items()}
         base = opts.get("baseURL")
         if isinstance(base, str) and not gateway:
             u = urlparse(base)
             if u.hostname:
                 gateway = (u.hostname, u.port or (443 if u.scheme == "https" else 80))
-        providers[name] = {**{k: v for k, v in p.items() if k != "options"}, "options": opts}
+        providers[name] = copy
+    if len(envs) > 1:
+        raise SB.SandboxError(f"the owner's OpenCode providers name {len(envs)} key variables ({', '.join(sorted(envs))}): "
+                              "a sandboxed lane gets one; nothing was prepared")
     cfg = {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled"}
     if providers:
         cfg["provider"] = providers
     if model or owner.get("model"):
         cfg["model"] = model or owner.get("model")
-    return cfg, key_env, gateway
+    return cfg, (next(iter(envs)) if envs else None), gateway
 
 
 def owner_identity() -> tuple:
@@ -341,6 +440,14 @@ def find_tool(path: list, name: str) -> "str | None":
     return None
 
 
+def effective_extras(root: Path) -> list:
+    try:
+        import extras as X
+        return [e for e in X.effective(X.store_for(root)) if e.get("kind") != "hook"]
+    except Exception:  # noqa: BLE001  only for the line prepare prints
+        return []
+
+
 def host_bash() -> str:
     """The opener runs in pasta's namespace on the host's file system, so any host bash will do."""
     return os.path.realpath(shutil.which("bash") or "/bin/bash")
@@ -380,8 +487,15 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
     missing = [k for k in PIN_KEYS if not os.path.isabs(conf.get(k) or "")]
     if missing:
         raise SB.SandboxError(f"{', '.join(missing)} not pinned: run lane-control machine setup --sandbox")
-    slug = github_slug(root)
-    bad = [line for ok, line in ci_check(slug) if not ok]
+    slug, lines = ci_target(root, st)
+    bad = [line for ok, line in lines if not ok]
+    if not bad:
+        try:
+            writes = workflow_writes(root, base_branch(root, st, base)[0])
+        except SB.SandboxError:
+            writes = []
+        if writes:
+            bad.append(f"base workflows ask for a write token: {', '.join(writes[:5])}")
     if bad:
         raise SB.SandboxError(f"CI of {slug} runs a lane's code with more than a read-only token: "
                               + "; ".join(bad) + ". A sandboxed project needs a read-only default workflow token, "
@@ -395,6 +509,8 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
         known = {}
     if known and known.get("repo") != str(root):
         raise SB.SandboxError(f"lane state {ld} is of another repository ({known.get('repo')}): nothing was done")
+    if trole != "lane" and not issue:
+        issue = known.get("issue")  # review r1 m4: a reviewer reads the lane's own issue
     if trole == "lane":
         branch = known.get("branch") or lane_branch(root, wt)  # r1 M5: the lane's branch from its first prepare
     else:
@@ -474,19 +590,26 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
     persona_src = persona_src.with_suffix(".md")
     persona = gen / "persona.md"
     text = persona_src.read_text() if persona_src.is_file() and not persona_src.is_symlink() else \
-        f"# {trole} of {name}\n\nYour brief is your persona; the sandbox's rules: {SB.__name__} (spec).\n"
+        (f"# The {trole} of {name}\n\nYour brief (the task Orca gave you) is your spec. You run in a sandbox: your "
+         "own clone, no network to this machine or its LAN; git push and pull, gh pr, gh run view, orca-ide "
+         "orchestration send|ask|check|reply, bd show|update|create and lane-heavy work through its broker.\n")
     SB.write_private(persona, text)
     rf = [x for x in (review_files or [])]
     for x in rf + ([review_write] if review_write else []):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md", x):
             raise SB.SandboxError(f"review file {x!r}: a plain .md name in the owner's review folder")
+    # review r1 m5: what a sandboxed lane does not get in phase 1, said every time
+    left = [e for e in effective_extras(root)]
+    say("prepare: not given to a sandboxed lane in phase 1: the project's extras (skills, MCP servers, plugins, "
+        "personas)" + (f": {len(left)} of them here" if left else "") + ", and the idle and watchdog signals")
+    prefix = st.get("bd_prefix") or known.get("bd_prefix") or (issue.split("-")[0] if issue and "-" in issue else None)
     lane_rec = {"lane": lane, "project": str(root), "name": name, "repo": str(root), "base": base, "branch": branch,
                 "worktree": str(wt),
                 "issue": issue, "gh_repo": slug, "private": private, "bd_prefix": st.get("bd_prefix") or
                 (issue.split("-")[0] if issue and "-" in issue else None)}
     old = json.loads((ld / "lane.json").read_text()) if (ld / "lane.json").is_file() else {}
-    if trole != "lane":  # a reviewer's or check's ticket does not rebind the lane
-        lane_rec = {k: v for k, v in lane_rec.items() if k not in ("worktree", "branch") or k not in old}
+    if trole != "lane":  # review r1 m4: a reviewer's or check's prepare never rewrites the lane's own fields
+        lane_rec = {k: v for k, v in lane_rec.items() if k not in old}
     lane_rec["worktrees"] = sorted(set(old.get("worktrees") or []) | {str(wt)})
     SB.write_private(ld / "lane.json", json.dumps({**old, **lane_rec}, indent=1) + "\n")
     t = {"nonce": nonce, "role": trole, "lane": lane, "issue": issue, "project": name, "repo": str(root),
@@ -499,7 +622,7 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
          "persona": str(persona), "gateway_key_env": key_env, "gateway": list(gateway) if gateway else None,
          "hook_port": None, "review_files": rf, "review_write": review_write if trole == "reviewer" else None,
          "sha": sha, "private": private, "inside": str(HERE / "sandbox-inside"), "lc_tree": str(HERE.parent),
-         "checkout": checkout, "gh_repo": slug, "base_sha": base_sha, "bd_prefix": lane_rec["bd_prefix"], "agent_dirs":
+         "checkout": checkout, "gh_repo": slug, "base_sha": base_sha, "bd_prefix": prefix, "agent_dirs":
          [p for p in (conf.get("SANDBOX_AGENT_DIRS") or "").split(":") if p], "created": time.time()}
     stale = 0  # r1 m3: a ticket prepare wrote before and no start took is never taken instead of this one
     for f in SB.tickets_dir(wt).glob("*.json") if SB.tickets_dir(wt).is_dir() else []:
