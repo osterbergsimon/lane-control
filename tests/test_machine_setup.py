@@ -2611,12 +2611,14 @@ class SandboxSetupTests(unittest.TestCase):
 
     def test_check_names_agent_dirs(self):
         self.setup_ok()
-        npm = self.t / "npm" / "lib" / "node_modules" / "opencode-ai" / "bin"
+        npm = self.t / "npm" / "lib" / "node_modules" / "@opencode" / "cli" / "bin"
         npm.mkdir(parents=True)
         (npm / "opencode").write_text("#!/bin/sh\n")
         self.LS.SP.conf_file().write_text(self.LS.SP.conf_file().read_text() + f"SANDBOX_REAL_OPENCODE2={npm}/opencode\n")
         rc, out = self.check()
-        self.assertIn(f"add SANDBOX_AGENT_DIRS={self.t / 'npm' / 'lib' / 'node_modules'} to machine.conf", out)
+        # r1 n2: the package's scope folder, not every global module
+        self.assertIn(f"add SANDBOX_AGENT_DIRS={self.t / 'npm' / 'lib' / 'node_modules' / '@opencode'} to machine.conf",
+                      out)
 
     def test_orca_settings_read_only(self):
         db = self.home / ".config" / "orca" / "profiles" / "local-default" / "profile-state.db"
@@ -2632,6 +2634,27 @@ class SandboxSetupTests(unittest.TestCase):
         self.assertEqual(self.LS.orca_overrides(), {"opencode2": "/x/lane-sandbox-shim opencode2 --standalone"})
         self.assertEqual((db.read_bytes(), db.stat().st_mtime_ns, sorted(p.name for p in db.parent.iterdir())),
                          before)
+
+    def test_orca_settings_seen_through_the_wal(self):
+        """r1 M8: a change Orca committed that is still in the WAL is seen; Orca's files are not changed."""
+        db = self.home / ".config" / "orca" / "profiles" / "local-default" / "profile-state.db"
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA wal_autocheckpoint=0")
+        con.execute("CREATE TABLE profile_state_documents (domain TEXT, payload TEXT)")
+        con.execute("INSERT INTO profile_state_documents VALUES ('settings', ?)",
+                    (json.dumps({"agentCmdOverrides": {"opencode2": "/x/lane-sandbox-shim opencode2"}}),))
+        con.commit()
+        self.assertEqual(self.LS.orca_overrides(), {"opencode2": "/x/lane-sandbox-shim opencode2"})
+        con.execute("UPDATE profile_state_documents SET payload = ? WHERE domain = 'settings'",
+                    (json.dumps({"agentCmdOverrides": {}}),))
+        con.commit()  # the removal sits in the WAL while Orca (this connection) keeps it open
+        self.assertTrue(Path(str(db) + "-wal").stat().st_size > 0)
+        before = {p.name: p.read_bytes() for p in db.parent.iterdir()}
+        self.assertEqual(self.LS.orca_overrides(), {})
+        self.assertEqual({p.name: p.read_bytes() for p in db.parent.iterdir()}, before)
+        con.close()
 
     def test_front_door(self):
         import importlib.util

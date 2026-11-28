@@ -1317,13 +1317,17 @@ class SandboxPrepareTests(Scratch):
         (self.home / ".config" / "lane-control" / "machine.conf").write_text("SANDBOX_PROJECTS=other\n")
         self.no_prep(says="SANDBOX_PROJECTS")
 
-    def test_idle_reader_uses_ticket_data(self):
+    def test_idle_reader_never_opens_the_agents_store(self):
+        """r1 m6: a sandboxed lane's store is agent-written (it could be a link or a FIFO): never opened outside;
+        there is no idle signal for it, and prepare says so."""
         adapter = load("lc_oc_adapter_t", ROOT / "core" / "harnesses" / "opencode" / "adapter.py")
-        self.assertEqual(adapter.db_path(self.wt), self.home / ".local/share/opencode/opencode.db")  # not sandboxed
-        nonce, _ = self.ok_prep()
+        nonce, out = self.ok_prep()
+        self.assertIn("the idle and watchdog signals", out)
         t = self.SB.take_ticket(self.wt, "term_1")
-        self.assertEqual(adapter.db_path(self.wt), Path(t["ticket_dir"]) / "data" / "opencode.db")
-        self.assertEqual(adapter.db_path(), self.home / ".local/share/opencode/opencode.db")
+        data = Path(t["ticket_dir"]) / "data"
+        os.mkfifo(data / "opencode.db")  # what a hostile agent could leave there
+        self.assertEqual(adapter.db_path(self.wt), self.home / ".local/share/opencode/opencode.db")
+        self.assertIsNone(adapter.idle_minutes(self.wt, 0.0, "lanes"))  # returns at once: nothing opened
 
     def test_needs_lane_key(self):
         code, out, err = self.run_le("prepare", self.repo, self.wt, "--sandbox", "--role", "lanes")

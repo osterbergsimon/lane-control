@@ -73,6 +73,14 @@ def opts(args: list, flags: dict) -> tuple:
     """--name value | --name=value | -x value for the names in flags ({flag: key}); a bare flag in flags with key
     ending in '!' is a switch. Returns (values, positionals); an unknown flag refuses."""
     vals, pos, i = {}, [], 0
+    expanded = []
+    for a in args:  # review r1 n1: bundled short switches (-qu) are split when each one is a known switch
+        if len(a) > 2 and a[0] == "-" and a[1] != "-" and "=" not in a and \
+                all(flags.get(f"-{c}", "").endswith("!") for c in a[1:]):
+            expanded += [f"-{c}" for c in a[1:]]
+        else:
+            expanded.append(a)
+    args = expanded
     while i < len(args):
         a = args[i]
         if a.startswith("-") and a != "-":

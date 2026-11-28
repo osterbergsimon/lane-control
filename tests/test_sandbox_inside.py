@@ -210,6 +210,14 @@ class GitTests(InsideCase):
         self.assertEqual(git("config", "branch.lane-1.remote", cwd=self.clone), "origin")
         self.assertEqual(git("config", "branch.lane-1.merge", cwd=self.clone), "refs/heads/lane-1")
 
+    def test_bundled_short_flags(self):
+        """r1 n1: git push -qu works like -q -u."""
+        self.commit("work")
+        r = self.ok("git", "push", "-qu", cwd=self.clone)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(git("config", "branch.lane-1.remote", cwd=self.clone), "origin")
+        self.no("git", "push", "-qf", cwd=self.clone, says="-qf")  # a bundle with an unknown flag stays refused
+
     def test_status_ahead_behind_after_push(self):
         self.commit("one")
         self.ok("git", "push", "-u", cwd=self.clone)

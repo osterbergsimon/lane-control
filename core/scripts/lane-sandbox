@@ -79,23 +79,31 @@ def custom_command(agent: str) -> str:
 # --- reading Orca's setting (read only) ----------------------------------------------------------------------------
 
 def orca_overrides() -> "dict | None":
-    """Orca's agentCmdOverrides from its profile store, opened read-only and immutable (never written); None when it
-    cannot be read."""
+    """Orca's agentCmdOverrides from its profile store. Orca's files are only read: the database and its -wal are
+    copied into a private temp folder and the copy is opened, so committed changes still in the WAL are seen (review
+    r1 M8; `immutable=1` would ignore them). None when it cannot be read: "cannot tell"."""
     ud = Path(os.environ.get("ORCA_USER_DATA_PATH") or SB._xdg("XDG_CONFIG_HOME", ".config") / "orca")
     found = None
     for db in sorted((ud / "profiles").glob("*/profile-state.db")):
-        try:
-            con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True, timeout=5)
+        with tempfile.TemporaryDirectory(prefix="lc-orca-settings-") as tmp:
+            copy = Path(tmp) / "s.db"
             try:
-                for (payload,) in con.execute("SELECT payload FROM profile_state_documents WHERE domain = 'settings'"):
-                    d = json.loads(payload)
-                    o = d.get("agentCmdOverrides") if isinstance(d, dict) else None
-                    if isinstance(o, dict):
-                        found = {**(found or {}), **{k: v for k, v in o.items() if isinstance(v, str)}}
-            finally:
-                con.close()
-        except (sqlite3.Error, ValueError, OSError):
-            continue
+                shutil.copyfile(db, copy)
+                wal = Path(str(db) + "-wal")
+                if wal.exists():
+                    shutil.copyfile(wal, Path(str(copy) + "-wal"))
+                con = sqlite3.connect(str(copy), timeout=5)
+                try:
+                    for (payload,) in con.execute(
+                            "SELECT payload FROM profile_state_documents WHERE domain = 'settings'"):
+                        d = json.loads(payload)
+                        o = d.get("agentCmdOverrides") if isinstance(d, dict) else None
+                        if isinstance(o, dict):
+                            found = {**(found or {}), **{k: v for k, v in o.items() if isinstance(v, str)}}
+                finally:
+                    con.close()
+            except (sqlite3.Error, ValueError, OSError):
+                return None
     return found
 
 
@@ -232,8 +240,11 @@ def check(read_only: bool = True) -> int:
         if rp.startswith("/nix/store/") or any(rp.startswith(d.rstrip("/") + "/") for d in dirs):
             continue
         parts = Path(rp).parts
-        top = str(Path(*parts[:parts.index("node_modules") + 1])) if "node_modules" in parts else \
-            str(Path(rp).parent.parent)
+        if "node_modules" in parts:  # review r1 n2: the package's scope folder (or the package), never all of them
+            i = parts.index("node_modules")
+            top = str(Path(*parts[:i + 2]))
+        else:
+            top = str(Path(rp).parent)
         say(f"real {a}", f"{rp} is outside /nix/store and SANDBOX_AGENT_DIRS, so it would not exist inside: add "
             f"SANDBOX_AGENT_DIRS={top} to machine.conf (bound read-only), or install it from nixpkgs")
         unset.append(a)
