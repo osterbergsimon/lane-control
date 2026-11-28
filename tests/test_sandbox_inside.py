@@ -283,6 +283,11 @@ class HeavyEnterTests(InsideCase):
         c = self.t / "c"
         git("clone", "-q", "--no-checkout", "--no-local", src, c, cwd=self.t)
         self.assertFalse((c / "f").exists())
+        self.no("lane-enter", sys.executable, "-c", "print('ran')", cwd=c, says="did not release")  # r1 M2
+        (self.inbox / "release").write_text("tok-1")
+        self.env["LANE_INBOX"], self.env["LANE_RELEASE"] = str(self.inbox), "tok-2"
+        self.no("lane-enter", sys.executable, "-c", "print('ran')", cwd=c, says="did not release")
+        self.env["LANE_RELEASE"] = "tok-1"
         r = self.ok("lane-enter", sys.executable, "-c", "print(open('f').read())", cwd=c)
         self.assertEqual(r.stdout.strip(), "file")
         (c / "f").write_text("changed\n")

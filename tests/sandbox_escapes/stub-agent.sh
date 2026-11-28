@@ -27,6 +27,7 @@ floor_search() {
   grep -rIlF -- "$MARK" "$(j home)" "$(j wt)" "$(j shared)" /tmp /etc /run 2>/dev/null | head -3
 }
 case $MODE in
+  started) : >"$OUT/started"; exit 0 ;;
   inspect)
     inspect
     h=$(floor_search); [ -z "$h" ] && ok "a relaunch finds no floor data either (after the last run's renames)" ||
@@ -74,6 +75,15 @@ for f in "${ro[@]}"; do
   umount "$f" 2>/dev/null && no "unmounted $f"
 done
 if unshare -Urm true 2>/dev/null; then no "made a nested user namespace"; else ok "cannot make a nested user namespace"; fi
+# r1 M3: the unmapped forms (no uid map needs no CAP_SETFCAP) and the raw syscall, refused by the seccomp filter
+if unshare -U true 2>/dev/null; then no "unshare -U made a user namespace"; else ok "unshare -U is refused"; fi
+if unshare -U -n -m true 2>/dev/null; then no "unshare -U -n -m made namespaces"; else ok "unshare -U -n -m is refused"; fi
+if python3 -I -c 'import os; os.unshare(os.CLONE_NEWUSER)' 2>/dev/null; then no "unshare(CLONE_NEWUSER) worked"
+else ok "unshare(CLONE_NEWUSER) is refused"; fi
+if python3 -I -c 'import os
+pid = os.fork()
+if pid == 0: os._exit(0)
+os.waitpid(pid, 0)' 2>/dev/null; then ok "fork and clone still work"; else no "fork broke under the filter"; fi
 if "$(j nft)" flush ruleset 2>/dev/null; then no "flushed the network filter"; else ok "cannot change the network filter"; fi
 
 # 4. Sockets: the nix daemon, host loopback TCP and UDP, abstract sockets, the host's other addresses.

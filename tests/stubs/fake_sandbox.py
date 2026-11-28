@@ -67,6 +67,8 @@ elif me == "bwrap":
     for j, x in enumerate(args[:-2]):
         if x == "--bind" and args[j + 2] == "/run/lane/outbox":
             os.environ["LANE_OUTBOX"] = args[j + 1]
+        if x == "--ro-bind" and args[j + 2] == "/run/lane/inbox":
+            os.environ["LANE_INBOX"] = args[j + 1]
     if cfg.get("host_path"):  # the tool path's folders exist inside a real sandbox; here they may be placeholders
         os.environ["PATH"] = os.environ.get("PATH", "") + ":" + cfg["host_path"]
     child = subprocess.Popen(agent)

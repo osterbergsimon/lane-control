@@ -97,14 +97,16 @@ class ChainTests(Base):
         self.assertTrue(opener[0].endswith("bash") and opener[1] == "-c", opener)
         self.assertIn('3>"$i"', opener[2])
         self.assertIn('4<"$b"', opener[2])
+        self.assertIn('5<"$s"', opener[2])
         launch = Path(self.ticket()["ticket_dir"]) / "launch"
-        self.assertEqual(opener[-2:], [str(launch / "info.json"), str(launch / "block")])
+        self.assertEqual(opener[-3:], [str(launch / "info.json"), str(launch / "block"), str(launch / "seccomp.bpf")])
         bw = argv[b + 1:]
         self.assertEqual(bw[:2], ["--cap-drop", "ALL"])
         for f in ("--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try"):
             self.assertIn(f, bw)
         self.assertEqual(bw[bw.index("--unsetenv") + 1], "DBUS_SESSION_BUS_ADDRESS")
         self.assertIn("XDG_RUNTIME_DIR", bw)
+        self.assertEqual(bw[bw.index("--seccomp") + 1], "5")  # r1 M3: the filter, opened by path inside pasta
         i = bw.index("--info-fd")
         self.assertEqual(bw[i:i + 4], ["--info-fd", "3", "--block-fd", "4"])
         self.assertEqual(bw[i + 4:], ["/nix/store/ggg-opencode/bin/opencode", "--standalone"])
@@ -240,6 +242,49 @@ class ChainTests(Base):
         self.assertEqual(m[m.index("/opt/opencode") - 1], "--ro-bind")
         with self.assertRaises(SB.SandboxError):
             SB.bwrap_mounts(self.ticket(agent_dirs=[str(self.home)]))
+
+
+class SeccompTests(unittest.TestCase):
+    """r1 M3: the filter's program, read back instruction by instruction (the live suite runs it under bwrap)."""
+
+    def decode(self, prog):
+        import struct
+        return [struct.unpack("<HBBI", prog[i:i + 8]) for i in range(0, len(prog), 8)]
+
+    def run_bpf(self, prog, arch, nr, a0=0, a1=0):
+        """A tiny interpreter for the four instructions the filter uses."""
+        data = {0: nr, 4: arch, 16: a0, 24: a1}
+        ins, pc, acc = self.decode(prog), 0, 0
+        while True:
+            code, jt, jf, k = ins[pc]
+            if code == 0x20:
+                acc = data[k]
+                pc += 1
+            elif code == 0x06:
+                return k
+            else:
+                hit = {0x15: acc == k, 0x35: acc >= k, 0x45: bool(acc & k)}[code]
+                pc += 1 + (jt if hit else jf)
+
+    def test_filter(self):
+        for m, (arch, unshare, clone, clone3, ioctl, x32) in SB.SECCOMP_ARCH.items():
+            p = SB.seccomp_filter(m)
+            allow, eperm, enosys = 0x7FFF0000, 0x50001, 0x50026
+            self.assertEqual(self.run_bpf(p, arch, unshare, SB.CLONE_NEWUSER), eperm, m)
+            self.assertEqual(self.run_bpf(p, arch, unshare, SB.CLONE_NEWUSER | 0x20000), eperm, m)
+            self.assertEqual(self.run_bpf(p, arch, unshare, 0x20000), allow, m)  # a mount namespace alone: allowed
+            self.assertEqual(self.run_bpf(p, arch, clone, SB.CLONE_NEWUSER | 0x11), eperm, m)
+            self.assertEqual(self.run_bpf(p, arch, clone, 0x11), allow, m)  # fork-like clone
+            self.assertEqual(self.run_bpf(p, arch, clone3), enosys, m)
+            self.assertEqual(self.run_bpf(p, arch, ioctl, 0, SB.TIOCSTI), eperm, m)
+            self.assertEqual(self.run_bpf(p, arch, ioctl, 0, SB.TIOCLINUX), eperm, m)
+            self.assertEqual(self.run_bpf(p, arch, ioctl, 0, 0x5413), allow, m)  # TIOCGWINSZ
+            self.assertEqual(self.run_bpf(p, 0x40000003, 1), eperm, m)  # another ABI
+            self.assertEqual(self.run_bpf(p, arch, 0), allow, m)
+            if x32:
+                self.assertEqual(self.run_bpf(p, arch, 0x40000000 | unshare), eperm, m)
+        with self.assertRaises(SB.SandboxError):
+            SB.seccomp_filter("riscv64")
 
 
 class NftTests(unittest.TestCase):

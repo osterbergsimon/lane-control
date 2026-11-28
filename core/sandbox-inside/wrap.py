@@ -311,9 +311,24 @@ def heavy_main(args: list) -> int:
         s.close()
 
 
+def released() -> bool:
+    """The launcher writes its release token to the inbox (read-only here) only after the network filter and the run
+    record: bwrap also goes on when the launcher dies, so the block fd alone proves nothing (review r1 M2)."""
+    tok = os.environ.get("LANE_RELEASE") or ""
+    f = Path(os.environ.get("LANE_INBOX") or "/run/lane/inbox") / "release"
+    try:
+        fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as fh:
+            return bool(tok) and fh.read(200).strip() == tok
+    except OSError:
+        return False
+
+
 def enter_main(args: list) -> int:
     if not args:
         die("lane-enter <agent> [args]")
+    if not released():
+        die("the launcher did not release this start (it ended before the network filter was set): nothing runs", 3)
     if Path(".git").is_dir() and not Path(".git/index").exists():
         r = subprocess.run([real_git(), "reset", "-q", "--hard", "HEAD"])
         if r.returncode != 0:

@@ -24,6 +24,7 @@ SANDBOX_REAL_OPENCODE2, SANDBOX_LANE_MEMORY, SANDBOX_AGENT_DIRS). LANE_SANDBOX_P
 for the host-pid lookup."""
 import json
 import os
+import secrets
 import shutil
 import signal
 import stat
@@ -165,6 +166,20 @@ def orca_binds(env: dict, home: str) -> list:
     return out
 
 
+class Aborted(Exception):
+    """A stop signal before the release: the chain is killed and the agent never starts."""
+
+
+def die_with_launcher():
+    """In the chain's first process: SIGKILL when the launcher dies (PR_SET_PDEATHSIG), so pasta, and with it bwrap
+    (--die-with-parent), never outlives the launcher."""
+    import ctypes
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL, 0, 0, 0)  # PR_SET_PDEATHSIG = 1
+    except (OSError, AttributeError):
+        pass
+
+
 class Chain:
     def __init__(self):
         self.proc = None
@@ -193,6 +208,8 @@ class Chain:
             return self.host_pid
 
     def forward(self, signum, _frame):
+        if not self.released and signum != signal.SIGWINCH:
+            raise Aborted(signal.Signals(signum).name)  # before the release a stop signal ends the launch
         pid = self.target()
         if pid:
             try:
@@ -221,28 +238,34 @@ def wait_info(info: Path, chain: Chain) -> "dict | None":
     return None
 
 
-def launch(t: dict, conf: dict, env: dict) -> int:
+def launch(t: dict, conf: dict, env: dict, stdio: "dict | None" = None) -> int:
     chain = Chain()
     try:
-        return _launch(t, conf, env, chain)
+        return _launch(t, conf, env, chain, stdio)
+    except Aborted as e:
+        return refuse(f"{e} before the agent was released: the chain was stopped, nothing ran")
     finally:
         if not chain.released:  # whatever went wrong before the release: the agent never starts
             chain.kill()
 
 
-def _launch(t: dict, conf: dict, env: dict, chain) -> int:
+def _launch(t: dict, conf: dict, env: dict, chain, stdio=None) -> int:
     td = Path(t["ticket_dir"])
     launch_dir = SB.private_dir(td / "launch")
     run = td / "run"
     for sub in ("inbox", "outbox"):
         SB.private_dir(run / sub)
     info, block = launch_dir / "info.json", launch_dir / "block"
-    for f in (info, block, run / "broker.sock"):
+    release = run / "inbox" / "release"
+    for f in (info, block, run / "broker.sock", release):
         try:
             f.unlink()
         except FileNotFoundError:
             pass
     os.mkfifo(block, 0o600)
+    SB.write_private(launch_dir / "seccomp.bpf", "")
+    (launch_dir / "seccomp.bpf").write_bytes(SB.seccomp_filter())
+    t["release"] = secrets.token_hex(16)  # lane-enter runs the agent only when the inbox holds this (review r1 M2)
     hold = os.open(block, os.O_RDWR | os.O_NONBLOCK)  # bwrap blocks on it until we write
     broker_env = {k: v for k, v in env.items() if k != t.get("gateway_key_env")}
     chain.broker = subprocess.Popen([sys.executable, str(HERE / "lane-broker"), "serve", t["ticket_file"]],
@@ -261,11 +284,11 @@ def _launch(t: dict, conf: dict, env: dict, chain) -> int:
     if why is None:
         argv[0] = shutil.which("systemd-run") or argv[0]
     try:
-        chain.proc = subprocess.Popen(argv, env=cenv)
+        chain.proc = subprocess.Popen(argv, env=cenv, preexec_fn=die_with_launcher, **(stdio or {}))
     except OSError as e:
         chain.kill()
         return refuse(f"the chain could not start: {e.strerror}")
-    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGWINCH):
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT, signal.SIGWINCH):
         signal.signal(s, chain.forward)
     d = wait_info(info, chain)
     if d is None:
@@ -294,9 +317,15 @@ def _launch(t: dict, conf: dict, env: dict, chain) -> int:
            "terminal": t["terminal"], "host_pid": chain.host_pid, "mntns": int(d["mnt-namespace"]),
            "ticket": t["ticket_file"], "scope": why is None, "started": time.time()}
     SB.write_private(SB.run_record(t["terminal"]), json.dumps(rec, indent=1) + "\n")
-    chain.released = True
-    os.write(hold, b"g")
-    os.close(hold)
+    stops = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT}
+    signal.pthread_sigmask(signal.SIG_BLOCK, stops)  # no abort between the token and the release
+    try:
+        SB.write_private(release, t["release"])
+        chain.released = True
+        os.write(hold, b"g")
+        os.close(hold)
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, stops)  # a stop that came meanwhile now goes to the agent
     while True:
         try:
             rc = chain.proc.wait()

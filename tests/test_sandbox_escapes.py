@@ -333,6 +333,9 @@ class EscapeTests(unittest.TestCase):
         self.assertEqual(sum(1 for x in self.lines() if x.startswith("ok   cannot remount or write")),
                          len(self.cfg["ro"]))
         self.assertIn("ok   cannot make a nested user namespace", self.out)
+        for x in ("unshare -U is refused", "unshare -U -n -m is refused", "unshare(CLONE_NEWUSER) is refused",
+                  "fork and clone still work"):
+            self.assertIn(f"ok   {x}", self.out)  # r1 M3
         self.assertIn("ok   cannot change the network filter", self.out)
         after = {f: sha_of(f) for f in self.ro_before}
         self.assertEqual(after, self.ro_before)  # no host file behind a read-only bind changed
@@ -415,6 +418,56 @@ class EscapeTests(unittest.TestCase):
         m.stub("inspect", n, pushed=pushed)
         rc, out, _ = m.launch()
         self.assertIn(f"inspect head={pushed} dirty=0 unpushed=0", out)  # recreated from refs/lanes, checked out inside
+
+
+class AbortTests(unittest.TestCase):
+    """r1 M2, with real pasta and bwrap: the launcher killed or stopped while it sets the network filter (a slow
+    nsenter stands in for the window): the agent never starts, and there is no run record."""
+
+    def machine(self):
+        p = dict(need_sandbox(self))
+        slow = Path(tempfile.mkdtemp(prefix="sbxns"))
+        self.addCleanup(shutil.rmtree, slow, True)
+        self.marker = slow / "nsenter-started"
+        w = slow / "nsenter"
+        w.write_text(f"#!{shutil.which('bash') and os.path.realpath(shutil.which('bash'))}\n: >{self.marker}\n"
+                     f"{os.path.join(os.path.dirname(os.path.realpath(shutil.which('sleep'))), 'sleep')} 4\nexec {p['SANDBOX_NSENTER']} \"$@\"\n")
+        w.chmod(0o755)
+        p["SANDBOX_NSENTER"] = str(w)
+        m = Machine(p)
+        self.addCleanup(m.close)
+        return m
+
+    def abort_with(self, sig):
+        m = self.machine()
+        n = m.prepare()
+        m.stub("started", n)
+        outbox = m.ticket_dir(n) / "run" / "outbox"
+        proc = subprocess.Popen([str(SHIM), "opencode2"], cwd=m.fx.wt, env=m.pane_env(), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
+        for _ in range(600):
+            if self.marker.exists():
+                break
+            time.sleep(0.05)
+        self.assertTrue(self.marker.exists(), "the launcher never reached the filter step")
+        proc.send_signal(sig)
+        out, _ = proc.communicate(timeout=60)
+        time.sleep(6)  # longer than the slow nsenter: a start would have happened by now
+        self.assertFalse((outbox / "started").exists(), (sig, out))
+        self.assertFalse(SB.run_record(m.term).exists())
+        return proc.returncode, out
+
+    def test_sigkill_during_the_filter(self):
+        self.abort_with(signal.SIGKILL)
+
+    def test_sigquit_during_the_filter(self):
+        rc, out = self.abort_with(signal.SIGQUIT)
+        self.assertEqual(rc, 2, out)
+
+    def test_sigterm_during_the_filter(self):
+        rc, out = self.abort_with(signal.SIGTERM)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("SIGTERM before the agent was released", out)
 
 
 class ControlTests(unittest.TestCase):

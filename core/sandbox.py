@@ -301,7 +301,10 @@ def inside_env(t: dict, environ: dict, scope: bool) -> dict:
     """The allowlist, as the environment bwrap and pasta start with (never as arguments)."""
     env = {"HOME": t["home"], "PATH": _inside_path(t), "SHELL": t.get("shell") or "/bin/sh", "TMPDIR": "/tmp",
            "LANE_ROLE": {"lane": "lanes"}.get(t["role"], t["role"]), "LANE_PERSONA": "/run/lane/persona.md",
-           "LANE_BROKER": "/run/lane/broker.sock", "LANE_OUTBOX": "/run/lane/outbox", "LANE_SANDBOX": "1"}
+           "LANE_BROKER": "/run/lane/broker.sock", "LANE_OUTBOX": "/run/lane/outbox", "LANE_INBOX": "/run/lane/inbox",
+           "LANE_SANDBOX": "1"}
+    if t.get("release"):
+        env["LANE_RELEASE"] = t["release"]  # lane-enter starts the agent only when the launcher wrote this to the inbox
     bound = {os.path.normpath(p) for p in t.get("orca_binds") or []}
     for k, v in environ.items():
         if k in ENV_DROPPED:
@@ -338,12 +341,13 @@ def chain_argv(t: dict, conf: dict, scope: bool, environ: "dict | None" = None) 
     argv += [conf["SANDBOX_PASTA"], "--config-net", "-q", "-f", "--no-map-gw", "--dns-forward", DNS,
              "-t", "none", "-u", "none", "-U", "none"]
     argv += ["-T", ",".join(ports) if ports else "none", "--"]
-    argv += [t.get("bash") or "bash", "-c", 'i=$1 b=$2; shift 2; exec "$@" 3>"$i" 4<"$b"', "lane-sandbox",
-             str(launch / "info.json"), str(launch / "block")]
+    argv += [t.get("bash") or "bash", "-c", 'i=$1 b=$2 s=$3; shift 3; exec "$@" 3>"$i" 4<"$b" 5<"$s"',
+             "lane-sandbox", str(launch / "info.json"), str(launch / "block"), str(launch / "seccomp.bpf")]
     bw = [conf["SANDBOX_BWRAP"], "--cap-drop", "ALL", "--die-with-parent", "--unshare-pid", "--unshare-ipc",
           "--unshare-uts", "--unshare-cgroup-try"]
-    if tiocsti_allowed():
+    if tiocsti_allowed() or t.get("new_session"):
         bw.append("--new-session")
+    bw += ["--seccomp", "5"]
     for k in BUS_VARS:
         bw += ["--unsetenv", k]
     bw += bwrap_mounts(t)
@@ -353,6 +357,61 @@ def chain_argv(t: dict, conf: dict, scope: bool, environ: "dict | None" = None) 
         raise SandboxError("the ticket names no agent to run")
     argv += bw + agent
     return argv, inside_env(t, environ, scope)
+
+
+# --- seccomp: no nested user namespace (review r1 M3), no typing into the pane's terminal ------------------------
+
+SECCOMP_ARCH = {  # machine: (AUDIT_ARCH, unshare, clone, clone3, ioctl, x32 bit)
+    "x86_64": (0xC000003E, 272, 56, 435, 16, True),
+    "aarch64": (0xC00000B7, 97, 220, 435, 29, False),
+}
+CLONE_NEWUSER = 0x10000000
+TIOCSTI, TIOCLINUX = 0x5412, 0x541C
+EPERM, ENOSYS = 1, 38
+
+
+def seccomp_filter(machine: "str | None" = None) -> bytes:
+    """A classic BPF program for bwrap --seccomp: unshare and clone with CLONE_NEWUSER fail with EPERM; clone3 fails
+    with ENOSYS (its flags are behind a pointer; libc falls back to clone); ioctl TIOCSTI and TIOCLINUX fail with EPERM;
+    any other ABI (32-bit, x32) fails with EPERM. Everything else is allowed. An unknown machine refuses the launch."""
+    import platform
+    import struct
+    m = machine or platform.machine()
+    if m not in SECCOMP_ARCH:
+        raise SandboxError(f"no seccomp filter for {m}: the sandbox runs on x86_64 and aarch64 only")
+    arch, unshare, clone, clone3, ioctl, x32 = SECCOMP_ARCH[m]
+    LD, JEQ, JGE, JSET, RET = 0x20, 0x15, 0x35, 0x45, 0x06
+    allow, deny, nosys = 0x7FFF0000, 0x00050000 | EPERM, 0x00050000 | ENOSYS
+    prog = [("ld", 4), ("jeq", arch, "nr", "deny"), "nr", ("ld", 0)]
+    if x32:
+        prog.append(("jge", 0x40000000, "deny", None))
+    prog += [("jeq", clone3, "nosys", None), ("jeq", unshare, "flags", None), ("jeq", clone, "flags", None),
+             ("jeq", ioctl, "ioctl", "allow"),
+             "flags", ("ld", 16), ("jset", CLONE_NEWUSER, "deny", "allow"),
+             "ioctl", ("ld", 24), ("jeq", TIOCSTI, "deny", None), ("jeq", TIOCLINUX, "deny", "allow"),
+             "allow", ("ret", allow), "deny", ("ret", deny), "nosys", ("ret", nosys)]
+    labels, ins = {}, []
+    for x in prog:
+        if isinstance(x, str):
+            labels[x] = len(ins)
+        else:
+            ins.append(x)
+    out = b""
+    for i, x in enumerate(ins):
+        def off(target):
+            if target is None:
+                return 0
+            d = labels[target] - (i + 1)
+            assert 0 <= d < 256
+            return d
+        if x[0] == "ld":
+            out += struct.pack("<HBBI", LD, 0, 0, x[1])
+        elif x[0] == "ret":
+            out += struct.pack("<HBBI", RET, 0, 0, x[1])
+        else:
+            code = {"jeq": JEQ, "jge": JGE, "jset": JSET}[x[0]]
+            out += struct.pack("<HBBI", code, off(x[2]), off(x[3]), x[1])
+    return out
 
 
 # --- network -------------------------------------------------------------------------------------------------------
