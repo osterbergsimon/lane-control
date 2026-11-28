@@ -2570,10 +2570,14 @@ class SandboxSetupTests(unittest.TestCase):
         self.assertIn(f"custom command to exactly: {want} [not set]", out)
         self.assertIn("Settings -> Agents -> OpenCode 2", out)
         self.assertEqual(rc, 1)
-        self.assertIn("sandbox: off (Orca's custom command", out)
+        self.assertIn("sandbox: off (not ready for opencode, opencode2", out)
         rc, out = self.check(orca_overrides=lambda: {"opencode2": want})
         self.assertIn(f"{want} [set]", out)
-        self.assertIn("sandbox: on", out.splitlines()[-1])
+        self.assertEqual(out.splitlines()[-1], "sandbox: off (not ready for opencode: the lines above name what to set)")
+        both = {"opencode2": want, "opencode": want.replace("opencode2 --standalone", "opencode")}
+        rc, out = self.check(orca_overrides=lambda: both)
+        self.assertEqual(out.splitlines()[-1], "sandbox: on")  # r1 B3: only both set is on
+        self.assertEqual(rc, 0)
         rc, out = self.check(orca_overrides=lambda: {"opencode2": "opencode2 --standalone"})
         self.assertIn("[set to something else]", out)
         rc, out = self.check(orca_overrides=lambda: None)

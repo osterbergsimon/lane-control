@@ -254,10 +254,10 @@ def check(read_only: bool = True) -> int:
     if broken:
         print(f"sandbox: broken ({'; '.join(broken)})")
         return 1
-    if "opencode2" in unset and "opencode" in unset:
-        print("sandbox: off (Orca's custom command for OpenCode is not set: the line above names it)")
+    if unset:  # r1 B3: either agent started without the launcher runs unsandboxed: only both set is `on`
+        print(f"sandbox: off (not ready for {', '.join(unset)}: the lines above name what to set)")
         return 1
-    print("sandbox: on" + (f" (custom command not set for {', '.join(unset)})" if unset else ""))
+    print("sandbox: on")
     return 0
 
 

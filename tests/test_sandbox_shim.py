@@ -200,6 +200,59 @@ class RefusalTests(ShimCase):
         self.assertIn("SANDBOX_AGENT_DIRS", err)
 
 
+class FailClosedTests(ShimCase):
+    """r1 B3: with the custom command set, a worktree of a sandboxed project never starts unsandboxed: not after a
+    refused prepare, not without one, not for a reviewer worktree never prepared, not with an unreadable config."""
+
+    def refused_here(self, cwd=None, says=""):
+        code, out, err = self.shim("opencode2", "--standalone", cwd=cwd)
+        self.assertEqual(code, 2, err)
+        self.assertIn(says, err)
+        self.assertFalse(self.agent_started())
+        self.assertEqual(self.calls("opencode2"), [])
+
+    def test_no_prepare(self):
+        self.refused_here(says="has no ticket")
+
+    def test_after_prepare_refused_for_ci(self):
+        with self.assertRaises(SB.SandboxError):
+            self.fx.prepare(ci={"workflow": {"default_workflow_permissions": "write"}})
+        self.refused_here(says="no ticket")
+
+    def test_after_prepare_refused_for_a_stale_selftest(self):
+        f = SB.selftest_file()
+        f.write_text(json.dumps({**json.loads(f.read_text()), "lane_control": "0" * 40}))
+        with self.assertRaises(SB.SandboxError):
+            self.fx.prepare()
+        self.refused_here(says="no ticket")
+
+    def test_reviewer_worktree_never_prepared(self):
+        rw = self.t / "m" / "orca" / "workspaces" / "app" / "review-1"
+        FX.git("worktree", "add", "-q", "-b", "review-1", rw, "main", cwd=self.fx.repo)
+        self.refused_here(cwd=rw, says="worktree of a sandboxed project")
+        sub = rw / "deep"
+        sub.mkdir()
+        self.refused_here(cwd=sub, says="worktree of a sandboxed project")
+
+    def test_unreadable_config(self):
+        (self.fx.home / ".config" / "lane-control" / "machine.conf").write_text("SANDBOX_PROJECTS=app\nfalse\n")
+        self.refused_here(says="machine.conf cannot be read")
+        code, _, err = self.shim("opencode2", cwd=self.fx.repo)  # the primary checkout: the owner's
+        self.assertEqual(code, 7, err)
+
+    def test_other_projects_pass(self):
+        other = self.t / "other"
+        other.mkdir()
+        FX.git("init", "-q", "-b", "main", cwd=other)
+        (other / "f").write_text("x\n")
+        FX.git("add", "f", cwd=other)
+        FX.git("commit", "-q", "-m", "f", cwd=other)
+        ow = self.t / "other-wt"
+        FX.git("worktree", "add", "-q", "-b", "x", ow, cwd=other)
+        code, _, err = self.shim("opencode2", cwd=ow)
+        self.assertEqual(code, 7, err)  # not a sandboxed project: the owner's own tab
+
+
 class LaunchTests(ShimCase):
     def test_launch_and_record(self):
         nonce = self.fx.prepare()

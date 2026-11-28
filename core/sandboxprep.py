@@ -58,14 +58,17 @@ def read_conf(p: "Path | None" = None) -> dict:
                 conf[k] = " ".join(shlex.split(v)) if v else ""
     except FileNotFoundError:
         pass
+    except OSError as e:
+        conf["_error"] = f"{p} cannot be read ({e.strerror})"
     try:
         import machineconf
-        mc = machineconf.load()
-        for k, v in mc.items():
-            if k.startswith("SANDBOX_") and v not in ("", None):
-                conf[k] = v
-    except Exception:  # no machine.conf: the generated file alone
-        pass
+        if machineconf.path().exists():
+            mc = machineconf.load()
+            for k, v in mc.items():
+                if k.startswith("SANDBOX_") and v not in ("", None):
+                    conf[k] = v
+    except Exception as e:  # noqa: BLE001  a machine.conf that exists but cannot be read: said, never ignored
+        conf["_error"] = f"machine.conf cannot be read ({e})"
     return conf
 
 
@@ -360,15 +363,23 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
     if name not in projects_on(conf) and str(root) not in projects_on(conf):
         raise SB.SandboxError(f"{name} is not a sandboxed project: add it to SANDBOX_PROJECTS in machine.conf "
                               "(after lane-control machine setup --check --sandbox passes)")
+    if not lane:
+        raise SB.SandboxError("--lane KEY is needed with --sandbox (the lane's identity, not the worktree's)")
+    ld = SB.lane_dir(lane, root)
+    bf = SB.binding_file(wt)
+    if bf.is_file() and (json.loads(bf.read_text()).get("lane"), json.loads(bf.read_text()).get("project")) != \
+            (lane, str(root)):
+        raise SB.SandboxError(f"{wt} is bound to another sandboxed lane: give this lane its own worktree")
+    # bound before any check that can refuse: the launcher then refuses this worktree until a prepare succeeds
+    SB.write_private(bf, json.dumps({"lane": lane, "project": str(root)}) + "\n")
+    if conf.get("_error"):
+        raise SB.SandboxError(conf["_error"])
     why = selftest_current(conf)
     if why:
         raise SB.SandboxError(f"{why}: run lane-control sandbox selftest (a skip counts as a failure)")
     missing = [k for k in PIN_KEYS if not os.path.isabs(conf.get(k) or "")]
     if missing:
         raise SB.SandboxError(f"{', '.join(missing)} not pinned: run lane-control machine setup --sandbox")
-    if not lane:
-        raise SB.SandboxError("--lane KEY is needed with --sandbox (the lane's identity, not the worktree's)")
-    ld = SB.lane_dir(lane, root)
     slug = github_slug(root)
     bad = [line for ok, line in ci_check(slug) if not ok]
     if bad:
@@ -385,10 +396,7 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
     if known and known.get("repo") != str(root):
         raise SB.SandboxError(f"lane state {ld} is of another repository ({known.get('repo')}): nothing was done")
     if trole == "lane":
-        branch = lane_branch(root, wt)
-        other = SB.binding_file(wt)
-        if other.is_file() and json.loads(other.read_text()).get("lane") != lane:
-            raise SB.SandboxError(f"{wt} is bound to another sandboxed lane: give this lane its own worktree")
+        branch = known.get("branch") or lane_branch(root, wt)  # r1 M5: the lane's branch from its first prepare
     else:
         branch = known.get("branch")
         if not branch:
@@ -493,6 +501,11 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
          "sha": sha, "private": private, "inside": str(HERE / "sandbox-inside"), "lc_tree": str(HERE.parent),
          "checkout": checkout, "gh_repo": slug, "base_sha": base_sha, "bd_prefix": lane_rec["bd_prefix"], "agent_dirs":
          [p for p in (conf.get("SANDBOX_AGENT_DIRS") or "").split(":") if p], "created": time.time()}
+    stale = 0  # r1 m3: a ticket prepare wrote before and no start took is never taken instead of this one
+    for f in SB.tickets_dir(wt).glob("*.json") if SB.tickets_dir(wt).is_dir() else []:
+        f.unlink()
+        stale += 1
+    if stale:
+        say(f"prepare: removed {stale} unused older ticket(s) of {wt}")
     SB.write_ticket(wt, t)
-    SB.write_private(SB.binding_file(wt), json.dumps({"lane": lane, "project": str(root)}) + "\n")
     return nonce

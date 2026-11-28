@@ -107,23 +107,24 @@ class Fixture:
         f.write_text(json.dumps({"ok": True, "lane_control": SP.lc_version(),
                                  "pins": {k: self.conf[k] for k in SP.PIN_KEYS}}))
 
-    def patched(self):
-        """The environment and the CI answers prepare runs with."""
+    def patched(self, ci: "dict | None" = None):
+        """The environment and the CI answers prepare runs with (ci: answers to change, by the path's last part)."""
+        answers = {"workflow": {"default_workflow_permissions": "read"}, "app": {"owner": {"type": "User"}},
+                   "environments": {"total_count": 0, "environments": []}, **(ci or {})}
         stack = [mock.patch.dict(os.environ, self.env, clear=True),
                  mock.patch.object(SP, "github_slug", lambda root: "owner/app"),
-                 mock.patch.object(SP, "gh_json", lambda path: {
-                     "workflow": {"default_workflow_permissions": "read"}, "app": {"owner": {"type": "User"}},
-                     "environments": {"total_count": 0, "environments": []}}.get(path.rsplit("/", 1)[-1],
-                                                                                 {"total_count": 0}))]
+                 mock.patch.object(SP, "gh_json", lambda path: answers.get(path.rsplit("/", 1)[-1],
+                                                                            {"total_count": 0}))]
         return stack
 
-    def prepare(self, role: str = "lanes", sha: "str | None" = None, **kw) -> dict:
-        """Prepare and take the ticket (bound to a fake terminal); returns the taken ticket."""
-        ps = self.patched()
+    def prepare(self, role: str = "lanes", sha: "str | None" = None, ci: "dict | None" = None, wt=None, **kw):
+        """Prepare as lane prepare --sandbox does; returns the nonce."""
+        ps = self.patched(ci)
         for p in ps:
             p.start()
         try:
-            nonce = SP.prepare(self.repo, json.loads((self.store / "settings.json").read_text()), self.wt.resolve(),
+            nonce = SP.prepare(self.repo, json.loads((self.store / "settings.json").read_text()),
+                               Path(wt or self.wt).resolve(),
                                role, self.lane, kw.pop("issue", "app-1x"), sha, say=lambda *_: None, **kw)
             return nonce
         finally:

@@ -80,6 +80,45 @@ def bound_worktree(cwd: Path) -> "Path | None":
     return None
 
 
+def linked_worktree(cwd: Path) -> "tuple | None":
+    """(worktree root, main checkout) when cwd is in a linked git worktree, read from its .git file alone (no git
+    runs); None in a primary checkout or outside any repo."""
+    for d in [cwd, *cwd.parents]:
+        g = d / ".git"
+        if g.is_dir():
+            return None
+        if g.is_file():
+            try:
+                line = g.read_text(errors="replace").strip()
+            except OSError:
+                return (d, None)
+            if not line.startswith("gitdir:"):
+                return (d, None)
+            gd = Path(line[7:].strip())
+            gd = (d / gd).resolve() if not gd.is_absolute() else gd.resolve()
+            if gd.parent.name != "worktrees":
+                return (d, None)  # a submodule or something else: not a project's main checkout
+            return (d, gd.parent.parent.parent)
+    return None
+
+
+def sandboxed_main(main: "Path | None", conf: dict) -> bool:
+    """Whether that main checkout is a project in SANDBOX_PROJECTS (by checkout path or by its settings name)."""
+    if main is None:
+        return False
+    names = SP.projects_on(conf)
+    if str(main) in names or str(main.resolve()) in names:
+        return True
+    try:
+        import extras as X
+        for root, st in X.known():
+            if Path(root).resolve() == main.resolve() and (st.get("name") or Path(root).name) in names:
+                return True
+    except Exception:  # noqa: BLE001  the project list cannot be read: count it as sandboxed (fail closed)
+        return bool(names)
+    return False
+
+
 def check_pins(conf: dict) -> "str | None":
     """Each pinned binary: an absolute path that exists and is not setuid or setgid (machine setup --sandbox pins
     /nix/store paths and the selftest ran with exactly these; prepare refuses otherwise)."""
@@ -295,14 +334,25 @@ def main(argv: list) -> int:
         return refuse(f"no real {agent} found (set SANDBOX_REAL_{agent.upper()} in machine.conf)")
     cwd = Path(os.getcwd()).resolve()
     wt = bound_worktree(cwd)
-    if wt is None or (args[:1] and args[0] in PASS):
+    lw = linked_worktree(cwd)
+    # Fail closed (review r1 B3): any linked worktree of a sandboxed project, or of any project while the config
+    # cannot be read, starts only sandboxed, with a ticket; the owner's tabs elsewhere pass through.
+    guarded = wt is not None or (lw is not None and (bool(conf.get("_error")) or sandboxed_main(lw[1], conf)))
+    if not guarded or (args[:1] and args[0] in PASS):
         os.execv(real, [agent, *args])
+    if wt is None:
+        if conf.get("_error"):
+            return refuse(f"{conf['_error']}: a lane worktree starts only sandboxed, so nothing ran")
+        return refuse(f"{lw[0]} is a worktree of a sandboxed project and has no ticket: run lane-control lane prepare "
+                      f"<project> {lw[0]} --sandbox ... first (a refused prepare leaves it refused); nothing ran")
     if wt != cwd:
         return refuse(f"started in {cwd}, below the sandboxed lane's worktree {wt}: start it in the worktree")
     if detector:
         return refuse(f"{wt} is a sandboxed lane's worktree, and this start came through PATH, not lane-control's "
                       "launcher: set Orca's custom command for OpenCode (lane-control machine setup --check --sandbox "
                       "names it); nothing ran")
+    if conf.get("_error"):
+        return refuse(f"{conf['_error']}: nothing ran")
     why = check_pins(conf)
     if why:
         return refuse(why)

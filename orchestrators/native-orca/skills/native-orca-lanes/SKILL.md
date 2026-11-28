@@ -96,14 +96,16 @@ orca-ide orchestration worker-start --spec-file <brief> --worktree path:<that wo
 worktree first (as above, for Claude too), run the `lane-control lane prepare` line it gives, and only then
 `worker-start --worktree path:<that worktree>`. If prepare exits non-zero, hold the lane and tell the owner.
 
-**Sandboxed lanes (OpenCode).** For a project in SANDBOX_PROJECTS on a machine where `lane-control machine setup --check
---sandbox` ends `sandbox: on`, every OpenCode lane runs sandboxed in its own clone, and so do its reviewers and every
-rerun of its checks (owner 2026-11-28). In this order, for the lane and for each reviewer:
+**Sandboxed lanes (OpenCode).** A project in SANDBOX_PROJECTS is always sandboxed: every OpenCode lane runs in its
+own clone, and so do its reviewers and every rerun of its checks (owner 2026-11-28). In this order, for the lane and
+for each reviewer:
 1. Make the worktree first (as above); a reviewer gets a new worktree of its own, never the lane's (one-shot
    tickets are taken per worktree).
 2. `lane-control lane prepare <project> <worktree> --sandbox --role lanes --lane <KEY> --issue <id>` (a reviewer:
    `--role reviewer --lane <KEY> --sha <pushed sha> --review-write <KEY>-r<n>.md`). Its last line is the nonce.
-   Non-zero: hold the lane and tell the owner what it printed.
+   Non-zero: hold the lane and tell the owner what it printed; never start it anyway (the launcher refuses it too).
+   When `lane-control machine setup --check --sandbox` ends in anything but a plain `sandbox: on` (off, broken, a
+   stale selftest, one project's CI), hold every OpenCode lane of that project and tell the owner.
 3. `orca-ide orchestration worker-start --spec-file <brief> --worktree path:<worktree> --agent opencode2 ...`.
 4. Right after: `lane-control lane started <worktree> --nonce <nonce> --dispatch <dispatch id>`. Exit 1 means the
    agent did not start through the sandbox; it was stopped: hold the lane and tell the owner (a detection, not a

@@ -1168,8 +1168,11 @@ class SandboxPrepareTests(Scratch):
         self.no_prep(role="reviewer", says="--sha")
         self.no_prep("--sha", self.other, role="reviewer", says="not in the lane's pushed work")
         n2, _ = self.ok_prep("--sha", sha, "--review-write", "app-1-r1.md", role="reviewer")
+        rev = self.ticket(n2)
+        self.wt = self.t / "workspaces" / "check-1"
+        git("worktree", "add", "-q", self.wt, "-b", "check-1", cwd=self.repo)
         n3, _ = self.ok_prep("--sha", sha, role="check")
-        rev, chk = self.ticket(n2), self.ticket(n3)
+        chk = self.ticket(n3)
         self.wt = lane_wt
         lane = self.ticket(n1)
         self.assertEqual((rev["branch"], chk["branch"]), ("lane-1", "lane-1"))  # the lane's PR, not review-1's
@@ -1181,6 +1184,20 @@ class SandboxPrepareTests(Scratch):
         self.assertEqual((rc / ".git" / "HEAD").read_text().strip(), sha)
         self.assertEqual(rev["checkout"], sha)
         self.assertFalse((rc / "lane-file").exists())
+
+    def test_new_prepare_drops_unused_tickets(self):
+        """r1 m3: the next start takes the newest prepare's ticket, never an older unused one."""
+        n1, _ = self.ok_prep()
+        n2, out = self.ok_prep()
+        self.assertIn("removed 1 unused older ticket", out)
+        self.assertEqual(self.SB.take_ticket(self.wt, "term_1")["nonce"], n2)
+        del n1
+
+    def test_binding_written_before_a_refusal(self):
+        """r1 B3: a prepare that refuses still leaves the worktree bound (so the launcher refuses it)."""
+        self.SB.selftest_file().unlink()
+        self.no_prep(says="selftest")
+        self.assertTrue(self.SB.binding_file(self.wt).is_file())
 
     def test_worktree_of_another_lane_refused(self):
         self.ok_prep()
