@@ -111,8 +111,9 @@ class Fixture:
         stack = [mock.patch.dict(os.environ, self.env, clear=True),
                  mock.patch.object(SP, "github_slug", lambda root: "owner/app"),
                  mock.patch.object(SP, "gh_json", lambda path: {
-                     "workflow": {"default_workflow_permissions": "read"}}.get(path.rsplit("/", 1)[-1],
-                                                                              {"total_count": 0}))]
+                     "workflow": {"default_workflow_permissions": "read"}, "app": {"owner": {"type": "User"}},
+                     "environments": {"total_count": 0, "environments": []}}.get(path.rsplit("/", 1)[-1],
+                                                                                 {"total_count": 0}))]
         return stack
 
     def prepare(self, role: str = "lanes", sha: "str | None" = None, **kw) -> dict:

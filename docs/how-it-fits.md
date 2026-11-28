@@ -483,6 +483,28 @@ More: [the ratchet, the owner's guide](away-improve.md).
 
 More: [lane cleanup](orca-cleanup.md).
 
+## The lane sandbox (OpenCode, phase 1)
+
+- **What it is.** An OpenCode lane, its reviewers and every rerun of its checks run in their own clone of the project
+  under bwrap `--cap-drop ALL` inside pasta's own network namespace, with a memory scope from `systemd-run --user`
+  when a user manager exists. The floor (secrets, auth, lane-control's and Orca's state, the shared repository, the
+  rest of `$HOME`) is not there at all; the agent reaches the outside only through one broker per ticket that takes
+  typed requests: report, ask, push, fetch, its own PR, its own issue.
+- **Who starts what.** Orca runs `lane-sandbox-shim` as OpenCode's custom command, which the owner sets once by hand
+  (`lane-control machine check --sandbox` names it); the coordinator runs `lane-control lane prepare --sandbox` before
+  `worker-start` and `lane-control lane started` after it.
+- **How work leaves.** A push is a bundle the broker copies without following links, imports into a quarantine that
+  holds only the lane's base and earlier pushes, and accepts only as a fast-forward of the lane's own branch with no
+  CI change (unless `lane-control lane approve-ci`). No host git ever runs in a lane's clone; reviewers get a clone of
+  the pushed sha of their own.
+- **What stays open** in phase 1: the internet (exfiltration of the clone, the lane's gateway key and Orca's hook
+  token, which it holds; phase 2 adds a key proxy and an egress allowlist), CI running a lane's code with a read-only
+  token and no secrets before review, the coordinator and the owner's own sessions (not sandboxed), and a start
+  without the custom command, which is detected (`lane started` stops the worker), not prevented.
+
+More: [setup](../orchestrators/native-orca/setup.md#the-opencode-lane-sandbox-phase-1) and the
+[design](superpowers/specs/2026-11-27-agent-sandbox-design.md).
+
 ## Parked parts
 
 Orca + Cotal, Rove and wsp are parked and herdr is untested. Their scripts are still in the repo, marked parked in the

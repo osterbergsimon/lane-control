@@ -96,6 +96,26 @@ orca-ide orchestration worker-start --spec-file <brief> --worktree path:<that wo
 worktree first (as above, for Claude too), run the `lane-control lane prepare` line it gives, and only then
 `worker-start --worktree path:<that worktree>`. If prepare exits non-zero, hold the lane and tell the owner.
 
+**Sandboxed lanes (OpenCode).** For a project in SANDBOX_PROJECTS on a machine where `lane-control machine check
+--sandbox` ends `sandbox: on`, every OpenCode lane runs sandboxed in its own clone, and so do its reviewers and every
+rerun of its checks (owner 2026-11-28). In this order, for the lane and for each reviewer:
+1. Make the worktree first (as above).
+2. `lane-control lane prepare <project> <worktree> --sandbox --role lanes --lane <KEY> --issue <id>` (a reviewer:
+   `--role reviewer --lane <KEY> --sha <pushed sha> --review-write <KEY>-r<n>.md`). Its last line is the nonce.
+   Non-zero: hold the lane and tell the owner what it printed.
+3. `orca-ide orchestration worker-start --spec-file <brief> --worktree path:<worktree> --agent opencode2 ...`.
+4. Right after: `lane-control lane started <worktree> --nonce <nonce> --dispatch <dispatch id>`. Exit 1 means the
+   agent did not start through the sandbox; it was stopped: hold the lane and tell the owner (a detection, not a
+   prevention).
+
+In its brief: its persona is at `/run/lane/persona.md`; `git push`, `git pull`, `gh pr`, `gh run view`,
+`orca-ide orchestration send|ask|check|reply`, `bd show|update|create` and `~/.agents/bin/lane-heavy` work inside;
+`git pull --rebase`, force pushes and other repos are refused. A relaunch, a resume or a follow-up after a restart is
+`prepare` again (it reuses the clone, or recreates it from `refs/lanes/<KEY>`), then `worker-start`, `lane started`.
+Never check a sandboxed lane's branch out on the host, never `gh pr checkout` it, never rerun its checks in a host
+shell: `lane-control sandbox check <KEY> --sha <sha> -- <command>`. A push that changes CI configuration is refused
+until the owner runs `lane-control lane approve-ci <KEY> <sha>`; never run it for them.
+
 Then mirror it on the lane's worktree card, so the owner sees it at a glance:
 `orca-ide worktree set --worktree <lane> --comment "<KEY> <tier> <harness>/<model>: <one line>"`.
 
@@ -210,6 +230,11 @@ rebase merge, never `--admin`). If the head moved, gh refuses: review the new co
 `<lane-control>/scripts/lane-control project hook . after-merge --pr <n> --head <sha> --merge-sha <merge commit>
 --lane <KEY> --issue <id>` (an attached repo's PR: `--repo <its folder>`; it only warns: pass a warning to the
 owner). Then `bd close <id>`, then `bd dolt push`.
+
+A sandboxed lane closes differently: its Orca worktree is always at the base, so Orca's cleanup rules and the
+fallback's checks below always pass and prove nothing. Never use them for it. After the merge (or the owner's word
+that it is done): `lane-control sandbox close <KEY>` (it refuses while the clone holds dirty files or unpushed
+commits; `--done` and `--discard` are the owner's), then remove its worktree as its last line says.
 
 Orca removes the worktree, not you. Its own cleanup rule "Delete merged workspaces" (in Orca: Settings -> Workspace
 Cleanup -> Cleanup rules) removes a merged lane's worktree and its merged branch once nothing runs in it, it is clean

@@ -1,9 +1,11 @@
 # Agent sandbox: bwrap around agent lanes (SBX-1)
 
-Status: design, round 3, for the owner's approval. Issue lc-9r81. No product code yet: the plan is
-`docs/superpowers/plans/2026-11-27-agent-sandbox.md`; the spike is `docs/superpowers/spikes/2026-11-27-agent-sandbox/`
-(`spike.sh`, `stub-agent.sh`, `spike_helpers.py`). What needs a measurement or the owner is filed as children of
-lc-9r81 (lc-9r81.1 to .4) and listed under "Open questions".
+Status: round 3, approved by the owner 2026-11-28 ("recs approved"; lc-9r81.4); phase 1 built in SBX-2 (lc-35qn,
+plan tasks 1-8): `core/sandbox.py`, `core/sandboxprep.py`, `core/scripts/lane-sandbox-shim`, `core/scripts/lane-broker`,
+`core/scripts/lane-sandbox`, `core/sandbox-inside/`, and the adversarial suite `tests/test_sandbox_escapes.py`. Issue
+lc-9r81. The plan is `docs/superpowers/plans/2026-11-27-agent-sandbox.md`; the spike and the task 1 measurements are
+in `docs/superpowers/spikes/2026-11-27-agent-sandbox/`. The owner's answers are under "Open questions"; what the build
+changed is under "As built (SBX-2)". A live lane (plan task 9) waits for the owner's go.
 
 Round 1 moved the lane into its own clone. Round 2's review (B1-B6, M1-M6, m1-m4) found that the launch kept
 capabilities, the broker trusted the lane's outbox, the launch could not start as written, the history check missed
@@ -76,11 +78,16 @@ key and Orca's hook token, which the agent holds). Phase 2 (lc-0zae) adds a key 
 
 ## The launch
 
-**Hook** (no Orca settings edit, no internal RPC): `worker-start --agent opencode` runs Orca's catalog command
-(`opencode`, or `opencode2 --standalone`) in the pane's login shell, so the first `opencode`/`opencode2` on PATH wins;
-`machine setup --sandbox` puts links to `core/scripts/lane-sandbox-shim` in the first PATH folder ahead of the real CLI
-(after asking). This detects, not prevents, a bypass; the owner's alternative is Orca's custom command set once to the
-shim (question 1; measured in lc-9r81.1).
+**Hook** (owner 2026-11-28, question 1): Orca's custom command for OpenCode, which the owner sets once by hand in
+Orca (Settings -> Agents -> OpenCode 2, and OpenCode) to the installed launcher:
+`<data>/lane-control/current/core/scripts/lane-sandbox-shim opencode2 --standalone` (and `... lane-sandbox-shim
+opencode`). lane-control never edits Orca's settings and uses no internal RPC; `lane-control machine check --sandbox`
+prints the exact text and says whether it is set, reading Orca's settings document read-only. Orca's catalog command is
+replaced whole by a custom command, and a customized agent's chat runs through the same command (lc-9r81.1,
+`orca-launch-probe.md`). The PATH shim stays only as a detector: `machine setup --sandbox` offers links named
+`opencode`/`opencode2` to the same launcher first on PATH (after asking); started under one of those names in a
+sandboxed lane's worktree it refuses, so a start that did not come through the custom command never runs unsandboxed
+there, and `lane started` stops the worker.
 
 **Tickets**: `lane-control lane prepare <project> <worktree> --sandbox --role lanes|reviewer|check` writes a one-shot
 ticket (`~/.local/state/lane-control/sandbox/tickets/<worktree-id>/<nonce>.json`) naming the lane, role, clone and
@@ -109,8 +116,9 @@ the run record: same terminal as `orca-ide orchestration worker-show` gives, hos
 namespace. Without it in 30 s it stops the worker. Detection, not prevention.
 
 **Inside the agent is uid 0 with no capabilities** (pasta's user namespace maps the owner's uid to 0; bwrap cannot
-map 1000 there: "setting up uid map: Operation not permitted"). Whether OpenCode and the lane's tools behave as uid
-0 is lc-9r81.2.
+map 1000 there: "setting up uid map: Operation not permitted"). node, npm, git and python run as uid 0 without
+capabilities; nothing can be chowned or setuid to another uid (lc-9r81.2, `uid0-probe.md`). OpenCode itself as uid 0
+is measured in the live lane (task 9).
 
 ## The lane's repository
 
@@ -149,8 +157,8 @@ map 1000 there: "setting up uid map: Operation not permitted"). Whether OpenCode
 
 ## Who runs lane-written code
 
-- **Reviewers and check reruns** run sandboxed, each with its own ticket and clone of the pushed sha, cache, data and
-  run folders; a Claude reviewer may instead read only `gh pr diff` and run nothing (question 2).
+- **Reviewers and check reruns** of a sandboxed lane always run sandboxed (owner 2026-11-28, question 2), each with
+  its own ticket and clone of the pushed sha, cache, data and run folders.
 - **The coordinator** never checks out a sandboxed lane's branch and never reruns its checks on the host
   (`lane-control sandbox check <lane> --sha <sha> -- <command>` instead).
 - **CI does, before any review** (r2 B5). On `pull_request`, a same-repo branch's workflows run with the branch's own
@@ -158,9 +166,9 @@ map 1000 there: "setting up uid map: Operation not permitted"). Whether OpenCode
   runners the repository exposes to them. In this repo, `test.yml` runs the branch's test suite on `ubuntu-latest`
   with `contents: read`. The broker refuses a push that changes CI configuration without the owner's approval; it
   cannot stop an existing workflow from running lane code. So `prepare` checks with `gh api` that the repository's
-  default workflow token is read-only, that it has no Actions secrets and no self-hosted runners, and refuses a
-  sandboxed lane otherwise unless the owner accepts that project; or lanes push to a fork, where pull requests run with
-  a read-only token and no secrets (question 7, lc-9r81.3).
+  default workflow token is read-only, that it has no Actions secrets (nor organization or environment secrets) and
+  no self-hosted runners, and refuses a sandboxed lane otherwise; `machine check --sandbox` reports the same per
+  project (owner 2026-11-28, question 7; `ci-probe.md`).
 
 ## Mount plan (OpenCode, phase 1)
 
@@ -287,8 +295,9 @@ Claude refuses some modes as root, so uid 0 inside (lc-9r81.2) matters more ther
 
 ## What this closes, and what stays
 
-All "Open" rows stay open until SBX-2's adversarial suite passes on the implementation; the probe column says where the
-design's fix is shown.
+SBX-2's adversarial suite passes on the implementation (2026-11-28, `tests/test_sandbox_escapes.py` under real pasta
+and bwrap); the "Open, designed" rows below stay so until the owner's live lane (plan task 9) also passes, and then
+read "Closed for sandboxed OpenCode lanes". The probe column says where each fix is shown.
 
 | Issue | Status for sandboxed OpenCode lanes | Probe |
 |---|---|---|
@@ -309,25 +318,50 @@ design's fix is shown.
 - The coordinator and the owner's own sessions are unsandboxed.
 - The internet: exfiltration of the clone and the agent's key and hook token (phase 2).
 - CI runs lane code before review with whatever the repository grants (question 7).
-- An unsandboxed start is detected, not prevented, with the PATH shim (question 1).
+- A start that does not go through Orca's custom command (not set, or set to something else) is detected (the PATH
+  detector refuses it, `lane started` stops the worker), not prevented.
 - A renamed or re-encoded copy of private data in history.
 - Code runs like any merged code after the owner merges a reviewed PR.
 - A kernel, bwrap, pasta, nft or git bug.
 
-## Open questions for the owner (lc-9r81.4, measurements lc-9r81.1-.3)
+## Open questions for the owner: answered 2026-11-28 (lc-9r81.4)
 
-1. Launch: the PATH shim (detects an unsandboxed start and stops it) or Orca's custom command set once by you
-   (prevents it)? lc-9r81.1 measures both.
-2. Reviewers and check reruns: always sandboxed, or may a Claude reviewer read only the PR diff and run nothing?
-3. History: refuse a lane whose base history holds a `--private` path or a `.env` file (this design), and is the
-   template list `.env.example`, `.env.sample`, `.env.template`, `.env.dist` right?
-4. Reads: may a lane read its own issue and the issues it links (and nothing else of beads), and only the review files
-   `prepare` names for it?
-5. Network: private ranges and link-local are dropped, with only the gateway allowed; may a lane reach anything else
-   on the LAN? The internet stays open until phase 2.
-6. A clone per lane and per reviewer: fine for every project, or a size limit?
-7. CI (lc-9r81.3): require a read-only default token, no Actions secrets and no self-hosted runners for a sandboxed
-   project, or push lane branches to a fork, or accept the repository as it is?
+The owner (2026-11-28, "recs approved") decided 1, 2 and 7; every other question takes the recommended answer, as the
+owner said.
+
+1. Launch: **Orca's custom command, set once by the owner** (prevents an unsandboxed start where it is set); the PATH
+   shim is kept only as the detector ("The launch"). lane-control prints what to set and checks it, read-only.
+2. Reviewers and check reruns: **always sandboxed**; no Claude reviewer reads a sandboxed lane's work unsandboxed.
+3. History: **refuse** a lane whose delivered history holds a `--private` path or a `.env` file (recommended); the
+   template list stays `.env.example`, `.env.sample`, `.env.template`, `.env.dist`.
+4. Reads: **yes**, the lane's own issue and the issues it links, and only the review files `prepare` names
+   (recommended).
+5. Network: **nothing else on the LAN**: private ranges and link-local dropped, only the gateway allowed; the
+   internet stays open until phase 2 (recommended).
+6. A clone per lane and per reviewer: **fine for every project**, no size limit in phase 1 (recommended; the design).
+7. CI: **require a read-only default token, no secrets and no self-hosted runners**; check and report it, refuse
+   `--sandbox` for a project that fails it. No per-project acceptance and no fork in phase 1.
+
+## As built (SBX-2), where it differs from or adds to the text above
+
+- The pinned store paths go to `~/.config/lane-control/sandbox.conf` (written by `machine setup --sandbox`, mode
+  0600), not into `machine.conf`, which machine setup never changes; the owner's keys stay in `machine.conf`
+  (`SANDBOX_PROJECTS`, `SANDBOX_LANE_MEMORY`, `SANDBOX_AGENT_DIRS`, `SANDBOX_REAL_OPENCODE[2]`, `SANDBOX_REVIEW_DIR`).
+- The fresh clone fetches `origin/<base>` from the shared repo (`git init` and a fetch), never the owner's local base
+  branch, which may hold unpushed commits; the recreated, reviewer and check clones are made `--no-checkout` and
+  checked out inside by `lane-enter`, the chain's first step, so no host git ever writes a lane-written tree.
+- The inside wrappers are bound read-only at `~/.agents/lane-inside` with `~/.agents/bin` a link to their `bin`, so
+  the links resolve inside where personas name them; the lane's PATH starts with them.
+- The agent binary must resolve under `/nix/store` or a folder in `SANDBOX_AGENT_DIRS` (bound read-only); an npm
+  install outside the store is named by `machine check --sandbox` with the line to add.
+- The broker exits with the launcher that started it; the socket is bound by its relative name (a long `$HOME` would
+  pass the 108-byte socket path limit).
+- `lane-control sandbox inspect|close|check` run the spec's sandboxed step through the same launcher, with the clone
+  bound at its own path; `close` removes the worktree's ticket and binding files too and leaves the Orca worktree to
+  the coordinator.
+- The adversarial suite runs every probe of the spike and of reviews r1 and r2 through the real launcher, broker and
+  wrappers under real pasta and bwrap (`lane-control sandbox selftest`; a skip fails it). CI's runner has no nix
+  store, so CI skips it and says so (`python3 tests/test_sandbox_escapes.py --availability`).
 
 ## Review round 2, answered
 

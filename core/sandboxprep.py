@@ -136,10 +136,27 @@ def ci_check(slug: "str | None") -> list:
         lambda d: d["default_workflow_permissions"] == "read", lambda d: d["default_workflow_permissions"])
     one("Actions secrets", f"repos/{slug}/actions/secrets", lambda d: int(d["total_count"]) == 0,
         lambda d: str(int(d["total_count"])))
-    one("organization secrets for the repo", f"repos/{slug}/actions/organization-secrets",
-        lambda d: int(d["total_count"]) == 0, lambda d: str(int(d["total_count"])))
+    try:
+        org = (gh_json(f"repos/{slug}").get("owner") or {}).get("type") == "Organization"
+    except (SB.SandboxError, ValueError, OSError, subprocess.TimeoutExpired, AttributeError):
+        org = True  # cannot tell: check it, and a failed read refuses
+    if org:
+        one("organization secrets for the repo", f"repos/{slug}/actions/organization-secrets",
+            lambda d: int(d["total_count"]) == 0, lambda d: str(int(d["total_count"])))
     one("self-hosted runners", f"repos/{slug}/actions/runners", lambda d: int(d["total_count"]) == 0,
         lambda d: str(int(d["total_count"])))
+    try:
+        envs = [e.get("name") for e in gh_json(f"repos/{slug}/environments").get("environments") or []]
+    except (SB.SandboxError, ValueError, OSError, subprocess.TimeoutExpired, AttributeError):
+        envs = None
+    if envs is None:
+        out.append((False, "environments: cannot be read"))
+    for e in envs or []:
+        if isinstance(e, str) and re.fullmatch(r"[A-Za-z0-9 ._-]{1,100}", e):
+            one(f"secrets of environment {e}", f"repos/{slug}/environments/{e}/secrets",
+                lambda d: int(d["total_count"]) == 0, lambda d: str(int(d["total_count"])))
+        else:
+            out.append((False, "an environment with an unusual name: check its secrets by hand"))
     return out
 
 

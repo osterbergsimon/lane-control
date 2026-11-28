@@ -3008,6 +3008,52 @@ class LifecycleHookContentTests(unittest.TestCase):
         self.assertIn("never run `lane-control project gate` or `project hook ... after-merge` yourself for an "
                       "away-merge", away)
 
+class SandboxContentTests(unittest.TestCase):
+    """SBX-2 (lc-35qn): the lane skill names a sandboxed lane's commands in order and forbids the worktree close checks
+    and host reruns for it; the personas name the sandbox's paths; the docs name what stays open in phase 1."""
+    NATIVE = ROOT / "orchestrators" / "native-orca"
+
+    def flat(self, p):
+        return " ".join(p.read_text().split())
+
+    def test_skill_order_and_forbidden(self):
+        text = self.flat(self.NATIVE / "skills" / "native-orca-lanes" / "SKILL.md")
+        steps = ["lane-control lane prepare <project> <worktree> --sandbox --role lanes", "orca-ide orchestration "
+                 "worker-start", "lane-control lane started <worktree> --nonce <nonce> --dispatch <dispatch id>"]
+        at = [text.find(x) for x in steps]
+        self.assertTrue(all(i >= 0 for i in at), at)
+        sb = text.index("Sandboxed lanes (OpenCode)")
+        self.assertEqual([i for i in (text.find(x, sb) for x in steps)], sorted(text.find(x, sb) for x in steps))
+        for x in ("--role reviewer --lane <KEY> --sha", "Never check a sandboxed lane's branch out on the host",
+                  "never `gh pr checkout` it", "lane-control sandbox check <KEY> --sha <sha> -- <command>",
+                  "`prepare` again", "lane-control lane approve-ci <KEY> <sha>", "never run it for them",
+                  "lane-control sandbox close <KEY>", "Never use them for it", "/run/lane/persona.md"):
+            self.assertIn(x, text)
+
+    def test_personas(self):
+        rev = self.flat(self.NATIVE / "personas" / "reviewer.md")
+        self.assertIn("/run/lane/persona.md", rev)
+        self.assertIn("LANE_SANDBOX=1", rev)
+        co = self.flat(self.NATIVE / "personas" / "coordinator.md")
+        for x in ("lane-control lane started", "lane-control sandbox check <KEY> --sha <sha> -- <command>",
+                  "lane-control sandbox close <KEY>", "never check its branch out on the host"):
+            self.assertIn(x, co)
+
+    def test_docs_name_what_stays_open(self):
+        for p in (self.NATIVE / "setup.md", ROOT / "docs" / "how-it-fits.md"):
+            text = self.flat(p).lower()
+            for x in ("internet", "gateway key", "ci", "coordinator", "detected", "not prevented"):
+                self.assertIn(x, text, (p.name, x))
+        g = self.flat(ROOT / "docs" / "getting-started.md")
+        self.assertIn("lane-control machine check --sandbox", g)
+
+    def test_setup_names_the_custom_command(self):
+        text = self.flat(self.NATIVE / "setup.md")
+        self.assertIn("Settings -> Agents -> OpenCode 2 -> custom command", text)
+        self.assertIn("lane-sandbox-shim opencode2 --standalone", text)
+        self.assertIn("lane-control never edits Orca's settings", text)
+
+
 if __name__ == "__main__":
     unittest.main()
 

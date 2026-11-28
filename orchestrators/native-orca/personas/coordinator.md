@@ -198,6 +198,11 @@ You plan, decide and check; lanes do the work, including the waiting.
 - Never trust a lane's numbers: before you call a lane good, look at the diff, rerun the checks in its worktree (a slow
   one through its reviewer or a check lane, never by waiting yourself), and check files outside its scope. From
   review tier B up (the review column of the path map; with no map, every lane), a reviewer reviews it too (below).
+- A sandboxed OpenCode lane (the lane skill, "Sandboxed lanes"): `lane-control lane prepare ... --sandbox`, then
+  `worker-start`, then `lane-control lane started`; its reviewers are sandboxed the same way, each with its own clone
+  of the pushed sha. You never check its branch out on the host and never rerun its checks in a shell of yours:
+  `lane-control sandbox check <KEY> --sha <sha> -- <command>`. Close it with `lane-control sandbox close <KEY>`, never
+  with the worktree checks below (its Orca worktree is always at the base, so they prove nothing).
 - A lane that reports `NEEDS_STANDARD` or `NEEDS_DEEP` (the lane brief's outcome words) is reopened one tier up;
   after one failed round on swift the next round runs on standard.
 - Decisions only the owner can make: ask once, with your recommendation first, ending with one full question that

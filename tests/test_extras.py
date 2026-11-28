@@ -948,7 +948,8 @@ class SandboxPrepareTests(Scratch):
                                                             "apiKey": "{env:GATEWAY_KEY}"}}}}))
         (self.home / ".gitconfig").write_text("[user]\n\tname = Owner\n\temail = owner@example.invalid\n")
         self.ci = {"workflow": {"default_workflow_permissions": "read"}, "secrets": {"total_count": 0},
-                   "organization-secrets": {"total_count": 0}, "runners": {"total_count": 0}}
+                   "organization-secrets": {"total_count": 0}, "runners": {"total_count": 0},
+                   "app": {"owner": {"type": "User"}}, "environments": {"total_count": 0, "environments": []}}
 
         def gh_json(path):
             leaf = path.rsplit("/", 1)[-1]
@@ -1176,12 +1177,18 @@ class SandboxPrepareTests(Scratch):
 
     def test_ci_settings_refused(self):
         for leaf, bad in (("workflow", {"default_workflow_permissions": "write"}), ("secrets", {"total_count": 1}),
-                          ("organization-secrets", {"total_count": 2}), ("runners", {"total_count": 1}),
-                          ("runners", None)):
+                          ("runners", {"total_count": 1}), ("runners", None), ("environments", None),
+                          ("environments", {"environments": [{"name": "../x"}]})):
             keep = self.ci[leaf]
             self.ci[leaf] = bad
             self.no_prep(says="read-only default workflow token")
             self.ci[leaf] = keep
+        self.ok_prep()  # a user's repo: no organization secrets to ask about
+        shutil.rmtree(self.SB.lane_dir("app-1"))
+        self.ci["app"] = {"owner": {"type": "Organization"}}
+        self.ci["organization-secrets"] = {"total_count": 2}
+        self.no_prep(says="organization secrets for the repo: 2")
+        self.ci["organization-secrets"] = {"total_count": 0}
         self.ok_prep()
 
     def test_refuses_without_selftest(self):

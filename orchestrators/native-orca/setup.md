@@ -278,3 +278,32 @@ carries on with it and cuts one for a project that has none, or the owner adopts
 `core/scripts/away-merge` is its only merge route. `lane-away on` (even `--until-back`), night and the budget never start it,
 and it does not make the owner count as away (`docs/superpowers/specs/2026-11-23-away-improve-design.md`). `IMPROVE_IDLE_MIN` in `machine.conf` (default 30) is the
 idle time after which the night manager nudges a coordinator that improve mode covers.
+
+## The OpenCode lane sandbox (phase 1)
+OpenCode lanes, their reviewers and reruns of their checks can run in a sandbox that holds their own clone of the
+project and nothing else of the machine (design: `docs/superpowers/specs/2026-11-27-agent-sandbox-design.md`). Once:
+
+1. `lane-control machine setup --sandbox` pins bubblewrap, passt, util-linux and nftables (and the lanes' tool list)
+   from nixpkgs with GC roots in lane-control's data folder, refuses a setuid binary, writes
+   `~/.config/lane-control/sandbox.conf`, probes the chain and runs `lane-control sandbox selftest` (the adversarial
+   suite; a skip is a failure). It offers the PATH detector links (it asks; optional).
+2. In Orca, set the custom command for OpenCode once, by hand (Settings -> Agents -> OpenCode 2 -> custom command,
+   and the same for OpenCode): `lane-control machine check --sandbox` prints the exact text, the installed
+   launcher `.../lane-control/current/core/scripts/lane-sandbox-shim opencode2 --standalone`, and says whether it is set.
+   lane-control never edits Orca's settings; the check only reads them.
+3. In `machine.conf`: `SANDBOX_PROJECTS=<project> ...`; where OpenCode is not installed from nixpkgs,
+   `SANDBOX_AGENT_DIRS=<its install folder>` (bound read-only; the check names it); optionally `SANDBOX_LANE_MEMORY`
+   (default 8G) and `SANDBOX_REVIEW_DIR` (the review folder a ticket may read named files from).
+4. Each sandboxed project's GitHub Actions: a read-only default workflow token, no Actions secrets and no
+   self-hosted runners (owner 2026-11-28); `lane prepare --sandbox` refuses a project that fails it, and the check
+   reports it.
+
+`lane-control machine check --sandbox` (read only) ends with `sandbox: on|off|broken (<why>)`. Then the coordinator
+follows the lane skill's "Sandboxed lanes": `lane prepare --sandbox`, `worker-start`, `lane started`; close with
+`lane-control sandbox close <KEY>`. Owner's commands: `lane-control lane approve-ci <KEY> <sha>` (a push that changes
+CI), `sandbox close --done|--discard`, `lane prepare --sandbox --discard` (a broken clone).
+
+What stays open in phase 1: the internet (a lane can send its clone, its gateway key and Orca's hook token anywhere;
+phase 2, lc-0zae), CI runs a lane's code with the read-only token before review, the coordinator and the owner's own
+sessions are not sandboxed, a start without the custom command is detected (`lane started` stops it), not prevented,
+and a renamed or re-encoded copy of private data in history is not seen.

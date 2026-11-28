@@ -465,6 +465,11 @@ by hand or asks you ([docs/orca-cleanup.md](orca-cleanup.md)). You never need to
   Servers > "Share this computer", choosing 127.0.0.1, then paste it at setup's hidden prompt (with `--pair-by-hand`
   setup gives these steps before it starts, so you can make it while it runs).
 - **Cleanup and branches:** [docs/orca-cleanup.md](orca-cleanup.md).
+- **Run OpenCode lanes in a sandbox:** `lane-control machine setup --sandbox`, then set the custom command
+  `lane-control machine check --sandbox` names in Orca's Settings -> Agents, then add the project to
+  `SANDBOX_PROJECTS` in `machine.conf` ([the sandbox](../orchestrators/native-orca/setup.md#the-opencode-lane-sandbox-phase-1)).
+  It keeps a lane away from your secrets and other repos; the internet, CI with a read-only token, and your own
+  sessions stay open in phase 1.
 - **More projects and models:** repeat step 4 per repo; tiers and routing are in [core/model-routing.md](../core/model-routing.md).
 - **Switch orchestrators:** `scripts/orch status ~/code/<project>`, then follow [the switch guide](../orchestrators/switching.md).
 - **Everything else:** [docs/README.md](README.md).
