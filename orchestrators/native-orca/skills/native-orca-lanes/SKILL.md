@@ -99,7 +99,8 @@ worktree first (as above, for Claude too), run the `lane-control lane prepare` l
 **Sandboxed lanes (OpenCode).** For a project in SANDBOX_PROJECTS on a machine where `lane-control machine check
 --sandbox` ends `sandbox: on`, every OpenCode lane runs sandboxed in its own clone, and so do its reviewers and every
 rerun of its checks (owner 2026-11-28). In this order, for the lane and for each reviewer:
-1. Make the worktree first (as above).
+1. Make the worktree first (as above); a reviewer gets a new worktree of its own, never the lane's (one-shot
+   tickets are taken per worktree).
 2. `lane-control lane prepare <project> <worktree> --sandbox --role lanes --lane <KEY> --issue <id>` (a reviewer:
    `--role reviewer --lane <KEY> --sha <pushed sha> --review-write <KEY>-r<n>.md`). Its last line is the nonce.
    Non-zero: hold the lane and tell the owner what it printed.

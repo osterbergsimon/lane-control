@@ -1160,12 +1160,19 @@ class SandboxPrepareTests(Scratch):
 
     def test_reviewer_own_folders(self):
         n1, _ = self.ok_prep()
-        self.no_prep(role="reviewer", says="--sha")
         sha = self.push_lane()
+        self.no_prep("--sha", sha, role="reviewer", says="its own worktree")  # never the lane's worktree
+        lane_wt = self.wt
+        self.wt = self.t / "workspaces" / "review-1"
+        git("worktree", "add", "-q", self.wt, "-b", "review-1", cwd=self.repo)
+        self.no_prep(role="reviewer", says="--sha")
         self.no_prep("--sha", self.other, role="reviewer", says="not in the lane's pushed work")
         n2, _ = self.ok_prep("--sha", sha, "--review-write", "app-1-r1.md", role="reviewer")
         n3, _ = self.ok_prep("--sha", sha, role="check")
-        lane, rev, chk = self.ticket(n1), self.ticket(n2), self.ticket(n3)
+        rev, chk = self.ticket(n2), self.ticket(n3)
+        self.wt = lane_wt
+        lane = self.ticket(n1)
+        self.assertEqual((rev["branch"], chk["branch"]), ("lane-1", "lane-1"))  # the lane's PR, not review-1's
         self.assertEqual((rev["role"], chk["role"]), ("reviewer", "check"))
         self.assertEqual(rev["review_write"], "app-1-r1.md")
         dirs = [{t["clone"], t["ticket_dir"]} for t in (lane, rev, chk)]
@@ -1174,6 +1181,10 @@ class SandboxPrepareTests(Scratch):
         self.assertEqual((rc / ".git" / "HEAD").read_text().strip(), sha)
         self.assertEqual(rev["checkout"], sha)
         self.assertFalse((rc / "lane-file").exists())
+
+    def test_worktree_of_another_lane_refused(self):
+        self.ok_prep()
+        self.no_prep(lane="app-2", says="bound to another sandboxed lane")
 
     def test_ci_settings_refused(self):
         for leaf, bad in (("workflow", {"default_workflow_permissions": "write"}), ("secrets", {"total_count": 1}),

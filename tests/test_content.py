@@ -3024,7 +3024,8 @@ class SandboxContentTests(unittest.TestCase):
         self.assertTrue(all(i >= 0 for i in at), at)
         sb = text.index("Sandboxed lanes (OpenCode)")
         self.assertEqual([i for i in (text.find(x, sb) for x in steps)], sorted(text.find(x, sb) for x in steps))
-        for x in ("--role reviewer --lane <KEY> --sha", "Never check a sandboxed lane's branch out on the host",
+        for x in ("--role reviewer --lane <KEY> --sha", "a reviewer gets a new worktree of its own, never the lane's",
+                  "Never check a sandboxed lane's branch out on the host",
                   "never `gh pr checkout` it", "lane-control sandbox check <KEY> --sha <sha> -- <command>",
                   "`prepare` again", "lane-control lane approve-ci <KEY> <sha>", "never run it for them",
                   "lane-control sandbox close <KEY>", "Never use them for it", "/run/lane/persona.md"):

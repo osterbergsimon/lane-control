@@ -287,6 +287,32 @@ def owner_identity() -> tuple:
 
 # --- prepare -------------------------------------------------------------------------------------------------------
 
+def second_clone(root: Path, ld: Path, lane: str, role: str, sha: "str | None", base: str, base_sha: str,
+                 pushed: "str | None", private: list) -> Path:
+    """A reviewer's or check's own clone of the lane's pushed sha, history-checked, made --no-checkout with HEAD at
+    the sha (its files are checked out inside)."""
+    if not sha or not SHA.fullmatch(sha):
+        raise SB.SandboxError(f"--role {role} needs --sha <full sha> of the lane's pushed work")
+    if not pushed:
+        raise SB.SandboxError(f"lane {lane} has pushed nothing (no refs/lanes/{lane}): nothing to {role}")
+    if subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", sha, pushed],
+                      capture_output=True, stdin=subprocess.DEVNULL).returncode:
+        raise SB.SandboxError(f"{sha[:12]} is not in the lane's pushed work (refs/lanes/{lane})")
+    n = 1
+    while (ld / f"{role}-{n}").exists():
+        n += 1
+    clone = ld / f"{role}-{n}" / "repo"
+    init_clone(clone, root, base, base_sha)
+    git("-C", clone, "fetch", "-q", "--no-tags", "--no-write-fetch-head", root, f"{pushed}:refs/lanes/{lane}")
+    try:
+        history_or_refuse(clone, private, f"{role} clone")
+    except SB.SandboxError:
+        shutil.rmtree(clone.parent)
+        raise
+    (clone / ".git" / "HEAD").write_text(sha + "\n")
+    return clone
+
+
 def tool_path(conf: dict, st: dict) -> list:
     """lane-control's list (built outside at machine setup) and the project's own store paths from its settings
     store, never anything in the worktree."""
@@ -346,8 +372,23 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
                               "no Actions secrets and no self-hosted runners (lane-control machine check --sandbox)")
     tools = tool_path(conf, st)
     base, base_sha = base_branch(root, st, base)
-    branch = lane_branch(root, wt)
     private = list(st.get("private") or [])
+    try:
+        known = json.loads((ld / "lane.json").read_text())
+    except (OSError, ValueError):
+        known = {}
+    if trole == "lane":
+        branch = lane_branch(root, wt)
+        other = SB.binding_file(wt)
+        if other.is_file() and json.loads(other.read_text()).get("lane") != lane:
+            raise SB.SandboxError(f"{wt} is bound to another sandboxed lane: give this lane its own worktree")
+    else:
+        branch = known.get("branch")
+        if not branch:
+            raise SB.SandboxError(f"lane {lane} was never prepared here: prepare the lane first")
+        if known.get("worktree") == str(wt):
+            raise SB.SandboxError(f"a {role} gets its own worktree, never the lane's ({wt}): one-shot tickets are taken "
+                                  "per worktree, so a relaunch could take the other role's")
     SB.private_dir(ld)
     clone, quar = ld / "repo", ld / "quarantine.git"
     checkout = None
@@ -397,25 +438,7 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
             SB.write_private(ld / "delivered", base_sha + "\n")
             say(f"prepare: cloned origin/{base} ({base_sha[:12]}) into {clone} as {branch}")
     else:
-        if not sha or not SHA.fullmatch(sha):
-            raise SB.SandboxError(f"--role {role} needs --sha <full sha> of the lane's pushed work")
-        if not pushed:
-            raise SB.SandboxError(f"lane {lane} has pushed nothing (no refs/lanes/{lane}): nothing to {role}")
-        if subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", sha, pushed],
-                          capture_output=True, stdin=subprocess.DEVNULL).returncode:
-            raise SB.SandboxError(f"{sha[:12]} is not in the lane's pushed work (refs/lanes/{lane})")
-        n = 1
-        while (ld / f"{role}-{n}").exists():
-            n += 1
-        clone = ld / f"{role}-{n}" / "repo"
-        init_clone(clone, root, base, base_sha)
-        git("-C", clone, "fetch", "-q", "--no-tags", "--no-write-fetch-head", root, f"{pushed}:refs/lanes/{lane}")
-        try:
-            history_or_refuse(clone, private, f"{role} clone")
-        except SB.SandboxError:
-            shutil.rmtree(clone.parent)
-            raise
-        (clone / ".git" / "HEAD").write_text(sha + "\n")  # detached at the sha; files checked out inside
+        clone = second_clone(root, ld, lane, role, sha, base, base_sha, pushed, private)
         checkout = sha
         say(f"prepare: {role} clone {clone} of {sha[:12]}; its files are checked out inside")
     nonce = os.urandom(16).hex()

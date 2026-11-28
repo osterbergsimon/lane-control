@@ -582,11 +582,9 @@ def cmd_check(a) -> int:
     import extras as X
     root = Path(rec["repo"])
     st = next((st for r, st in X.known() if r == root), {})
-    wt = Path(rec.get("worktree") or root)
-    nonce = SP.prepare(root, st, wt, "check", a.lane, rec.get("issue"), a.sha, say=lambda *_: None)
-    t = next(json.loads(f.read_text()) for f in SB.tickets_dir(wt).glob(f"*-{nonce}.json"))
-    (SB.tickets_dir(wt) / next(f.name for f in SB.tickets_dir(wt).glob(f"*-{nonce}.json"))).unlink()
-    clone = Path(t["clone"])
+    base, base_sha = SP.base_branch(root, st, rec.get("base"))
+    clone = SP.second_clone(root, SB.lane_dir(a.lane), a.lane, "check", a.sha, base, base_sha,
+                            SP.lane_ref(root, a.lane), list(st.get("private") or rec.get("private") or []))
     rc, _ = run_inside(a.lane, clone, list(a.command))
     print(f"check {a.lane} @{a.sha[:12]}: exit {rc} (in a fresh clone, sandboxed)")
     return rc
