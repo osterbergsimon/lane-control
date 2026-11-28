@@ -273,9 +273,12 @@ def bwrap_mounts(t: dict) -> list:
             raise SandboxError(f"{p}: not one of Orca's two paths for a lane")
         m += ["--ro-bind", p, p]
     for p in t.get("agent_dirs") or []:
+        if not os.path.isabs(p):
+            raise SandboxError(f"agent folder {p}: not absolute")
+        p = os.path.realpath(p)  # bound at its real path: the agent is exec'd by its resolved path (review r2 B2)
         why = _forbidden_bind(p, t)
-        if why or not os.path.isabs(p):
-            raise SandboxError(f"agent folder {p}: {why or 'not absolute'}")
+        if why:
+            raise SandboxError(f"agent folder {p}: {why}")
         m += ["--ro-bind", p, p]
     if t.get("persona"):
         m += ["--ro-bind", t["persona"], "/run/lane/persona.md"]

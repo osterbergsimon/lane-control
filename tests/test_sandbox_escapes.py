@@ -165,16 +165,27 @@ def sha_of(p: Path) -> str:
 class Machine:
     """One scratch machine with a prepared lane, the fakes and the listeners; shared by a test class."""
 
-    def __init__(self, p: dict, terminal="term_sbx"):
+    def __init__(self, p: dict, terminal="term_sbx", npm: bool = False):
         self.tmp = tempfile.TemporaryDirectory(prefix="sbx")
         self.t = Path(self.tmp.name).resolve()
         self.mark_a, self.mark_b = "FAKE-FLOOR-", f"{os.getpid()}-{time.time_ns()}"
         self.fx = FX.Fixture(self.t / "m", mark=self.mark_a + self.mark_b, conf=p)
         self.term = terminal
-        self.agent = self.t / "agent"
-        self.agent.mkdir()
-        shutil.copyfile(STUB, self.agent / "opencode2")
-        (self.agent / "opencode2").chmod(0o755)
+        if npm:  # r2 B2: the owner's npm layout: bin/opencode2 a link into node_modules/@scope/pkg/bin
+            prefix = self.t / "npm"
+            self.agent = prefix / "lib" / "node_modules" / "@opencode" / "cli" / "bin"
+            self.agent.mkdir(parents=True)
+            shutil.copyfile(STUB, self.agent / "opencode.exe")
+            (self.agent / "opencode.exe").chmod(0o755)
+            (prefix / "bin").mkdir()
+            (prefix / "bin" / "opencode2").symlink_to("../lib/node_modules/@opencode/cli/bin/opencode.exe")
+            real, agent_dirs = prefix / "bin" / "opencode2", prefix / "lib" / "node_modules" / "@opencode"
+        else:
+            self.agent = self.t / "agent"
+            self.agent.mkdir()
+            shutil.copyfile(STUB, self.agent / "opencode2")
+            (self.agent / "opencode2").chmod(0o755)
+            real, agent_dirs = self.agent / "opencode2", self.agent
         self.fakebin = self.t / "fakebin"
         self.fakebin.mkdir()
         self.orca_log = self.t / "orca.log"
@@ -185,8 +196,8 @@ class Machine:
         for f in self.fakebin.iterdir():
             f.chmod(0o755)
         (self.fx.home / ".config" / "lane-control" / "machine.conf").write_text(
-            f"SANDBOX_PROJECTS=app\nSANDBOX_REAL_OPENCODE2={self.agent / 'opencode2'}\n"
-            f"SANDBOX_AGENT_DIRS={self.agent}\nSANDBOX_LANE_MEMORY=4G\n")
+            f"SANDBOX_PROJECTS=app\nSANDBOX_REAL_OPENCODE2={real}\n"
+            f"SANDBOX_AGENT_DIRS={agent_dirs}\nSANDBOX_LANE_MEMORY=4G\n")
         self.net = Listeners()
         self.key = f"fake-gateway-key-{time.time_ns()}"
         self.out_marker = self.t / "ran-outside"
@@ -469,6 +480,20 @@ class AbortTests(unittest.TestCase):
         rc, out = self.abort_with(signal.SIGTERM)
         self.assertEqual(rc, 2, out)
         self.assertIn("SIGTERM before the agent was released", out)
+
+
+class NpmLayoutTests(unittest.TestCase):
+    def test_a_linked_npm_install_starts(self):
+        """r2 B2, real chain: SANDBOX_REAL_OPENCODE2 is a link in an npm bin/ folder, SANDBOX_AGENT_DIRS the package's
+        scope folder: the agent starts (by its resolved path, under its own name) and the sandbox holds."""
+        p = need_sandbox(self)
+        m = Machine(p, npm=True)
+        self.addCleanup(m.close)
+        n = m.prepare()
+        m.stub("started", n)
+        rc, out, _ = m.launch()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((m.ticket_dir(n) / "run" / "outbox" / "started").exists(), out)
 
 
 class ControlTests(unittest.TestCase):

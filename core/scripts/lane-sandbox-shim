@@ -390,14 +390,15 @@ def main(argv: list) -> int:
         t = SB.take_ticket(wt, env.get("ORCA_TERMINAL_HANDLE", ""))
     except SB.SandboxError as e:
         return refuse(str(e))
-    t["agent"] = [str(Path(t["inside"]) / "bin" / "lane-enter"), real, *args]
+    # review r2 B2: the resolved binary (a link in an npm bin/ folder does not exist inside), under its own name
+    t["agent"] = [str(Path(t["inside"]) / "bin" / "lane-enter"), "--argv0", agent, os.path.realpath(real), *args]
     try:
         t["hook_port"] = int(env["ORCA_AGENT_HOOK_PORT"]) if env.get("ORCA_AGENT_HOOK_PORT") else None
     except ValueError:
         t["hook_port"] = None
     t["orca_binds"] = orca_binds(env, t["home"])
     rp = os.path.realpath(real)
-    if not rp.startswith("/nix/store/") and not any(rp.startswith(d.rstrip("/") + "/") for d in t["agent_dirs"]):
+    if not rp.startswith("/nix/store/") and not any(rp.startswith(os.path.realpath(d) + "/") for d in t["agent_dirs"]):
         return refuse(f"{agent} resolves to {rp}, outside /nix/store and SANDBOX_AGENT_DIRS: it would not exist "
                       "inside; install it from nixpkgs or add its folder to SANDBOX_AGENT_DIRS")
     try:

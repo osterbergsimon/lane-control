@@ -261,7 +261,7 @@ class LaunchTests(ShimCase):
         tools = [r["tool"] for r in self.calls()]
         self.assertEqual(tools[:1], ["systemd-run"])  # the probe
         self.assertEqual(tools[1:5], ["systemd-run", "pasta", "bwrap", "nsenter"])
-        self.assertIn("opencode2", tools)
+        self.assertIn("fake_sandbox.py", tools)  # r2 B2: the agent link is exec'd by its resolved path
         rec = self.record()
         self.assertEqual((rec["nonce"], rec["host_pid"], rec["mntns"], rec["role"]), (nonce, HOSTPID, MNTNS, "lane"))
         self.assertEqual(rec["status"], 7)

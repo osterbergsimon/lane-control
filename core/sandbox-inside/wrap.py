@@ -337,11 +337,17 @@ def enter_main(args: list) -> int:
         die("lane-enter <agent> [args]")
     if not released():
         die("the launcher did not release this start (it ended before the network filter was set): nothing runs", 3)
+    name = None
+    if args[:1] == ["--argv0"] and len(args) > 2:
+        name, args = args[1], args[2:]
     if Path(".git").is_dir() and not Path(".git/index").exists():
         r = subprocess.run([real_git(), "reset", "-q", "--hard", "HEAD"])
         if r.returncode != 0:
             die("could not check out the clone's files")
-    os.execvp(args[0], args)
+    try:
+        os.execvp(args[0], [name or args[0], *args[1:]])
+    except OSError as e:
+        die(f"the agent {args[0]} cannot be started inside ({e.strerror}): nothing runs", 3)
 
 
 NAME = Path(sys.argv[0]).name

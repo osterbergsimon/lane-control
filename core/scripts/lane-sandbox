@@ -237,7 +237,7 @@ def check(read_only: bool = True) -> int:
         if not exe:
             continue
         rp = os.path.realpath(exe)
-        if rp.startswith("/nix/store/") or any(rp.startswith(d.rstrip("/") + "/") for d in dirs):
+        if rp.startswith("/nix/store/") or any(rp.startswith(os.path.realpath(d) + "/") for d in dirs):
             continue
         parts = Path(rp).parts
         if "node_modules" in parts:  # review r1 n2: the package's scope folder (or the package), never all of them
