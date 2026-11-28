@@ -200,7 +200,7 @@ def init_clone(clone: Path, repo: Path, base: str, base_sha: str) -> None:
     git("-C", clone, "fetch", "-q", "--no-tags", "--no-write-fetch-head", repo,
         f"{base_sha}:refs/remotes/origin/{base}")
     git("-C", clone, "config", "remote.origin.url", NOWHERE)
-    git("-C", clone, "config", "remote.origin.fetch", f"+refs/heads/*:refs/remotes/origin/*")
+    git("-C", clone, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 
 
 def make_quarantine(q: Path, repo: Path, base: str, base_sha: str, pushed: "str | None") -> None:

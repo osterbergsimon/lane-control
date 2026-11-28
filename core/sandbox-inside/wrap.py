@@ -142,7 +142,7 @@ def git_push(glob: list, rest: list) -> int:
         die("push goes to origin only (the broker pushes the lane's own branch)")
     branch = g("symbolic-ref", "--short", "HEAD")
     for p in pos[1:]:
-        if p not in (branch, f"HEAD", f"{branch}:{branch}", f"refs/heads/{branch}"):
+        if p not in (branch, "HEAD", f"{branch}:{branch}", f"refs/heads/{branch}"):
             die(f"push only the lane's branch ({branch}): no other ref, no force, no delete")
     outbox = Path(os.environ.get("LANE_OUTBOX") or "/run/lane/outbox")
     bundle = outbox / "push.bundle"
