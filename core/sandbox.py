@@ -392,7 +392,11 @@ def host_pid(mntns: int, nspid: int, proc: Path = Path("/proc")) -> int:
     `nspid`. Raises SandboxError for none or more than one: the agent is then never released."""
     want = f"mnt:[{int(mntns)}]"
     found = []
-    for p in os.listdir(proc):
+    try:
+        pids = os.listdir(proc)
+    except OSError:
+        pids = []
+    for p in pids:
         if not p.isdigit():
             continue
         try:

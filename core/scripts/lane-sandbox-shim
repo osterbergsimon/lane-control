@@ -81,10 +81,12 @@ def bound_worktree(cwd: Path) -> "Path | None":
 
 
 def check_pins(conf: dict) -> "str | None":
+    """Each pinned binary: an absolute path that exists and is not setuid or setgid (machine setup --sandbox pins
+    /nix/store paths and the selftest ran with exactly these; prepare refuses otherwise)."""
     for k in SP.PIN_KEYS:
         v = conf.get(k) or ""
-        if not v.startswith("/nix/store/"):
-            return f"{k} is not a pinned /nix/store path: run lane-control machine setup --sandbox"
+        if not os.path.isabs(v):
+            return f"{k} is not pinned: run lane-control machine setup --sandbox"
         try:
             st = os.stat(v)
         except OSError:
@@ -128,8 +130,8 @@ class Chain:
     def __init__(self):
         self.proc = None
         self.broker = None
-        self.agent_pid = None
         self.host_pid = None
+        self.released = False
 
     def kill(self):
         for p in (self.proc, self.broker):
@@ -181,6 +183,15 @@ def wait_info(info: Path, chain: Chain) -> "dict | None":
 
 
 def launch(t: dict, conf: dict, env: dict) -> int:
+    chain = Chain()
+    try:
+        return _launch(t, conf, env, chain)
+    finally:
+        if not chain.released:  # whatever went wrong before the release: the agent never starts
+            chain.kill()
+
+
+def _launch(t: dict, conf: dict, env: dict, chain) -> int:
     td = Path(t["ticket_dir"])
     launch_dir = SB.private_dir(td / "launch")
     run = td / "run"
@@ -194,7 +205,6 @@ def launch(t: dict, conf: dict, env: dict) -> int:
             pass
     os.mkfifo(block, 0o600)
     hold = os.open(block, os.O_RDWR | os.O_NONBLOCK)  # bwrap blocks on it until we write
-    chain = Chain()
     broker_env = {k: v for k, v in env.items() if k != t.get("gateway_key_env")}
     chain.broker = subprocess.Popen([sys.executable, str(HERE / "lane-broker"), "serve", t["ticket_file"]],
                                     env=broker_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -245,6 +255,7 @@ def launch(t: dict, conf: dict, env: dict) -> int:
            "terminal": t["terminal"], "host_pid": chain.host_pid, "mntns": int(d["mnt-namespace"]),
            "ticket": t["ticket_file"], "scope": why is None, "started": time.time()}
     SB.write_private(SB.run_record(t["terminal"]), json.dumps(rec, indent=1) + "\n")
+    chain.released = True
     os.write(hold, b"g")
     os.close(hold)
     while True:
@@ -314,6 +325,8 @@ def main(argv: list) -> int:
         return launch(t, conf, env)
     except SB.SandboxError as e:
         return refuse(str(e))
+    except Exception as e:  # noqa: BLE001  one line, never a traceback; the agent did not start unless released
+        return refuse(f"the launch failed ({e.__class__.__name__}: {e})")
 
 
 if __name__ == "__main__":
