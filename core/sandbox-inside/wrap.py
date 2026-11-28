@@ -318,7 +318,7 @@ def enter_main(args: list) -> int:
         r = subprocess.run([real_git(), "reset", "-q", "--hard", "HEAD"])
         if r.returncode != 0:
             die("could not check out the clone's files")
-    os.execv(args[0], args)
+    os.execvp(args[0], args)
 
 
 NAME = Path(sys.argv[0]).name

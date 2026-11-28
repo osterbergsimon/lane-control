@@ -44,7 +44,7 @@ class FakeRun:
     """git runs for real; every other CLI is recorded and answered by the first matching rule."""
 
     def __init__(self):
-        self.calls, self.rules, self.git = [], [], []
+        self.calls, self.rules, self.git, self.cwds = [], [], [], []
 
     def on(self, match, rc=0, out=""):
         self.rules.insert(0, (match, rc, out))
@@ -55,6 +55,7 @@ class FakeRun:
             self.git.append((argv, str(kw.get("cwd") or "")))
             return subprocess.run(argv, **kw)
         self.calls.append(argv)
+        self.cwds.append(str(kw.get("cwd") or ""))
         for match, rc, out in self.rules:
             if match(argv):
                 return CP(argv, rc, out(argv) if callable(out) else out)
@@ -340,6 +341,8 @@ class BdTests(BrokerCase):
             self.refused("bd-show", says="issue ids", id=bad)
         shows = [c for c in self.run.calls if c[:2] == ["bd", "show"]]
         self.assertTrue(all(c[2].startswith("--id=") for c in shows))
+        # r1 B3: bd runs in the project's own checkout (its .beads), never in the clone
+        self.assertEqual({cwd for c, cwd in zip(self.run.calls, self.run.cwds) if c[0] == "bd"}, {str(self.fx.repo)})
 
     def test_bd_writes_own_issue(self):
         self.assertTrue(self.req("bd-note", text="found x")["ok"])

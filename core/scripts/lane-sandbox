@@ -221,6 +221,19 @@ def check(read_only: bool = True) -> int:
             unset.append(agent)
     real = {a: conf.get("SANDBOX_REAL_" + a.upper()) for a in AGENTS}
     say("real OpenCode", ", ".join(f"{a}: {real[a] or 'not found'}" for a in AGENTS))
+    dirs = [d for d in (conf.get("SANDBOX_AGENT_DIRS") or "").split(":") if d]
+    for a, exe in real.items():
+        if not exe:
+            continue
+        rp = os.path.realpath(exe)
+        if rp.startswith("/nix/store/") or any(rp.startswith(d.rstrip("/") + "/") for d in dirs):
+            continue
+        parts = Path(rp).parts
+        top = str(Path(*parts[:parts.index("node_modules") + 1])) if "node_modules" in parts else \
+            str(Path(rp).parent.parent)
+        say(f"real {a}", f"{rp} is outside /nix/store and SANDBOX_AGENT_DIRS, so it would not exist inside: add "
+            f"SANDBOX_AGENT_DIRS={top} to machine.conf (bound read-only), or install it from nixpkgs")
+        unset.append(a)
     for agent in AGENTS:
         found = login_shell_finds(agent)
         shim = bool(found) and Path(found).resolve() == launcher().resolve()
@@ -476,7 +489,7 @@ def run_inside(lane: str, clone: Path, inner: list, role: str = "check") -> tupl
 
 INSPECT = ('h=$(git rev-parse HEAD 2>/dev/null || echo none); d=$(git status --porcelain 2>/dev/null | wc -l); '
            'u=$(git rev-list --count "$1"..HEAD 2>/dev/null || git rev-list --count HEAD 2>/dev/null || echo 0); '
-           'printf \'{"head": "%s", "dirty": %d, "unpushed": %d}\\n\' "$h" "$d" "$u" >/run/lane/outbox/inspect.json')
+           'printf \'{"head": "%s", "dirty": %d, "unpushed": %d}\\n\' "$h" "$d" "$u" >"${LANE_OUTBOX:-/run/lane/outbox}/inspect.json"')
 
 
 def inspect(lane: str) -> dict:
@@ -617,13 +630,12 @@ def main(argv: list) -> int:
     p = sub.add_parser("check")
     p.add_argument("lane")
     p.add_argument("--sha", required=True)
-    p.add_argument("command", nargs=argparse.REMAINDER)
     p = sub.add_parser("approve-ci")
     p.add_argument("lane")
     p.add_argument("sha")
-    a = ap.parse_args(argv)
-    if getattr(a, "command", None) and a.command[:1] == ["--"]:
-        a.command = a.command[1:]
+    tail = argv[argv.index("--") + 1:] if "--" in argv else []
+    a = ap.parse_args(argv[:argv.index("--")] if "--" in argv else argv)
+    a.command = tail
     try:
         return {"machine-setup": lambda _: setup(), "machine-check": lambda _: check(), "selftest": lambda _: selftest(),
                 "started": started, "inspect": cmd_inspect, "close": cmd_close, "check": cmd_check,

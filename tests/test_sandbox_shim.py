@@ -290,5 +290,185 @@ class LaunchTests(ShimCase):
         self.assertEqual(p.returncode, 7, err)
 
 
+LS_PATH = ROOT / "core" / "scripts" / "lane-sandbox"
+FAKE_ORCA = """#!{py}
+import json, sys
+a = sys.argv[1:]
+open({log!r}, "a").write(json.dumps(a) + "\\n")
+if "worker-show" in a:
+    print(json.dumps({{"ok": True, "result": {{"terminal": {term!r}}}}}))
+else:
+    print(json.dumps({{"ok": True, "result": {{}}}}))
+"""
+FAKE_GH = """#!/bin/sh
+echo '{{"state": "{state}"}}'
+"""
+
+
+class LifecycleCase(ShimCase):
+    def setUp(self):
+        super().setUp()
+        self.orca_log = self.t / "orca.jsonl"
+        (self.bin / "orca-fake").write_text(FAKE_ORCA.format(py=sys.executable, log=str(self.orca_log),
+                                                             term="term_lane"))
+        (self.bin / "orca-fake").chmod(0o755)
+        self.gh("OPEN")
+
+    def gh(self, state):
+        (self.bin / "gh").unlink(missing_ok=True)
+        (self.bin / "gh").write_text(FAKE_GH.format(state=state))
+        (self.bin / "gh").chmod(0o755)
+
+    def ls(self, *args, env=None, timeout=120):
+        e = env or self.env(ORCA_CLI=str(self.bin / "orca-fake"))
+        return subprocess.run([sys.executable, str(LS_PATH), *args], env=e, capture_output=True, text=True,
+                              timeout=timeout, stdin=subprocess.DEVNULL, cwd=self.t)
+
+    def orca_calls(self):
+        return [json.loads(x) for x in self.orca_log.read_text().splitlines()] if self.orca_log.exists() else []
+
+    def live_record(self, nonce, **over):
+        """A run record as the launcher writes it, for a process that is alive in the fake /proc."""
+        rec = {"nonce": nonce, "role": "lane", "lane": "app-1", "worktree": str(self.fx.wt.resolve()),
+               "terminal": "term_lane", "host_pid": HOSTPID, "mntns": MNTNS, "started": time.time(), **over}
+        SB.write_private(SB.run_record(rec["terminal"]), json.dumps(rec))
+
+
+class StartedTests(LifecycleCase):
+    def test_lane_started_ok(self):
+        nonce = self.fx.prepare()
+        self.live_record(nonce)
+        r = self.ls("started", str(self.fx.wt), "--nonce", nonce, "--dispatch", "ctx_abcdef1", "--wait", "0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("started: sandboxed", r.stdout)
+        self.assertFalse(any("worker-stop" in c for c in self.orca_calls()))
+
+    def test_lane_started_after_a_real_launch(self):
+        nonce = self.fx.prepare()
+        self.write_cfg(agent_wait=30)
+        p = self.shim("opencode2", wait=False)
+        self.addCleanup(lambda: (p.kill(), p.communicate()))
+        ready = Path(str(self.log) + ".agent-ready")
+        for _ in range(300):
+            if ready.exists():
+                break
+            time.sleep(0.05)
+        r = self.ls("started", str(self.fx.wt), "--nonce", nonce, "--dispatch", "ctx_abcdef1", "--wait", "5")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def stops(self, nonce, why):
+        r = self.ls("started", str(self.fx.wt), "--nonce", nonce, "--dispatch", "ctx_abcdef1", "--wait", "0")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("NOT sandboxed", r.stdout)
+        self.assertIn(why, r.stdout)
+        self.assertIn(["orchestration", "worker-stop", "--dispatch", "ctx_abcdef1", "--json"], self.orca_calls())
+        self.orca_log.unlink()
+
+    def test_lane_started_stops_unsandboxed(self):
+        nonce = self.fx.prepare()
+        self.stops(nonce, "no run record")  # the agent started without the launcher
+        self.live_record("0" * 32)
+        self.stops(nonce, "no run record")  # a stale record of another launch
+        self.live_record(nonce, host_pid=99999)
+        self.stops(nonce, "not running")  # a dead pid
+        self.live_record(nonce, mntns=1234)
+        self.stops(nonce, "mount namespace")  # a pid reused by another process
+        self.live_record(nonce, terminal="term_lane", ended=time.time())
+        self.stops(nonce, "already ended")
+        SB.run_record("term_lane").unlink()
+        self.live_record(nonce, terminal="term_other")
+        self.stops(nonce, "terminal is not the dispatch's")
+
+
+class CloseCheckTests(LifecycleCase):
+    def lane_with_push(self):
+        self.fx.prepare()
+        c = self.fx.clone()
+        (c / "lane-file").write_text("work\n")
+        FX.git("add", "lane-file", cwd=c)
+        FX.git("commit", "-q", "-m", "lane", cwd=c)
+        sha = FX.git("rev-parse", "HEAD", cwd=c)
+        FX.git("fetch", "-q", c, f"{sha}:refs/lanes/app-1", cwd=self.fx.repo)  # as the broker leaves it
+        return sha
+
+    def test_close_needs_merged_pr_or_word(self):
+        self.lane_with_push()
+        r = self.ls("close", "app-1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not merged", r.stdout)
+        r = self.ls("close", "app-1", "--done")  # the owner's word, and this is no person at a terminal
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("person", r.stdout + r.stderr)
+        self.assertTrue(self.fx.clone().is_dir())
+
+    def test_close_refuses_unpushed_or_dirty(self):
+        self.lane_with_push()
+        self.gh("MERGED")
+        c = self.fx.clone()
+        (c / "dirty").write_text("x\n")
+        r = self.ls("close", "app-1")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("1 dirty file(s)", r.stdout)
+        (c / "dirty").unlink()
+        (c / "more").write_text("x\n")
+        FX.git("add", "more", cwd=c)
+        FX.git("commit", "-q", "-m", "unpushed", cwd=c)
+        r = self.ls("close", "app-1")
+        self.assertIn("1 commit(s) not pushed", r.stdout)
+        self.assertTrue(c.is_dir())
+        FX.git("reset", "-q", "--hard", "HEAD~1", cwd=c)
+        r = self.ls("close", "app-1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(SB.lane_dir("app-1").exists())
+        self.assertFalse(SB.binding_file(self.fx.wt).exists())
+        self.assertIn("never its close checks", r.stdout)
+        bw = [x for x in self.calls("bwrap")][-1]["argv"]
+        self.assertEqual(bw[bw.index(str(c)) + 1], str(c))  # the inspect ran sandboxed, in the clone
+
+    def test_close_discard(self):
+        self.lane_with_push()
+        self.gh("MERGED")
+        (self.fx.clone() / "dirty").write_text("x\n")
+        sys.path.insert(0, str(ROOT / "core"))
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("lc_ls_close_t", str(LS_PATH))
+        spec = importlib.util.spec_from_loader("lc_ls_close_t", loader)
+        LS = importlib.util.module_from_spec(spec)
+        loader.exec_module(LS)
+        with mock.patch.object(LS, "person", lambda what: None), \
+                mock.patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ.get('PATH', '')}"}):
+            import contextlib
+            import io
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = LS.main(["close", "app-1", "--discard"])
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertFalse(SB.lane_dir("app-1").exists())
+        self.assertEqual(self.calls("bwrap"), [])  # discarded: no inspect was needed
+
+    def test_check_runs_in_fresh_clone(self):
+        sha = self.lane_with_push()
+        r = self.ls("check", "app-1", "--sha", sha, "--", "bash", "-c",
+                    'git rev-parse HEAD >"$LANE_OUTBOX/head"; test -f lane-file; exit 3')
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("in a fresh clone, sandboxed", r.stdout)
+        checks = sorted(SB.lane_dir("app-1").glob("check-*/repo"))
+        self.assertEqual(len(checks), 1)
+        bw = self.calls("bwrap")[-1]["argv"]
+        self.assertIn(str(checks[0]), bw)
+        self.assertNotIn(str(self.fx.clone()), bw)
+        heads = list(SB.lane_dir("app-1").glob("t-*/run/outbox/head"))
+        self.assertEqual([h.read_text().strip() for h in heads], [sha])
+        self.assertNotEqual(checks[0], self.fx.clone())
+
+    def test_approve_ci_is_a_persons(self):
+        r = self.ls("approve-ci", "app-1", "a" * 40)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("person", r.stdout + r.stderr)
+        r = self.ls("approve-ci", "app-1", "a" * 40, env=self.env(LANE_SANDBOX="1"))
+        self.assertIn("inside a sandbox", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

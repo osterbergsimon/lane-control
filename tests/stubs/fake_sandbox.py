@@ -62,6 +62,11 @@ elif me == "bwrap":
         log(event="never-released")
         sys.exit(1)
     log(event="released")
+    if "--chdir" in args:  # what a real bwrap does; the mounts are not made, so the outbox is named by its host path
+        os.chdir(args[args.index("--chdir") + 1])
+    for j, x in enumerate(args[:-2]):
+        if x == "--bind" and args[j + 2] == "/run/lane/outbox":
+            os.environ["LANE_OUTBOX"] = args[j + 1]
     child = subprocess.Popen(agent)
     (Path(cfg["proc"]) / str(cfg["host_pid"]) / "task" / str(cfg["host_pid"]) / "children").write_text(
         f"{child.pid} ")

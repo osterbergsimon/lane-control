@@ -23,8 +23,15 @@ inspect() {
   printf 'inspect head=%s dirty=%s unpushed=%s\n' "$(git rev-parse HEAD)" "$(git status --porcelain | wc -l)" \
     "$(git rev-list --count "$(j pushed)..HEAD" 2>/dev/null || echo unknown)"
 }
+floor_search() {
+  grep -rIlF -- "$MARK" "$(j home)" "$(j wt)" "$(j shared)" /tmp /etc /run 2>/dev/null | head -3
+}
 case $MODE in
-  inspect) inspect; exit 0 ;;
+  inspect)
+    inspect
+    h=$(floor_search); [ -z "$h" ] && ok "a relaunch finds no floor data either (after the last run's renames)" ||
+      no "a relaunch found floor data: $h"
+    exit "$bad" ;;
   edit) printf 'more\n' >>lane-file; git commit -qam "stub: unpushed" && printf 'wip\n' >>lane-file; inspect; exit 0 ;;
   tty)
     if { : </dev/tty; } 2>/dev/null; then echo "tty=yes" >"$OUT/tty"; else echo "tty=no" >"$OUT/tty"; fi
@@ -131,6 +138,11 @@ else no "cannot commit"; fi
 if git pull -q 2>/dev/null && grep -q updated orca.yaml; then ok "git pull takes the base's new commit (it changes orca.yaml) and merges"
 else no "cannot take the base's new commits"; fi
 if lane-heavy true; then ok "lane-heavy runs a command in a slot"; else no "lane-heavy failed"; fi
+if "$HOME/.agents/bin/lane-heavy" true && [ -s /run/lane/persona.md ]; then
+  ok "the persona's paths work inside (~/.agents/bin/lane-heavy, /run/lane/persona.md)"
+else no "the persona's paths do not work inside"; fi
+mkdir -p fixtures/customers && printf 'x\n' >fixtures/customers/stub.csv && mv fixtures renamed-fixtures &&
+  ok "renamed a folder in the clone (r1 B6: nothing is masked by path, so nothing moves past a mount)"
 git init -q sub && printf 'x\n' >sub/f && git -C sub add f && git -C sub commit -q -m sub &&
   git -C sub config core.fsmonitor "echo ran-outside >>'$(j out_marker)'; false"
 mkdir -p .claude

@@ -378,6 +378,7 @@ class EscapeTests(unittest.TestCase):
 
     def test_work_cycle(self):
         for x in ("commit with the generated git identity", "git pull takes the base", "lane-heavy runs",
+                  "the persona's paths work inside", "renamed a folder",
                   "git push -u through the broker", "up to date with origin"):
             self.assertTrue(any(line.startswith("ok") and x in line for line in self.lines()), x)
         self.assertEqual(git("log", "-1", "--format=%an", self.honest, cwd=self.m.fx.repo), "Owner")
@@ -397,7 +398,10 @@ class EscapeTests(unittest.TestCase):
         n = m.prepare()  # resume: the clone is reused
         m.stub("inspect", n, pushed=pushed)
         rc, out, _ = m.launch()
-        self.assertIn(f"inspect head={pushed} dirty=0 unpushed=0", out)
+        self.assertIn("ok   a relaunch finds no floor data", out)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"inspect head={pushed} dirty=1 unpushed=0", out)  # the stub's renamed folder, untracked
+        shutil.rmtree(m.fx.clone() / "renamed-fixtures")
         n = m.prepare()
         m.stub("edit", n, pushed=pushed)
         rc, out, _ = m.launch()

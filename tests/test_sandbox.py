@@ -167,6 +167,22 @@ class ChainTests(Base):
         with self.assertRaises(SB.SandboxError):
             SB.bwrap_mounts(self.ticket(orca_binds=[str(ud)]))
 
+    def test_beads_not_mounted(self):
+        """r1 B3: no beads folder (the shared repo's .beads, its target, any .beads) is bound; bd is the broker's."""
+        t = self.ticket()
+        m = SB.bwrap_mounts(t)
+        self.assertFalse([x for x in m if ".beads" in x or x.endswith("-beads")])
+        with self.assertRaises(SB.SandboxError):
+            SB.bwrap_mounts(self.ticket(agent_dirs=[t["repo"] + "/.beads"]))
+
+    def test_ca_and_locale_pass(self):
+        env = {**self.owner_env(), "SSL_CERT_FILE": "/etc/ssl/certs/ca.pem", "LOCALE_ARCHIVE": "/nix/store/x/locale",
+               "NIX_SSL_CERT_FILE": "/etc/ssl/certs/ca.pem", "TZDIR": "/etc/zoneinfo"}
+        with mock.patch.object(SB, "tiocsti_allowed", lambda: False):
+            _, e = SB.chain_argv(self.ticket(), CONF, False, env)
+        for k in ("SSL_CERT_FILE", "LOCALE_ARCHIVE", "NIX_SSL_CERT_FILE", "TZDIR"):
+            self.assertEqual(e[k], env[k])
+
     def test_clone_at_worktree_path(self):
         t = self.ticket()
         m = SB.bwrap_mounts(t)

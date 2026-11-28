@@ -211,7 +211,7 @@ def _forbidden_bind(src: str, t: dict) -> "str | None":
         return "the owner's config"
     for floor in (".ssh", ".gnupg", ".netrc", ".git-credentials", ".docker", ".aws", ".kube", ".claude",
                   ".claude.json", ".local/share/opencode", ".local/share/lane-control", ".local/state/lane-control",
-                  ".agents", ".cache", ".local"):
+                  ".agents", ".cache/lane-control", ".bash_history", ".local/share/fish", ".python_history"):
         f = f"{home}/{floor}"
         if s == f or s.startswith(f + "/") or f.startswith(s + "/"):
             return "a floor path"
@@ -273,7 +273,7 @@ def inside_env(t: dict, environ: dict, scope: bool) -> dict:
     """The allowlist, as the environment bwrap and pasta start with (never as arguments)."""
     env = {"HOME": t["home"], "PATH": _inside_path(t), "SHELL": t.get("shell") or "/bin/sh", "TMPDIR": "/tmp",
            "LANE_ROLE": {"lane": "lanes"}.get(t["role"], t["role"]), "LANE_PERSONA": "/run/lane/persona.md",
-           "LANE_BROKER": "/run/lane/broker.sock", "LANE_SANDBOX": "1"}
+           "LANE_BROKER": "/run/lane/broker.sock", "LANE_OUTBOX": "/run/lane/outbox", "LANE_SANDBOX": "1"}
     bound = {os.path.normpath(p) for p in t.get("orca_binds") or []}
     for k, v in environ.items():
         if k in ENV_DROPPED:
