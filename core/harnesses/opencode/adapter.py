@@ -152,8 +152,27 @@ def install_persona_hook(checkout: Path) -> list:
     return lines
 
 
-def db_path() -> Path:
+def db_path(checkout: "Path | None" = None) -> Path:
+    """OpenCode's v2 store. For a sandboxed lane's worktree (SBX-2) the agent's store is its ticket's own data folder,
+    bound at ~/.local/share/opencode inside: the newest ticket taken for that worktree names it."""
+    sandboxed = sandbox_data(checkout) if checkout is not None else None
+    if sandboxed is not None:
+        return sandboxed / "opencode.db"
     return _xdg("XDG_DATA_HOME", ".local/share") / "opencode" / "opencode.db"
+
+
+def sandbox_data(checkout: Path) -> "Path | None":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import sandbox
+    if not sandbox.binding_file(checkout).is_file():
+        return None
+    taken = sorted((sandbox.tickets_dir(checkout) / "taken").glob("*.json"))
+    for f in reversed(taken):
+        try:
+            return Path(json.loads(f.read_text())["ticket_dir"]) / "data"
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None
 
 
 # The recorded session's family: up to its root, then every session below that root (sub-agent sessions).
@@ -174,7 +193,7 @@ def idle_minutes(checkout: Path, now: float, role: str = "coordinator") -> "int 
     when no marked session is recorded or the store does not have it. A record or store that cannot be read raises
     (OSError or sqlite3.Error), so a caller can tell it from "no session"."""
     sid = harnesses.read_session(checkout, role, NAME)
-    db = db_path()
+    db = db_path(checkout)
     if sid is None or not db.exists():
         return None
     con = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=5)

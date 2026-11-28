@@ -11,6 +11,12 @@ where each harness reads it). Run through the front door:
   lane-control lane prepare <project> <worktree> --role lanes|reviewer [--lane KEY] [--issue ID]
                                                      (the coordinator, before a worker starts; a lane's runs the
                                                      lane-start hooks)
+  lane-control lane prepare <project> <worktree> --sandbox --role lanes|reviewer|check --lane KEY [--issue ID]
+                            [--sha SHA] [--review-file NAME]... [--review-write NAME] [--base B] [--discard]
+                                                     a sandboxed OpenCode lane (core/sandboxprep.py): its own clone
+                                                     (made, reused, or recreated from refs/lanes/<lane>), the history
+                                                     and CI checks, a one-shot ticket; the last line is the nonce for
+                                                     lane-control lane started
   lane-control project gate <project> <PR> [--head <sha>] [--lane KEY] [--issue ID]
                                                      the gate hooks, before a merge: exit 1 is not green
   lane-control project hook <project> <event> [--pr N] [--head <sha>] [--merge-sha <sha>] [--lane KEY]
@@ -218,11 +224,23 @@ def cmd_prepare(argv: list) -> int:
         "in the lane's worktree adds its own: the folder then holds both roles' extras."))
     ap.add_argument("project")
     ap.add_argument("worktree")
-    ap.add_argument("--role", required=True, choices=("lanes", "reviewer"))
+    ap.add_argument("--role", required=True, choices=("lanes", "reviewer", "check"))
     ap.add_argument("--lane", help="the lane's key, for the lane-start hooks")
     ap.add_argument("--issue", help="the lane's issue id, for the lane-start hooks")
+    ap.add_argument("--sandbox", action="store_true", help="a sandboxed OpenCode lane, reviewer or check")
+    ap.add_argument("--sha", help="--sandbox, reviewer or check: the lane's pushed commit")
+    ap.add_argument("--review-file", dest="review_files", action="append", default=[], metavar="NAME",
+                    help="--sandbox: a file of the owner's review folder this ticket may read")
+    ap.add_argument("--review-write", dest="review_write", metavar="NAME",
+                    help="--sandbox, reviewer: the one review file it may create")
+    ap.add_argument("--base", help="--sandbox: the base branch (default origin's HEAD, else main)")
+    ap.add_argument("--discard", action="store_true", help="--sandbox: throw away a broken clone (a person only)")
     skip_flags(ap)
     a = ap.parse_args(argv)
+    if a.sandbox:
+        return cmd_prepare_sandbox(a)
+    if a.role == "check":
+        raise X.ExtrasError("--role check is for --sandbox only")
     H.check_facts({"lane": a.lane, "issue": a.issue})  # before anything is written
     root, st, store = X.find_project(a.project)
     skip = skips(X.effective(store), "lane-start", a, "lane-control lane prepare") if a.role == "lanes" else {}
@@ -268,6 +286,46 @@ def cmd_prepare(argv: list) -> int:
                 print(f"prepare: {line}")
             return 1
     print(f"prepare: done ({', '.join(scopes)} extras in {wt}; {n} extra(s))")
+    return 0
+
+
+def cmd_prepare_sandbox(a) -> int:
+    """`lane prepare --sandbox`: no extras are written into the Orca worktree (the agent sees its own clone there);
+    the clone, checks and ticket are core/sandboxprep.py's. A lane's lane-start hooks run as for any lane."""
+    sys.path.insert(0, str(HERE / "core"))
+    import sandbox as SB
+    import sandboxprep as SP
+    H.check_facts({"lane": a.lane, "issue": a.issue})
+    root, st, store = X.find_project(a.project)
+    skip = skips(X.effective(store), "lane-start", a, "lane-control lane prepare") if a.role == "lanes" else {}
+    if a.discard:
+        person("lane-control lane prepare --discard")
+    wt = Path(a.worktree).expanduser()
+    if wt.is_symlink():
+        raise X.ExtrasError(f"{wt} is a symlink: give the worktree's own path")
+    wt = wt.resolve()
+    if not wt.is_dir() or X.common_dir(wt) != X.common_dir(root) or wt == root.resolve():
+        raise X.ExtrasError(f"{wt} is not a lane worktree of {root}")
+    try:
+        nonce = SP.prepare(root, st, wt, a.role, a.lane, a.issue, a.sha, a.review_files, a.review_write, a.base,
+                           a.discard, say=print)
+    except SB.SandboxError as e:
+        print(f"prepare: refused: {e}")
+        return 1
+    if a.role == "lanes":
+        facts = {**facts_of(root, st), "worktree": str(wt), "role": a.role, "lane": a.lane, "issue": a.issue}
+        if skip:
+            H.record_skip(skip, "lane-start", H.check_facts(facts))
+        res = H.run(X.effective(store), "lane-start", facts, skip)
+        for line in H.report(res):
+            print(f"prepare: {line}")
+        if H.failed(res):
+            print(f"prepare: failed: {len(H.failed(res))} lane-start hook(s) did not pass; hold the lane (the ticket "
+                  "stays unused)")
+            return 1
+    print(f"prepare: done (sandboxed {a.role}; lane {a.lane}); next: orca-ide orchestration worker-start ... "
+          f"--agent opencode2, then lane-control lane started {wt} --nonce {nonce} --dispatch <dispatch id>")
+    print(nonce)
     return 0
 
 

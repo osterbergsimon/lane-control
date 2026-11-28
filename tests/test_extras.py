@@ -903,5 +903,314 @@ class RefreshTests(unittest.TestCase):
             self.assertNotIn("--plugin-dir", cmd)
 
 
+SB_T = load("lc_sandbox_ext_t", ROOT / "core" / "sandbox.py")
+
+
+class SandboxPrepareTests(Scratch):
+    """SBX-2 task 3: `lane prepare --sandbox`: the lane's own clone of origin's base, resumed untouched, recreated
+    from refs/lanes/<lane>, refused when broken or when history holds private data; the CI and selftest gates; the
+    generated home files; a reviewer's or check's own clone and folders."""
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(ROOT / "core"))
+        import sandboxprep
+        self.SP = sandboxprep
+        self.SB = sandboxprep.SB
+        self.origin = self.t / "origin.git"
+        git("init", "-q", "--bare", "-b", "main", self.origin, cwd=self.t)
+        git("remote", "add", "origin", self.origin, cwd=self.repo)
+        git("push", "-q", "origin", "main", cwd=self.repo)
+        git("fetch", "-q", "origin", cwd=self.repo)
+        self.base = git("rev-parse", "main", cwd=self.repo)
+        git("switch", "-q", "-c", "other", cwd=self.repo)
+        (self.repo / "other.txt").write_text("another lane\n")
+        git("add", "other.txt", cwd=self.repo)
+        git("commit", "-q", "-m", "other", cwd=self.repo)
+        self.other = git("rev-parse", "HEAD", cwd=self.repo)
+        git("switch", "-q", "main", cwd=self.repo)
+        (self.repo / "wip.txt").write_text("unpushed\n")
+        git("add", "wip.txt", cwd=self.repo)
+        git("commit", "-q", "-m", "owner's unpushed work", cwd=self.repo)  # local main is ahead of origin
+        self.wip = git("rev-parse", "HEAD", cwd=self.repo)
+        git("update-ref", "refs/owner/x", self.wip, cwd=self.repo)
+        cfg = self.home / ".config"
+        (cfg / "lane-control").mkdir(parents=True, exist_ok=True)
+        self.conf = {"SANDBOX_BWRAP": "/nix/store/a-bubblewrap/bin/bwrap", "SANDBOX_PASTA": "/nix/store/b-passt/bin/pasta",
+                     "SANDBOX_NSENTER": "/nix/store/c-util-linux/bin/nsenter", "SANDBOX_NFT": "/nix/store/d-nft/bin/nft",
+                     "SANDBOX_TOOL_PATH": "/nix/store/e-git/bin:/nix/store/f-python3/bin"}
+        (cfg / "lane-control" / "sandbox.conf").write_text("".join(f"{k}={v}\n" for k, v in self.conf.items()))
+        (cfg / "lane-control" / "machine.conf").write_text("SANDBOX_PROJECTS=app\n")
+        self.selftest()
+        (cfg / "opencode").mkdir(parents=True, exist_ok=True)
+        (cfg / "opencode" / "opencode.json").write_text(json.dumps({"model": "gw/chat", "provider": {"gw": {
+            "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://192.168.1.20:8317/v1",
+                                                            "apiKey": "{env:GATEWAY_KEY}"}}}}))
+        (self.home / ".gitconfig").write_text("[user]\n\tname = Owner\n\temail = owner@example.invalid\n")
+        self.ci = {"workflow": {"default_workflow_permissions": "read"}, "secrets": {"total_count": 0},
+                   "organization-secrets": {"total_count": 0}, "runners": {"total_count": 0}}
+
+        def gh_json(path):
+            leaf = path.rsplit("/", 1)[-1]
+            if leaf not in self.ci or self.ci[leaf] is None:
+                raise self.SB.SandboxError("no")
+            return self.ci[leaf]
+        p = mock.patch.object(self.SP, "gh_json", gh_json)
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.object(self.SP, "github_slug", lambda root: "owner/app")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def selftest(self, **over):
+        st = {"ok": True, "lane_control": self.SP.lc_version() if hasattr(self, "SP") else None,
+              "pins": {k: self.conf[k] for k in self.SP.PIN_KEYS}, **over}
+        f = self.SB.selftest_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(st))
+
+    def sprep(self, *extra, role="lanes", lane="app-1"):
+        return self.run_le("prepare", self.repo, self.wt, "--sandbox", "--role", role, "--lane", lane, *extra)
+
+    def ok_prep(self, *extra, **kw):
+        code, out, err = self.sprep(*extra, **kw)
+        self.assertEqual(code, 0, out + err)
+        nonce = out.strip().splitlines()[-1]
+        self.assertRegex(nonce, r"^[0-9a-f]{32}$")
+        return nonce, out
+
+    def ticket(self, nonce):
+        for f in self.SB.tickets_dir(self.wt).glob(f"*-{nonce}.json"):
+            return json.loads(f.read_text())
+        self.fail(f"no ticket {nonce}")
+
+    def tickets(self):
+        d = self.SB.tickets_dir(self.wt)
+        return sorted(d.glob("*.json")) if d.is_dir() else []
+
+    def no_prep(self, *extra, says="", **kw):
+        before = self.tickets()
+        code, out, err = self.sprep(*extra, **kw)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("prepare: refused", out)
+        self.assertIn(says, out)
+        self.assertEqual(self.tickets(), before)  # a refusal hands nothing over
+        return out
+
+    def clone(self):
+        return self.SB.lane_dir("app-1") / "repo"
+
+    def test_fresh_clone_only_base(self):
+        nonce, out = self.ok_prep()
+        c = self.clone()
+        self.assertEqual(git("rev-parse", "HEAD", cwd=c), self.base)  # origin's base, not the owner's local main
+        self.assertEqual(git("symbolic-ref", "--short", "HEAD", cwd=c), "lane-1")
+        refs = git("for-each-ref", "--format=%(refname)", cwd=c).split()
+        self.assertEqual(sorted(refs), ["refs/heads/lane-1", "refs/remotes/origin/main"])
+        for sha in (self.other, self.wip):
+            r = subprocess.run(["git", "cat-file", "-e", sha], cwd=c, capture_output=True)
+            self.assertNotEqual(r.returncode, 0, sha)
+        self.assertEqual(git("config", "remote.origin.url", cwd=c), self.SP.NOWHERE)
+        q = self.SB.lane_dir("app-1") / "quarantine.git"
+        self.assertEqual(git("rev-parse", "refs/heads/main", cwd=q), self.base)
+        self.assertEqual((self.SB.lane_dir("app-1") / "base").read_text().strip(), self.base)
+        t = self.ticket(nonce)
+        self.assertEqual((t["role"], t["clone"], t["worktree"]), ("lane", str(c), str(self.wt)))
+        self.assertEqual(t["gateway_key_env"], "GATEWAY_KEY")
+        self.assertEqual(t["gateway"], ["192.168.1.20", 8317])
+        gen = json.loads(Path(t["home_files"]["opencode.json"]).read_text())
+        self.assertEqual(gen["provider"]["gw"]["options"]["apiKey"], "{env:GATEWAY_KEY}")
+        self.assertEqual(gen["model"], "gw/chat")
+        self.assertNotIn("mcp", gen)
+        self.assertIn("name = Owner", Path(t["home_files"]["gitconfig"]).read_text())
+        self.assertEqual(Path(t["home_files"]["resolv.conf"]).read_text(), "nameserver 169.254.1.53\n")
+        self.clean(self.wt)  # nothing written into the Orca worktree
+        self.assertTrue(self.SB.binding_file(self.wt).is_file())
+
+    def test_resume_reuses_clone(self):
+        n1, _ = self.ok_prep()
+        c = self.clone()
+        (c / "lane-file").write_text("work\n")
+        git("add", "lane-file", cwd=c)
+        git("commit", "-q", "-m", "lane work", cwd=c)
+        (c / "dirty").write_text("uncommitted\n")
+        head = (c / ".git" / "HEAD").read_bytes()
+        stamps = {p: os.stat(p).st_mtime_ns for p in (c, c / ".git", c / ".git" / "HEAD", c / ".git" / "index",
+                                                      c / ".git" / "config")}
+        real_run = subprocess.run
+        ran_in_clone = []
+
+        def spy(cmd, *a, **kw):
+            words = [str(x) for x in cmd]
+            if any(str(c) in w for w in words) or str(kw.get("cwd") or "").startswith(str(c)):
+                ran_in_clone.append(words)
+            return real_run(cmd, *a, **kw)
+        with mock.patch.object(self.SP.subprocess, "run", spy):
+            n2, out = self.ok_prep()
+        self.assertNotEqual(n1, n2)
+        self.assertIn("resume", out)
+        self.assertEqual(ran_in_clone, [])
+        self.assertEqual((c / ".git" / "HEAD").read_bytes(), head)
+        self.assertEqual({p: os.stat(p).st_mtime_ns for p in stamps}, stamps)
+        self.assertEqual((c / "dirty").read_text(), "uncommitted\n")
+
+    def push_lane(self, text="pushed work\n"):
+        """What the broker leaves after an accepted push: refs/lanes/app-1 in the shared repo."""
+        w = self.t / "pusher"
+        git("clone", "-q", "--no-local", self.origin, w, cwd=self.t)
+        (w / "lane-file").write_text(text)
+        git("add", "lane-file", cwd=w)
+        git("commit", "-q", "-m", "lane", cwd=w)
+        sha = git("rev-parse", "HEAD", cwd=w)
+        git("fetch", "-q", w, f"{sha}:refs/lanes/app-1", cwd=self.repo)
+        shutil.rmtree(w)
+        return sha
+
+    def test_recreate_from_pushed_branch(self):
+        self.ok_prep()
+        sha = self.push_lane()
+        shutil.rmtree(self.clone())
+        nonce, out = self.ok_prep()
+        c = self.clone()
+        self.assertIn("recreated", out)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=c), sha)
+        self.assertEqual(git("symbolic-ref", "--short", "HEAD", cwd=c), "lane-1")
+        self.assertFalse((c / "lane-file").exists())  # checked out inside, never on the host
+        self.assertEqual(self.ticket(nonce)["checkout"], "lane-1")
+
+    def test_broken_clone_refused(self):
+        self.ok_prep()
+        c = self.clone()
+        (c / "keep").write_text("the lane's files\n")
+        shutil.rmtree(c / ".git")
+        out = self.no_prep(says="--discard")
+        self.assertIn("refs/lanes/app-1", out)
+        self.assertEqual((c / "keep").read_text(), "the lane's files\n")  # never a silent re-clone over it
+        (c / ".git").symlink_to(self.repo / ".git")  # a .git that points elsewhere is not the clone
+        self.no_prep(says="no longer a git repo")
+        nonce, out = self.ok_prep("--discard")
+        self.assertIn("discarded", out)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=c), self.base)
+
+    def push_main(self, path, text="x\n", side=False):
+        w = self.t / "mainpush"
+        git("clone", "-q", "--no-local", self.origin, w, cwd=self.t)
+        if side:
+            git("switch", "-q", "-c", "side", cwd=w)
+        f = w / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        git("add", "-f", path, cwd=w)
+        git("commit", "-q", "-m", "add", cwd=w)
+        if side:
+            git("rm", "-q", path, cwd=w)
+            git("commit", "-q", "-m", "remove", cwd=w)
+            git("switch", "-q", "main", cwd=w)
+            git("merge", "-q", "--no-ff", "--no-edit", "side", cwd=w)
+        git("push", "-q", "origin", "main", cwd=w)
+        shutil.rmtree(w)
+        git("fetch", "-q", "origin", cwd=self.repo)
+
+    def private(self, *paths):
+        st = json.loads((self.store / "settings.json").read_text())
+        st["private"] = list(paths)
+        (self.store / "settings.json").write_text(json.dumps(st))
+
+    def test_history_refusals(self):
+        self.private("./fixtures/customers/")
+        self.push_main("fixtures/customers/b.csv", side=True)
+        out = self.no_prep(says="fixtures/customers/b.csv")
+        self.assertFalse(self.clone().exists())
+        self.push_main("Fixtures/Customers/a.csv")
+        self.no_prep(says="Fixtures/Customers/a.csv")
+
+    def test_history_env_files(self):
+        self.push_main(".env.example")
+        self.ok_prep()
+        shutil.rmtree(self.SB.lane_dir("app-1"))
+        self.push_main("sub/.env.local")
+        self.no_prep(says="sub/.env.local")
+
+    def test_inline_key_refused(self):
+        key = "sk-" + "K3" * 16
+        (self.home / ".config" / "opencode" / "opencode.json").write_text(json.dumps({"provider": {"gw": {
+            "options": {"baseURL": "https://gw.example.com/v1", "apiKey": key}}}}))
+        code, out, err = self.sprep()
+        self.assertNotEqual(code, 0)
+        self.assertIn("inline apiKey", out)
+        self.assertNotIn(key, out + err)
+        for f in self.SB.state_root().rglob("*"):
+            if f.is_file():
+                self.assertNotIn(key, f.read_text(errors="replace"), f)
+
+    def test_tool_list_from_store_only(self):
+        (self.repo / ".lane-control").mkdir(exist_ok=True)
+        (self.repo / ".lane-control" / "sandbox-tools").write_text("/tmp/evil/bin\n")
+        (self.wt / "flake.nix").write_text("{ evil }\n")
+        st = json.loads((self.store / "settings.json").read_text())
+        st["sandbox_tools"] = ["/nix/store/z-node/bin"]
+        (self.store / "settings.json").write_text(json.dumps(st))
+        nonce, _ = self.ok_prep()
+        self.assertEqual(self.ticket(nonce)["tool_path"],
+                         ["/nix/store/e-git/bin", "/nix/store/f-python3/bin", "/nix/store/z-node/bin"])
+        st["sandbox_tools"] = [str(self.wt / "bin")]
+        (self.store / "settings.json").write_text(json.dumps(st))
+        self.no_prep(says="only /nix/store paths")
+
+    def test_reviewer_own_folders(self):
+        n1, _ = self.ok_prep()
+        self.no_prep(role="reviewer", says="--sha")
+        sha = self.push_lane()
+        self.no_prep("--sha", self.other, role="reviewer", says="not in the lane's pushed work")
+        n2, _ = self.ok_prep("--sha", sha, "--review-write", "app-1-r1.md", role="reviewer")
+        n3, _ = self.ok_prep("--sha", sha, role="check")
+        lane, rev, chk = self.ticket(n1), self.ticket(n2), self.ticket(n3)
+        self.assertEqual((rev["role"], chk["role"]), ("reviewer", "check"))
+        self.assertEqual(rev["review_write"], "app-1-r1.md")
+        dirs = [{t["clone"], t["ticket_dir"]} for t in (lane, rev, chk)]
+        self.assertEqual(len(set.union(*dirs)), 6)
+        rc = Path(rev["clone"])
+        self.assertEqual((rc / ".git" / "HEAD").read_text().strip(), sha)
+        self.assertEqual(rev["checkout"], sha)
+        self.assertFalse((rc / "lane-file").exists())
+
+    def test_ci_settings_refused(self):
+        for leaf, bad in (("workflow", {"default_workflow_permissions": "write"}), ("secrets", {"total_count": 1}),
+                          ("organization-secrets", {"total_count": 2}), ("runners", {"total_count": 1}),
+                          ("runners", None)):
+            keep = self.ci[leaf]
+            self.ci[leaf] = bad
+            self.no_prep(says="read-only default workflow token")
+            self.ci[leaf] = keep
+        self.ok_prep()
+
+    def test_refuses_without_selftest(self):
+        self.SB.selftest_file().unlink()
+        self.no_prep(says="lane-control sandbox selftest")
+        self.selftest(ok=False)
+        self.no_prep(says="failed")
+        self.selftest(lane_control="0" * 40)
+        self.no_prep(says="another lane-control version")
+        self.selftest(pins={"SANDBOX_BWRAP": "/nix/store/other/bin/bwrap"})
+        self.no_prep(says="other pinned binaries")
+
+    def test_project_must_be_on(self):
+        (self.home / ".config" / "lane-control" / "machine.conf").write_text("SANDBOX_PROJECTS=other\n")
+        self.no_prep(says="SANDBOX_PROJECTS")
+
+    def test_idle_reader_uses_ticket_data(self):
+        adapter = load("lc_oc_adapter_t", ROOT / "core" / "harnesses" / "opencode" / "adapter.py")
+        self.assertEqual(adapter.db_path(self.wt), self.home / ".local/share/opencode/opencode.db")  # not sandboxed
+        nonce, _ = self.ok_prep()
+        t = self.SB.take_ticket(self.wt, "term_1")
+        self.assertEqual(adapter.db_path(self.wt), Path(t["ticket_dir"]) / "data" / "opencode.db")
+        self.assertEqual(adapter.db_path(), self.home / ".local/share/opencode/opencode.db")
+
+    def test_needs_lane_key(self):
+        code, out, err = self.run_le("prepare", self.repo, self.wt, "--sandbox", "--role", "lanes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("--lane", out)
+
+
 if __name__ == "__main__":
     unittest.main()
