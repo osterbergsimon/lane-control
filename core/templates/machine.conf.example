@@ -58,7 +58,7 @@ AWAY_HOURS=14
 #SANDBOX_PROJECTS=""
 # The lane's memory cap (systemd-run --user scope):
 #SANDBOX_LANE_MEMORY=8G
-# Folders an OpenCode install outside the nix store needs, bound read-only (lane-control machine check --sandbox
+# Folders an OpenCode install outside the nix store needs, bound read-only (lane-control machine setup --check --sandbox
 # names it), colon-separated:
 #SANDBOX_AGENT_DIRS=""
 # The real OpenCode binaries, when PATH finds the detector link first:

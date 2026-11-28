@@ -491,7 +491,7 @@ More: [lane cleanup](orca-cleanup.md).
   rest of `$HOME`) is not there at all; the agent reaches the outside only through one broker per ticket that takes
   typed requests: report, ask, push, fetch, its own PR, its own issue.
 - **Who starts what.** Orca runs `lane-sandbox-shim` as OpenCode's custom command, which the owner sets once by hand
-  (`lane-control machine check --sandbox` names it); the coordinator runs `lane-control lane prepare --sandbox` before
+  (`lane-control machine setup --check --sandbox` names it); the coordinator runs `lane-control lane prepare --sandbox` before
   `worker-start` and `lane-control lane started` after it.
 - **How work leaves.** A push is a bundle the broker copies without following links, imports into a quarantine that
   holds only the lane's base and earlier pushes, and accepts only as a fast-forward of the lane's own branch with no

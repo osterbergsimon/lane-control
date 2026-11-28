@@ -14,7 +14,7 @@ setting was changed, no internal RPC used, no agent started.
   (`profiles/<profile>/profile-state.db`, table `profile_state_documents`, `domain = 'settings'`). In the app it is
   Settings -> Agents -> <agent> -> custom command; `orca agent installed --help`: "ones set up there with a custom
   command are included". Here it was `{}` (nothing set).
-- What the owner sets (printed by `lane-control machine check --sandbox`, which reads the setting and says whether it
+- What the owner sets (printed by `lane-control machine setup --check --sandbox`, which reads the setting and says whether it
   is set): OpenCode 2: `<data>/lane-control/current/core/scripts/lane-sandbox-shim opencode2 --standalone`;
   OpenCode: `<data>/lane-control/current/core/scripts/lane-sandbox-shim opencode`. The installed `current` path, so
   an install never changes the setting.

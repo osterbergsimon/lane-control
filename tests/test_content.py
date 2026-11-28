@@ -1589,6 +1589,8 @@ class CrossHostReportContractTests(unittest.TestCase):
         # lane-control's scripts never send a worker_done (briefs and personas tell agents to); if one starts to,
         # its refusal must name the ids and the command, and this test says where to add that.
         for path in list((ROOT / "core" / "scripts").iterdir()) + list((ROOT / "orchestrators").rglob("*.py")):
+            if path.name == "lane-broker":  # SBX-2: relays a sandboxed lane's own report, after dispatch-show
+                continue                     # shows that dispatch on its terminal; each refusal says which check failed
             if path.is_file() and path.suffix not in (".md", ".pyc"):
                 self.assertNotIn("worker_done", path.read_text(errors="ignore"), path.name)
 
@@ -3046,7 +3048,7 @@ class SandboxContentTests(unittest.TestCase):
             for x in ("internet", "gateway key", "ci", "coordinator", "detected", "not prevented"):
                 self.assertIn(x, text, (p.name, x))
         g = self.flat(ROOT / "docs" / "getting-started.md")
-        self.assertIn("lane-control machine check --sandbox", g)
+        self.assertIn("lane-control machine setup --check --sandbox", g)
 
     def test_setup_names_the_custom_command(self):
         text = self.flat(self.NATIVE / "setup.md")

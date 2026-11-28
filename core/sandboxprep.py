@@ -354,7 +354,7 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
     name = st.get("name") or root.name
     if name not in projects_on(conf) and str(root) not in projects_on(conf):
         raise SB.SandboxError(f"{name} is not a sandboxed project: add it to SANDBOX_PROJECTS in machine.conf "
-                              "(after lane-control machine check --sandbox passes)")
+                              "(after lane-control machine setup --check --sandbox passes)")
     why = selftest_current(conf)
     if why:
         raise SB.SandboxError(f"{why}: run lane-control sandbox selftest (a skip counts as a failure)")
@@ -369,7 +369,7 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
     if bad:
         raise SB.SandboxError(f"CI of {slug} runs a lane's code with more than a read-only token: "
                               + "; ".join(bad) + ". A sandboxed project needs a read-only default workflow token, "
-                              "no Actions secrets and no self-hosted runners (lane-control machine check --sandbox)")
+                              "no Actions secrets and no self-hosted runners (lane-control machine setup --check --sandbox)")
     tools = tool_path(conf, st)
     base, base_sha = base_branch(root, st, base)
     private = list(st.get("private") or [])

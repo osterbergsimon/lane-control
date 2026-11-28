@@ -1,7 +1,7 @@
 # CI probe (lc-9r81.3), SBX-2 task 1, 2026-11-28
 
 The owner's decision 2 (2026-11-28): a sandboxed project's CI must have a read-only default workflow token, no
-secrets and no self-hosted runners; `lane-control machine check --sandbox` reports it per project in
+secrets and no self-hosted runners; `lane-control machine setup --check --sandbox` reports it per project in
 SANDBOX_PROJECTS and `lane-control lane prepare --sandbox` refuses a project that fails it
 (`core/sandboxprep.py` `ci_check`).
 

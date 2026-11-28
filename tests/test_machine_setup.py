@@ -2451,7 +2451,7 @@ class NightManagerDocTests(unittest.TestCase):
 
 class SandboxSetupTests(unittest.TestCase):
     """SBX-2 task 7 (lc-35qn): `machine setup --sandbox` pins store paths with GC roots and refuses setuid binaries,
-    a failed probe or selftest; `machine check --sandbox` reads only and says the exact custom command to set in
+    a failed probe or selftest; `machine setup --check --sandbox` reads only and says the exact custom command to set in
     Orca, whether it is set (Orca's settings opened read-only), the PATH detector and the user manager."""
 
     def setUp(self):
@@ -2635,7 +2635,9 @@ class SandboxSetupTests(unittest.TestCase):
                                                       / "frontdoor.py")
         F = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(F)
-        self.assertEqual(F.route(["machine", "check", "--sandbox"]), ("machine-setup", ["--check", "--sandbox"]))
+        self.assertEqual(F.route(["machine", "setup", "--check", "--sandbox"]),
+                         ("machine-setup", ["--check", "--sandbox"]))
+        self.assertIsNone(F.route(["machine", "check", "--sandbox"]))  # review m1: `machine check` is the automation
         self.assertEqual(F.route(["machine", "setup", "--sandbox"]), ("machine-setup", ["--sandbox"]))
         self.assertEqual(F.route(["sandbox", "selftest"]), ("lane-sandbox", ["selftest"]))
         self.assertEqual(F.route(["lane", "started", "/w", "--nonce", "n", "--dispatch", "d"]),

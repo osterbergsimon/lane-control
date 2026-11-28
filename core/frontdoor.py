@@ -52,19 +52,16 @@ ROUTES = {
                       "send its coordinator a request"),
     ("lane", "list"): ("lane-spawn", ["lane", "list"], "<project>", "lane, issue, PR, CI, idle time"),
     ("lane", "status"): ("lane-spawn", ["lane", "status"], "<project>", "each lane in full"),
-    ("lane", "prepare"): ("lane-extras", ["prepare"], "<project> <worktree> --role R [--sandbox]",
+    ("lane", "prepare"): ("lane-extras", ["prepare"], "<project> <worktree> --role R",
                           "a lane's extras, before it starts"),
-    ("lane", "started"): ("lane-sandbox", ["started"], "<worktree> --nonce N --dispatch ID",
-                          "a sandboxed lane really started"),
+    ("lane", "started"): ("lane-sandbox", ["started"], "<worktree> --nonce N --dispatch D", "sandboxed, or stopped"),
     ("lane", "approve-ci"): ("lane-sandbox", ["approve-ci"], "<lane> <sha>", "a person: let a CI change through"),
-    ("machine", "setup"): ("machine-setup", [], "[--host <host>] [--check] [--sandbox]",
-                           "set it up once; --check reads only"),
-    ("machine", "check"): ("machine-setup", ["--check"], "[--sandbox]", "what setup would find; read only"),
+    ("machine", "setup"): ("machine-setup", [], "[--host <host>] [--check]", "set it up once; --check reads only"),
     ("machine", "report"): ("machine-check", ["--peek"], "[--last]", "budget, memory, runners; read only"),
     ("machine", "extras"): ("lane-extras", ["machine"], "add|list|remove ...", "extras for every project here"),
     ("sandbox", "selftest"): ("lane-sandbox", ["selftest"], "", "the adversarial suite; a skip fails"),
-    ("sandbox", "inspect"): ("lane-sandbox", ["inspect"], "<lane>", "a sandboxed lane's clone: dirty, unpushed"),
-    ("sandbox", "close"): ("lane-sandbox", ["close"], "<lane> [--discard] [--done]", "end a sandboxed lane"),
+    ("sandbox", "inspect"): ("lane-sandbox", ["inspect"], "<lane>", "its clone: dirty, unpushed"),
+    ("sandbox", "close"): ("lane-sandbox", ["close"], "<lane> [--discard|--done]", "end a sandboxed lane"),
     ("sandbox", "check"): ("lane-sandbox", ["check"], "<lane> --sha S -- <cmd>", "rerun a check, sandboxed"),
     ("ratchet", "on"): ("lane-improve", ["on"], "[--hours N] [--project <name>]...", "only on the owner's word"),
     ("ratchet", "off"): ("lane-improve", ["off"], "", "end it; what runs drains"),
@@ -79,7 +76,7 @@ GROUPS = {"project": "a project and its coordinator",
           "coordinator": "coordinators: start one (live check), restart it, or see whether it runs",
           "lane": "lanes: ask a project's coordinator for one, or list them", "machine": "this machine (or a box)",
           "ratchet": "the ratchet, unattended improvement (presence is lane-away)",
-          "sandbox": "the OpenCode lane sandbox (SBX-2): selftest, inspect, close, a sandboxed check"}
+          "sandbox": "the OpenCode lane sandbox: selftest, inspect, close, check"}
 ALIASES = {"improve": "ratchet"}  # the name before the owner's rename (2026-11-26): works, and says the new one
 OLD = ("project-setup", "project-pause", "machine-setup", "machine-check", "lane-improve")
 NEW = ("lane-spawn", "lane-extras", "lane-sandbox")  # scripts only their forms run (lc-wja, lc-7c6): no old name, so no hint

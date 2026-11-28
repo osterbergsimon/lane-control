@@ -96,7 +96,7 @@ orca-ide orchestration worker-start --spec-file <brief> --worktree path:<that wo
 worktree first (as above, for Claude too), run the `lane-control lane prepare` line it gives, and only then
 `worker-start --worktree path:<that worktree>`. If prepare exits non-zero, hold the lane and tell the owner.
 
-**Sandboxed lanes (OpenCode).** For a project in SANDBOX_PROJECTS on a machine where `lane-control machine check
+**Sandboxed lanes (OpenCode).** For a project in SANDBOX_PROJECTS on a machine where `lane-control machine setup --check
 --sandbox` ends `sandbox: on`, every OpenCode lane runs sandboxed in its own clone, and so do its reviewers and every
 rerun of its checks (owner 2026-11-28). In this order, for the lane and for each reviewer:
 1. Make the worktree first (as above); a reviewer gets a new worktree of its own, never the lane's (one-shot

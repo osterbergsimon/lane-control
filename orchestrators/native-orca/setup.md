@@ -288,7 +288,7 @@ project and nothing else of the machine (design: `docs/superpowers/specs/2026-11
    `~/.config/lane-control/sandbox.conf`, probes the chain and runs `lane-control sandbox selftest` (the adversarial
    suite; a skip is a failure). It offers the PATH detector links (it asks; optional).
 2. In Orca, set the custom command for OpenCode once, by hand (Settings -> Agents -> OpenCode 2 -> custom command,
-   and the same for OpenCode): `lane-control machine check --sandbox` prints the exact text, the installed
+   and the same for OpenCode): `lane-control machine setup --check --sandbox` prints the exact text, the installed
    launcher `.../lane-control/current/core/scripts/lane-sandbox-shim opencode2 --standalone`, and says whether it is set.
    lane-control never edits Orca's settings; the check only reads them.
 3. In `machine.conf`: `SANDBOX_PROJECTS=<project> ...`; where OpenCode is not installed from nixpkgs,
@@ -298,7 +298,7 @@ project and nothing else of the machine (design: `docs/superpowers/specs/2026-11
    self-hosted runners (owner 2026-11-28); `lane prepare --sandbox` refuses a project that fails it, and the check
    reports it.
 
-`lane-control machine check --sandbox` (read only) ends with `sandbox: on|off|broken (<why>)`. Then the coordinator
+`lane-control machine setup --check --sandbox` (read only) ends with `sandbox: on|off|broken (<why>)`. Then the coordinator
 follows the lane skill's "Sandboxed lanes": `lane prepare --sandbox`, `worker-start`, `lane started`; close with
 `lane-control sandbox close <KEY>`. Owner's commands: `lane-control lane approve-ci <KEY> <sha>` (a push that changes
 CI), `sandbox close --done|--discard`, `lane prepare --sandbox --discard` (a broken clone).

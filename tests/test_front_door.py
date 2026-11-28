@@ -115,7 +115,7 @@ class Table(unittest.TestCase):
         # review m1: `machine check` is the Orca automation's name (machine-check); no form takes it for another job
         self.assertNotIn(("machine", "check"), F.ROUTES)
         self.assertNotIn(("machine", "changes"), F.ROUTES)  # it reads, so it is named for what it does: report
-        self.assertEqual(set(F.GROUPS), {"project", "coordinator", "lane", "machine", "ratchet"})
+        self.assertEqual(set(F.GROUPS), {"project", "coordinator", "lane", "machine", "ratchet", "sandbox"})
         self.assertEqual(F.ALIASES, {"improve": "ratchet"})
         self.assertNotIn("away", F.GROUPS)  # presence is lane-away
 
@@ -294,7 +294,8 @@ class Dispatch(unittest.TestCase):
         for flag in ("--help", "-h"):
             self.assertEqual(self.run_([self.cli, flag]).stdout, out.stdout)
         t = out.stdout
-        self.assertLessEqual(len(t.splitlines()), 45)  # one screen (CLI-2 added the coordinator and lane groups)
+        self.assertLessEqual(len(t.splitlines()), 52)  # one screen (CLI-2 added the coordinator and lane groups, SBX-2
+        #                                                  the sandbox group and lane started|approve-ci)
         self.assertLessEqual(max(len(x) for x in t.splitlines()), 100, t)  # review n2
         for (g, v) in F.ROUTES:
             self.assertIn(f"lane-control {g} {v}", t)

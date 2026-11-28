@@ -5,7 +5,7 @@ front door:
   lane-control machine setup --sandbox      pin bubblewrap, passt, util-linux and nftables (and the lane tool list)
                                             from nixpkgs with GC roots, refuse a setuid binary, write sandbox.conf,
                                             probe the chain, run the selftest, offer the PATH detector links (asks)
-  lane-control machine check --sandbox      read only: each pin, the chain probe, legacy_tiocsti, the user manager,
+  lane-control machine setup --check --sandbox      read only: each pin, the chain probe, legacy_tiocsti, the user manager,
                                             the selftest, Orca's custom command for OpenCode (the exact text to set,
                                             and whether it is set), the PATH detector, each sandboxed project's CI;
                                             last line `sandbox: on|off|broken (<why>)`
@@ -170,7 +170,7 @@ def login_shell_finds(agent: str) -> "str | None":
         return None
 
 
-# --- machine check --sandbox ---------------------------------------------------------------------------------------
+# --- machine setup --check --sandbox ---------------------------------------------------------------------------------------
 
 def projects(conf: dict) -> list:
     """(name, root) of each SANDBOX_PROJECTS entry this machine knows."""
@@ -340,7 +340,7 @@ def setup() -> int:
         say("PATH detector", "not linked (" + ("no terminal to ask" if yes is None else "you said no") + ")")
     for agent, label in AGENTS.items():
         say("next", f"in Orca, Settings -> Agents -> {label} -> custom command: {custom_command(agent)}")
-    say("next", "add each project to SANDBOX_PROJECTS in machine.conf, then lane-control machine check --sandbox")
+    say("next", "add each project to SANDBOX_PROJECTS in machine.conf, then lane-control machine setup --check --sandbox")
     return 0
 
 
@@ -441,7 +441,7 @@ def started(a) -> int:
         stopped = "the worker was stopped"
     except SB.SandboxError:
         stopped = "the worker could NOT be stopped: stop it by hand"
-    print(f"started: NOT sandboxed: {why}; {stopped}. Check lane-control machine check --sandbox, then prepare again")
+    print(f"started: NOT sandboxed: {why}; {stopped}. Check lane-control machine setup --check --sandbox, then prepare again")
     return 1
 
 

@@ -75,7 +75,7 @@ class Base(unittest.TestCase):
                 "GATEWAY_KEY": KEY, "ORCA_AGENT_HOOK_TOKEN": TOKEN, "ORCA_AGENT_LAUNCH_TOKEN": LAUNCH,
                 "ORCA_AGENT_HOOK_PORT": "4411", "ORCA_TERMINAL_HANDLE": "term_1", "ORCA_PANE_KEY": "pane-1",
                 "GITHUB_TOKEN": "ghp_" + "Z9" * 18, "FAKE_OWNER_TOKEN": "owner-secret",
-                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus", "XDG_RUNTIME_DIR": "/run/user/1000",
+                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/xdg-u/bus", "XDG_RUNTIME_DIR": "/tmp/xdg-u",
                 "ORCA_OPENCODE_SOURCE_CONFIG_DIR": str(self.home / ".config" / "opencode"), "SSH_AUTH_SOCK": "/x"}
 
 
@@ -134,7 +134,7 @@ class ChainTests(Base):
 
     def test_bus_vars_only_for_scope(self):
         argv, env = self.chain(scope=True)
-        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/run/user/1000/bus")
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/tmp/xdg-u/bus")
         b = argv.index(CONF["SANDBOX_BWRAP"])
         bw = argv[b:]
         for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):

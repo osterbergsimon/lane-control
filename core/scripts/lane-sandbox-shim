@@ -2,7 +2,7 @@
 """lane-sandbox-shim: the launcher Orca runs for OpenCode (SBX-2 task 4, lc-35qn; spec "The launch").
 
   lane-sandbox-shim opencode [args]              Orca's custom command for OpenCode (the owner sets it once in
-  lane-sandbox-shim opencode2 --standalone [args]   Settings -> Agents; `lane-control machine check --sandbox`
+  lane-sandbox-shim opencode2 --standalone [args]   Settings -> Agents; `lane-control machine setup --check --sandbox`
                                                   prints the exact text and says whether it is set)
   opencode | opencode2 [args]                    the same file linked first on PATH: the detector only
 
@@ -217,7 +217,7 @@ def _launch(t: dict, conf: dict, env: dict, chain) -> int:
         time.sleep(0.02)
     why = scope_works(env)
     if why:
-        say(f"no memory cap for this lane: {why} (lane-control machine check --sandbox says so too)")
+        say(f"no memory cap for this lane: {why} (lane-control machine setup --check --sandbox says so too)")
     argv, cenv = SB.chain_argv(t, conf, why is None, env)
     if why is None:
         argv[0] = shutil.which("systemd-run") or argv[0]
@@ -301,7 +301,7 @@ def main(argv: list) -> int:
         return refuse(f"started in {cwd}, below the sandboxed lane's worktree {wt}: start it in the worktree")
     if detector:
         return refuse(f"{wt} is a sandboxed lane's worktree, and this start came through PATH, not lane-control's "
-                      "launcher: set Orca's custom command for OpenCode (lane-control machine check --sandbox "
+                      "launcher: set Orca's custom command for OpenCode (lane-control machine setup --check --sandbox "
                       "names it); nothing ran")
     why = check_pins(conf)
     if why:

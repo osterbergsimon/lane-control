@@ -81,7 +81,7 @@ key and Orca's hook token, which the agent holds). Phase 2 (lc-0zae) adds a key 
 **Hook** (owner 2026-11-28, question 1): Orca's custom command for OpenCode, which the owner sets once by hand in
 Orca (Settings -> Agents -> OpenCode 2, and OpenCode) to the installed launcher:
 `<data>/lane-control/current/core/scripts/lane-sandbox-shim opencode2 --standalone` (and `... lane-sandbox-shim
-opencode`). lane-control never edits Orca's settings and uses no internal RPC; `lane-control machine check --sandbox`
+opencode`). lane-control never edits Orca's settings and uses no internal RPC; `lane-control machine setup --check --sandbox`
 prints the exact text and says whether it is set, reading Orca's settings document read-only. Orca's catalog command is
 replaced whole by a custom command, and a customized agent's chat runs through the same command (lc-9r81.1,
 `orca-launch-probe.md`). The PATH shim stays only as a detector: `machine setup --sandbox` offers links named
@@ -167,7 +167,7 @@ is measured in the live lane (task 9).
   with `contents: read`. The broker refuses a push that changes CI configuration without the owner's approval; it
   cannot stop an existing workflow from running lane code. So `prepare` checks with `gh api` that the repository's
   default workflow token is read-only, that it has no Actions secrets (nor organization or environment secrets) and
-  no self-hosted runners, and refuses a sandboxed lane otherwise; `machine check --sandbox` reports the same per
+  no self-hosted runners, and refuses a sandboxed lane otherwise; `machine setup --check --sandbox` reports the same per
   project (owner 2026-11-28, question 7; `ci-probe.md`).
 
 ## Mount plan (OpenCode, phase 1)
@@ -344,6 +344,8 @@ owner said.
 
 ## As built (SBX-2), where it differs from or adds to the text above
 
+- The read-only check is `lane-control machine setup --check --sandbox`: `machine check` names the machine check
+  automation (review m1 of the front door), so no form takes that name.
 - The pinned store paths go to `~/.config/lane-control/sandbox.conf` (written by `machine setup --sandbox`, mode
   0600), not into `machine.conf`, which machine setup never changes; the owner's keys stay in `machine.conf`
   (`SANDBOX_PROJECTS`, `SANDBOX_LANE_MEMORY`, `SANDBOX_AGENT_DIRS`, `SANDBOX_REAL_OPENCODE[2]`, `SANDBOX_REVIEW_DIR`).
@@ -353,7 +355,7 @@ owner said.
 - The inside wrappers are bound read-only at `~/.agents/lane-inside` with `~/.agents/bin` a link to their `bin`, so
   the links resolve inside where personas name them; the lane's PATH starts with them.
 - The agent binary must resolve under `/nix/store` or a folder in `SANDBOX_AGENT_DIRS` (bound read-only); an npm
-  install outside the store is named by `machine check --sandbox` with the line to add.
+  install outside the store is named by `machine setup --check --sandbox` with the line to add.
 - The broker exits with the launcher that started it; the socket is bound by its relative name (a long `$HOME` would
   pass the 108-byte socket path limit).
 - `lane-control sandbox inspect|close|check` run the spec's sandboxed step through the same launcher, with the clone
