@@ -127,23 +127,50 @@ def parse_github(url: str) -> "str | None":
     return slug if slug and GH_SLUG.fullmatch(slug) else None
 
 
-def gh_resolve(root: Path) -> "str | None":
-    """What gh makes of the checkout's remote (it resolves ssh host aliases), or None."""
+def ssh_hostname(alias: str) -> "str | None":
+    """The host an ssh alias names (`ssh -G`, which only reads the ssh config), or None."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}", alias):
+        return None
     try:
-        r = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd=root,
-                           capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        r = subprocess.run(["ssh", "-G", alias], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    slug = r.stdout.strip()
-    return slug if r.returncode == 0 and GH_SLUG.fullmatch(slug) else None
+    for line in r.stdout.splitlines():
+        if line.lower().startswith("hostname "):
+            return line.split(None, 1)[1].strip().lower()
+    return None
+
+
+def resolve_url(url: str) -> "str | None":
+    """owner/repo of one remote URL: GitHub's forms, or an scp-form ssh alias whose hostname is GitHub's."""
+    slug = parse_github(url)
+    if slug:
+        return slug
+    m = re.fullmatch(r"(?:[A-Za-z0-9._-]+@)?([A-Za-z0-9][A-Za-z0-9._-]*):([^/][^:]*?/[^/]+?)(?:\.git)?/?", url.strip())
+    if m and ssh_hostname(m.group(1)) in ("github.com", "ssh.github.com"):
+        return m.group(2) if GH_SLUG.fullmatch(m.group(2)) else None
+    return None
+
+
+def remote_urls(root: Path) -> list:
+    """Every URL the broker's `git push origin` may use, and origin's fetch URLs (review r2 M4: a pushurl counts)."""
+    out = []
+    for args in (("remote", "get-url", "--push", "--all", "origin"), ("remote", "get-url", "--all", "origin")):
+        try:
+            out += [u for u in git("-C", root, *args).splitlines() if u.strip()]
+        except SB.SandboxError:
+            pass
+    return list(dict.fromkeys(out))
 
 
 def github_slug(root: Path) -> "str | None":
-    try:
-        url = git("-C", root, "remote", "get-url", "origin")
-    except SB.SandboxError:
+    """The one GitHub repository every origin URL names, or None (none, an unresolvable one, or two repositories)."""
+    urls = remote_urls(root)
+    slugs = {resolve_url(u) for u in urls}
+    if not urls or None in slugs or len({x.lower() for x in slugs}) != 1:
         return None
-    return parse_github(url) or gh_resolve(root)
+    return slugs.pop()
 
 
 def ci_target(root: Path, st: dict) -> tuple:
@@ -154,9 +181,66 @@ def ci_target(root: Path, st: dict) -> tuple:
         return slug, ci_check(slug)
     if st.get("sandbox_no_ci") is True:
         return None, [(True, "no GitHub repository; the owner recorded that this project has no CI")]
-    return None, [(False, "origin is not a GitHub remote lane-control can read (gh repo view could not name it), so "
-                          "its CI cannot be checked; when the project has no CI, record \"sandbox_no_ci\": true in "
-                          "its settings store")]
+    return None, [(False, "origin is not one GitHub repository lane-control can name (each push and fetch URL, an "
+                          "ssh alias through ssh -G), so its CI cannot be checked; when the project has no CI, record "
+                          "\"sandbox_no_ci\": true in its settings store")]
+
+
+def ci_verdict(root: Path, st: dict, base: "str | None" = None) -> list:
+    """[(ok, line)]: the one CI rule, for prepare and for machine setup --check --sandbox alike (review r2 M2): the
+    repository's Actions settings (or the owner's sandbox_no_ci) and the base's workflow permissions."""
+    _, lines = ci_target(root, st)
+    try:
+        b = base_branch(root, st, base)[0]
+        writes = workflow_writes(root, b)
+    except SB.SandboxError as e:
+        return lines + [(False, f"the base's workflows cannot be read ({e})")]
+    if writes:
+        lines = lines + [(False, f"base workflows ask for a write token: {', '.join(writes[:5])}")]
+    return lines
+
+
+PERM_ENTRY = re.compile(r"""["']?[A-Za-z][A-Za-z-]*["']?\s*:\s*["']?(read|none)["']?""")
+
+
+def _uncomment(line: str) -> str:
+    return re.sub(r"(^|\s)#.*$", "", line).rstrip()
+
+
+def permissions_read_only(text: str) -> bool:
+    """True only when every `permissions:` value in a workflow is clearly read-only: `read-all`, `{}`, or entries that
+    are all `read` or `none`, in block or flow form, any key quoting (review r2 M3). Anything else (write-all,
+    write, an empty value, an alias, a form this does not read) is not: fail closed."""
+    lines = text.splitlines()
+    if re.search(r"\bwrite-all\b", text) or re.search(r"""["']?[A-Za-z-]+["']?\s*:\s*["']?write["']?\s*[,}]""", text):
+        return False
+    for i, raw in enumerate(lines):
+        line = _uncomment(raw)
+        m = re.match(r"""^(\s*)(?:-\s*)?["']?permissions["']?\s*:\s*(.*)$""", line)
+        if not m:
+            continue
+        indent, val = len(m.group(1)), m.group(2).strip()
+        if val:
+            v = val.strip("\"'")
+            if v in ("read-all", "{}"):
+                continue
+            if val.startswith("{") and val.endswith("}"):
+                inner = val[1:-1].strip()
+                if inner and not all(PERM_ENTRY.fullmatch(x.strip()) for x in inner.split(",")):
+                    return False
+                continue
+            return False
+        entries = []
+        for nxt in lines[i + 1:]:
+            n = _uncomment(nxt)
+            if not n.strip():
+                continue
+            if len(n) - len(n.lstrip()) <= indent:
+                break
+            entries.append(n.strip())
+        if not entries or not all(PERM_ENTRY.fullmatch(e) for e in entries):
+            return False
+    return True
 
 
 def workflow_writes(root: Path, base: str) -> list:
@@ -175,7 +259,7 @@ def workflow_writes(root: Path, base: str) -> list:
         name = n.decode("utf-8", "surrogateescape")
         r = subprocess.run(["git", "-C", str(root), "cat-file", "blob", f"{ref}:{name}"], capture_output=True)
         text = r.stdout.decode("utf-8", "replace")
-        if re.search(r"(?im)^[^#\n]*\bwrite-all\b|^[^#\n]*[a-z-]+\s*:\s*['\"]?write['\"]?\s*(#.*)?$", text):
+        if not permissions_read_only(text):
             out.append(name)
     return out
 
@@ -457,6 +541,45 @@ def projects_on(conf: dict) -> list:
     return (conf.get("SANDBOX_PROJECTS") or "").split()
 
 
+def sandbox_projects(conf: dict) -> tuple:
+    """(the checkouts SANDBOX_PROJECTS names, problems). Every project store is read: one that cannot be read or
+    parsed, and an entry that matches no project (a name with no store, a comma list, a path that is no project),
+    is a problem, and callers fail closed on any problem (review r2 M1)."""
+    names = projects_on(conf)
+    roots, by_name, problems = set(), {}, []
+    if not names:
+        return roots, problems
+    stores = SB._xdg("XDG_CONFIG_HOME", ".config") / "lane-control" / "projects"
+    try:
+        files = sorted(stores.glob("*/settings.json"))
+    except OSError as e:
+        return roots, [f"the project stores cannot be listed ({e.strerror})"]
+    known = set()
+    for f in files:
+        try:
+            st = json.loads(f.read_text())
+            if not isinstance(st, dict) or not isinstance(st.get("root"), str):
+                raise ValueError("no root")
+        except (OSError, ValueError) as e:
+            problems.append(f"project store {f.parent.name} cannot be read ({e.__class__.__name__})")
+            continue
+        r = Path(st["root"]).resolve()
+        known.add(r)
+        by_name.setdefault(st.get("name") or r.name, set()).add(r)
+    for e in names:
+        if e.startswith("/"):
+            r = Path(e).resolve()
+            if r in known:
+                roots.add(r)
+            else:
+                problems.append(f"SANDBOX_PROJECTS entry {e!r} is no project set up here")
+        elif e in by_name:
+            roots |= by_name[e]
+        else:
+            problems.append(f"SANDBOX_PROJECTS entry {e!r} matches no project (names are space-separated)")
+    return roots, problems
+
+
 def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue: "str | None" = None,
             sha: "str | None" = None, review_files: "list | None" = None, review_write: "str | None" = None,
             base: "str | None" = None, discard: bool = False, model: "str | None" = None, say=print) -> str:
@@ -467,9 +590,11 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
     trole = ROLES[role]
     conf = read_conf()
     name = st.get("name") or root.name
-    if name not in projects_on(conf) and str(root) not in projects_on(conf):
+    roots, problems = sandbox_projects(conf)
+    if Path(root).resolve() not in roots:
         raise SB.SandboxError(f"{name} is not a sandboxed project: add it to SANDBOX_PROJECTS in machine.conf "
-                              "(after lane-control machine setup --check --sandbox passes)")
+                              "(after lane-control machine setup --check --sandbox passes)"
+                              + (f"; also: {'; '.join(problems)}" if problems else ""))
     if not lane:
         raise SB.SandboxError("--lane KEY is needed with --sandbox (the lane's identity, not the worktree's)")
     ld = SB.lane_dir(lane, root)
@@ -487,17 +612,10 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
     missing = [k for k in PIN_KEYS if not os.path.isabs(conf.get(k) or "")]
     if missing:
         raise SB.SandboxError(f"{', '.join(missing)} not pinned: run lane-control machine setup --sandbox")
-    slug, lines = ci_target(root, st)
-    bad = [line for ok, line in lines if not ok]
-    if not bad:
-        try:
-            writes = workflow_writes(root, base_branch(root, st, base)[0])
-        except SB.SandboxError:
-            writes = []
-        if writes:
-            bad.append(f"base workflows ask for a write token: {', '.join(writes[:5])}")
+    slug = github_slug(root)
+    bad = [line for ok, line in ci_verdict(root, st, base) if not ok]
     if bad:
-        raise SB.SandboxError(f"CI of {slug} runs a lane's code with more than a read-only token: "
+        raise SB.SandboxError(f"CI of {slug or name} runs a lane's code with more than a read-only token: "
                               + "; ".join(bad) + ". A sandboxed project needs a read-only default workflow token, "
                               "no Actions secrets and no self-hosted runners (lane-control machine setup --check --sandbox)")
     tools = tool_path(conf, st)

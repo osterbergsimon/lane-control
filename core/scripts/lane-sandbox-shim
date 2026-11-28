@@ -104,20 +104,18 @@ def linked_worktree(cwd: Path) -> "tuple | None":
 
 
 def sandboxed_main(main: "Path | None", conf: dict) -> bool:
-    """Whether that main checkout is a project in SANDBOX_PROJECTS (by checkout path or by its settings name)."""
-    if main is None:
-        return False
-    names = SP.projects_on(conf)
-    if str(main) in names or str(main.resolve()) in names:
-        return True
+    """Whether a linked worktree of that main checkout must start sandboxed: its project is in SANDBOX_PROJECTS, or
+    the sandbox's project list cannot be read whole (an unreadable store, an entry matching nothing: fail closed,
+    review r2 M1)."""
     try:
-        import extras as X
-        for root, st in X.known():
-            if Path(root).resolve() == main.resolve() and (st.get("name") or Path(root).name) in names:
-                return True
-    except Exception:  # noqa: BLE001  the project list cannot be read: count it as sandboxed (fail closed)
-        return bool(names)
-    return False
+        roots, problems = SP.sandbox_projects(conf)
+    except Exception:  # noqa: BLE001  cannot tell: sandboxed
+        return True
+    if not SP.projects_on(conf):
+        return False
+    if problems or main is None:
+        return True
+    return main.resolve() in roots
 
 
 def check_pins(conf: dict) -> "str | None":
@@ -390,6 +388,8 @@ def main(argv: list) -> int:
         t = SB.take_ticket(wt, env.get("ORCA_TERMINAL_HANDLE", ""))
     except SB.SandboxError as e:
         return refuse(str(e))
+    except OSError as e:  # an unreadable ticket folder or file: nothing starts (review r2)
+        return refuse(f"the tickets of {wt} cannot be read ({e.strerror}): nothing ran")
     # review r2 B2: the resolved binary (a link in an npm bin/ folder does not exist inside), under its own name
     t["agent"] = [str(Path(t["inside"]) / "bin" / "lane-enter"), "--argv0", agent, os.path.realpath(real), *args]
     try:
@@ -410,4 +410,9 @@ def main(argv: list) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001  anything unforeseen before the agent ran: refuse, never pass through
+        sys.exit(refuse(f"the launcher failed ({e.__class__.__name__}: {e}); nothing ran"))

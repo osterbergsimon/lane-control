@@ -181,14 +181,16 @@ def login_shell_finds(agent: str) -> "str | None":
 # --- machine setup --check --sandbox ---------------------------------------------------------------------------------------
 
 def projects(conf: dict) -> list:
-    """(name, root) of each SANDBOX_PROJECTS entry this machine knows."""
+    """(name, root) of each project SANDBOX_PROJECTS names (sandboxprep.sandbox_projects: one rule for all)."""
     import extras as X
-    out = []
-    names = SP.projects_on(conf)
-    for root, st in X.known():
-        if (st.get("name") or root.name) in names or str(root) in names:
-            out.append((st.get("name") or root.name, root))
-    return out
+    roots, _ = SP.sandbox_projects(conf)
+    return [(st.get("name") or r.name, r) for r, st in X.known() if r.resolve() in roots]
+
+
+def project_settings(conf: dict) -> list:
+    import extras as X
+    roots, _ = SP.sandbox_projects(conf)
+    return [(st.get("name") or r.name, r, st) for r, st in X.known() if r.resolve() in roots]
 
 
 def check(read_only: bool = True) -> int:
@@ -253,8 +255,12 @@ def check(read_only: bool = True) -> int:
         say(f"PATH detector ({agent})", "first on the login shell's PATH (a start without the custom command is "
             "refused)" if shim else f"not first ({found[agent] or 'not on PATH'}; optional: the custom command is "
             "the hook)")
-    for name, root in projects(conf):
-        lines = SP.ci_check(SP.github_slug(root))
+    _, problems = SP.sandbox_projects(conf)
+    for p in problems:  # review r2 M1: an entry that matches nothing, an unreadable store
+        say("projects", p)
+        broken.append(p)
+    for name, root, st in project_settings(conf):
+        lines = SP.ci_verdict(root, st)  # the same rule prepare applies (review r2 M2)
         bad = [line for ok, line in lines if not ok]
         say(f"CI {name}", "; ".join(line for _, line in lines) + (": refuses --sandbox" if bad else ": ok"))
         if bad:

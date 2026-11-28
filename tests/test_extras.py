@@ -1200,12 +1200,27 @@ class SandboxPrepareTests(Scratch):
             self.assertFalse(lines[0][0])
             self.assertIn("sandbox_no_ci", lines[0][1])
             self.assertTrue(self.SP.ci_target(self.repo, {"sandbox_no_ci": True})[1][0][0])
-            self.no_prep(says="not a GitHub remote")
+            self.no_prep(says="not one GitHub repository lane-control can name")
         git("remote", "set-url", "origin", "github-work:o/r.git", cwd=self.repo)  # an ssh host alias
-        with mock.patch.object(self.SP, "gh_resolve", lambda root: "o/r"):
-            self.assertEqual(self.real_slug(self.repo), "o/r")  # gh names it: its CI is checked
-        with mock.patch.object(self.SP, "gh_resolve", lambda root: None):
-            self.assertIsNone(self.real_slug(self.repo))  # nobody can name it: ci_target refuses (above)
+        with mock.patch.object(self.SP, "ssh_hostname", lambda a: "github.com"):
+            self.assertEqual(self.real_slug(self.repo), "o/r")  # ssh -G names it: its CI is checked
+        with mock.patch.object(self.SP, "ssh_hostname", lambda a: "git.example.com"):
+            self.assertIsNone(self.real_slug(self.repo))  # not GitHub: ci_target refuses (above)
+
+    def test_push_url_and_upstream(self):
+        """r2 M4: the repository checked is the one pushed to: a pushurl to another repository, or an alias with an
+        upstream beside it, never passes on another repository's settings."""
+        git("remote", "set-url", "origin", "https://github.com/owner/safe.git", cwd=self.repo)
+        self.assertEqual(self.real_slug(self.repo), "owner/safe")
+        git("config", "remote.origin.pushurl", "https://github.com/owner/has-secrets.git", cwd=self.repo)
+        self.assertIsNone(self.real_slug(self.repo))  # two repositories: refused
+        git("config", "--unset", "remote.origin.pushurl", cwd=self.repo)
+        git("remote", "set-url", "origin", "gh-alias:example-owner/the-fork.git", cwd=self.repo)
+        git("remote", "add", "upstream", "https://github.com/cli/cli.git", cwd=self.repo)
+        with mock.patch.object(self.SP, "ssh_hostname", lambda a: "github.com"):
+            self.assertEqual(self.real_slug(self.repo), "example-owner/the-fork")  # origin's, never upstream's
+        with mock.patch.object(self.SP, "ssh_hostname", lambda a: None):
+            self.assertIsNone(self.real_slug(self.repo))
 
     def test_org_runners_write_workflows_and_pages(self):
         """r1 m1: an organization's runners, a base workflow that asks for a write token, a second page of
@@ -1219,6 +1234,21 @@ class SandboxPrepareTests(Scratch):
         self.ci["environments"] = {"total_count": 0, "environments": []}
         self.push_main(".github/workflows/t.yml", "on: push\npermissions:\n  contents: write\n")
         self.no_prep(says="base workflows ask for a write token: .github/workflows/t.yml")
+
+    def test_workflow_permission_forms(self):
+        """r2 M3: every YAML form of a write permission is seen; only clearly read-only ones pass."""
+        bad = ["permissions: write-all", "permissions: {contents: write}",
+               "permissions: { contents: write, id-token: write }",
+               "jobs:\n  b:\n    permissions: {packages: write}", 'permissions:\n  "contents": write',
+               "permissions:\n  contents: write", "permissions:\n  contents: 'write'", "permissions:",
+               "permissions: *anchor", "permissions:\n  contents: read\n  issues: write"]
+        good = ["permissions: read-all", "permissions: {}", "permissions:\n  contents: read\n  pull-requests: none",
+                "permissions: {contents: read}", "on: push  # no permissions key: the read-only default",
+                "permissions:\n  contents: read  # write is not given"]
+        for t in bad:
+            self.assertFalse(self.SP.permissions_read_only("on: push\n" + t + "\n"), t)
+        for t in good:
+            self.assertTrue(self.SP.permissions_read_only("on: push\n" + t + "\n"), t)
 
     def test_provider_secrets_refused(self):
         """r1 M9: a secret anywhere in the owner's provider entry refuses; only allowlisted fields are copied."""

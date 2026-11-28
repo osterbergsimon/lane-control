@@ -2603,11 +2603,53 @@ class SandboxSetupTests(unittest.TestCase):
 
     def test_check_reports_ci(self):
         self.setup_ok()
-        with self.mock.patch.object(self.LS.SP, "ci_check", lambda slug: [(False, "default workflow token: write")]), \
-                self.mock.patch.object(self.LS.SP, "github_slug", lambda root: "o/r"):
-            rc, out = self.check(projects=lambda conf: [("app", self.t)])
+        with self.mock.patch.object(self.LS.SP, "ci_verdict", lambda root, st, base=None: [
+                (False, "default workflow token: write")]):
+            rc, out = self.check(project_settings=lambda conf: [("app", self.t, {})])
         self.assertIn("CI app: default workflow token: write: refuses --sandbox", out)
         self.assertIn("sandbox: broken (CI of app)", out)
+
+    def ci_repo(self, workflow=None):
+        repo = self.t / "app"
+        origin = self.t / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        if workflow:
+            (repo / ".github" / "workflows").mkdir(parents=True)
+            (repo / ".github" / "workflows" / "ci.yml").write_text(workflow)
+        (repo / "f").write_text("x\n")
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-C", str(repo)]
+        subprocess.run([*g, "add", "-A"], check=True)
+        subprocess.run([*g, "commit", "-q", "-m", "x"], check=True)
+        subprocess.run([*g, "remote", "add", "origin", str(origin)], check=True)
+        subprocess.run([*g, "push", "-q", "origin", "main"], check=True)
+        subprocess.run([*g, "fetch", "-q", "origin"], check=True)
+        return repo
+
+    def test_check_and_prepare_judge_ci_alike(self):
+        """r2 M2: a project with sandbox_no_ci is not broken in the check; a base workflow asking for a write token
+        is, as prepare refuses it."""
+        self.setup_ok()
+        repo = self.ci_repo()
+        rc, out = self.check(project_settings=lambda conf: [("app", repo, {"sandbox_no_ci": True})])
+        self.assertIn("CI app: no GitHub repository; the owner recorded that this project has no CI: ok", out)
+        self.assertNotIn("CI of app", out)
+        repo2 = self.t / "two"
+        repo2.mkdir()
+        self.t, old = repo2, self.t
+        repo2 = self.ci_repo("on: push\npermissions: {contents: write}\n")
+        self.t = old
+        rc, out = self.check(project_settings=lambda conf: [("app", repo2, {"sandbox_no_ci": True})])
+        self.assertIn("base workflows ask for a write token: .github/workflows/ci.yml", out)
+        self.assertIn("CI of app", out.splitlines()[-1])
+
+    def test_check_reports_unmatched_projects(self):
+        """r2 M1: a SANDBOX_PROJECTS entry that matches no project is broken, not silently on."""
+        self.setup_ok()
+        (self.home / ".config" / "lane-control" / "machine.conf").write_text("SANDBOX_PROJECTS=app,pub\n")
+        rc, out = self.check()
+        self.assertIn("SANDBOX_PROJECTS entry 'app,pub' matches no project", out)
+        self.assertEqual(rc, 1)
 
     def test_check_names_agent_dirs(self):
         self.setup_ok()
