@@ -359,6 +359,56 @@ class HistoryTests(Base):
                          [".GitHub/Actions/a/action.yml", ".circleci/config.yml", ".github/workflows/x.yml",
                           "Jenkinsfile", "azure-pipelines.yml", "sub/.gitlab-ci.yml"])
 
+    def test_quoted_names_are_seen(self):
+        """r1 B1: names git would C-quote (a quote, backslash, tab, newline) and non-UTF-8 bytes are read exactly."""
+        r = self.repo()
+        base = git("rev-parse", "HEAD", cwd=r)
+        names = ['.github/workflows/q"x.yml', ".github/workflows/b\\s.yml", ".github/workflows/t\tx.yml",
+                 ".github/workflows/n\nx.yml"]
+        for n in names:
+            self.commit(r, n)
+        self.assertEqual(SB.ci_hits(r, ["HEAD", f"^{base}"]), sorted(names))
+        priv = ['fixtures/customers/a"b.csv', 'dir"x/.env', "dir\\y/.env.local", "fixtures/customers/t\tb.csv"]
+        for n in priv:
+            self.commit(r, n)
+        self.assertEqual(SB.history_hits(r, ["HEAD"], ["fixtures/customers"]), sorted(priv))
+        os.makedirs(os.fsencode(r) + b"/fixtures/customers", exist_ok=True)
+        with open(os.fsencode(r) + b"/fixtures/customers/\xff.csv", "w") as f:
+            f.write("x")
+        subprocess.run(["git", "add", "-f", "."], cwd=r, check=True)
+        git("commit", "-q", "-m", "latin1", cwd=r)
+        hits = SB.history_hits(r, ["HEAD", "^HEAD~1"], ["fixtures/customers"])
+        self.assertEqual(len(hits), 1)  # a non-UTF-8 name: still counted, no crash
+
+    def test_ci_folder_as_link_or_submodule(self):
+        r = self.repo()
+        base = git("rev-parse", "HEAD", cwd=r)
+        os.symlink("elsewhere", r / ".github")
+        git("add", ".github", cwd=r)
+        git("commit", "-q", "-m", "link", cwd=r)
+        self.assertEqual(SB.ci_hits(r, ["HEAD", f"^{base}"]), [".github"])
+        self.assertTrue(SB.is_ci_path(".GitHub/Workflows"))
+        self.assertTrue(SB.is_ci_path(".github/workflows"))
+        self.assertFalse(SB.is_ci_path(".github/CODEOWNERS"))
+
+    def test_merged_base_ci_change_is_not_the_lanes(self):
+        """r1 m2: merging the base's own workflow change is not flagged; an edit made in the merge itself is."""
+        r = self.repo()
+        base = git("rev-parse", "HEAD", cwd=r)
+        git("switch", "-q", "-c", "lane", cwd=r)
+        self.commit(r, "lane.txt")
+        git("switch", "-q", "main", cwd=r)
+        self.commit(r, ".github/workflows/test.yml", "on: push\n")
+        git("switch", "-q", "lane", cwd=r)
+        git("merge", "-q", "--no-edit", "main", cwd=r)
+        self.assertEqual(SB.ci_hits(r, ["lane", "--not", "main", base]), [])
+        git("switch", "-q", "-c", "evil", "lane~1", cwd=r)
+        git("merge", "-q", "--no-commit", "main", cwd=r)
+        (r / ".github/workflows/test.yml").write_text("on: push\npermissions: write-all\n")
+        git("add", ".github", cwd=r)
+        git("commit", "-q", "-m", "evil merge", cwd=r)
+        self.assertEqual(SB.ci_hits(r, ["evil", "--not", "main", base]), [".github/workflows/test.yml"])
+
     def test_norm(self):
         self.assertEqual(SB.norm_private(["./x/", "x/", "x", "", "  ./Y "]), ["x", "y"])
 

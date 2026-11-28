@@ -1589,8 +1589,11 @@ class CrossHostReportContractTests(unittest.TestCase):
         # lane-control's scripts never send a worker_done (briefs and personas tell agents to); if one starts to,
         # its refusal must name the ids and the command, and this test says where to add that.
         for path in list((ROOT / "core" / "scripts").iterdir()) + list((ROOT / "orchestrators").rglob("*.py")):
-            if path.name == "lane-broker":  # SBX-2: relays a sandboxed lane's own report, after dispatch-show
-                continue                     # shows that dispatch on its terminal; each refusal says which check failed
+            if path.name == "lane-broker":  # SBX-2: relays a sandboxed lane's own report; its refusal names both ids
+                text = path.read_text()      # and the command it checked with (review r1 m8)
+                self.assertIn('f"task {task}, dispatch {dispatch} is not this terminal\'s', text)
+                self.assertIn("orca-ide orchestration dispatch-show --task={task}", text)
+                continue
             if path.is_file() and path.suffix not in (".md", ".pyc"):
                 self.assertNotIn("worker_done", path.read_text(errors="ignore"), path.name)
 

@@ -158,9 +158,12 @@ class Broker:
         try:
             d = json.loads(r.stdout)["result"]["dispatch"]
         except (ValueError, KeyError, TypeError):
-            raise Refused("that task's dispatch cannot be read from Orca") from None
+            raise Refused(f"task {task}: its dispatch cannot be read from Orca (orca-ide orchestration dispatch-show "
+                          f"--task={task})") from None
         if r.returncode != 0 or d.get("id") != dispatch or d.get("assignee_handle") != self.terminal:
-            raise Refused("that dispatch is not this terminal's")
+            raise Refused(f"task {task}, dispatch {dispatch} is not this terminal's ({self.terminal}): checked with "
+                          f"orca-ide orchestration dispatch-show --task={task}; report with the task and dispatch ids "
+                          "of your own brief")
 
     def seen_file(self) -> Path:
         return self.broker_dir / "seen.json"
@@ -175,7 +178,10 @@ class Broker:
 
     def handle(self, req) -> dict:
         name, f = validate(req, self.t["role"])
-        return getattr(self, "r_" + name.replace("-", "_"))(**f)
+        try:
+            return getattr(self, "r_" + name.replace("-", "_"))(**f)
+        except SB.SandboxError as e:
+            raise Refused(str(e)) from None
 
     def r_report(self, task, dispatch, subject, body, outcome, files=()):
         self.dispatch_mine(task, dispatch)
@@ -378,9 +384,7 @@ class Broker:
         prev = self.git("-C", q, "rev-parse", "-q", "--verify", "refs/heads/lane", check=False)
         if prev and self.cli(["git", "-C", str(q), "merge-base", "--is-ancestor", prev, new]).returncode:
             raise Refused("not a fast-forward of the lane's last push (a rewritten branch: lanes merge)")
-        if prev == new:
-            return {"ok": True, "sha": new, "output": "up to date"}
-        hits = SB.ci_hits(q, [new, "--not", f"refs/heads/{base}", *([prev] if prev else [])])
+        hits = [] if prev == new else SB.ci_hits(q, [new, "--not", f"refs/heads/{base}", *([prev] if prev else [])])
         if hits and not (Path(self.t["lane_dir"]) / "ci-approved" / new).is_file():
             raise Refused(f"changes CI configuration ({', '.join(hits[:5])}): the owner approves it with "
                           f"lane-control lane approve-ci {lane} {new}")
@@ -389,8 +393,8 @@ class Broker:
                  f"refs/heads/lane:refs/lanes/{lane}")
         r = self.cli(["git", "-C", str(repo), "push", "-q", "--no-verify", "origin",
                       f"refs/lanes/{lane}:refs/heads/{branch}"])
-        if r.returncode != 0:
-            raise Refused("accepted into refs/lanes/{0}, but the push to origin failed: push again".format(lane))
+        if r.returncode != 0:  # the quarantine already has it: the next push (even of the same sha) pushes again
+            raise Refused(f"accepted into refs/lanes/{lane}, but the push to origin failed: push again")
         self.git("-C", q, "update-ref", "-d", "refs/incoming", check=False)
         return {"ok": True, "sha": new, "output": f"pushed {new[:12]} to origin {branch}"}
 
@@ -443,6 +447,10 @@ def log(t: dict, name: str, outcome: str) -> None:
         f.write(line + "\n")
 
 
+MAX_CONNECTIONS = 8   # at once, per ticket: a lane cannot grow the broker without limit
+READ_TIMEOUT = 30     # seconds for one request to arrive
+
+
 def read_request(conn) -> bytes:
     buf = b""
     while b"\n" not in buf:
@@ -468,8 +476,20 @@ def slot_settings() -> tuple:
         return Path(d or "/nonexistent"), 1
 
 
+HELD = threading.Lock()  # one heavy slot per ticket at a time
+
+
 def heavy_slot(t: dict, conn) -> None:
-    """Hold one of lane-heavy's slots (its flock files) while the connection stays open."""
+    """Hold one of lane-heavy's slots (its flock files) while the connection stays open; one per ticket."""
+    if not HELD.acquire(blocking=False):
+        raise Refused("this ticket already holds a heavy slot: one at a time")
+    try:
+        _heavy_slot(conn)
+    finally:
+        HELD.release()
+
+
+def _heavy_slot(conn) -> None:
     state, n = slot_settings()
     if not state.is_absolute() or state.is_symlink():
         raise Refused("lane-heavy's slot folder cannot be used")
@@ -488,14 +508,39 @@ def heavy_slot(t: dict, conn) -> None:
             time.sleep(1)
     try:
         conn.sendall(json.dumps({"ok": True, "output": "slot held"}).encode() + b"\n")
+        conn.settimeout(None)  # held for as long as the command runs
         while conn.recv(4096):
             pass
     finally:
         os.close(fd)
 
 
-def serve_one(b: Broker, conn) -> None:
+def turn_away(conn) -> None:
+    """Answer a connection over the cap, then drain briefly, so the lane reads the reason and not a reset."""
+    try:
+        conn.sendall(json.dumps({"ok": False, "error": f"more than {MAX_CONNECTIONS} requests at once"}).encode() +
+                     b"\n")
+        conn.shutdown(socket.SHUT_WR)
+        conn.settimeout(1)
+        left = 1 << 20
+        while left > 0 and (chunk := conn.recv(65536)):
+            left -= len(chunk)
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+
+def serve_one(b: Broker, conn, gate) -> None:
+    try:
+        _serve_one(b, conn)
+    finally:
+        gate.release()
+
+
+def _serve_one(b: Broker, conn) -> None:
     name = "?"
+    conn.settimeout(READ_TIMEOUT)
     try:
         try:
             raw = read_request(conn)
@@ -561,9 +606,14 @@ def serve(ticket_file: str) -> int:
             time.sleep(1)
         os._exit(0)
     threading.Thread(target=orphaned, daemon=True).start()
+    gate = threading.BoundedSemaphore(MAX_CONNECTIONS)
     while True:
         conn, _ = s.accept()
-        threading.Thread(target=serve_one, args=(b, conn), daemon=True).start()
+        if not gate.acquire(blocking=False):
+            log(t, "?", "refused: too many connections")
+            threading.Thread(target=turn_away, args=(conn,), daemon=True).start()
+            continue
+        threading.Thread(target=serve_one, args=(b, conn, gate), daemon=True).start()
 
 
 def main(argv: list) -> int:

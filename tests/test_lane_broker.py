@@ -126,6 +126,29 @@ class PushTests(BrokerCase):
         self.refused("push", says="not a fast-forward")
         self.assertEqual(self.refs(), before)
 
+    def test_push_again_after_origin_refused(self):
+        """r1 M1: origin refuses the first push (a pre-receive hook); the same push again really reaches origin."""
+        sha = self.lane_commit()
+        hook = self.fx.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        self.bundle("lane-1", "^origin/main")
+        self.refused("push", says="push to origin failed: push again")
+        hook.unlink()
+        self.bundle("lane-1", "^origin/main")
+        out = self.req("push")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(git("rev-parse", "lane-1", cwd=self.fx.origin), sha)
+
+    def test_ci_workflow_with_a_quoted_name_refused(self):
+        """r1 B1, through the broker: a workflow whose name git would quote."""
+        (self.clone / ".github" / "workflows").mkdir(parents=True)
+        self.lane_commit('.github/workflows/q"x.yml', "on: push\n")
+        self.bundle("lane-1", "^origin/main")
+        self.refused("push", says="CI configuration")
+        self.assertNotEqual(subprocess.run(["git", "rev-parse", "-q", "--verify", "lane-1"], cwd=self.fx.origin,
+                                           capture_output=True).returncode, 0)
+
     def test_push_hostile_outbox(self):
         self.lane_commit()
         wip, shared = self.fx.wip_sha, self.fx.repo
@@ -257,8 +280,10 @@ class OrcaTests(BrokerCase):
 
     def test_report_checks_dispatch(self):
         self.dispatch("term_other")
-        self.refused("report", says="not this terminal's", task="task_abcdef1", dispatch="ctx_abcdef1",
-                     subject="done", body="x", outcome="succeeded")
+        err = self.refused("report", says="not this terminal's", task="task_abcdef1", dispatch="ctx_abcdef1",
+                           subject="done", body="x", outcome="succeeded")
+        for x in ("task task_abcdef1", "dispatch ctx_abcdef1", "dispatch-show --task=task_abcdef1"):
+            self.assertIn(x, err)
         self.assertFalse(any("send" in c for c in self.run.calls))
         self.dispatch("term_lane", did="ctx_followup1")  # a follow-up dispatch on this terminal
         out = self.req("report", task="task_abcdef1", dispatch="ctx_followup1", subject="done", body="three lines",
@@ -454,6 +479,29 @@ class ServeTests(BrokerCase):
         self.assertEqual([x["request"] for x in log], ["fetch", "bd-show", "nope"])
         self.assertEqual(log[0]["outcome"], "ok")
         self.assertTrue(log[1]["outcome"].startswith("refused"))
+
+    def test_one_slot_per_ticket_and_a_connection_cap(self):
+        """r1 m9: a second slot from the same ticket is refused; at most MAX_CONNECTIONS at once; a silent
+        connection times out."""
+        sock = self.serve()
+        with self.conn(sock) as c:
+            c.sendall(json.dumps({"request": "heavy-slot"}).encode() + b"\n")
+            self.assertTrue(json.loads(c.recv(4096))["ok"])
+            out = self.ask(sock, json.dumps({"request": "heavy-slot"}).encode() + b"\n")
+            self.assertFalse(out["ok"])
+            self.assertIn("one at a time", out["error"])
+        held = []
+        for _ in range(LB.MAX_CONNECTIONS):
+            with self.conn(sock) as c:
+                held.append(c.detach())
+        time.sleep(0.3)
+        out = self.ask(sock, json.dumps({"request": "fetch"}).encode() + b"\n")
+        self.assertFalse(out["ok"])
+        self.assertIn("at once", out["error"])
+        for fd in held:
+            os.close(fd)
+        time.sleep(0.5)
+        self.assertTrue(self.ask(sock, json.dumps({"request": "fetch"}).encode() + b"\n")["ok"])
 
     def test_heavy_slot_held_while_open(self):
         sock = self.serve()

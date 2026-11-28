@@ -432,17 +432,47 @@ def norm_private(paths: list) -> list:
     return out
 
 
+def _git_bytes(repo: Path, *args, stdin: bytes = b"") -> bytes:
+    r = subprocess.run(["git", "-C", str(repo), *args], input=stdin, capture_output=True)
+    if r.returncode != 0:
+        raise SandboxError(f"git {args[0]} failed in {repo}: "
+                           f"{(r.stderr.decode(errors='replace').strip().splitlines() or [''])[-1][:200]}")
+    return r.stdout
+
+
+def _names(out: bytes) -> set:
+    """git's -z output: NUL-separated raw path bytes, never quoted or escaped. A name that is not UTF-8 is kept with
+    surrogate escapes, so it still compares (and still counts) instead of crashing or being skipped."""
+    return {p.decode("utf-8", "surrogateescape") for p in out.split(b"\0") if p}
+
+
 def changed_paths(repo: Path, revs: list) -> set:
     """Every path any delivered commit adds or changes, against each parent (-m), the root included: a file added
-    and removed on a merged side branch is still seen."""
-    commits = subprocess.run(["git", "-C", str(repo), "rev-list", *revs], check=True, capture_output=True,
-                             text=True, stdin=subprocess.DEVNULL).stdout
+    and removed on a merged side branch is still seen. Read with -z: a name with a quote, backslash, tab or newline
+    is the name itself."""
+    commits = _git_bytes(repo, "rev-list", *revs)
     if not commits.strip():
         return set()
-    out = subprocess.run(["git", "-C", str(repo), "-c", "core.quotePath=false", "diff-tree", "--stdin", "-r", "-m",
-                          "--root", "--no-commit-id", "--name-only", "--no-renames"],
-                         input=commits, check=True, capture_output=True, text=True).stdout
-    return {line for line in out.splitlines() if line}
+    return _names(_git_bytes(repo, "diff-tree", "--stdin", "-z", "-r", "-m", "--root", "--no-commit-id",
+                             "--name-only", "--no-renames", stdin=commits))
+
+
+def ci_changed_paths(repo: Path, revs: list) -> set:
+    """The paths the lane itself changed in the delivered commits: each ordinary commit against its parent; each merge
+    only where its result differs from every parent (--cc), so merging a base that changed CI is not the lane's
+    change, while an edit made in the merge itself is."""
+    plain, merges = [], []
+    for line in _git_bytes(repo, "rev-list", "--parents", *revs).decode().split("\n"):
+        f = line.split()
+        if f:
+            (merges if len(f) > 2 else plain).append(f[0])
+    out = set()
+    if plain:
+        out |= _names(_git_bytes(repo, "diff-tree", "--stdin", "-z", "-r", "--root", "--no-commit-id",
+                                 "--name-only", "--no-renames", stdin="\n".join(plain).encode() + b"\n"))
+    for m in merges:
+        out |= _names(_git_bytes(repo, "diff-tree", "-z", "-r", "--cc", "--no-commit-id", "--name-only", m))
+    return out
 
 
 def history_hits(repo: Path, revs: list, private: list) -> list:
@@ -460,13 +490,18 @@ def history_hits(repo: Path, revs: list, private: list) -> list:
     return hits
 
 
+CI_DIRS = {p.rstrip("/") for p in CI_PREFIXES} | {".github"}
+
+
+def is_ci_path(p: str) -> bool:
+    """A CI configuration path, any case: under a CI folder, a CI file name at any depth, or one of the folders itself
+    (a link or submodule standing in for `.github`, `.github/workflows`, ...)."""
+    low = p.lower()
+    return low.startswith(CI_PREFIXES) or low in CI_DIRS or low.rsplit("/", 1)[-1] in CI_FILES
+
+
 def ci_hits(repo: Path, revs: list) -> list:
-    hits = []
-    for p in sorted(changed_paths(repo, revs)):
-        low = p.lower()
-        if low.startswith(CI_PREFIXES) or low.rsplit("/", 1)[-1] in CI_FILES:
-            hits.append(p)
-    return hits
+    return sorted(p for p in ci_changed_paths(repo, revs) if is_ci_path(p))
 
 
 # --- the broker's read of the outbox -------------------------------------------------------------------------------
