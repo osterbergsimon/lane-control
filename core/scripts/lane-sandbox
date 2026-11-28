@@ -190,7 +190,8 @@ def check(read_only: bool = True) -> int:
     for k, (pkg, _) in PINS.items():
         v = conf.get(k)
         bad = [p for p in probs if p.startswith(k)]
-        say("pin", f"{pkg}: {v or 'not pinned'}" + (f" ({bad[0][len(k) + 1:]})" if bad else " (ok)"))
+        say("pin", f"{pkg}: not pinned" if not v else f"{pkg}: {v}" + (f" ({bad[0][len(k) + 1:]})" if bad else
+                                                                        " (ok)"))
     if probs and not off:
         broken.append("pins: " + "; ".join(probs))
     tools = [p for p in (conf.get("SANDBOX_TOOL_PATH") or "").split(":") if p]
@@ -219,7 +220,9 @@ def check(read_only: bool = True) -> int:
             f"set Settings -> Agents -> {label} -> custom command to exactly: {want} [{state}]")
         if state != "set":
             unset.append(agent)
-    real = {a: conf.get("SANDBOX_REAL_" + a.upper()) for a in AGENTS}
+    found = {a: login_shell_finds(a) for a in AGENTS}
+    real = {a: conf.get("SANDBOX_REAL_" + a.upper()) or (found[a] if found[a] and Path(found[a]).resolve() !=
+                                                         launcher().resolve() else None) for a in AGENTS}
     say("real OpenCode", ", ".join(f"{a}: {real[a] or 'not found'}" for a in AGENTS))
     dirs = [d for d in (conf.get("SANDBOX_AGENT_DIRS") or "").split(":") if d]
     for a, exe in real.items():
@@ -235,10 +238,10 @@ def check(read_only: bool = True) -> int:
             f"SANDBOX_AGENT_DIRS={top} to machine.conf (bound read-only), or install it from nixpkgs")
         unset.append(a)
     for agent in AGENTS:
-        found = login_shell_finds(agent)
-        shim = bool(found) and Path(found).resolve() == launcher().resolve()
+        shim = bool(found[agent]) and Path(found[agent]).resolve() == launcher().resolve()
         say(f"PATH detector ({agent})", "first on the login shell's PATH (a start without the custom command is "
-            "refused)" if shim else f"not first ({found or 'not on PATH'}; optional: the custom command is the hook)")
+            "refused)" if shim else f"not first ({found[agent] or 'not on PATH'}; optional: the custom command is "
+            "the hook)")
     for name, root in projects(conf):
         lines = SP.ci_check(SP.github_slug(root))
         bad = [line for ok, line in lines if not ok]
