@@ -10,8 +10,12 @@ Kinds (one entry each, its id `<kind>:<name>`):
   hook     a lifecycle hook (lc-76o, EXT-2): an owner's script, at an absolute path pinned by its hash or in a git repo
            pinned at a full commit, run by lane-control at an event (after-setup, lane-start, gate, after-merge,
            on-report); it is no role's, runs outside every session and folder, and core/hooks.py runs it
-Agent hooks (Claude's or OpenCode's own), permission rules and env values are not kinds yet: they need their own design
-(lc-yw1g, EXT-1b).
+  agent-hook  an owner's script run by the agent's own hooks (Claude PreToolUse, PostToolUse, SessionStart, Stop;
+           OpenCode's tool hooks for the first two) through lane-control's runner, which checks it against its pin and
+           runs a private copy with no secret in its environment (lc-yw1g, EXT-1b; core/agentrules.py)
+  permission  a Claude deny rule (never an allow: lc-pwdq); lane-control's own denies (secrets, auth files,
+           --private paths, the agents' settings, credential commands) are written beside it; on OpenCode advisory
+  env      a non-secret environment value (NAME=value) for the role's sessions
 
 Scope per extra: lanes, coordinator, reviewer (reviewer and design reviewer), or all. Stored in the project's own
 settings store (<config>/lane-control/projects/<key>/extras.json, beside its tier table) and, machine-wide, in
@@ -32,6 +36,9 @@ Every other extra goes only where the sessions of its role read it:
                          .mcp.json, .claude/settings.json (enabledMcpjsonServers: only the servers lane-control wrote,
                          enabledPlugins; .claude/settings.local.json when the project commits settings.json),
                          .claude/skills/<name>, .opencode/opencode.json, .opencode/skills/<name>
+  permissions, env and agent hooks go in the same files: Claude's settings (the coordinator's launch --settings, a
+  lane's .claude/settings.json), OpenCode's opencode.json (permissions, policies) and
+  .opencode/plugins/lane-control-extras.js (env, agent hooks)
 
 In a folder, lane-control writes only files it creates and owns whole: never a committed file, never a file that
 was there before (or changed since it wrote it), never through a symlink. Applying is all or nothing: on any problem
@@ -51,11 +58,15 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agentrules as R  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
-KINDS = ("skill", "mcp", "persona", "plugin", "hook")
+KINDS = ("skill", "mcp", "persona", "plugin", "hook", "agent-hook", "permission", "env")
 EVENTS = ("after-setup", "lane-start", "gate", "after-merge", "on-report")  # lifecycle hooks: core/hooks.py
 HOOK_TIMEOUT = 600  # seconds, per hook, unless the owner gives --timeout
 HOOK_TIMEOUT_MAX = 6 * 3600
@@ -86,6 +97,7 @@ PERSONAS_DIR = ".lane-control/personas"
 EXCLUDE_BEGIN = "# lane-control extras: begin (files lane-control extras wrote; never committed)"
 EXCLUDE_END = "# lane-control extras: end"
 PLUGIN_NAME = "lane-control-extras"  # the coordinator's skills reach Claude as this session-only plugin
+OC_PLUGIN = ".opencode/plugins/lane-control-extras.js"  # env and agent hooks on OpenCode
 
 
 class ExtrasError(Exception):
@@ -322,14 +334,15 @@ def effective(store: "Path | None") -> list:
     for origin, data in (("machine", machine), ("project", load(project_file(store)) if store else None)):
         for e in (data or {}).get("extras", []):
             # a hook never takes another's place: the machine's and the project's both run (gates: all must pass)
-            by_id[f"{origin}|{ident(e)}" if e["kind"] == "hook" else ident(e)] = {**e, "origin": origin}
+            by_id[f"{origin}|{ident(e)}" if e["kind"] in ("hook", "agent-hook") else ident(e)] = \
+                {**e, "origin": origin}
     return list(by_id.values())
 
 
 def label(e: dict) -> str:
     """The id shown and recorded: a hook's says its level (hook:machine:<name>, hook:project:<name>)."""
-    if e.get("kind") == "hook" and e.get("origin") in ("machine", "project"):
-        return f"hook:{e['origin']}:{e['name']}"
+    if e.get("kind") in ("hook", "agent-hook") and e.get("origin") in ("machine", "project"):
+        return f"{e['kind']}:{e['origin']}:{e['name']}"
     return ident(e)
 
 
@@ -539,6 +552,41 @@ def parse_timeout(text) -> int:
     return int(text)
 
 
+def pin_script(spec: str, allow_repo: bool) -> tuple:
+    """(fields, file stem, warnings) of an owner's script: an absolute path pinned by its hash (a link's target is
+    what is pinned and run), or <git-url>@<full commit>:<path> (checked here, fetched by the caller)."""
+    warnings = []
+    if spec.startswith(("/", "~")):
+        path, h, warn = owners_file(spec, allow_repo, "the hook script", True)
+        warnings += [warn] if warn else []
+        real = os.path.realpath(path)  # a link (dotfiles, home-manager): its target is pinned and run, never the link
+        if real != path:
+            warnings.append(f"note: {path} is a link: the file pinned and run is {real} (add it again when the link "
+                            "points elsewhere)")
+        return {"script": real, "sha256": h, **({"link": path} if real != path else {})}, Path(path).stem, warnings
+    m = SPEC.fullmatch(spec)
+    if not m:
+        raise ExtrasError("--script is an absolute path, or <git-url>@<full 40-hex commit>:<path> (a branch or "
+                          "short sha is not a pin)")
+    why = url_problem(m["url"]) or path_problem(m["path"] or "") or (
+        "the path of the script in the repo is missing (:<path>)" if not m["path"] else None)
+    if why:
+        raise ExtrasError(f"--script is refused: {why}")
+    return {"url": m["url"], "commit": m["commit"], "path": m["path"]}, Path(m["path"]).stem, warnings
+
+
+def fetch_script(e: dict) -> None:
+    """A git-pinned script fetched and its whole pinned tree read and checked now, so a bad pin is refused at add."""
+    if "url" in e:
+        why = fetch_objects(e["url"], e["commit"], hook_source_dir(e))
+        if why:
+            raise ExtrasError(f"--script: {why}")
+        data, why = hook_blob(e)
+        if why:
+            raise ExtrasError(f"--script: {why}")
+        e["sha256"] = digest(data)
+
+
 def make_hook(event: str, opts: dict) -> tuple:
     """(entry, warnings) of a lifecycle hook: --hook <event> --script <absolute path | git-url@commit:path>
     [--timeout S]. The script is pinned at add: a path by its hash, a git one by its commit and its hash (it is fetched
@@ -552,42 +600,142 @@ def make_hook(event: str, opts: dict) -> tuple:
     if not spec:
         raise ExtrasError("a hook needs --script <absolute path> or --script <git-url>@<full commit>:<path>")
     timeout = parse_timeout(opts.get("timeout"))
-    warnings = []
     e = {"kind": "hook", "event": event, "for": [], "timeout": timeout}
-    if spec.startswith(("/", "~")):
-        path, h, warn = owners_file(spec, bool(opts.get("allow_repo_path")), "the hook script", True)
-        warnings += [warn] if warn else []
-        real = os.path.realpath(path)  # a link (dotfiles, home-manager): its target is pinned and run, never the link
-        if real != path:
-            warnings.append(f"note: {path} is a link: the file pinned and run is {real} (add it again when the link "
-                            "points elsewhere)")
-        e.update(script=real, sha256=h, **({"link": path} if real != path else {}))
-        stem = Path(path).stem
-    else:
-        m = SPEC.fullmatch(spec)
-        if not m:
-            raise ExtrasError("--script is an absolute path, or <git-url>@<full 40-hex commit>:<path> (a branch or "
-                              "short sha is not a pin)")
-        why = url_problem(m["url"]) or path_problem(m["path"] or "") or (
-            "the path of the script in the repo is missing (:<path>)" if not m["path"] else None)
-        if why:
-            raise ExtrasError(f"--script is refused: {why}")
-        e.update(url=m["url"], commit=m["commit"], path=m["path"])
-        stem = Path(m["path"]).stem
+    fields, stem, warnings = pin_script(spec, bool(opts.get("allow_repo_path")))
+    e.update(fields)
     stem = slug(stem)
     name = opts.get("name") or (stem if stem.startswith(event) else f"{event}-{stem}")  # one script at two events
     if not NAME.fullmatch(name or ""):
         raise ExtrasError("the hook's name is not lowercase letters, digits and dashes: give --name")
     e["name"] = name
-    if "url" in e:
-        why = fetch_objects(e["url"], e["commit"], hook_source_dir(e))
-        if why:
-            raise ExtrasError(f"--script: {why}")
-        data, why = hook_blob(e)  # the whole pinned tree is read and checked now, so a bad one is refused at add
-        if why:
-            raise ExtrasError(f"--script: {why}")
-        e["sha256"] = digest(data)
+    fetch_script(e)
     return e, warnings
+
+
+def make_agent_hook(event: str, opts: dict) -> tuple:
+    """(entry, warnings) of an agent hook: --agent-hook <event> [--matcher T|T] [--timeout S] -- <script>. The script
+    is pinned as a lifecycle hook's (pin_script); Claude runs it at its own event through lane-control's runner, and
+    OpenCode at its tool hooks for PreToolUse and PostToolUse (SessionStart and Stop are Claude only: said)."""
+    if event not in R.AGENT_EVENTS:
+        raise ExtrasError(f"--agent-hook takes {', '.join(R.AGENT_EVENTS)} (Claude Code's events)")
+    tail = list(opts.get("command") or [])
+    spec = opts.get("script") or (tail[0] if len(tail) == 1 else "")
+    if not spec or (tail and opts.get("script")) or len(tail) > 1:
+        raise ExtrasError("an agent hook is one script after `--` (an absolute path or <git-url>@<full commit>:"
+                          "<path>), with no arguments: --agent-hook <event> -- <script>")
+    try:
+        m = R.matcher(opts.get("matcher"), event)
+    except R.RuleError as err:
+        raise ExtrasError(str(err))
+    t = opts.get("timeout")
+    if t in (None, ""):
+        timeout = R.AGENT_HOOK_TIMEOUT
+    elif re.fullmatch(r"[0-9]{1,4}", str(t)) and 1 <= int(t) <= R.AGENT_HOOK_TIMEOUT_MAX:
+        timeout = int(t)
+    else:
+        raise ExtrasError(f"--timeout takes whole seconds, 1 to {R.AGENT_HOOK_TIMEOUT_MAX} for an agent hook "
+                          f"(default {R.AGENT_HOOK_TIMEOUT})")
+    e = {"kind": "agent-hook", "event": event, "for": parse_scope(opts.get("for")), "timeout": timeout,
+         **({"matcher": m} if m else {})}
+    fields, stem, warnings = pin_script(spec, bool(opts.get("allow_repo_path")))
+    e.update(fields)
+    stem = slug(stem)
+    ev = slug(event)
+    name = opts.get("name") or (stem if stem.startswith(ev) else f"{ev}-{stem}")
+    if not NAME.fullmatch(name or ""):
+        raise ExtrasError("the agent hook's name is not lowercase letters, digits and dashes: give --name")
+    e["name"] = name
+    fetch_script(e)
+    if event not in R.OPENCODE_EVENTS:
+        warnings.append(f"note: {event} is Claude only: OpenCode has no {event} hook that can do what Claude's does, "
+                        "so an OpenCode session does not run it")
+    else:
+        tools, none = R.opencode_tools(m)
+        if none and not tools:
+            warnings.append(f"note: no OpenCode tool does what {', '.join(none)} does, so this hook is Claude only")
+        elif none:
+            warnings.append(f"note: on OpenCode this hook runs for {', '.join(tools)} only: no OpenCode tool does what "
+                            f"{', '.join(none)} does")
+        elif tools:
+            warnings.append(f"note: on OpenCode it runs for the tools {', '.join(tools)} (its input is OpenCode's: "
+                            "tool_name is OpenCode's tool id)")
+    if event == "PreToolUse":
+        warnings.append("note: a PreToolUse hook fails closed: a timeout, a crash, any exit but 0, or a refused script "
+                        "blocks the call (Claude Code 2.1.295 or later; an older one lets a timed-out hook through)")
+    return e, warnings
+
+
+def contexts(store: "Path | None") -> list:
+    """[(root, private globs)] of the projects an extra in this store applies to: the project's own, or (the machine's,
+    store None) every project on this machine."""
+    if store is not None:
+        st = store_settings(store)
+        return [(st.get("root") or "", [g for g in st.get("private") or [] if isinstance(g, str)])]
+    return [(str(r), [g for g in st.get("private") or [] if isinstance(g, str)]) for r, st in known()]
+
+
+def store_settings(store: Path) -> dict:
+    try:
+        st = json.loads((Path(store) / "settings.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return st if isinstance(st, dict) else {}
+
+
+def privates(ctxs: list) -> list:
+    return [g for _, gs in ctxs for g in gs]
+
+
+def permission_problem(e: dict, ctxs: list = ()) -> tuple:
+    """(why refused or None, notes) of a permission extra. Only a deny is taken: an allow (stored before lc-yw1g's
+    review) is refused, never written (allow extras are lc-pwdq)."""
+    if e.get("effect") != "deny":
+        return ("allow rules are not extras: on OpenCode no allow can be made safe yet, and a Bash allow runs any code "
+                "(lc-pwdq); remove it"), []
+    try:
+        return R.deny_problem(e["rule"], secretish_name), []
+    except R.RuleError as err:
+        return str(err), []
+
+
+def env_problem(name: str, value) -> "str | None":
+    return R.env_problem(name, value, secretish_name, opaque, TOKEN_VALUE, USERINFO, SECRET_QUERY, AUTH_TEXT)
+
+
+def make_permission(value, opts: dict) -> tuple:
+    effect, rule = (list(value) + [None, None])[:2] if isinstance(value, (list, tuple)) else (None, None)
+    if effect == "allow":
+        raise ExtrasError("--permission takes deny rules only: an allow cannot be made safe yet (on OpenCode the floor "
+                          "is advisory and an allow there lifts someone else's deny; a Bash allow runs any code). Allow "
+                          "extras are lc-pwdq")
+    if effect not in R.EFFECTS or not rule:
+        raise ExtrasError("--permission takes deny and a rule: --permission deny 'Bash(git push --force *)'")
+    if R.secretish(rule, secretish_name):
+        raise ExtrasError("--permission is refused: the rule looks like it carries a key, token or password (not "
+                          "shown)")
+    try:
+        tool, _ = R.parse(rule)
+    except R.RuleError as err:
+        raise ExtrasError(f"--permission is refused: {err}")
+    e = {"kind": "permission", "effect": effect, "rule": rule.strip(), "for": parse_scope(opts.get("for")),
+         "name": f"{effect}:{rule.strip()}"}
+    notes = []
+    if not R.to_opencode(rule, "/h", "/f"):
+        notes.append(f"note: {rule.strip()} is Claude only: OpenCode has no rule for {tool}, so an OpenCode session "
+                     "is not held by this deny")
+    notes.append("note: on OpenCode a deny and lane-control's own denies are advisory: its grep tool, its shell and a "
+                 "read through a link never present the path a deny names (lc-mpb5)")
+    return e, notes
+
+
+def make_env(value: str, opts: dict) -> tuple:
+    name, eq, val = (value or "").partition("=")
+    if not eq:
+        raise ExtrasError("--env takes NAME=value for an env extra (an MCP server's --env takes a NAME only)")
+    why = env_problem(name, val)
+    if why:
+        raise ExtrasError(f"--env is refused: {why} (the value is not shown)")
+    return {"kind": "env", "name": name, "value": val, "for": parse_scope(opts.get("for"))}, []
 
 
 def make(kind: str, value, opts: dict) -> tuple:
@@ -595,6 +743,12 @@ def make(kind: str, value, opts: dict) -> tuple:
     harness, allow_repo_path, script, timeout."""
     if kind == "hook":
         return make_hook(value, opts)
+    if kind == "agent-hook":
+        return make_agent_hook(value, opts)
+    if kind == "permission":
+        return make_permission(value, opts)
+    if kind == "env":
+        return make_env(value, opts)
     scope = parse_scope(opts.get("for"))
     warnings = []
     e = {"kind": kind, "for": scope}
@@ -678,7 +832,7 @@ def add(path: Path, entry: dict) -> str:
     """Put entry in the store file (replacing one with its id); 'added' or 'replaced'."""
     data = load(path)
     was = [e for e in data["extras"] if ident(e) == ident(entry)]
-    other = [e for e in was if e["kind"] == "hook" and e.get("event") != entry.get("event")]
+    other = [e for e in was if e["kind"] in ("hook", "agent-hook") and e.get("event") != entry.get("event")]
     if other:
         raise ExtrasError(f"{ident(entry)} is already the {other[0].get('event')} hook here: give this one another "
                           "--name (a hook replaces only one of its own event)")
@@ -722,9 +876,15 @@ def describe(e: dict) -> str:
         return shlex.join([e["command"], *e.get("args", [])]) + env
     if k == "persona":
         return f"{e['prompt_file']} (tier {e['tier']}, {e['harness']})"
-    if k == "hook":
+    if k in ("hook", "agent-hook"):
         where = e["script"] if e.get("script") else f"{e['url']}@{e['commit'][:12]}:{e['path']}"
-        return f"{e['event']}: {where} (timeout {e.get('timeout', HOOK_TIMEOUT)} s)"
+        m = f" {e['matcher']}" if e.get("matcher") else ""
+        only = " (Claude only)" if k == "agent-hook" and e["event"] not in R.OPENCODE_EVENTS else ""
+        return f"{e['event']}{m}: {where} (timeout {e.get('timeout', HOOK_TIMEOUT)} s){only}"
+    if k == "permission":
+        return f"{e.get('effect')} {e['rule']}" + ("" if R.to_opencode(e["rule"], "/h", "/f") else " (Claude only)")
+    if k == "env":
+        return f"{e['name']}={e['value']}"
     return f"{e['harness']}:{e['source']}@{e['pin']}"
 
 
@@ -1096,23 +1256,189 @@ def opencode_mcp(e: dict) -> dict:
             **({"environment": {n: "{env:%s}" % n for n in e["env"]}} if e.get("env") else {})}
 
 
-def wanted(entries: list) -> tuple:
-    """(problems, by kind) for a folder's entries: what may go in, after every source and pin was checked."""
-    es = [e for e in entries if not user_level(e) and e["kind"] not in ("persona", "hook")]
-    problems = []
-    for e in es:
-        why = ensure_skill(e) if e["kind"] == "skill" else mcp_problem(e) if e["kind"] == "mcp" else None
-        if why:
-            problems.append(f"{ident(e)}: {why}")
-    kinds = {k: [e for e in es if e["kind"] == k] for k in ("skill", "mcp", "plugin")}
+SESSION_KINDS = ("skill", "mcp", "plugin", "agent-hook", "permission", "env")
+
+
+def wanted(entries: list, ctxs: list = ()) -> tuple:
+    """(problems, by kind) for a folder's entries (wanted_split without the labels)."""
+    problems, kinds, _ = wanted_split(entries, ctxs)
     return problems, kinds
+
+
+def wanted_split(entries: list, ctxs: list = ()) -> tuple:
+    """(problems, by kind, labels with a problem) for a folder's entries: what may go in, after every source and pin
+    was checked (an agent hook's script against its pin, a deny rule and an env value against the secret shapes)."""
+    es = [e for e in entries if not user_level(e) and e["kind"] in SESSION_KINDS]
+    problems, bad = [], set()
+    for e in es:
+        k = e["kind"]
+        why = ensure_skill(e) if k == "skill" else mcp_problem(e) if k == "mcp" else \
+            hook_problem(e, fetch_it=True) if k == "agent-hook" else permission_problem(e, ctxs)[0] \
+            if k == "permission" else env_problem(e["name"], e.get("value")) if k == "env" else None
+        if why:
+            bad.add(label(e))
+            problems.append(f"{label(e)}: {why}" + (" (refused: a changed or missing agent hook is never dropped "
+                                                    "silently: its entry stays and refuses to run, which blocks a "
+                                                    "PreToolUse call; add it again or remove it)" if k == "agent-hook"
+                                                    else ""))
+    kinds = {k: [e for e in es if e["kind"] == k] for k in SESSION_KINDS}
+    return problems, kinds, bad
+
+
+PROTECTIONS = ("permission", "agent-hook")
+KEPT = ("on a problem the folder keeps lane-control's protections (deny rules, its floor, agent hooks, each of which "
+        "refuses a changed script) and loses what grants (MCP servers, plugins, skills, env values) until it is fixed")
+
+
+def protective(kinds: dict, bad: set) -> dict:
+    """What stays when something cannot be done: the deny rules with no problem of their own, and every agent hook
+    (its runner refuses one that changed, so a guard fails closed instead of going away). Nothing that grants."""
+    return {k: ([e for e in kinds[k] if not (k == "permission" and label(e) in bad)] if k in PROTECTIONS else [])
+            for k in SESSION_KINDS}
+
+
+def lane_control_root() -> Path:
+    """The lane-control tree hooks name: .../lane-control/current when this is the installed one, else this tree."""
+    cur = ROOT.parent / "current"
+    try:
+        if cur.is_symlink() and cur.resolve() == ROOT.resolve():
+            return cur
+    except OSError:
+        pass
+    return ROOT
+
+
+def session_ctx(root: "Path | None") -> dict:
+    """What the floor and the hook commands of a project's sessions need: HOME, the main checkout, its --private
+    globs, and the lane-control tree."""
+    st = store_settings(store_for(root)) if root else {}
+    data = os.environ.get("XDG_DATA_HOME")
+    claude = os.environ.get("CLAUDE_CONFIG_DIR")
+    dirs = {"config": str(config_home()), "state": str(state_home()),
+            "data": data if data and os.path.isabs(data) else str(home() / ".local" / "share"),
+            "claude": claude if claude and os.path.isabs(claude) else str(home() / ".claude")}
+    return {"home": str(home()), "root": str(Path(root).resolve()) if root else "",
+            "private": [g for g in st.get("private") or [] if isinstance(g, str)], "lc": str(lane_control_root()),
+            "dirs": dirs}
+
+
+def hook_command(e: dict, ctx: dict, harness: str = "claude") -> list:
+    """The argv a harness runs for an agent hook: lane-control's runner, never the script itself."""
+    argv = ["python3", "-I", R.runner_path(ctx["lc"]), "run", ctx["root"] or "-", e.get("origin") or "project",
+            e["name"], e["event"]]
+    return argv + (["--harness", harness] if harness != "claude" else [])
+
+
+def session_floor(kinds: dict, ctx: dict, folder: str, own: list) -> "list | None":
+    """The floor a session gets: the whole of it beside any deny rule; beside agent hooks alone, the part that keeps a
+    guard in place (no edit of the files written here, the agents' settings, lane-control's folders); else none."""
+    part = "full" if kinds["permission"] else "guard" if kinds["agent-hook"] else None
+    if part is None:
+        return None
+    return R.floor(ctx["home"], folder, ctx["root"] or folder, ctx["private"], own, ctx.get("dirs"), part)
+
+
+def claude_session(kinds: dict, ctx: dict, folder: str, own: list) -> dict:
+    """The permissions (the owner's denies and the floor: never an allow), env and hooks a Claude session in `folder`
+    gets. A PreToolUse hook fails closed: onFailure block (a timeout, a crash or a runner that cannot start blocks the
+    call), with Claude's timeout past the runner's own and its stop grace."""
+    out = {}
+    items = session_floor(kinds, ctx, folder, own)
+    if items is not None:
+        out["permissions"] = R.claude_permissions([e["rule"] for e in kinds["permission"]], items, ctx["home"])
+    if kinds["env"]:
+        out["env"] = {e["name"]: e["value"] for e in kinds["env"]}
+    if kinds["agent-hook"]:
+        hooks = {}
+        for e in kinds["agent-hook"]:
+            cmd = {"type": "command", "command": shlex.join(hook_command(e, ctx)),
+                   "timeout": int(e.get("timeout") or R.AGENT_HOOK_TIMEOUT) + R.HOOK_MARGIN}
+            if e["event"] == "PreToolUse":
+                cmd["onFailure"] = "block"
+            h = {"hooks": [cmd]}
+            if e["event"] in ("PreToolUse", "PostToolUse"):
+                h = {"matcher": e.get("matcher") or "*", **h}
+            hooks.setdefault(e["event"], []).append(h)
+        out["hooks"] = hooks
+    return out
+
+
+def opencode_plugin(env: dict, hooks: list) -> str:
+    """OpenCode's half of env values and agent hooks: a v2 plugin (the API lane-away-guard.js uses, probed on 2.2.1).
+    shell.create.before sets the env values for shell commands; tool.execute.before runs a PreToolUse hook (any exit
+    but 0, a timeout or the runner not starting stops the call with what it said), tool.execute.after a PostToolUse
+    one (it only tells)."""
+    return """// lane-control-extras.js: written by lane-control (core/extras.py) from the owner's extras; never edit it by hand:
+// lane-control project|machine extras changes it at the next refresh or lane prepare. Each hook runs lane-control's
+// runner (core/scripts/lane-agent-hook), which checks the owner's script against its pin and runs a private copy with
+// no secret in its environment.
+import { spawn } from "node:child_process";
+
+const ENV = %s;
+const HOOKS = %s;
+
+function run(h, payload) {
+  return new Promise((done) => {
+    let out = "", err = "";
+    let child;
+    try {
+      child = spawn(h.argv[0], h.argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] });
+    } catch (e) {
+      done({ code: null, out, err: String(e) });
+      return;
+    }
+    const timer = setTimeout(() => child.kill("SIGKILL"), (h.timeout + %d) * 1000);
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { err += d; });
+    child.on("error", (e) => { clearTimeout(timer); done({ code: null, out, err: String(e) }); });
+    child.on("close", (code) => { clearTimeout(timer); done({ code, out, err }); });
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+const wants = (h, tool) => h.tools === null || h.tools.includes(tool);
+
+export default {
+  id: "lane-control-extras",
+  async setup(ctx) {
+    const regs = [];
+    if (Object.keys(ENV).length) {
+      regs.push(await ctx.shell.hook("create.before", (event) => { Object.assign(event.env, ENV); }));
+    }
+    const pre = HOOKS.filter((h) => h.event === "PreToolUse");
+    const post = HOOKS.filter((h) => h.event === "PostToolUse");
+    const payload = (name, event) => ({ hook_event_name: name, tool_name: event.tool, tool_input: event.input,
+      session_id: event.sessionID, cwd: ctx.location?.directory, harness: "opencode" });
+    if (pre.length) {
+      regs.push(await ctx.tool.hook("execute.before", async (event) => {
+        for (const h of pre) {
+          if (!wants(h, event.tool)) continue;
+          const r = await run(h, payload("PreToolUse", event));
+          if (r.code !== 0) {  // fails closed, as Claude's onFailure block: any exit but 0, a timeout, no start
+            throw new Error(`${h.id}: ` + ((r.err || r.out).trim().slice(-2000) || "blocked"));
+          }
+        }
+      }));
+    }
+    if (post.length) {
+      regs.push(await ctx.tool.hook("execute.after", async (event) => {
+        for (const h of post) if (wants(h, event.tool)) await run(h, payload("PostToolUse", event));
+      }));
+    }
+    return () => regs.forEach((r) => r?.dispose?.());
+  },
+};
+""" % (json.dumps(env, ensure_ascii=True), json.dumps(hooks, ensure_ascii=True, indent=2), R.HOOK_MARGIN)
 
 
 def json_text(data: dict) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
-def opencode_files(kinds: dict) -> dict:
+def opencode_files(kinds: dict, ctx: "dict | None" = None, folder: str = "", own: list = ()) -> dict:
+    """A folder's OpenCode files: opencode.json (mcp, plugin, the permissions and their floor as policies), the
+    plugin for env values and agent hooks, and skill links."""
+    kinds = {k: kinds.get(k, []) for k in SESSION_KINDS}
     files = {}
     cfg = {}
     if kinds["mcp"]:
@@ -1120,11 +1446,29 @@ def opencode_files(kinds: dict) -> dict:
     plugins = [f"{e['source']}@{e['pin']}" for e in kinds["plugin"] if e["harness"] == "opencode"]
     if plugins:
         cfg["plugin"] = plugins
+    items = session_floor(kinds, ctx, folder, own) if ctx else None
+    if items is not None:
+        perms, policies = R.opencode_permissions([e["rule"] for e in kinds["permission"]], items, ctx["home"], folder)
+        if perms:
+            cfg["permissions"] = perms
+        cfg["policies"] = policies
     if cfg:
         files[".opencode/opencode.json"] = json_text({"$schema": "https://opencode.ai/config.json", **cfg})
+    hooks = [{"id": label(e), "event": e["event"], "tools": R.opencode_tools(e.get("matcher"))[0],
+              "argv": hook_command(e, ctx, "opencode"), "timeout": int(e.get("timeout") or R.AGENT_HOOK_TIMEOUT)}
+             for e in kinds["agent-hook"] if e["event"] in R.OPENCODE_EVENTS and
+             R.opencode_tools(e.get("matcher"))[0] != []] if ctx else []
+    env = {e["name"]: e["value"] for e in kinds["env"]}
+    if env or hooks:
+        files[OC_PLUGIN] = opencode_plugin(env, hooks)
     for e in kinds["skill"]:
         files[f".opencode/skills/{e['name']}"] = skill_dir(e)
     return files
+
+
+def own_files(files: dict) -> list:
+    """The files lane-control writes in a folder (not its skill links): the session may not edit them."""
+    return sorted(rel for rel, c in files.items() if not isinstance(c, Path))
 
 
 def tracked(folder: Path, rel: str) -> bool:
@@ -1132,8 +1476,9 @@ def tracked(folder: Path, rel: str) -> bool:
     return bool(r and r.returncode == 0 and r.stdout.strip())
 
 
-def claude_worktree_files(folder: Path, kinds: dict) -> dict:
+def claude_worktree_files(folder: Path, kinds: dict, ctx: "dict | None" = None, own: list = ()) -> dict:
     """A lane's or reviewer's Claude files in its own worktree."""
+    kinds = {k: kinds.get(k, []) for k in SESSION_KINDS}
     files = {}
     if kinds["mcp"]:
         files[".mcp.json"] = json_text({"mcpServers": {e["name"]: claude_mcp(e) for e in kinds["mcp"]}})
@@ -1143,6 +1488,8 @@ def claude_worktree_files(folder: Path, kinds: dict) -> dict:
     plugins = {e["source"]: True for e in kinds["plugin"] if e["harness"] == "claude"}
     if plugins:
         settings["enabledPlugins"] = plugins
+    if ctx:
+        settings.update(claude_session(kinds, ctx, str(folder), list(own)))
     if settings:
         rel = ".claude/settings.json" if not tracked(folder, ".claude/settings.json") else \
             ".claude/settings.local.json"
@@ -1152,14 +1499,21 @@ def claude_worktree_files(folder: Path, kinds: dict) -> dict:
     return files
 
 
-def claude_launch_files(kinds: dict) -> dict:
-    """The coordinator's Claude files, in its launch folder (paths relative to it)."""
+def claude_launch_files(kinds: dict, ctx: "dict | None" = None) -> dict:
+    """The coordinator's Claude files, in its launch folder (paths relative to it). Its floor names absolute paths:
+    a `/path` rule in a --settings file would anchor at the launch folder, not the checkout."""
+    kinds = {k: kinds.get(k, []) for k in SESSION_KINDS}
     files = {}
     if kinds["mcp"]:
         files["mcp.json"] = json_text({"mcpServers": {e["name"]: claude_mcp(e) for e in kinds["mcp"]}})
+    settings = {}
     plugins = {e["source"]: True for e in kinds["plugin"] if e["harness"] == "claude"}
     if plugins:
-        files["settings.json"] = json_text({"enabledPlugins": plugins})
+        settings["enabledPlugins"] = plugins
+    if ctx:
+        settings.update(claude_session(kinds, ctx, ctx["root"], []))
+    if settings:
+        files["settings.json"] = json_text(settings)
     if kinds["skill"]:
         files["plugin/.claude-plugin/plugin.json"] = json_text({
             "name": PLUGIN_NAME, "version": "1.0.0",
@@ -1183,11 +1537,13 @@ def launch_args(store: Path) -> list:
 
 
 def apply_launch(store: Path, entries: list, dry: bool = False) -> tuple:
-    """The coordinator's Claude launch folder holding exactly what its entries give (all or nothing: on a problem
-    it is emptied). (lines, problems)."""
+    """The coordinator's Claude launch folder holding exactly what its entries give; on a problem only its
+    protections (KEPT). (lines, problems)."""
     d = launch_dir(store)
-    problems, kinds = wanted(entries)
-    want = {} if problems else claude_launch_files(kinds)
+    root = store_settings(store).get("root")
+    ctx = session_ctx(Path(root) if root else None)
+    problems, kinds, bad = wanted_split(entries, [(ctx["root"], ctx["private"])])
+    want = claude_launch_files(protective(kinds, bad) if problems else kinds, ctx)
     have = {}
     if d.is_dir():
         for p in d.rglob("*"):
@@ -1273,8 +1629,9 @@ def mark(content) -> str:
 def apply_folder(folder: Path, entries: list, scopes: list, claude: bool = True, dry: bool = False,
                  project: "Path | None" = None) -> tuple:
     """Make folder hold exactly what `entries` give a session there: Claude's worktree files (claude=True: a lane's
-    or reviewer's) and OpenCode's. All or nothing: on any problem the folder keeps none of lane-control's files.
-    (lines, problems). dry: change nothing, say what would change."""
+    or reviewer's) and OpenCode's. On any problem the folder gets only lane-control's protections (KEPT: never a
+    deny, the floor or a guard hook taken out), and a file that cannot be written (committed, foreign, behind a link)
+    is left exactly as it is. (lines, problems). dry: change nothing, say what would change."""
     folder = Path(folder).resolve()
     rec = read_record(folder)
     had = {k: v for k, v in (rec.get("files") or {}).items() if isinstance(v, str)}
@@ -1284,28 +1641,45 @@ def apply_folder(folder: Path, entries: list, scopes: list, claude: bool = True,
     def ours(rel, now):
         return now is not None and mark(now) in {had.get(rel), alt.get(rel)} - {None}
     had = {**{k: v for k, v in alt.items() if k not in had}, **had}
-    problems, kinds = wanted(entries)
-    want = {}
-    if not problems:
-        want = {**(claude_worktree_files(folder, kinds) if claude else {}), **opencode_files(kinds)}
+    ctx = session_ctx(Path(project) if project else folder)
+    problems, kinds, bad = wanted_split(entries, [(ctx["root"], ctx["private"])])
+
+    def files_for(ks):
+        def build(own):
+            return {**(claude_worktree_files(folder, ks, ctx, own) if claude else {}),
+                    **opencode_files(ks, ctx, str(folder), own)}
+        return build(own_files(build([])))  # the floor denies edits of exactly the files written here
+    want = files_for(protective(kinds, bad) if problems else kinds)
     if not want and not had and not problems:
         return [], []
+    frozen, seen = set(), set()
+
+    def check_files(w):
+        for rel in sorted(set(w) | set(had)):
+            if rel in seen:
+                continue
+            seen.add(rel)
+            why = unsafe(folder, rel)
+            now = None if why else current(folder, rel)
+            if why:
+                problems.append(f"{rel}: {why}; lane-control writes nothing through it")
+            elif rel in w and tracked(folder, rel):
+                problems.append(f"{rel} is committed in the project: lane-control never changes it")
+            elif rel in w and now is not None and not ours(rel, now):
+                problems.append(f"{folder / rel} is there and is not lane-control's (or changed since it was "
+                                "written); left so")
+            else:
+                continue
+            frozen.add(rel)  # left exactly as it is
+    had_problems = bool(problems)
+    check_files(want)
+    if problems and not had_problems:
+        want = files_for(protective(kinds, bad))  # something cannot be done: only the protections stay
+        check_files(want)
+    want = {rel: c for rel, c in want.items() if rel not in frozen}
+    lines = [f"{folder}: {KEPT}"] if problems else []
     for rel in sorted(set(want) | set(had)):
-        why = unsafe(folder, rel)
-        if why:
-            problems.append(f"{rel}: {why}; lane-control writes nothing through it")
-            continue
-        now = current(folder, rel)
-        if rel in want and tracked(folder, rel):
-            problems.append(f"{rel} is committed in the project: lane-control never changes it")
-        elif rel in want and now is not None and not ours(rel, now):
-            problems.append(f"{folder / rel} is there and is not lane-control's (or changed since it was written); "
-                            "left so")
-    if problems:
-        want = {}  # all or nothing: none of ours stays where something could not be done
-    lines = []
-    for rel in sorted(set(want) | set(had)):
-        if unsafe(folder, rel):
+        if rel in frozen or unsafe(folder, rel):
             continue
         now = current(folder, rel)
         if rel in want:
@@ -1327,7 +1701,7 @@ def apply_folder(folder: Path, entries: list, scopes: list, claude: bool = True,
     write_file(record_file(folder), json_text({**rec_body, "files": {k: v for k, v in had.items()},
                                                 "pending": files}), 0o600)
     for rel in sorted(set(want) | set(had)):
-        if unsafe(folder, rel):
+        if rel in frozen or unsafe(folder, rel):
             continue
         f, now = folder / rel, current(folder, rel)
         if rel in want and now != want[rel]:
@@ -1409,7 +1783,7 @@ def prepare_entries(entries: list, scopes: list) -> list:
     chosen = {}
     for s in scopes:
         for e in for_scope(entries, s):
-            chosen[ident(e)] = e
+            chosen[label(e)] = e  # an agent hook's level is part of it: the machine's and the project's both run
     return list(chosen.values())
 
 
@@ -1512,7 +1886,8 @@ def coordinator_section(repo: Path, entries: list, lane_control: str) -> str:
         parts = []
         if any(not user_level(e) and e["kind"] not in ("persona", "hook") for s in ("lanes", "reviewer")
                for e in for_scope(entries, s)):
-            parts.append("extras (skills, MCP servers or plugins) that must be in their worktree")
+            parts.append("extras (skills, MCP servers, plugins, agent hooks, permission rules or env values) that "
+                         "must be in their worktree")
         if starts:
             parts.append("lane-start hooks (the owner's scripts) that run once a lane's worktree is ready")
         out.append(f"The {who} of this project have {' and '.join(parts)}, before the agent starts:")
@@ -1528,9 +1903,17 @@ def coordinator_section(repo: Path, entries: list, lane_control: str) -> str:
 
 # --- checking ----------------------------------------------------------------------------------------------------
 
-def check_entry(e: dict) -> tuple:
-    """(state, detail) of one extra, read only: ok, missing, changed or failing."""
+def check_entry(e: dict, ctxs: list = ()) -> tuple:
+    """(state, detail) of one extra, read only: ok, missing, changed or failing (ctxs: the projects it applies to, for
+    a permission rule's --private check)."""
     k = e["kind"]
+    if k == "permission":
+        why, _ = permission_problem(e, list(ctxs))
+        return ("failing", f"{why}: refresh and prepare refuse it now; remove it") if why else \
+            ("ok", f"deny {e['rule']}, with lane-control's own denies beside it")
+    if k == "env":
+        why = env_problem(e["name"], e.get("value"))
+        return ("failing", f"{why}; remove it") if why else ("ok", f"{e['name']} set for its roles' sessions")
     if k == "skill":
         if user_level(e):
             link = home() / ".agents" / "skills" / e["name"]
@@ -1560,7 +1943,7 @@ def check_entry(e: dict) -> tuple:
         if sha256(f) != e.get("sha256"):
             return "changed", f"{f} changed since it was added"
         return "ok", f"{f}, tier {e['tier']}, {e['harness']}"
-    if k == "hook":
+    if k in ("hook", "agent-hook"):
         why = hook_problem(e)
         if why is None:
             return "ok", f"{e['event']}: " + (f"{hook_file(e)} as added" if e.get("script") else
@@ -1583,14 +1966,15 @@ def check(store: "Path | None", folder: "Path | None" = None) -> list:
     whether the coordinator has what refresh would give it. [{id, origin, for, state, detail, what}]."""
     rows = []
     entries = effective(store)
+    ctxs = contexts(store)
     for e in entries:
-        state, detail = check_entry(e)
+        state, detail = check_entry(e, ctxs)
         row = {"id": label(e), "origin": e.get("origin"), "for": roles(e), "state": state, "detail": detail,
                "what": describe(e)}
         if e["kind"] == "hook":
             row["event"] = e.get("event")
-            if state in PROBLEMS:
-                row["fix"] = hook_fix(e, state)
+        if e["kind"] in ("hook", "agent-hook") and state in PROBLEMS:
+            row["fix"] = hook_fix(e, state)
         rows.append(row)
     if folder is not None and store is not None:
         coord = for_scope(entries, "coordinator")

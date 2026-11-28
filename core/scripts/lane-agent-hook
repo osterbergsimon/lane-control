@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""lane-agent-hook: runs one of the owner's agent hooks for Claude Code or OpenCode (lc-yw1g, EXT-1b). The agent's
+settings name this runner, never the owner's script (core/extras.py claude_session, opencode_plugin):
+
+  python3 -I <lane-control>/core/scripts/lane-agent-hook run <project root | -> <machine|project> <name> <event>
+                                                          [--harness claude|opencode]
+
+It reads the extra from the owner's store (never from the folder the session runs in), checks its script against
+its pin and runs a private copy made just before (core/hooks.py prepared: a path hook's bytes that matched its hash,
+a git hook's pinned commit written out object by object, each hashed), in the session's folder, with the event's
+JSON on stdin passed through and its stdout, stderr and exit code passed back. Its environment is EXT-2's short list
+(PATH, HOME, USER, the locale, the XDG folders, TMPDIR, SSH_AUTH_SOCK), CLAUDE_PROJECT_DIR and LANE_AGENT_HOOK_EVENT,
+_NAME, _HARNESS: none of the agent's other variables, so no token or key. Its own process group, stopped at its
+timeout and when the runner is stopped.
+
+A hook it cannot run as added (changed, missing, removed, not fetched), a timeout, and any error of the runner's own
+are refused, never skipped in silence: for PreToolUse the tool call is blocked (exit 2, the reason on stderr), for the
+other events the error is reported (exit 1) and the session goes on. Claude also has onFailure block on a PreToolUse
+entry, with its timeout past this one, so a runner that hangs or cannot start blocks too."""
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parents[2]
+
+
+def _load(name, rel):
+    spec = importlib.util.spec_from_file_location(name, HERE / rel)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def refuse(event: str, what: str, why: str) -> int:
+    print(f"lane-control: the owner's agent hook {what} is refused: {why}. Tell the owner (lane-control project "
+          f"check names it); it is not skipped" + (": this tool call is blocked" if event == "PreToolUse" else ""),
+          file=sys.stderr)
+    return 2 if event == "PreToolUse" else 1
+
+
+def env_for(H, e: dict, event: str, harness: str) -> dict:
+    env = {k: os.environ[k] for k in H.PASS_ENV if os.environ.get(k)}
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    env.setdefault("HOME", str(H.X.home()))
+    if os.environ.get("CLAUDE_PROJECT_DIR"):
+        env["CLAUDE_PROJECT_DIR"] = os.environ["CLAUDE_PROJECT_DIR"]
+    env.update(LANE_AGENT_HOOK_EVENT=event, LANE_AGENT_HOOK_NAME=e["name"], LANE_AGENT_HOOK_HARNESS=harness)
+    return env
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    event = next((a for a in argv if a in ("PreToolUse", "PostToolUse", "SessionStart", "Stop")), "PreToolUse")
+    try:
+        return run(argv)
+    except BaseException as err:  # anything unforeseen fails closed for a guard
+        if isinstance(err, SystemExit) and err.code in (0, None):
+            return 0
+        return refuse(event, "agent-hook", f"the runner failed ({type(err).__name__})")
+
+
+def run(argv: list) -> int:
+    harness = "claude"
+    if "--harness" in argv:
+        i = argv.index("--harness")
+        harness = (argv[i + 1:i + 2] or ["claude"])[0]
+        argv = argv[:i] + argv[i + 2:]
+    if len(argv) != 5 or argv[0] != "run" or argv[2] not in ("machine", "project") or \
+            harness not in ("claude", "opencode"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    _, root, level, name, event = argv
+    what = f"agent-hook:{level}:{name}"
+    try:
+        H = _load("lc_hooks_agent", "core/hooks.py")
+    except Exception as err:  # the install is broken: never run anything
+        return refuse(event, what, f"lane-control cannot load its hooks code ({err})")
+    X = H.X
+    try:
+        store = X.store_for(Path(root)) if root != "-" else None
+        found = [e for e in X.effective(store) if e["kind"] == "agent-hook" and e.get("origin") == level and
+                 e["name"] == name]
+    except X.ExtrasError as err:
+        return refuse(event, what, str(err))
+    if not found:
+        return refuse(event, what, "there is no such extra any more (removed?); lane-control project refresh takes "
+                                   "it out of the session's settings")
+    e = found[0]
+    if e.get("event") != event:
+        return refuse(event, what, f"it is the {e.get('event')} hook, not {event}'s")
+    base = H.runs_dir()
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        d = Path(tempfile.mkdtemp(prefix=f"agent-{name}.", dir=base))
+    except OSError as err:
+        return refuse(event, what, f"its run folder cannot be made ({err.strerror or err})")
+    try:
+        exe, why = H.prepared(e, d)
+        if why:
+            return refuse(event, what, why)
+        try:
+            timeout = int(e.get("timeout") or 60)
+        except (TypeError, ValueError):
+            return refuse(event, what, "its timeout in the store is not a number")
+        with H.guarded():
+            try:
+                p = subprocess.Popen([str(exe)], env=env_for(H, e, event, harness), start_new_session=True)
+            except OSError as err:
+                return refuse(event, what, f"it could not be started ({err.strerror or err})")
+            H.RUNNING.add(p.pid)
+            try:
+                code = p.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                H.stop_group(p.pid)
+                p.wait()
+                return refuse(event, what, f"it ran past its timeout of {timeout} s")
+            finally:
+                H.stop_group(p.pid)
+                H.RUNNING.discard(p.pid)
+        return code
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

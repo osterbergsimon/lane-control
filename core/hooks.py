@@ -50,6 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import extras as X  # noqa: E402
+import agentrules as R  # noqa: E402
 
 EVENTS = X.EVENTS
 BLOCKING = ("after-setup", "lane-start", "gate")  # a failure fails the command; after-merge and on-report warn
@@ -76,14 +77,7 @@ FACTS = {  # fact: (the pattern its value must match, what it is)
     "setup": (r"setup|refresh", "setup or refresh"),
 }
 FREE = ("project", "project_root", "repo", "worktree")  # free text: only checked for the real shapes of a secret
-# The real shapes of a token or key: a known prefix at a word's start with a long run after it (so `task-tracker`,
-# `desk-4ab` or `fix-disk-usage` are names, not keys), a JWT, a private key block, a webhook URL.
-SECRET_SHAPE = re.compile(
-    r"(?<![A-Za-z0-9])(?:sk-(?:ant-|proj-|live-|test-)?|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abposr]-|"
-    r"AKIA|ASIA|AIza|ya29\.)[A-Za-z0-9_-]{16,}"
-    r"|(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"
-    r"|-----BEGIN[A-Z ]*PRIVATE KEY-----"
-    r"|https://hooks\.slack\.com/services/\S+|https://discord(?:app)?\.com/api/webhooks/\S+")
+SECRET_SHAPE = R.SECRET_SHAPE  # the real shapes of a token or key (core/agentrules.py, shared)
 ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|\x9b[0-?]*[ -/]*[@-~]")
 # a secret-named key or option given a value, in the common forms of output: name=value, name: value, "name": "value",
 # --name value. Words that are rarely a secret in test output (PASS, PWD, SESSION, ...) do not count here.
@@ -93,17 +87,7 @@ KEY_VALUE = re.compile(r"""(?P<q>["']?)(?P<k>[A-Za-z_][A-Za-z0-9_.-]{0,63})(?P=q
 OPTION_VALUE = re.compile(r"(?P<k>--?[A-Za-z][A-Za-z0-9_-]{0,63})(?P<sep>\s+)(?P<v>[^\s-]\S*)")
 
 
-def key_like(text: str) -> bool:
-    """A real key in a name or a path: a SECRET_SHAPE match that also holds one unbroken run of 16 or more letters
-    and digits with both in it (`sk-1234-add-login-validation` or `sk-learn-experiments-2` is a name; a key's body is
-    one long run)."""
-    for m in SECRET_SHAPE.finditer(text):
-        for run in re.findall(r"[A-Za-z0-9]{16,}", m.group(0)):
-            if re.search(r"[0-9]", run) and re.search(r"[A-Za-z]", run):
-                return True
-        if m.group(0).startswith("-----BEGIN"):
-            return True
-    return False
+key_like = R.key_like
 
 
 class HookError(X.ExtrasError):

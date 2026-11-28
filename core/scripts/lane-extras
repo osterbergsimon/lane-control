@@ -30,6 +30,16 @@ Kinds:
                                                            that event with facts as LANE_HOOK_* variables, outside every
                                                            worktree, never with a secret (core/hooks.py); default
                                                            timeout 600 s
+  --agent-hook PreToolUse|PostToolUse|SessionStart|Stop [--matcher Tool|Tool] [--timeout S] -- <script>
+                                                           the agent's own hook: the owner's script (an absolute path
+                                                           or git-url@commit:path, pinned), run through lane-control's
+                                                           runner with no secret in its environment; OpenCode runs the
+                                                           two tool events (the others are Claude only)
+  --permission deny <rule>                                 a Claude deny rule (Bash(git push --force *),
+                                                           Read(data/**)), with lane-control's own denies beside it;
+                                                           allow rules are not extras (lc-pwdq); on OpenCode advisory
+  --env NAME=value                                         a non-secret environment value (no secret name or value,
+                                                           never LANE_*, ORCA_*, HOME, XDG_*, PATH, ...)
 
 add and remove are a person's only, at a terminal (an agent is refused, as for lane new). A file an extra names (an
 MCP command or argument, a prompt file, a hook script) must be an absolute path outside every project checkout unless
@@ -59,7 +69,7 @@ def _load(name, rel):
 
 H = _load("lc_hooks", "core/hooks.py")
 X = H.X  # one copy of core/extras.py, so one ExtrasError
-KIND_FLAGS = ("skill", "mcp", "persona", "plugin", "hook")
+KIND_FLAGS = ("skill", "mcp", "persona", "plugin", "hook", "agent_hook", "permission")
 
 
 class Parser(argparse.ArgumentParser):
@@ -97,6 +107,9 @@ def add_parser(prog: str, project: bool) -> argparse.ArgumentParser:
     ap.add_argument("--persona")
     ap.add_argument("--plugin")
     ap.add_argument("--hook")
+    ap.add_argument("--agent-hook", dest="agent_hook")
+    ap.add_argument("--matcher")
+    ap.add_argument("--permission", nargs=2, metavar=("deny", "RULE"))
     ap.add_argument("--script")
     ap.add_argument("--timeout")
     ap.add_argument("--env", action="append", default=[], metavar="NAME")
@@ -129,19 +142,27 @@ def cmd_add(group: str, argv: list) -> int:
     head, tail = (argv[:argv.index("--")], argv[argv.index("--") + 1:]) if "--" in argv else (argv, [])
     a = add_parser(f"lane-control {group} extras add", group == "project").parse_args(head)
     given = [(k, getattr(a, k)) for k in KIND_FLAGS if getattr(a, k)]
+    if not given and len(a.env) == 1 and "=" in a.env[0]:
+        given = [("env", a.env[0])]  # --env NAME=value alone: an env extra (with --mcp, --env names a secret)
     if len(given) != 1:
-        raise X.ExtrasError("give exactly one kind: --skill, --mcp, --persona, --plugin or --hook (agent hooks of "
-                            "Claude or OpenCode, permission rules and env values are not extras yet: lc-yw1g)")
+        raise X.ExtrasError("give exactly one kind: --skill, --mcp, --persona, --plugin, --hook, --agent-hook, "
+                            "--permission or --env NAME=value")
     kind, value = given[0]
-    if kind != "mcp" and (tail or a.env):
-        raise X.ExtrasError("`--` with a command, and --env, are for --mcp only")
-    if kind != "hook" and (a.script or a.timeout):
-        raise X.ExtrasError("--script and --timeout are for --hook only")
+    kind = {"agent_hook": "agent-hook"}.get(kind, kind)
+    if kind not in ("mcp", "agent-hook") and tail:
+        raise X.ExtrasError("`--` with a command is for --mcp, and with a script for --agent-hook, only")
+    if kind not in ("mcp", "env") and a.env:
+        raise X.ExtrasError("--env is for --mcp only (its secrets' NAMES), or alone as --env NAME=value")
+    if kind not in ("hook", "agent-hook") and (a.script or a.timeout):
+        raise X.ExtrasError("--script and --timeout are for --hook and --agent-hook only")
+    if kind != "agent-hook" and a.matcher:
+        raise X.ExtrasError("--matcher is for --agent-hook only")
     path, label, root = target(group, a)
     person(f"lane-control {group} extras add")
+    store = X.find_project(a.project)[2] if group == "project" else None
     opts = {"name": a.name, "for": a.for_, "command": tail, "env": a.env, "prompt_file": a.prompt_file,
             "tier": a.tier, "harness": a.harness, "allow_repo_path": a.allow_repo_path, "script": a.script,
-            "timeout": a.timeout}
+            "timeout": a.timeout, "matcher": a.matcher, "contexts": X.contexts(store)}
     entry, warnings = X.make(kind, value, opts)
     if kind == "skill" and group == "project" and X.find(X.defaults(), entry["name"]):
         warnings.append(f"note: {entry['name']} is also a default design skill, installed for the whole user; "
@@ -251,7 +272,8 @@ def cmd_prepare(argv: list) -> int:
     for p in problems:
         print(f"prepare: problem: {p}")
     if problems:
-        print(f"prepare: failed: none of lane-control's extras are in {wt} (all or nothing); hold the lane")
+        print(f"prepare: failed: {wt} keeps only lane-control's protections (deny rules, the floor, agent hooks); "
+              "hold the lane")
         return 1
     n = len([e for e in entries if not X.user_level(e) and e["kind"] not in ("persona", "hook")])
     if a.role == "lanes":

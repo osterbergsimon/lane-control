@@ -172,7 +172,8 @@ def _boxhealth():
 
 
 def _extras():
-    """core/extras.py: the owner's extras (skills, MCP servers, personas, plugins), lc-7c6."""
+    """core/extras.py: the owner's extras (skills, MCP servers, personas, plugins, hooks, agent hooks, permission
+    rules, env values), lc-7c6, lc-76o, lc-yw1g."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("lc_extras", HERE / "core" / "extras.py")
     mod = importlib.util.module_from_spec(spec)
@@ -3145,10 +3146,10 @@ def apply_extras(repo: Path) -> bool:
                 why = EXTRAS.ensure_skill(e)
                 if why:
                     problems.append(f"{EXTRAS.ident(e)}: {why}")
-            elif e["kind"] == "hook":  # a git-pinned hook is fetched here too, so check and doctor find it
+            elif e["kind"] in ("hook", "agent-hook"):  # a git-pinned one is fetched here too (check, doctor find it)
                 why = EXTRAS.hook_problem(e, fetch_it=True)
                 if why:
-                    problems.append(f"{EXTRAS.ident(e)}: {why}")
+                    problems.append(f"{EXTRAS.label(e)}: {why}")
         more, more_problems = EXTRAS.render_personas(repo, entries, lambda name: additions(repo, name))
         lines, problems = lines + more, problems + more_problems
         launch, launch_problems = EXTRAS.apply_launch(store_dir(repo), coord)
@@ -3171,8 +3172,9 @@ def apply_extras(repo: Path) -> bool:
         say("extras", "missing", line)
     if problems:
         EXTRAS_FAILED.append(repo)
-        say("extras", "failed", "where a problem is named, that folder keeps none of lane-control's extras (all or "
-                                f"nothing): fix it, then lane-control project refresh {shlex.quote(str(repo))}")
+        say("extras", "failed", "where a problem is named, that folder keeps only lane-control's protections (deny "
+                                "rules, the floor, agent hooks) and none of what grants: fix it, then lane-control "
+                                f"project refresh {shlex.quote(str(repo))}")
     elif not lines and any(not EXTRAS.user_level(e) for e in entries):
         say("extras", "exists", f"{len([e for e in entries if not EXTRAS.user_level(e)])} extra(s) in place "
                                 f"(lane-control project extras list {shlex.quote(str(repo))})")
