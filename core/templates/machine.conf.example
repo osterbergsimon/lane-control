@@ -52,3 +52,17 @@ MACHINE_COORDINATOR_TO=""
 MACHINE_COORDINATOR_FOLDER=""
 # `lane-away on` counts for this many hours (`lane-away on --until-back` has no limit).
 AWAY_HOURS=14
+
+# The OpenCode lane sandbox (lane-control machine setup --sandbox writes the pinned binaries to sandbox.conf beside
+# this file; these are yours). Projects whose OpenCode lanes run sandboxed, by name or checkout path:
+#SANDBOX_PROJECTS=""
+# The lane's memory cap (systemd-run --user scope):
+#SANDBOX_LANE_MEMORY=8G
+# Folders an OpenCode install outside the nix store needs, bound read-only (lane-control machine setup --check --sandbox
+# names it), colon-separated:
+#SANDBOX_AGENT_DIRS=""
+# The real OpenCode binaries, when PATH finds the detector link first:
+#SANDBOX_REAL_OPENCODE=""
+#SANDBOX_REAL_OPENCODE2=""
+# The review folder a ticket may read the files prepare names from (and a reviewer write its one file to):
+#SANDBOX_REVIEW_DIR=""

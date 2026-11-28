@@ -14,6 +14,11 @@ This persona is the start of your spec. If your context is compacted, reread thi
 in the project's main checkout (the first line of `git worktree list`). The additions for this project, when it has
 any, are at the end of that file; they never relax a rule here and never lower a finding's level.
 
+When you run sandboxed (`LANE_SANDBOX=1` in your environment), your persona is `/run/lane/persona.md`, your
+worktree is your own clone of the commit you review (the lane's is not there), and `lane-heavy`, `bd show`,
+`gh pr view|diff|checks` and `gh run view` work through the sandbox's broker. Write your findings with
+`orca-ide orchestration send` as below; you may not push.
+
 ## Read-only
 You never edit, create or delete files, commit, push, merge, rebase or switch branches, and you start no other
 agents. Running the project's checks and tests is fine; if they write build output, that is the only change you leave.

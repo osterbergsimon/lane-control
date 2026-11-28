@@ -1,6 +1,6 @@
 # Agent Sandbox Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** OpenCode lanes and reviewers run in their own clone under the spec's chain (systemd-run scope → pasta →
 bwrap `--cap-drop ALL`), where the floor does not exist, nothing outside runs what they wrote, and every exchange goes
@@ -72,21 +72,24 @@ reference for every step below; port its logic, do not copy its shell.
 
 ### Task 1: Measurements (lc-9r81.1, lc-9r81.2, lc-9r81.3; owner's go first)
 
+Done in SBX-2 (2026-11-28) with stubs and read-only reads of Orca; what needs a live Orca launch moved to task 9
+(`orca-launch-probe.md`, "Not measured here").
+
 Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes/2026-11-27-agent-sandbox/` as
 `orca-launch-probe.md`, `uid0-probe.md`, `ci-probe.md`.
 
-- [ ] **Step 1 (lc-9r81.1):** with the owner's go, a stub `opencode2` (answers `--version` with `opencode v2.2.1`,
+- [x] **Step 1 (lc-9r81.1):** with the owner's go, a stub `opencode2` (answers `--version` with `opencode v2.2.1`,
   else records argv, cwd, env names, fds and parent chain) first on PATH through a scratch folder; one Orca worker as
   a terminal launch and one as a chat. Record the binary run, the env names and files Orca sets, what each Orca token
   authorizes (docs and code), the `worker-show` and `dispatch-show --task` fields naming the terminal, which OpenCode
   store `worker-read --source transcript` opens, and `orca-ide workspace cleanup preview --json` for an unchanged lane
   worktree before and after `worker-release`. Repeat with the custom command set to the stub.
-- [ ] **Step 2 (lc-9r81.2):** under the spike's chain, run `opencode --version`, `opencode models` with a fake provider
+- [x] **Step 2 (lc-9r81.2):** under the spike's chain, run `opencode --version`, `opencode models` with a fake provider
   config, node, npm, git and Playwright's headless browser as uid 0 without capabilities; and try pasta attaching to a
   bwrap namespace outside Orca's FHS env and on a remote box. Record what refuses or changes.
-- [ ] **Step 3 (lc-9r81.3):** for each sandbox-candidate project, `gh api` the default workflow permissions, Actions
+- [x] **Step 3 (lc-9r81.3):** for each sandbox-candidate project, `gh api` the default workflow permissions, Actions
   secrets count, runners, and the workflows' triggers; write what a lane's branch and PR would run.
-- [ ] **Step 4:** commit the three files; update the spec's open questions and children.
+- [x] **Step 4:** commit the three files; update the spec's open questions and children.
 
 ### Task 2: `core/sandbox.py`: tickets, argv, rules and checks as pure functions
 
@@ -106,7 +109,7 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   `worktree`, `clone`, `ticket_dir`, `home_files`, `tool_path`, `persona`, `gateway_key_env`, `gateway`, `hook_port`,
   `review_files`, `sha`.
 
-- [ ] **Step 1: Failing tests:** `test_chain_order_and_flags` (the Global Constraints chain, `--cap-drop ALL`,
+- [x] **Step 1: Failing tests:** `test_chain_order_and_flags` (the Global Constraints chain, `--cap-drop ALL`,
   `-t none -u none -U none`, the info and block opener); `test_no_secret_in_argv` (a ticket and env with a gateway key
   and Orca tokens: no value appears in the argv; all appear in the env dict); `test_bus_vars_only_for_scope` (present
   with `scope=True`, bwrap unsets both by name); `test_only_nix_store` (no argv element is or contains `/nix/var`,
@@ -117,7 +120,7 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   `./x/` and `X/` forms, `.env.example` not a hit); `test_ci_hits`; `test_safe_read` (a link, a link to a directory, a
   FIFO, a 65 MB sparse file, a file that grows while read, a regular file); `test_take_ticket_*` (oldest, once, other
   worktree, malformed).
-- [ ] **Step 2:** `python3 -m unittest tests.test_sandbox -v` → FAIL. **Step 3:** implement from the spike. **Step 4:**
+- [x] **Step 2:** `python3 -m unittest tests.test_sandbox -v` → FAIL. **Step 3:** implement from the spike. **Step 4:**
   PASS. **Step 5:** commit `core/sandbox.py tests/test_sandbox.py`.
 
 ### Task 3: `lane prepare --sandbox`: clone, resume, quarantine, checks
@@ -135,14 +138,14 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   project's CI check (`gh api` default workflow permissions `read`, Actions secrets 0, runners 0, else refuse unless
   the project's settings store records the owner's acceptance); a ticket with its own folders. Last line: the nonce.
 
-- [ ] **Step 1: Failing tests:** `test_fresh_clone_only_base` (another branch's commit and `refs/owner/*` absent);
+- [x] **Step 1: Failing tests:** `test_fresh_clone_only_base` (another branch's commit and `refs/owner/*` absent);
   `test_resume_reuses_clone` (a second prepare after commits in the clone: same folder, its mtime and HEAD file
   unchanged, a new ticket); `test_recreate_from_pushed_branch`; `test_broken_clone_refused` (Review Focus 4);
   `test_history_refusals` (tracked private, side branch, nested `.env.local`; `.env.example` accepted);
   `test_inline_key_refused`; `test_tool_list_from_store_only`; `test_reviewer_own_folders` (clone, cache, data, run
   differ from the lane's); `test_ci_settings_refused` (stub `gh api` answers write permissions, a secret, a runner:
   each refuses; the owner's acceptance in the store lets it through); `test_refuses_without_selftest`.
-- [ ] **Step 2–4:** FAIL, implement, PASS. **Step 5:** commit.
+- [x] **Step 2–4:** FAIL, implement, PASS. **Step 5:** commit.
 
 ### Task 4: The shim
 
@@ -157,12 +160,12 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   spec's chain steps 1-6, the run record `runs/<terminal>.json` (`nonce`, `role`, `host_pid`, `mntns`) written only
   after the nft filter is set, signals forwarded, the agent's exit status returned. Refusal: exit 2, one line.
 
-- [ ] **Step 1: Failing tests** (fake systemd-run, pasta and bwrap from `tests/stubs/fake.py` that record argv and
+- [x] **Step 1: Failing tests** (fake systemd-run, pasta and bwrap from `tests/stubs/fake.py` that record argv and
   env; the fake bwrap writes an info file and waits on its block fd): `test_passthrough_cases`;
   `test_no_ticket_refused`; `test_record_after_filter` (no record, no release when nsenter fails);
   `test_info_never_written` and `test_host_pid_ambiguous` (Review Focus 1); `test_no_scope_without_bus` (Review
   Focus 5); `test_no_secret_in_any_argv` (every recorded argv); `test_signals_forwarded`.
-- [ ] **Step 2–4:** FAIL, implement, PASS. **Step 5:** commit.
+- [x] **Step 2–4:** FAIL, implement, PASS. **Step 5:** commit.
 
 ### Task 5: The broker
 
@@ -176,7 +179,7 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   -> dict`; one handler per request in the spec's table; `lane-control lane approve-ci <lane> <sha>` (owner only:
   refuses inside a sandbox, where `ORCA_TERMINAL_HANDLE` names a sandboxed run record).
 
-- [ ] **Step 1: Failing tests:** push with real git in temp repos: `test_push_hostile_outbox` (a link to a lane-made
+- [x] **Step 1: Failing tests:** push with real git in temp repos: `test_push_hostile_outbox` (a link to a lane-made
   repo with alternates and a ref naming an unpushed commit, a link to a file, an id-only bundle, a FIFO, a 65 MB file,
   two refs, an orphan: each refused, the shared repo's refs and origin unchanged); `test_push_honest_then_rewritten`
   (Review Focus 3); `test_push_ci_change_needs_approval`; `test_push_never_runs_git_in_a_lane_path` (marker scripts in
@@ -186,7 +189,7 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   `test_run_view_own_branch_only`; `test_bd_show_lane_issue_and_links_only` (another id, a flag-shaped id such as
   `--db=/tmp/x` or `-C=/tmp`: refused); `test_review_read_named_only`; `test_review_write_once`; `test_roles` (reviewer
   cannot push or create; check has only `heavy-slot`); `test_size_limit`; `test_every_request_logged`.
-- [ ] **Step 2–4:** FAIL, implement, PASS. **Step 5:** commit.
+- [x] **Step 2–4:** FAIL, implement, PASS. **Step 5:** commit.
 
 ### Task 6: The inside wrappers
 
@@ -200,9 +203,9 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   upstream config on success; `git fetch`/`pull` → `fetch`, then from the inbox bundle (`pull --rebase` refused);
   other `git` verbs exec the real git; `gh run view <id>` → `run-view`; `lane-heavy <cmd>` holds `heavy-slot`.
 
-- [ ] **Step 1: Failing tests** (a fake broker on a temp socket): one per mapping, `test_push_u_sets_upstream`,
+- [x] **Step 1: Failing tests** (a fake broker on a temp socket): one per mapping, `test_push_u_sets_upstream`,
   `test_status_ahead_behind_after_push`, `test_unknown_verb_refused`, `test_heavy_slot_released_on_exit`.
-- [ ] **Step 2–4:** FAIL, implement, PASS. **Step 5:** commit.
+- [x] **Step 2–4:** FAIL, implement, PASS. **Step 5:** commit.
 
 ### Task 7: Machine setup, check, and the adversarial selftest
 
@@ -217,7 +220,7 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   (<why>)` (pins, chain probe, shim first on the login shell's PATH, `legacy_tiocsti`, user manager, selftest
   current); `lane-control sandbox selftest` → `~/.local/state/lane-control/sandbox/selftest.json`.
 
-- [ ] **Step 1: Failing tests** in `tests/test_sandbox_escapes.py`, each through the real shim (`lane-sandbox-shim`
+- [x] **Step 1: Failing tests** in `tests/test_sandbox_escapes.py`, each through the real shim (`lane-sandbox-shim`
   with a ticket from `prepare`) and the real broker, each checked from outside: every probe of the spike's `sandbox`
   run (floor, environment, capabilities and remount of every read-only bind, nested user namespace, `nft flush`, nix
   daemon, loopback TCP and UDP, abstract socket, every host address, inbound from every host address, host argv
@@ -226,7 +229,7 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
   `legacy_tiocsti` is 0); `test_lane_files_not_on_host`; `test_dns_and_outbound` (only with `LANE_SANDBOX_NET=1`).
   Setup tests: `test_setup_pins_store_paths`, `test_setup_refuses_setuid`, `test_setup_refuses_without_selftest`,
   `test_check_reports_shim_not_first`, `test_check_reports_no_user_manager`.
-- [ ] **Step 2–4:** FAIL, implement, PASS (`LANE_SANDBOX_SELFTEST=1 python3 -m unittest tests.test_sandbox_escapes`
+- [x] **Step 2–4:** FAIL, implement, PASS (`LANE_SANDBOX_SELFTEST=1 python3 -m unittest tests.test_sandbox_escapes`
   on this machine: every test runs, none skips). **Step 5:** commit.
 
 ### Task 8: Lane lifecycle commands, doctrine and docs
@@ -242,13 +245,13 @@ Stubs only, never a real agent or gateway; results into `docs/superpowers/spikes
 - Modify: `orchestrators/native-orca/setup.md`, `docs/how-it-fits.md`, `docs/getting-started.md`
 - Test: `tests/test_sandbox_shim.py`, `tests/test_content.py`
 
-- [ ] **Step 1: Failing tests:** `test_lane_started_ok`, `test_lane_started_stops_unsandboxed` (no record, a stale
+- [x] **Step 1: Failing tests:** `test_lane_started_ok`, `test_lane_started_stops_unsandboxed` (no record, a stale
   nonce, a dead pid, a mount namespace other than the record's: `worker-stop` recorded by the stub Orca, exit 1);
   `test_close_refuses_unpushed_or_dirty`, `test_close_discard`, `test_close_needs_merged_pr_or_word`;
   `test_check_runs_in_fresh_clone`; content tests: the skill names the commands in order and forbids the worktree
   close checks for sandboxed lanes; the docs name the open items (internet, the lane's key, CI, coordinator
   unsandboxed, detection not prevention).
-- [ ] **Step 2–4:** FAIL, edit, PASS. **Step 5:** commit.
+- [x] **Step 2–4:** FAIL, edit, PASS. **Step 5:** commit.
 
 ### Task 9: Live check with the stub, then one real lane (owner's go)
 

@@ -29,3 +29,7 @@ jobs:
           node-version: "22"
       - name: Test suite
         run: python3 -m unittest discover -s tests -v
+      # The adversarial sandbox suite (tests/test_sandbox_escapes.py) needs bwrap and pasta from nixpkgs and a nix
+      # store to bind; this runner has neither, so the suite skips above. This line says so plainly.
+      - name: Sandbox selftest availability
+        run: python3 tests/test_sandbox_escapes.py --availability

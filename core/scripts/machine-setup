@@ -6,6 +6,9 @@ manager, lane sweep and machine check automations, the presence-based CI limits 
                 [--automation-provider claude|opencode] [--automation-model MODEL [--replace-automation-model]]
                 [--no-model-check] [--trust-folder] [--no-start]
   machine-setup --check [--folder DIR]
+  machine-setup --sandbox | --check --sandbox      the OpenCode lane sandbox only (core/scripts/lane-sandbox): pins,
+                                                    probe, selftest, the PATH detector (asks); --check reads only and
+                                                    names the exact custom command to set in Orca
 
 Runs as a normal user on the machine whose coordinators it watches; with --host it copies what it needs to H over
 SSH (~/.local/share/lane-control, as project-setup does) and runs there with the same arguments, so a box gets its own
@@ -729,7 +732,16 @@ def main(argv) -> int:
     ap.add_argument("--no-start", action="store_true")
     ap.add_argument("--check", action="store_true",
                     help="say whether the machine coordinator's persona and its anchor are in --folder; changes nothing")
+    ap.add_argument("--sandbox", action="store_true",
+                    help="the OpenCode lane sandbox only: set it up, or with --check say what it needs (read only)")
     a = ap.parse_args(argv)
+    if a.sandbox:
+        if a.host:
+            print("machine-setup: --sandbox runs on this machine only", file=sys.stderr)
+            return 2
+        script = HERE / "lane-sandbox"
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, str(script), "machine-check" if a.check else "machine-setup"])
     if os.geteuid() == 0:
         print("machine-setup: refusing to run as root; agents run as a normal user", file=sys.stderr)
         return 2

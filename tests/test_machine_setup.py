@@ -2448,5 +2448,289 @@ class NightManagerDocTests(unittest.TestCase):
         for private in ("/home/", "10.10.", "alice", "shop-vps"):  # made-up names, so this runs in CI; the real ones: test_content.PrivateNamesTests
             self.assertNotIn(private, text.lower())
 
+
+class SandboxSetupTests(unittest.TestCase):
+    """SBX-2 task 7 (lc-35qn): `machine setup --sandbox` pins store paths with GC roots and refuses setuid binaries,
+    a failed probe or selftest; `machine setup --check --sandbox` reads only and says the exact custom command to set in
+    Orca, whether it is set (Orca's settings opened read-only), the PATH detector and the user manager."""
+
+    def setUp(self):
+        import importlib.machinery
+        import importlib.util
+        from unittest import mock
+        self.mock = mock
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.t = Path(tmp.name).resolve()
+        self.home = self.t / "home"
+        self.home.mkdir()
+        p = mock.patch.dict(os.environ, {**testhome.env_for(self.home), "PATH": os.environ.get("PATH", "")})
+        p.start()
+        self.addCleanup(p.stop)
+        for k in ("LANE_SANDBOX_CONF", "LANE_MACHINE_CONF", "ORCA_USER_DATA_PATH"):
+            os.environ.pop(k, None)
+        path = Path(__file__).resolve().parent.parent / "core" / "scripts" / "lane-sandbox"
+        loader = importlib.machinery.SourceFileLoader("lc_lane_sandbox_setup_t", str(path))
+        spec = importlib.util.spec_from_loader("lc_lane_sandbox_setup_t", loader)
+        self.LS = importlib.util.module_from_spec(spec)
+        loader.exec_module(self.LS)
+        self.pinned = []
+
+        def nix_pin(pkg, roots):
+            self.pinned.append((pkg, roots))
+            return f"/nix/store/fake-{pkg}"
+        for name, val in (("nix_pin", nix_pin), ("chain_probe", lambda conf: None), ("selftest", lambda: 0),
+                          ("setuid", lambda p: False), ("ask", lambda q: None)):
+            p = mock.patch.object(self.LS, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+        real_access = os.access
+        p = mock.patch.object(self.LS.os, "access",
+                              lambda f, m: True if str(f).startswith("/nix/store/fake-") else real_access(f, m))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def run_ls(self, fn, *a):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = fn(*a)
+        return rc, out.getvalue()
+
+    def conf(self):
+        return self.LS.SP.read_conf()
+
+    def test_setup_pins_store_paths(self):
+        with self.mock.patch.object(self.LS.Path, "is_dir", lambda self: True):
+            rc, out = self.run_ls(self.LS.setup)
+        self.assertEqual(rc, 0, out)
+        c = self.conf()
+        self.assertEqual(c["SANDBOX_BWRAP"], "/nix/store/fake-bubblewrap/bin/bwrap")
+        self.assertEqual(c["SANDBOX_PASTA"], "/nix/store/fake-passt/bin/pasta")
+        self.assertEqual(c["SANDBOX_NSENTER"], "/nix/store/fake-util-linux.bin/bin/nsenter")
+        self.assertEqual(c["SANDBOX_NFT"], "/nix/store/fake-nftables/bin/nft")
+        self.assertIn("/nix/store/fake-git/bin", c["SANDBOX_TOOL_PATH"].split(":"))
+        roots = {r for _, r in self.pinned}
+        self.assertEqual(len(roots), 1)
+        self.assertTrue(str(next(iter(roots))).startswith(str(self.home / ".local" / "share" / "lane-control")))
+        self.assertEqual(os.stat(self.LS.SP.conf_file()).st_mode & 0o777, 0o600)
+        self.assertIn("custom command", out)
+        self.assertIn("PATH detector: not linked (no terminal to ask)", out)
+        self.assertNotIn("/nix/var", self.LS.SP.conf_file().read_text())
+
+    def test_setup_refuses_setuid(self):
+        with self.mock.patch.object(self.LS, "setuid", lambda p: p.endswith("bwrap")):
+            rc, out = self.run_ls(self.LS.setup)
+        self.assertEqual(rc, 1)
+        self.assertIn("setuid", out)
+        self.assertFalse(self.LS.SP.conf_file().exists())
+
+    def test_setup_refuses_without_selftest(self):
+        with self.mock.patch.object(self.LS, "selftest", lambda: 1), \
+                self.mock.patch.object(self.LS.Path, "is_dir", lambda self: True):
+            rc, out = self.run_ls(self.LS.setup)
+        self.assertEqual(rc, 1)
+        self.assertIn("selftest failed", out)
+        with self.mock.patch.object(self.LS, "chain_probe", lambda conf: "unprivileged user namespaces refused"), \
+                self.mock.patch.object(self.LS.Path, "is_dir", lambda self: True):
+            rc, out = self.run_ls(self.LS.setup)
+        self.assertEqual(rc, 1)
+        self.assertIn("chain probe failed", out)
+
+    def setup_ok(self):
+        with self.mock.patch.object(self.LS.Path, "is_dir", lambda self: True):
+            self.assertEqual(self.run_ls(self.LS.setup)[0], 0)
+        conf = self.conf()
+        f = self.LS.SB.selftest_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"ok": True, "lane_control": self.LS.SP.lc_version(),
+                                 "pins": {k: conf[k] for k in self.LS.SP.PIN_KEYS}}))
+        store = "/nix/store/x-opencode/bin"
+        self.LS.SP.conf_file().write_text(self.LS.SP.conf_file().read_text().split("SANDBOX_REAL_")[0] +
+                                          f"SANDBOX_REAL_OPENCODE={store}/opencode\n"
+                                          f"SANDBOX_REAL_OPENCODE2={store}/opencode2\n")
+
+    def check(self, **over):
+        stack = [self.mock.patch.object(self.LS, k, v) for k, v in {
+            "user_manager": lambda: None, "login_shell_finds": lambda a: f"/nix/store/x-opencode/bin/{a}",
+            "orca_overrides": lambda: {}, "projects": lambda conf: [], **over}.items()]
+        for p in stack:
+            p.start()
+        try:
+            return self.run_ls(self.LS.check)
+        finally:
+            for p in stack:
+                p.stop()
+
+    def test_check_names_the_custom_command(self):
+        self.setup_ok()
+        want = f"{self.home}/.local/share/lane-control/current/core/scripts/lane-sandbox-shim opencode2 --standalone"
+        rc, out = self.check()
+        self.assertIn(f"custom command to exactly: {want} [not set]", out)
+        self.assertIn("Settings -> Agents -> OpenCode 2", out)
+        self.assertEqual(rc, 1)
+        self.assertIn("sandbox: off (not ready for opencode, opencode2", out)
+        rc, out = self.check(orca_overrides=lambda: {"opencode2": want})
+        self.assertIn(f"{want} [set]", out)
+        self.assertEqual(out.splitlines()[-1], "sandbox: off (not ready for opencode: the lines above name what to set)")
+        both = {"opencode2": want, "opencode": want.replace("opencode2 --standalone", "opencode")}
+        rc, out = self.check(orca_overrides=lambda: both)
+        self.assertEqual(out.splitlines()[-1], "sandbox: on")  # r1 B3: only both set is on
+        self.assertEqual(rc, 0)
+        rc, out = self.check(orca_overrides=lambda: {"opencode2": "opencode2 --standalone"})
+        self.assertIn("[set to something else]", out)
+        rc, out = self.check(orca_overrides=lambda: None)
+        self.assertIn("[cannot tell", out)
+
+    def test_check_reports_shim_not_first(self):
+        self.setup_ok()
+        rc, out = self.check()
+        self.assertIn("PATH detector (opencode2): not first", out)
+        shim = self.LS.launcher()
+        rc, out = self.check(login_shell_finds=lambda a: str(shim))
+        self.assertIn("PATH detector (opencode2): first on the login shell's PATH", out)
+
+    def test_check_reports_no_user_manager(self):
+        self.setup_ok()
+        rc, out = self.check(user_manager=lambda: "no user session bus here")
+        self.assertIn("user manager: none: lanes have no memory cap", out)
+
+    def test_check_off_when_not_set_up(self):
+        rc, out = self.check()
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.strip().splitlines()[-1], "sandbox: off (not set up: lane-control machine setup --sandbox)")
+
+    def test_check_reports_ci(self):
+        self.setup_ok()
+        with self.mock.patch.object(self.LS.SP, "ci_verdict", lambda root, st, base=None: [
+                (False, "default workflow token: write")]):
+            rc, out = self.check(project_settings=lambda conf: [("app", self.t, {})])
+        self.assertIn("CI app: default workflow token: write: refuses --sandbox", out)
+        self.assertIn("sandbox: broken (CI of app)", out)
+
+    def ci_repo(self, workflow=None):
+        repo = self.t / "app"
+        origin = self.t / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        if workflow:
+            (repo / ".github" / "workflows").mkdir(parents=True)
+            (repo / ".github" / "workflows" / "ci.yml").write_text(workflow)
+        (repo / "f").write_text("x\n")
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-C", str(repo)]
+        subprocess.run([*g, "add", "-A"], check=True)
+        subprocess.run([*g, "commit", "-q", "-m", "x"], check=True)
+        subprocess.run([*g, "remote", "add", "origin", str(origin)], check=True)
+        subprocess.run([*g, "push", "-q", "origin", "main"], check=True)
+        subprocess.run([*g, "fetch", "-q", "origin"], check=True)
+        return repo
+
+    def test_check_and_prepare_judge_ci_alike(self):
+        """r2 M2: a project with sandbox_no_ci is not broken in the check; a base workflow asking for a write token
+        is, as prepare refuses it."""
+        self.setup_ok()
+        repo = self.ci_repo()
+        rc, out = self.check(project_settings=lambda conf: [("app", repo, {"sandbox_no_ci": True})])
+        self.assertIn("CI app: no GitHub repository; the owner recorded that this project has no CI: ok", out)
+        self.assertNotIn("CI of app", out)
+        repo2 = self.t / "two"
+        repo2.mkdir()
+        self.t, old = repo2, self.t
+        repo2 = self.ci_repo("on: push\npermissions: {contents: write}\n")
+        self.t = old
+        rc, out = self.check(project_settings=lambda conf: [("app", repo2, {"sandbox_no_ci": True})])
+        self.assertIn("base workflows ask for a write token: .github/workflows/ci.yml", out)
+        self.assertIn("CI of app", out.splitlines()[-1])
+
+    def test_check_reports_unmatched_projects(self):
+        """r2 M1: a SANDBOX_PROJECTS entry that matches no project is broken, not silently on."""
+        self.setup_ok()
+        (self.home / ".config" / "lane-control" / "machine.conf").write_text("SANDBOX_PROJECTS=app,pub\n")
+        rc, out = self.check()
+        self.assertIn("SANDBOX_PROJECTS entry 'app,pub' matches no project", out)
+        self.assertEqual(rc, 1)
+
+    def test_check_names_agent_dirs(self):
+        self.setup_ok()
+        npm = self.t / "npm" / "lib" / "node_modules" / "@opencode" / "cli" / "bin"
+        npm.mkdir(parents=True)
+        (npm / "opencode").write_text("#!/bin/sh\n")
+        self.LS.SP.conf_file().write_text(self.LS.SP.conf_file().read_text() + f"SANDBOX_REAL_OPENCODE2={npm}/opencode\n")
+        rc, out = self.check()
+        # r1 n2: the package's scope folder, not every global module
+        self.assertIn(f"add SANDBOX_AGENT_DIRS={self.t / 'npm' / 'lib' / 'node_modules' / '@opencode'} to machine.conf",
+                      out)
+
+    def test_orca_settings_read_only(self):
+        db = self.home / ".config" / "orca" / "profiles" / "local-default" / "profile-state.db"
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE profile_state_documents (domain TEXT, payload TEXT)")
+        con.execute("INSERT INTO profile_state_documents VALUES ('settings', ?)",
+                    (json.dumps({"agentCmdOverrides": {"opencode2": "/x/lane-sandbox-shim opencode2 --standalone"},
+                                 "other": "kept"}),))
+        con.commit()
+        con.close()
+        before = (db.read_bytes(), db.stat().st_mtime_ns, sorted(p.name for p in db.parent.iterdir()))
+        self.assertEqual(self.LS.orca_overrides(), {"opencode2": "/x/lane-sandbox-shim opencode2 --standalone"})
+        self.assertEqual((db.read_bytes(), db.stat().st_mtime_ns, sorted(p.name for p in db.parent.iterdir())),
+                         before)
+
+    def test_orca_settings_seen_through_the_wal(self):
+        """r1 M8: a change Orca committed that is still in the WAL is seen; Orca's files are not changed."""
+        db = self.home / ".config" / "orca" / "profiles" / "local-default" / "profile-state.db"
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA wal_autocheckpoint=0")
+        con.execute("CREATE TABLE profile_state_documents (domain TEXT, payload TEXT)")
+        con.execute("INSERT INTO profile_state_documents VALUES ('settings', ?)",
+                    (json.dumps({"agentCmdOverrides": {"opencode2": "/x/lane-sandbox-shim opencode2"}}),))
+        con.commit()
+        self.assertEqual(self.LS.orca_overrides(), {"opencode2": "/x/lane-sandbox-shim opencode2"})
+        con.execute("UPDATE profile_state_documents SET payload = ? WHERE domain = 'settings'",
+                    (json.dumps({"agentCmdOverrides": {}}),))
+        con.commit()  # the removal sits in the WAL while Orca (this connection) keeps it open
+        self.assertTrue(Path(str(db) + "-wal").stat().st_size > 0)
+        before = {p.name: p.read_bytes() for p in db.parent.iterdir()}
+        self.assertEqual(self.LS.orca_overrides(), {})
+        self.assertEqual({p.name: p.read_bytes() for p in db.parent.iterdir()}, before)
+        con.close()
+
+    def test_orca_profiles_must_agree(self):
+        """r2 m3: a custom command in one profile and none in another is 'cannot tell', never 'set'."""
+        for prof, o in (("a", {"opencode2": "/x/lane-sandbox-shim opencode2 --standalone"}), ("b", {})):
+            db = self.home / ".config" / "orca" / "profiles" / prof / "profile-state.db"
+            db.parent.mkdir(parents=True)
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE profile_state_documents (domain TEXT, payload TEXT)")
+            con.execute("INSERT INTO profile_state_documents VALUES ('settings', ?)",
+                        (json.dumps({"agentCmdOverrides": o}),))
+            con.commit()
+            con.close()
+        self.assertEqual(self.LS.orca_overrides()["opencode2"], self.LS.DIFFER)
+        self.setup_ok()
+        with self.mock.patch.object(self.LS, "orca_overrides", lambda: {"opencode2": self.LS.DIFFER,
+                                                                       "opencode": self.LS.DIFFER}):
+            rc, out = self.run_ls(self.LS.check)
+        self.assertIn("[cannot tell (Orca's profiles differ", out)
+        self.assertNotIn("sandbox: on", out)
+
+    def test_front_door(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("lc_fd_sbx_t", Path(__file__).resolve().parent.parent / "core"
+                                                      / "frontdoor.py")
+        F = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(F)
+        self.assertEqual(F.route(["machine", "setup", "--check", "--sandbox"]),
+                         ("machine-setup", ["--check", "--sandbox"]))
+        self.assertIsNone(F.route(["machine", "check", "--sandbox"]))  # review m1: `machine check` is the automation
+        self.assertEqual(F.route(["machine", "setup", "--sandbox"]), ("machine-setup", ["--sandbox"]))
+        self.assertEqual(F.route(["sandbox", "selftest"]), ("lane-sandbox", ["selftest"]))
+        self.assertEqual(F.route(["lane", "started", "/w", "--nonce", "n", "--dispatch", "d"]),
+                         ("lane-sandbox", ["started", "/w", "--nonce", "n", "--dispatch", "d"]))
+
+
 if __name__ == "__main__":
     unittest.main()

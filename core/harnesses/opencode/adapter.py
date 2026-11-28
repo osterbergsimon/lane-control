@@ -152,8 +152,24 @@ def install_persona_hook(checkout: Path) -> list:
     return lines
 
 
-def db_path() -> Path:
+def db_path(checkout: "Path | None" = None) -> Path:
+    """OpenCode's v2 store: the owner's. A sandboxed lane's store is its ticket's own data folder, which the agent
+    writes, so it is never opened from outside (review r1 m6): idle_minutes has no signal for a sandboxed lane."""
     return _xdg("XDG_DATA_HOME", ".local/share") / "opencode" / "opencode.db"
+
+
+def sandbox_data(checkout: Path) -> "Path | None":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import sandbox
+    if not sandbox.binding_file(checkout).is_file():
+        return None
+    taken = sorted((sandbox.tickets_dir(checkout) / "taken").glob("*.json"))
+    for f in reversed(taken):
+        try:
+            return Path(json.loads(f.read_text())["ticket_dir"]) / "data"
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None
 
 
 # The recorded session's family: up to its root, then every session below that root (sub-agent sessions).
@@ -173,8 +189,10 @@ def idle_minutes(checkout: Path, now: float, role: str = "coordinator") -> "int 
     started with the markers) and of its sub-agent sessions; other sessions in the same checkout do not count. None
     when no marked session is recorded or the store does not have it. A record or store that cannot be read raises
     (OSError or sqlite3.Error), so a caller can tell it from "no session"."""
+    if sandbox_data(checkout) is not None:
+        return None  # a sandboxed lane: no idle signal in phase 1 (its store and session record are the agent's)
     sid = harnesses.read_session(checkout, role, NAME)
-    db = db_path()
+    db = db_path(checkout)
     if sid is None or not db.exists():
         return None
     con = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
