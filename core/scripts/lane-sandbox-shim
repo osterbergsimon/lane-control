@@ -311,7 +311,7 @@ def main(argv: list) -> int:
         t = SB.take_ticket(wt, env.get("ORCA_TERMINAL_HANDLE", ""))
     except SB.SandboxError as e:
         return refuse(str(e))
-    t["agent"] = [real, *args]
+    t["agent"] = [str(Path(t["inside"]) / "bin" / "lane-enter"), real, *args]
     try:
         t["hook_port"] = int(env["ORCA_AGENT_HOOK_PORT"]) if env.get("ORCA_AGENT_HOOK_PORT") else None
     except ValueError:
