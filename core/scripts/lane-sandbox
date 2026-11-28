@@ -517,6 +517,12 @@ def run_inside(lane: str, clone: Path, inner: list, role: str = "check") -> tupl
     return rc, td / "run" / "outbox", out
 
 
+def clean(text: str) -> str:
+    """A lane-derived string without control characters (review r2 M6)."""
+    return "".join(ch if ch in "\n\t" or (ch >= " " and ch != "\x7f" and not 0x80 <= ord(ch) < 0xa0) else "?"
+                   for ch in text)
+
+
 def printable(path: Path, cap: int = 1 << 20) -> str:
     """What a lane's command printed, without control characters (no escape sequences reach the caller's terminal)."""
     try:
@@ -559,8 +565,11 @@ def inspect(lane: str) -> dict:
     except (SB.SandboxError, ValueError):
         raise SB.SandboxError(f"the inspect step gave no report (status {rc}): cannot tell, so nothing is removed") \
             from None
-    if not r.get("ok") or not all(isinstance(r.get(k), int) for k in ("dirty", "unpushed", "stashes")):
-        raise SB.SandboxError(f"the inspect step cannot tell ({str(r.get('why'))[:80]}): nothing is removed")
+    if not r.get("ok") or not all(isinstance(r.get(k), int) and not isinstance(r.get(k), bool)
+                                   for k in ("dirty", "unpushed", "stashes")) \
+            or not (isinstance(r.get("head"), str) and SP.SHA.fullmatch(r["head"])):
+        why = clean(str(r.get("why") or "a malformed report"))[:80]
+        raise SB.SandboxError(f"the inspect step cannot tell ({why}): nothing is removed")
     return r
 
 
@@ -594,6 +603,13 @@ def remove_lane(lane: str) -> list:
                 shutil.rmtree(p)
             elif p.exists():
                 p.unlink()
+    repo, ref = Path(rec["repo"]), f"refs/lanes/{lane}"
+    sha = SP.lane_ref(repo, lane)
+    if sha:  # review r2 M5: archived, so a later lane of the same key starts fresh and nothing is lost
+        arch = f"refs/lanes-closed/{lane}-{time.strftime('%Y%m%d-%H%M%S')}"
+        SP.git("-C", repo, "update-ref", arch, sha)
+        SP.git("-C", repo, "update-ref", "-d", ref, sha)
+        gone.append(f"{ref} (kept as {arch})")
     shutil.rmtree(ld)
     gone.append(str(ld))
     return gone

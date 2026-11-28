@@ -571,6 +571,48 @@ class CloseCheckTests(LifecycleCase):
         self.assertIn("a?[2Jb", r.stdout)
         self.assertNotIn("\x1b", r.stdout)
 
+    def test_close_then_the_same_key_starts_fresh(self):
+        """r2 M5: close archives refs/lanes/<lane>; the same key again starts from the base and can push; a lane
+        record lost while its ref stays is refused, never recreated from someone else's work."""
+        old = self.lane_with_push()
+        self.gh("MERGED")
+        r = self.ls("close", "app-1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotEqual(subprocess.run(["git", "rev-parse", "-q", "--verify", "refs/lanes/app-1"],
+                                           cwd=self.fx.repo, capture_output=True).returncode, 0)
+        kept = FX.git("for-each-ref", "--format=%(objectname)", "refs/lanes-closed/", cwd=self.fx.repo)
+        self.assertEqual(kept, old)
+        self.fx.prepare()
+        self.assertEqual(FX.git("rev-parse", "HEAD", cwd=self.fx.clone()), self.fx.base)
+        self.assertTrue((SB.lane_dir("app-1", self.fx.repo) / "base").is_file())
+        # a ref whose lane record is gone: refused
+        FX.git("update-ref", "refs/lanes/app-9", old, cwd=self.fx.repo)
+        w9 = self.t / "m" / "orca" / "workspaces" / "app" / "lane-9"
+        FX.git("worktree", "add", "-q", "-b", "lane-9", w9, "main", cwd=self.fx.repo)
+        with self.assertRaises(SB.SandboxError) as e:
+            self.fx.lane = "app-9"
+            self.fx.prepare(wt=w9)
+        self.assertIn("own record is gone", str(e.exception))
+        self.fx.lane = "app-1"
+
+    def test_inspect_never_prints_lane_text_raw(self):
+        """r2 M6: a forged report (a clean filter can write it) with escape sequences in head or why reaches the
+        caller as 'cannot tell', with no control character."""
+        self.lane_with_push()
+        c = self.fx.clone()
+        hook = self.t / "forge.sh"
+        hook.write_text('#!/bin/sh\nprintf \'{"ok": true, "head": "\\033]52;c;eA==\\007\\033[2J", "dirty": 0, '
+                        '"unpushed": 0, "stashes": 0}\' >"$LANE_OUTBOX/inspect.json"; kill -9 $PPID\n')
+        hook.chmod(0o755)
+        (c / ".gitattributes").write_text("* filter=forge\n")
+        FX.git("config", "filter.forge.clean", str(hook), cwd=c)
+        r = self.ls("inspect", "app-1")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("cannot tell", out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+
     def test_close_discard(self):
         self.lane_with_push()
         self.gh("MERGED")

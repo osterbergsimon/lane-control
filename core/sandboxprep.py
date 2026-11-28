@@ -659,6 +659,11 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
         if clone.exists():
             say(f"prepare: resume: {clone} is reused as it is (no git runs in it)")
         elif pushed:
+            if not (ld / "base").is_file() or not known:
+                raise SB.SandboxError(
+                    f"refs/lanes/{lane} exists in {root}, but this lane's own record is gone (a closed lane, or its "
+                    f"state removed by hand): nothing was done. Use a new lane key, or, if that pushed work is this "
+                    f"lane's, ask the owner (git -C {root} update-ref -d refs/lanes/{lane} starts it fresh)")
             init_clone(clone, root, base, base_sha)
             git("-C", clone, "fetch", "-q", "--no-tags", "--no-write-fetch-head", root, f"{pushed}:refs/heads/{branch}")
             git("-C", clone, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
