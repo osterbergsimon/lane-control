@@ -27,7 +27,7 @@ MODELS = ("MACHINE_COORDINATOR", "AUTOMATION_MODEL")  # machine-setup's models; 
 # folders an agent install needs and the real OpenCode binaries. machine setup --sandbox writes the pinned store paths
 # to sandbox.conf beside this file instead, since an existing machine.conf is never changed.
 SANDBOX_KEYS = ("SANDBOX_PROJECTS", "SANDBOX_LANE_MEMORY", "SANDBOX_AGENT_DIRS", "SANDBOX_REAL_OPENCODE",
-                "SANDBOX_REAL_OPENCODE2")
+                "SANDBOX_REAL_OPENCODE2", "SANDBOX_REVIEW_DIR")
 KEYS = ("COORDINATORS", "RUNNER_REPOS", "MACHINE_COORDINATOR_TO", "MACHINE_COORDINATOR_FOLDER", *MODELS, *NUMBERS,
         *SANDBOX_KEYS)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")

@@ -440,7 +440,7 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
          "persona": str(persona), "gateway_key_env": key_env, "gateway": list(gateway) if gateway else None,
          "hook_port": None, "review_files": rf, "review_write": review_write if trole == "reviewer" else None,
          "sha": sha, "private": private, "inside": str(HERE / "sandbox-inside"), "lc_tree": str(HERE.parent),
-         "checkout": checkout, "gh_repo": slug, "bd_prefix": lane_rec["bd_prefix"], "agent_dirs":
+         "checkout": checkout, "gh_repo": slug, "base_sha": base_sha, "bd_prefix": lane_rec["bd_prefix"], "agent_dirs":
          [p for p in (conf.get("SANDBOX_AGENT_DIRS") or "").split(":") if p], "created": time.time()}
     SB.write_ticket(wt, t)
     SB.write_private(SB.binding_file(wt), json.dumps({"lane": lane, "project": str(root)}) + "\n")

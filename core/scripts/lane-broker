@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""lane-broker: the one way out of a sandboxed lane (SBX-2 task 5, lc-35qn; spec "The broker").
+
+  lane-broker serve <taken ticket file>     started by lane-sandbox-shim, one per ticket, outside the sandbox
+  lane-control lane approve-ci <lane> <sha>  (core/scripts/lane-sandbox) lets one push that changes CI through
+
+One JSON request per connection on the ticket's broker.sock (bound inside at /run/lane/broker.sock), at most 1 MB,
+typed fields only: no argv and no path from the lane. Text reaches a CLI through a file the broker makes (0600) or as
+`--opt=value`; ids are matched against their pattern and passed as `--id=<id>` where the CLI has it; unknown fields
+are refused; every request is logged (name, outcome; never a field's value) in the ticket's broker/requests.log.
+
+Requests and roles: report, escalate, ask, check, reply (lane, reviewer); push (lane); fetch (lane, reviewer);
+pr-create, pr-comment, pr-edit (lane); pr-view, pr-checks, pr-diff, run-view, bd-show, review-read (lane, reviewer);
+bd-note, bd-claim, bd-create (lane); review-write (reviewer); heavy-slot (lane, reviewer, check).
+Never: other Orca verbs, --to, --environment, --on, --file; gh api, auth, secret, --web, --editor, --attach,
+--template, --recover, another PR or run; bd list, close, delete, remember, or a flag-shaped id."""
+import fcntl
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import sandbox as SB  # noqa: E402
+
+ROLES = {
+    "report": ("lane", "reviewer"), "escalate": ("lane", "reviewer"), "ask": ("lane", "reviewer"),
+    "check": ("lane", "reviewer"), "reply": ("lane", "reviewer"), "push": ("lane",), "fetch": ("lane", "reviewer"),
+    "pr-create": ("lane",), "pr-view": ("lane", "reviewer"), "pr-checks": ("lane", "reviewer"),
+    "pr-diff": ("lane", "reviewer"), "pr-comment": ("lane",), "pr-edit": ("lane",), "run-view": ("lane", "reviewer"),
+    "bd-show": ("lane", "reviewer"), "bd-note": ("lane",), "bd-claim": ("lane",), "bd-create": ("lane",),
+    "review-read": ("lane", "reviewer"), "review-write": ("reviewer",), "heavy-slot": ("lane", "reviewer", "check"),
+}
+FIELDS = {  # name: (required, optional)
+    "report": (("task", "dispatch", "subject", "body", "outcome"), ("files",)),
+    "escalate": (("task", "dispatch", "subject", "body"), ()), "ask": (("question",), ()), "check": ((), ()),
+    "reply": (("id", "body"), ()), "push": ((), ()), "fetch": ((), ()), "pr-create": (("title", "body"), ()),
+    "pr-view": ((), ()), "pr-checks": ((), ()), "pr-diff": ((), ()), "pr-comment": (("body",), ()),
+    "pr-edit": ((), ("title", "body")), "run-view": (("run",), ()), "bd-show": (("id",), ()),
+    "bd-note": (("text",), ()), "bd-claim": ((), ()), "bd-create": (("title", "description"), ("type", "priority")),
+    "review-read": (("name",), ()), "review-write": (("name", "text"), ()), "heavy-slot": ((), ()),
+}
+PATTERNS = {"task": r"task_[A-Za-z0-9]{6,64}", "dispatch": r"ctx_[A-Za-z0-9]{6,64}", "id": r"[A-Za-z0-9_]{3,80}",
+            "outcome": r"succeeded|failed", "run": r"[0-9]{1,20}", "type": r"bug|feature|task|chore",
+            "priority": r"[0-4]", "name": r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md"}
+TEXT_CAP = {"subject": 300, "title": 300, "question": 4000}
+PR_JSON = "number,title,state,url,headRefName,headRefOid,baseRefName,isDraft,mergeable,reviewDecision,body"
+CHECKS_JSON = "name,state,bucket,link,workflow"
+BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,200}")
+
+
+class Refused(Exception):
+    pass
+
+
+def orca_cli() -> str:
+    try:
+        import machineconf
+        return machineconf.orca_cli()
+    except Exception:
+        return "orca-ide"
+
+
+def lane_record(t: dict) -> dict:
+    try:
+        return json.loads((Path(t["lane_dir"]) / "lane.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def text_file(t: dict, text: str) -> str:
+    d = SB.private_dir(Path(t["ticket_dir"]) / "broker" / "text")
+    fd, name = tempfile.mkstemp(dir=d, suffix=".txt")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    return name
+
+
+def validate(req, role: str) -> tuple:
+    if not isinstance(req, dict):
+        raise Refused("a request is a JSON object")
+    name = req.get("request")
+    if name not in FIELDS:
+        raise Refused(f"unknown request {str(name)[:40]!r}")
+    if role not in ROLES[name]:
+        raise Refused(f"{name} is not for a {role}")
+    need, opt = FIELDS[name]
+    extra = set(req) - {"request", *need, *opt}
+    if extra:
+        raise Refused(f"unknown field(s) for {name}: {', '.join(sorted(extra))[:200]}")
+    missing = [k for k in need if k not in req]
+    if missing:
+        raise Refused(f"{name} needs {', '.join(missing)}")
+    f = {k: req[k] for k in (*need, *opt) if k in req}
+    for k, v in f.items():
+        if k == "files":
+            if not (isinstance(v, list) and all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", x)
+                                                for x in v) and len(v) <= 200):
+                raise Refused("files: a list of plain relative paths")
+            continue
+        if not isinstance(v, str):
+            raise Refused(f"{k}: a string")
+        if k in PATTERNS and not (name == "bd-show" and k == "id") and not re.fullmatch(PATTERNS[k], v):
+            raise Refused(f"{k}: does not match its pattern")
+        if k in TEXT_CAP and (len(v) > TEXT_CAP[k] or "\n" in v and k != "question"):
+            raise Refused(f"{k}: too long, or more than one line")
+    return name, f
+
+
+class Broker:
+    def __init__(self, t: dict, terminal: str, run=subprocess.run):
+        self.t, self.terminal, self.run = t, terminal, run
+        self.rec = lane_record(t)
+        self.broker_dir = SB.private_dir(Path(t["ticket_dir"]) / "broker")
+        self.lock = threading.Lock()
+
+    # --- helpers -------------------------------------------------------------------------------------------------
+
+    def cli(self, argv: list, cwd=None, timeout=300) -> subprocess.CompletedProcess:
+        try:
+            return self.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                            stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise Refused(f"{Path(argv[0]).name} could not run: {e.__class__.__name__}") from None
+
+    def ok_or(self, r, what: str) -> dict:
+        if r.returncode != 0:
+            raise Refused(f"{what} failed: {(r.stderr or r.stdout or '').strip().splitlines()[-1:] or ['']}"[:400])
+        return {"ok": True, "output": (r.stdout or "")[-200000:]}
+
+    def git(self, *args, cwd=None, check=True) -> str:
+        r = self.cli(["git", *map(str, args)], cwd=cwd)
+        if check and r.returncode != 0:
+            raise Refused(f"git {args[0] if args else ''}: {(r.stderr.strip().splitlines() or ['failed'])[-1]}"[:300])
+        return r.stdout.strip()
+
+    def branch(self) -> str:
+        b = self.t["branch"]
+        if not BRANCH.fullmatch(b) or ".." in b:
+            raise Refused("the lane branch name is not one the broker passes on")
+        return b
+
+    def slug(self) -> str:
+        s = self.t.get("gh_repo") or self.rec.get("gh_repo")
+        if not s:
+            raise Refused("the project has no GitHub repository")
+        return s
+
+    def dispatch_mine(self, task: str, dispatch: str) -> None:
+        r = self.cli([orca_cli(), "orchestration", "dispatch-show", f"--task={task}", "--json"])
+        try:
+            d = json.loads(r.stdout)["result"]["dispatch"]
+        except (ValueError, KeyError, TypeError):
+            raise Refused("that task's dispatch cannot be read from Orca") from None
+        if r.returncode != 0 or d.get("id") != dispatch or d.get("assignee_handle") != self.terminal:
+            raise Refused("that dispatch is not this terminal's")
+
+    def seen_file(self) -> Path:
+        return self.broker_dir / "seen.json"
+
+    def seen(self) -> set:
+        try:
+            return set(json.loads(self.seen_file().read_text()))
+        except (OSError, ValueError):
+            return set()
+
+    # --- requests ------------------------------------------------------------------------------------------------
+
+    def handle(self, req) -> dict:
+        name, f = validate(req, self.t["role"])
+        return getattr(self, "r_" + name.replace("-", "_"))(**f)
+
+    def r_report(self, task, dispatch, subject, body, outcome, files=()):
+        self.dispatch_mine(task, dispatch)
+        argv = [orca_cli(), "orchestration", "send", f"--from={self.terminal}", "--type=worker_done",
+                f"--subject={subject}", f"--body-file={text_file(self.t, body)}", f"--task-id={task}",
+                f"--dispatch-id={dispatch}", f"--outcome={outcome}", "--json"]
+        if files:
+            argv.append(f"--files-modified={','.join(files)}")
+        return self.ok_or(self.cli(argv), "orca send")
+
+    def r_escalate(self, task, dispatch, subject, body):
+        self.dispatch_mine(task, dispatch)
+        return self.ok_or(self.cli([orca_cli(), "orchestration", "send", f"--from={self.terminal}",
+                                    "--type=escalation", f"--subject={subject}",
+                                    f"--body-file={text_file(self.t, body)}", f"--task-id={task}",
+                                    f"--dispatch-id={dispatch}", "--json"]), "orca send")
+
+    def r_ask(self, question):
+        return self.ok_or(self.cli([orca_cli(), "orchestration", "ask", f"--from={self.terminal}",
+                                    f"--question={question}", "--json"]), "orca ask")
+
+    def r_check(self):
+        r = self.cli([orca_cli(), "orchestration", "check", f"--terminal={self.terminal}", "--json"])
+        out = self.ok_or(r, "orca check")
+        ids = set(re.findall(r'"(?:id|message_id|messageId)"\s*:\s*"([A-Za-z0-9_]{3,80})"', r.stdout or ""))
+        with self.lock:
+            SB.write_private(self.seen_file(), json.dumps(sorted(self.seen() | ids)))
+        return out
+
+    def r_reply(self, id, body):
+        if id not in self.seen():
+            raise Refused("reply only to a message this lane's check returned")
+        return self.ok_or(self.cli([orca_cli(), "orchestration", "reply", f"--id={id}",
+                                    f"--body-file={text_file(self.t, body)}", f"--from={self.terminal}", "--json"]),
+                          "orca reply")
+
+    def gh(self, *args, what="gh"):
+        return self.ok_or(self.cli(["gh", *args]), what)
+
+    def r_pr_create(self, title, body):
+        return self.gh("pr", "create", f"--repo={self.slug()}", f"--head={self.branch()}", f"--base={self.t['base']}",
+                       f"--title={title}", f"--body-file={text_file(self.t, body)}", what="gh pr create")
+
+    def r_pr_view(self):
+        return self.gh("pr", "view", self.branch(), f"--repo={self.slug()}", f"--json={PR_JSON}", what="gh pr view")
+
+    def r_pr_checks(self):
+        r = self.cli(["gh", "pr", "checks", self.branch(), f"--repo={self.slug()}", f"--json={CHECKS_JSON}"])
+        if r.returncode not in (0, 1, 8):  # 1 and 8: some checks failed or are pending, still an answer
+            return self.ok_or(r, "gh pr checks")
+        return {"ok": True, "output": r.stdout}
+
+    def r_pr_diff(self):
+        return self.gh("pr", "diff", self.branch(), f"--repo={self.slug()}", what="gh pr diff")
+
+    def r_pr_comment(self, body):
+        return self.gh("pr", "comment", self.branch(), f"--repo={self.slug()}",
+                       f"--body-file={text_file(self.t, body)}", what="gh pr comment")
+
+    def r_pr_edit(self, title=None, body=None):
+        if title is None and body is None:
+            raise Refused("pr-edit needs a title or a body")
+        argv = ["pr", "edit", self.branch(), f"--repo={self.slug()}"]
+        if title is not None:
+            argv.append(f"--title={title}")
+        if body is not None:
+            argv.append(f"--body-file={text_file(self.t, body)}")
+        return self.gh(*argv, what="gh pr edit")
+
+    def r_run_view(self, run):
+        r = self.cli(["gh", "run", "view", run, f"--repo={self.slug()}", "--json=headBranch"])
+        try:
+            head = json.loads(r.stdout)["headBranch"]
+        except (ValueError, KeyError, TypeError):
+            raise Refused("that run cannot be read") from None
+        if r.returncode != 0 or head != self.branch():
+            raise Refused("that run is not of the lane's branch")
+        return self.gh("run", "view", run, f"--repo={self.slug()}", "--log-failed", what="gh run view")
+
+    # bd: the DB is the project's (the shared checkout's .beads), never the clone's
+    def bd(self, *args):
+        return self.cli(["bd", *args], cwd=self.t["repo"])
+
+    def bd_id_ok(self, id: str) -> None:
+        prefix = self.t.get("bd_prefix") or self.rec.get("bd_prefix") or (self.t.get("issue") or "").split("-")[0]
+        if not prefix or not re.fullmatch(rf"{re.escape(prefix)}-[a-z0-9]+(\.[0-9]+)*", id):
+            raise Refused("that id is not one of this project's issue ids")
+
+    def links(self) -> set:
+        issue = self.t.get("issue")
+        if not issue:
+            raise Refused("this lane has no issue")
+        self.bd_id_ok(issue)
+        r = self.bd("show", f"--id={issue}", "--json")
+        try:
+            d = json.loads(r.stdout)
+            d = d[0] if isinstance(d, list) else d
+        except (ValueError, IndexError):
+            raise Refused("the lane's issue cannot be read") from None
+        out = {issue}
+        for k in ("dependencies", "dependents", "parent", "children"):
+            for x in d.get(k) or []:
+                if isinstance(x, dict) and isinstance(x.get("id"), str):
+                    out.add(x["id"])
+                elif isinstance(x, str):
+                    out.add(x)
+        return out
+
+    def r_bd_show(self, id):
+        self.bd_id_ok(id)
+        if id not in self.links():
+            raise Refused("bd-show reads only the lane's issue and the issues it links")
+        return self.ok_or(self.bd("show", f"--id={id}"), "bd show")
+
+    def own_issue(self) -> str:
+        issue = self.t.get("issue")
+        if not issue:
+            raise Refused("this lane has no issue")
+        self.bd_id_ok(issue)
+        return issue
+
+    def r_bd_note(self, text):
+        return self.ok_or(self.bd("update", self.own_issue(), f"--append-notes={text}"), "bd update")
+
+    def r_bd_claim(self):
+        return self.ok_or(self.bd("update", self.own_issue(), "--claim"), "bd update")
+
+    def r_bd_create(self, title, description, type="task", priority="2"):
+        issue = self.own_issue()
+        return self.ok_or(self.bd("create", f"--title={title}", f"--description={description}", f"--type={type}",
+                                  f"--priority={priority}", f"--deps=discovered-from:{issue}"), "bd create")
+
+    def review_dir(self) -> Path:
+        sys.path.insert(0, str(HERE.parent))
+        import sandboxprep
+        d = sandboxprep.read_conf().get("SANDBOX_REVIEW_DIR")
+        if not d or not os.path.isabs(d):
+            raise Refused("no review folder (SANDBOX_REVIEW_DIR in machine.conf)")
+        return Path(d)
+
+    def r_review_read(self, name):
+        if name not in (self.t.get("review_files") or []):
+            raise Refused("review-read reads only the files prepare named for this ticket")
+        dst = self.broker_dir / "review-read.tmp"
+        try:
+            SB.safe_read(self.review_dir() / name, SB.REQUEST_CAP, dst)
+        except SB.SandboxError as e:
+            raise Refused(str(e)) from None
+        text = dst.read_text(errors="replace")
+        dst.unlink()
+        return {"ok": True, "output": text}
+
+    def r_review_write(self, name, text):
+        if name != self.t.get("review_write"):
+            raise Refused("review-write writes only the one name prepare gave this reviewer")
+        p = self.review_dir() / name
+        try:
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            raise Refused(f"{name} exists: a review file is written once") from None
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        return {"ok": True, "output": f"wrote {name}"}
+
+    # --- git: push and fetch, never on a lane-made path ----------------------------------------------------------
+
+    def quarantine(self) -> Path:
+        return Path(self.t["lane_dir"]) / "quarantine.git"
+
+    def r_push(self):
+        with self.lock:
+            return self._push()
+
+    def _push(self):
+        lane, branch, base = self.t["lane"], self.branch(), self.t["base"]
+        q, repo = self.quarantine(), self.t["repo"]
+        copy = self.broker_dir / "push.bundle"
+        try:
+            copy.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            SB.safe_read(Path(self.t["ticket_dir"]) / "run" / "outbox" / "push.bundle", SB.OUTBOX_CAP, copy)
+        except SB.SandboxError as e:
+            raise Refused(str(e)) from None
+        r = self.cli(["git", "-C", str(q), "bundle", "list-heads", str(copy)])
+        heads = [x.split() for x in r.stdout.splitlines() if x.strip()]
+        if r.returncode != 0:
+            raise Refused("not a git bundle")
+        if len(heads) != 1 or len(heads[0]) != 2 or heads[0][1] != f"refs/heads/{branch}":
+            raise Refused(f"the bundle must hold exactly refs/heads/{branch}")
+        r = self.cli(["git", "-C", str(q), "-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "fetch",
+                      "-q", "--no-tags", "--no-write-fetch-head", str(copy), f"+refs/heads/{branch}:refs/incoming"])
+        if r.returncode != 0:
+            raise Refused("the quarantine cannot import it (missing objects or fsck)")
+        new = self.git("-C", q, "rev-parse", "refs/incoming")
+        recorded = (Path(self.t["lane_dir"]) / "base").read_text().strip()
+        if self.cli(["git", "-C", str(q), "merge-base", "--is-ancestor", recorded, new]).returncode:
+            raise Refused("does not descend from the lane's base")
+        prev = self.git("-C", q, "rev-parse", "-q", "--verify", "refs/heads/lane", check=False)
+        if prev and self.cli(["git", "-C", str(q), "merge-base", "--is-ancestor", prev, new]).returncode:
+            raise Refused("not a fast-forward of the lane's last push (a rewritten branch: lanes merge)")
+        if prev == new:
+            return {"ok": True, "sha": new, "output": "up to date"}
+        hits = SB.ci_hits(q, [new, "--not", f"refs/heads/{base}", *([prev] if prev else [])])
+        if hits and not (Path(self.t["lane_dir"]) / "ci-approved" / new).is_file():
+            raise Refused(f"changes CI configuration ({', '.join(hits[:5])}): the owner approves it with "
+                          f"lane-control lane approve-ci {lane} {new}")
+        self.git("-C", q, "update-ref", "refs/heads/lane", new)
+        self.git("-C", repo, "fetch", "-q", "--no-tags", "--no-write-fetch-head", str(q),
+                 f"refs/heads/lane:refs/lanes/{lane}")
+        r = self.cli(["git", "-C", str(repo), "push", "-q", "--no-verify", "origin",
+                      f"refs/lanes/{lane}:refs/heads/{branch}"])
+        if r.returncode != 0:
+            raise Refused("accepted into refs/lanes/{0}, but the push to origin failed: push again".format(lane))
+        self.git("-C", q, "update-ref", "-d", "refs/incoming", check=False)
+        return {"ok": True, "sha": new, "output": f"pushed {new[:12]} to origin {branch}"}
+
+    def delivered_file(self) -> Path:
+        return Path(self.t["lane_dir"]) / "delivered" if self.t["role"] == "lane" else \
+            self.broker_dir / "delivered"
+
+    def r_fetch(self):
+        with self.lock:
+            return self._fetch()
+
+    def _fetch(self):
+        repo, base = self.t["repo"], self.t["base"]
+        df = self.delivered_file()
+        last = df.read_text().strip() if df.is_file() else (self.t.get("base_sha") or "")
+        if not last:
+            raise Refused("nothing recorded as delivered")
+        self.cli(["git", "-C", str(repo), "fetch", "-q", "--no-tags", "origin", base])  # the owner's own fetch
+        tip = self.git("-C", repo, "rev-parse", "-q", "--verify", f"refs/remotes/origin/{base}^{{commit}}")
+        if tip == last or not self.cli(["git", "-C", str(repo), "merge-base", "--is-ancestor", tip, last]).returncode:
+            return {"ok": True, "new": 0, "output": "up to date"}
+        hits = SB.history_hits(Path(repo), [tip, f"^{last}"], self.t.get("private") or [])
+        if hits:
+            raise Refused(f"the base's new commits hold private or secret-env paths ({', '.join(hits[:5])}): not "
+                          "delivered; tell the owner")
+        tmp = self.broker_dir / "base.bundle"
+        self.git("-C", repo, "bundle", "create", "-q", tmp, f"refs/remotes/origin/{base}", f"^{last}")
+        os.replace(tmp, Path(self.t["ticket_dir"]) / "run" / "inbox" / "base.bundle")
+        if self.t["role"] == "lane":
+            self.git("-C", self.quarantine(), "fetch", "-q", "--no-tags", "--no-write-fetch-head", repo,
+                     f"{tip}:refs/heads/{base}")
+        SB.write_private(df, tip + "\n")
+        return {"ok": True, "new": int(self.git("-C", repo, "rev-list", "--count", tip, f"^{last}")), "sha": tip,
+                "bundle": "/run/lane/inbox/base.bundle", "ref": f"refs/remotes/origin/{base}"}
+
+
+def handle(req, ticket: dict, terminal: str, run=subprocess.run) -> dict:
+    """One request, as the server runs it: {"ok": True, ...} or {"ok": False, "error": why}."""
+    try:
+        return Broker(ticket, terminal, run).handle(req)
+    except Refused as e:
+        return {"ok": False, "error": str(e)}
+
+
+# --- serving -------------------------------------------------------------------------------------------------------
+
+def log(t: dict, name: str, outcome: str) -> None:
+    line = json.dumps({"t": round(time.time(), 3), "request": str(name)[:40], "outcome": outcome[:300]})
+    with open(Path(t["ticket_dir"]) / "broker" / "requests.log", "a") as f:
+        f.write(line + "\n")
+
+
+def read_request(conn) -> bytes:
+    buf = b""
+    while b"\n" not in buf:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > SB.REQUEST_CAP:
+            raise Refused(f"request over {SB.REQUEST_CAP} bytes")
+    return buf.split(b"\n", 1)[0]
+
+
+def heavy_slot(t: dict, conn) -> None:
+    """Hold one of lane-heavy's slots (its flock files) while the connection stays open."""
+    state = Path(os.environ.get("LANE_STATE_DIR") or SB._xdg("XDG_STATE_HOME", ".local/state") / "lane-control")
+    SB.private_dir(state)
+    try:
+        n = int(os.environ.get("LANE_HEAVY_SLOTS") or 2)
+    except ValueError:
+        n = 2
+    fd = None
+    while fd is None:
+        for i in range(max(1, n)):
+            f = os.open(state / f"heavy.{i}", os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fd = f
+                break
+            except OSError:
+                os.close(f)
+        if fd is None:
+            time.sleep(1)
+    try:
+        conn.sendall(json.dumps({"ok": True, "output": "slot held"}).encode() + b"\n")
+        while conn.recv(4096):
+            pass
+    finally:
+        os.close(fd)
+
+
+def serve_one(b: Broker, conn) -> None:
+    name = "?"
+    try:
+        try:
+            raw = read_request(conn)
+            req = json.loads(raw.decode("utf-8"))
+            name = req.get("request", "?") if isinstance(req, dict) else "?"
+            if name == "heavy-slot":
+                validate(req, b.t["role"])
+                log(b.t, name, "held")
+                heavy_slot(b.t, conn)
+                return
+            out = b.handle(req)
+            log(b.t, name, "ok")
+        except Refused as e:
+            out = {"ok": False, "error": str(e)}
+            log(b.t, name, f"refused: {e}")
+        except (ValueError, UnicodeDecodeError):
+            out = {"ok": False, "error": "not a JSON request"}
+            log(b.t, name, "refused: not JSON")
+        except Exception as e:  # noqa: BLE001  never crash the server on one request
+            out = {"ok": False, "error": f"broker error: {e.__class__.__name__}"}
+            log(b.t, name, f"error: {e.__class__.__name__}")
+        conn.sendall(json.dumps(out).encode() + b"\n")
+        conn.shutdown(socket.SHUT_WR)
+        conn.settimeout(2)  # read what is left, so the lane's side gets the answer and not a reset
+        left = 64 << 20
+        while left > 0 and (chunk := conn.recv(65536)):
+            left -= len(chunk)
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+
+def serve(ticket_file: str) -> int:
+    t = SB.check_ticket(json.loads(Path(ticket_file).read_text()))
+    terminal = t.get("terminal")
+    if not terminal:
+        print("lane-broker: the ticket is not bound to a terminal", file=sys.stderr)
+        return 2
+    sock_path = Path(t["ticket_dir"]) / "run" / "broker.sock"
+    SB.private_dir(sock_path.parent)
+    SB.private_dir(Path(t["ticket_dir"]) / "broker")
+    try:
+        sock_path.unlink()
+    except FileNotFoundError:
+        pass
+    b = Broker(t, terminal)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    os.chdir(sock_path.parent)  # bound by its relative name: a long HOME would pass the 108-byte socket path limit
+    old = os.umask(0o177)
+    try:
+        os.unlink(".broker.sock.tmp")
+    except FileNotFoundError:
+        pass
+    s.bind(".broker.sock.tmp")
+    os.umask(old)
+    s.listen(16)
+    os.replace(".broker.sock.tmp", "broker.sock")
+    while True:
+        conn, _ = s.accept()
+        threading.Thread(target=serve_one, args=(b, conn), daemon=True).start()
+
+
+def main(argv: list) -> int:
+    if len(argv) == 2 and argv[0] == "serve":
+        return serve(argv[1])
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

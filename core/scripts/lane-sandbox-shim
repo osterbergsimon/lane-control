@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""lane-sandbox-shim: the launcher Orca runs for OpenCode (SBX-2 task 4, lc-35qn; spec "The launch").
+
+  lane-sandbox-shim opencode [args]              Orca's custom command for OpenCode (the owner sets it once in
+  lane-sandbox-shim opencode2 --standalone [args]   Settings -> Agents; `lane-control machine check --sandbox`
+                                                  prints the exact text and says whether it is set)
+  opencode | opencode2 [args]                    the same file linked first on PATH: the detector only
+
+In a worktree that `lane-control lane prepare --sandbox` bound to a lane, it takes the oldest unused ticket (bound
+to the pane's ORCA_TERMINAL_HANDLE), starts the ticket's broker and runs the spec's chain: [systemd-run --user
+--scope] -> pasta (own network namespace) -> bwrap --cap-drop ALL with the mount plan, blocked on its block fd. It
+then finds bwrap's host pid by mount namespace, sets the namespace's nft output filter through nsenter, writes the
+run record (runs/<terminal>.json), and only then lets bwrap start the agent. It stays the parent, forwards SIGINT,
+SIGTERM, SIGHUP and SIGWINCH to the agent and exits with its status. Every refusal is exit 2 and one line; the agent
+never starts then.
+
+Passes through unchanged: a folder no lane is bound to (the owner's own tabs, the primary checkout), `--version`,
+`-v`, `models`, `--help`, `-h`. As a PATH link (the name opencode or opencode2) in a bound worktree it refuses: a
+sandboxed lane started without the custom command (detected, not prevented; `lane-control lane started` then stops
+the worker).
+
+Reads: sandbox.conf and machine.conf (SANDBOX_BWRAP, SANDBOX_PASTA, SANDBOX_NSENTER, SANDBOX_NFT, SANDBOX_REAL_OPENCODE,
+SANDBOX_REAL_OPENCODE2, SANDBOX_LANE_MEMORY, SANDBOX_AGENT_DIRS). LANE_SANDBOX_PROC (tests only) names another /proc
+for the host-pid lookup."""
+import json
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import sandbox as SB  # noqa: E402
+import sandboxprep as SP  # noqa: E402
+
+AGENTS = ("opencode", "opencode2")
+PASS = ("--version", "-v", "models", "--help", "-h")
+INFO_WAIT = 20.0
+SHIM_NAMES = {"lane-sandbox-shim"}
+
+
+def say(msg: str) -> None:
+    print(f"lane-sandbox: {msg}", file=sys.stderr, flush=True)
+
+
+def refuse(msg: str) -> int:
+    say(f"refused: {msg}")
+    return 2
+
+
+def is_shim(p: Path) -> bool:
+    try:
+        return p.resolve() == Path(__file__).resolve()
+    except OSError:
+        return False
+
+
+def real_agent(agent: str, conf: dict) -> "str | None":
+    """The real OpenCode binary: machine.conf's SANDBOX_REAL_OPENCODE[2], else the next one on PATH that is not
+    this shim."""
+    given = conf.get("SANDBOX_REAL_" + agent.upper())
+    if given and os.path.isabs(given) and not is_shim(Path(given)):
+        return given
+    for d in os.environ.get("PATH", "").split(":"):
+        f = Path(d or ".") / agent
+        if f.is_file() and os.access(f, os.X_OK) and not is_shim(f):
+            return str(f)
+    return None
+
+
+def bound_worktree(cwd: Path) -> "Path | None":
+    """The folder (cwd or a parent) that prepare bound to a sandboxed lane, or None."""
+    for d in [cwd, *cwd.parents]:
+        if SB.binding_file(d).is_file() or SB.tickets_dir(d).is_dir() and any(SB.tickets_dir(d).glob("*.json")):
+            return d
+    return None
+
+
+def check_pins(conf: dict) -> "str | None":
+    for k in SP.PIN_KEYS:
+        v = conf.get(k) or ""
+        if not v.startswith("/nix/store/"):
+            return f"{k} is not a pinned /nix/store path: run lane-control machine setup --sandbox"
+        try:
+            st = os.stat(v)
+        except OSError:
+            return f"{k} ({v}) is missing: run lane-control machine setup --sandbox"
+        if st.st_mode & (stat.S_ISUID | stat.S_ISGID):
+            return f"{k} ({v}) is setuid or setgid: never used"
+    return None
+
+
+def scope_works(env: dict) -> "str | None":
+    """None when systemd-run --user can make a scope here; else why not (the chain then has no memory cap)."""
+    if not (env.get("DBUS_SESSION_BUS_ADDRESS") and env.get("XDG_RUNTIME_DIR")):
+        return "no user session bus"
+    exe = shutil.which("systemd-run")
+    if not exe:
+        return "no systemd-run"
+    bus = {k: env[k] for k in SB.BUS_VARS}
+    try:
+        r = subprocess.run([exe, "--user", "--scope", "-q", "--", "true"], env={"PATH": os.environ.get("PATH", ""),
+                                                                              **bus},
+                           capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return "systemd-run --user did not answer"
+    return None if r.returncode == 0 else "systemd-run --user --scope failed"
+
+
+def orca_binds(env: dict, home: str) -> list:
+    """Orca's OpenCode overlay folder and its hook endpoint file, when they are under Orca's user data."""
+    ud = os.path.normpath(os.path.join(home, ".config", "orca"))
+    out = []
+    for k in SB.ENV_PATHS:
+        v = env.get(k)
+        if v and os.path.isabs(v) and os.path.exists(v):
+            p = os.path.normpath(v)
+            if p.startswith(ud + "/") and p not in out:
+                out.append(p)
+    return out
+
+
+class Chain:
+    def __init__(self):
+        self.proc = None
+        self.broker = None
+        self.agent_pid = None
+        self.host_pid = None
+
+    def kill(self):
+        for p in (self.proc, self.broker):
+            if p and p.poll() is None:
+                try:
+                    p.kill()
+                    p.wait(timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+
+    def target(self) -> "int | None":
+        """The agent: bwrap's pid-1 helper's child (or the helper itself)."""
+        if self.host_pid is None:
+            return None
+        proc = os.environ.get("LANE_SANDBOX_PROC") or "/proc"
+        try:
+            kids = Path(f"{proc}/{self.host_pid}/task/{self.host_pid}/children").read_text().split()
+            return int(kids[0]) if kids else self.host_pid
+        except (OSError, ValueError):
+            return self.host_pid
+
+    def forward(self, signum, _frame):
+        pid = self.target()
+        if pid:
+            try:
+                os.kill(pid, signum)
+            except OSError:
+                pass
+        elif self.proc and self.proc.poll() is None:
+            try:
+                self.proc.send_signal(signum)
+            except OSError:
+                pass
+
+
+def wait_info(info: Path, chain: Chain) -> "dict | None":
+    end = time.time() + INFO_WAIT
+    while time.time() < end:
+        if chain.proc.poll() is not None:
+            return None
+        try:
+            d = json.loads(info.read_text())
+            if "child-pid" in d and "mnt-namespace" in d:
+                return d
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.05)
+    return None
+
+
+def launch(t: dict, conf: dict, env: dict) -> int:
+    td = Path(t["ticket_dir"])
+    launch_dir = SB.private_dir(td / "launch")
+    run = td / "run"
+    for sub in ("inbox", "outbox"):
+        SB.private_dir(run / sub)
+    info, block = launch_dir / "info.json", launch_dir / "block"
+    for f in (info, block, run / "broker.sock"):
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+    os.mkfifo(block, 0o600)
+    hold = os.open(block, os.O_RDWR | os.O_NONBLOCK)  # bwrap blocks on it until we write
+    chain = Chain()
+    broker_env = {k: v for k, v in env.items() if k != t.get("gateway_key_env")}
+    chain.broker = subprocess.Popen([sys.executable, str(HERE / "lane-broker"), "serve", t["ticket_file"]],
+                                    env=broker_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=open(td / "broker" / "stderr.log", "ab"), start_new_session=True)
+    end = time.time() + 10
+    while not (run / "broker.sock").exists():
+        if chain.broker.poll() is not None or time.time() > end:
+            chain.kill()
+            return refuse("the broker did not start (its log: broker/stderr.log in the ticket folder)")
+        time.sleep(0.02)
+    why = scope_works(env)
+    if why:
+        say(f"no memory cap for this lane: {why} (lane-control machine check --sandbox says so too)")
+    argv, cenv = SB.chain_argv(t, conf, why is None, env)
+    if why is None:
+        argv[0] = shutil.which("systemd-run") or argv[0]
+    try:
+        chain.proc = subprocess.Popen(argv, env=cenv)
+    except OSError as e:
+        chain.kill()
+        return refuse(f"the chain could not start: {e.strerror}")
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGWINCH):
+        signal.signal(s, chain.forward)
+    d = wait_info(info, chain)
+    if d is None:
+        chain.kill()
+        return refuse("bwrap exited, or wrote no info, before the agent could start: nothing ran")
+    proc = Path(os.environ.get("LANE_SANDBOX_PROC") or "/proc")
+    try:
+        chain.host_pid = SB.host_pid(int(d["mnt-namespace"]), int(d["child-pid"]), proc)
+    except (SB.SandboxError, ValueError, TypeError) as e:
+        chain.kill()
+        return refuse(str(e))
+    gw = tuple(t["gateway"]) if t.get("gateway") else None
+    rules = launch_dir / "nft"
+    try:
+        SB.write_private(rules, SB.nft_rules(SB.host_addrs(proc if proc != Path("/proc") else Path("/proc")), gw))
+    except SB.SandboxError as e:
+        chain.kill()
+        return refuse(f"network filter: {e}")
+    r = subprocess.run([conf["SANDBOX_NSENTER"], "--preserve-credentials", "-t", str(chain.host_pid), "-U", "-n",
+                        conf["SANDBOX_NFT"], "-f", str(rules)], capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL, timeout=30, env={"PATH": "/nonexistent"})
+    if r.returncode != 0:
+        chain.kill()
+        return refuse("the network filter could not be set (nsenter/nft failed): nothing ran")
+    rec = {"nonce": t["nonce"], "role": t["role"], "lane": t["lane"], "worktree": t["worktree"],
+           "terminal": t["terminal"], "host_pid": chain.host_pid, "mntns": int(d["mnt-namespace"]),
+           "ticket": t["ticket_file"], "scope": why is None, "started": time.time()}
+    SB.write_private(SB.run_record(t["terminal"]), json.dumps(rec, indent=1) + "\n")
+    os.write(hold, b"g")
+    os.close(hold)
+    while True:
+        try:
+            rc = chain.proc.wait()
+            break
+        except InterruptedError:
+            continue
+    if chain.broker.poll() is None:
+        chain.broker.terminate()
+        try:
+            chain.broker.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            chain.broker.kill()
+    try:
+        rec["ended"] = time.time()
+        rec["status"] = rc
+        SB.write_private(SB.run_record(t["terminal"]), json.dumps(rec, indent=1) + "\n")
+    except (OSError, SB.SandboxError):
+        pass
+    return rc if rc >= 0 else 128 - rc
+
+
+def main(argv: list) -> int:
+    me = Path(argv[0]).name
+    detector = me in AGENTS
+    if detector:
+        agent, args = me, argv[1:]
+    elif len(argv) > 1 and argv[1] in AGENTS:
+        agent, args = argv[1], argv[2:]
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    conf = SP.read_conf()
+    real = real_agent(agent, conf)
+    if real is None:
+        return refuse(f"no real {agent} found (set SANDBOX_REAL_{agent.upper()} in machine.conf)")
+    cwd = Path(os.getcwd()).resolve()
+    wt = bound_worktree(cwd)
+    if wt is None or (args[:1] and args[0] in PASS):
+        os.execv(real, [agent, *args])
+    if wt != cwd:
+        return refuse(f"started in {cwd}, below the sandboxed lane's worktree {wt}: start it in the worktree")
+    if detector:
+        return refuse(f"{wt} is a sandboxed lane's worktree, and this start came through PATH, not lane-control's "
+                      "launcher: set Orca's custom command for OpenCode (lane-control machine check --sandbox "
+                      "names it); nothing ran")
+    why = check_pins(conf)
+    if why:
+        return refuse(why)
+    env = dict(os.environ)
+    try:
+        t = SB.take_ticket(wt, env.get("ORCA_TERMINAL_HANDLE", ""))
+    except SB.SandboxError as e:
+        return refuse(str(e))
+    t["agent"] = [real, *args]
+    try:
+        t["hook_port"] = int(env["ORCA_AGENT_HOOK_PORT"]) if env.get("ORCA_AGENT_HOOK_PORT") else None
+    except ValueError:
+        t["hook_port"] = None
+    t["orca_binds"] = orca_binds(env, t["home"])
+    rp = os.path.realpath(real)
+    if not rp.startswith("/nix/store/") and not any(rp.startswith(d.rstrip("/") + "/") for d in t["agent_dirs"]):
+        return refuse(f"{agent} resolves to {rp}, outside /nix/store and SANDBOX_AGENT_DIRS: it would not exist "
+                      "inside; install it from nixpkgs or add its folder to SANDBOX_AGENT_DIRS")
+    try:
+        return launch(t, conf, env)
+    except SB.SandboxError as e:
+        return refuse(str(e))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
