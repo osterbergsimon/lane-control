@@ -240,6 +240,62 @@ class FailClosedTests(ShimCase):
         code, _, err = self.shim("opencode2", cwd=self.fx.repo)  # the primary checkout: the owner's
         self.assertEqual(code, 7, err)
 
+    # review r2: any unreadable or broken settings store, conf or ticket: the agent never starts unsandboxed
+    def store(self):
+        return self.fx.store / "settings.json"
+
+    def test_truncated_settings_store(self):
+        self.store().write_text('{"root": "')
+        self.refused_here(says="worktree of a sandboxed project")
+
+    def test_unreadable_settings_store(self):
+        self.store().chmod(0)
+        self.addCleanup(self.store().chmod, 0o600)
+        self.refused_here(says="worktree of a sandboxed project")
+
+    def test_settings_store_gone(self):
+        self.store().unlink()
+        self.refused_here(says="worktree of a sandboxed project")
+
+    def test_entry_matching_nothing(self):
+        for entry in ("app,pub", "nosuch", "/nowhere/app"):
+            (self.fx.home / ".config" / "lane-control" / "machine.conf").write_text(f"SANDBOX_PROJECTS='{entry} app'\n")
+            self.refused_here(says="worktree of a sandboxed project")
+
+    def test_unreadable_sandbox_conf(self):
+        f = self.fx.home / ".config" / "lane-control" / "sandbox.conf"
+        f.chmod(0)
+        self.addCleanup(f.chmod, 0o600)
+        self.refused_here(says="cannot be read")
+
+    def test_malformed_ticket(self):
+        self.fx.prepare()
+        d = SB.tickets_dir(self.fx.wt)
+        for f in d.glob("*.json"):
+            f.write_text("{not json")
+        self.refused_here(says="malformed ticket")
+
+    def test_unreadable_tickets(self):
+        self.fx.prepare()
+        d = SB.tickets_dir(self.fx.wt)
+        d.chmod(0)
+        self.addCleanup(d.chmod, 0o700)
+        self.refused_here(says="")
+
+    def test_broken_binding(self):
+        self.fx.prepare()
+        for f in SB.tickets_dir(self.fx.wt).glob("*.json"):
+            f.unlink()
+        SB.binding_file(self.fx.wt).write_text("{broken")
+        self.refused_here(says="no ticket")
+
+    def test_unreadable_state(self):
+        root = SB.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        root.chmod(0)
+        self.addCleanup(root.chmod, 0o700)
+        self.refused_here(says="")
+
     def test_other_projects_pass(self):
         other = self.t / "other"
         other.mkdir()
