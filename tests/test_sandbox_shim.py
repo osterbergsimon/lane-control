@@ -419,7 +419,7 @@ class CloseCheckTests(LifecycleCase):
         FX.git("reset", "-q", "--hard", "HEAD~1", cwd=c)
         r = self.ls("close", "app-1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertFalse(SB.lane_dir("app-1").exists())
+        self.assertFalse(SB.lane_dir("app-1", self.fx.repo).exists())
         self.assertFalse(SB.binding_file(self.fx.wt).exists())
         self.assertIn("never its close checks", r.stdout)
         bw = [x for x in self.calls("bwrap")][-1]["argv"]
@@ -444,7 +444,7 @@ class CloseCheckTests(LifecycleCase):
             with contextlib.redirect_stdout(out):
                 rc = LS.main(["close", "app-1", "--discard"])
         self.assertEqual(rc, 0, out.getvalue())
-        self.assertFalse(SB.lane_dir("app-1").exists())
+        self.assertFalse(SB.lane_dir("app-1", self.fx.repo).exists())
         self.assertEqual(self.calls("bwrap"), [])  # discarded: no inspect was needed
 
     def test_check_runs_in_fresh_clone(self):
@@ -453,12 +453,12 @@ class CloseCheckTests(LifecycleCase):
                     'git rev-parse HEAD >"$LANE_OUTBOX/head"; test -f lane-file; exit 3')
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("in a fresh clone, sandboxed", r.stdout)
-        checks = sorted(SB.lane_dir("app-1").glob("check-*/repo"))
+        checks = sorted(SB.lane_dir("app-1", self.fx.repo).glob("check-*/repo"))
         self.assertEqual(len(checks), 1)
         bw = self.calls("bwrap")[-1]["argv"]
         self.assertIn(str(checks[0]), bw)
         self.assertNotIn(str(self.fx.clone()), bw)
-        heads = list(SB.lane_dir("app-1").glob("t-*/run/outbox/head"))
+        heads = list(SB.lane_dir("app-1", self.fx.repo).glob("t-*/run/outbox/head"))
         self.assertEqual([h.read_text().strip() for h in heads], [sha])
         self.assertNotEqual(checks[0], self.fx.clone())
 

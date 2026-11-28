@@ -999,7 +999,7 @@ class SandboxPrepareTests(Scratch):
         return out
 
     def clone(self):
-        return self.SB.lane_dir("app-1") / "repo"
+        return self.SB.lane_dir("app-1", self.repo) / "repo"
 
     def test_fresh_clone_only_base(self):
         nonce, out = self.ok_prep()
@@ -1012,9 +1012,9 @@ class SandboxPrepareTests(Scratch):
             r = subprocess.run(["git", "cat-file", "-e", sha], cwd=c, capture_output=True)
             self.assertNotEqual(r.returncode, 0, sha)
         self.assertEqual(git("config", "remote.origin.url", cwd=c), self.SP.NOWHERE)
-        q = self.SB.lane_dir("app-1") / "quarantine.git"
+        q = self.SB.lane_dir("app-1", self.repo) / "quarantine.git"
         self.assertEqual(git("rev-parse", "refs/heads/main", cwd=q), self.base)
-        self.assertEqual((self.SB.lane_dir("app-1") / "base").read_text().strip(), self.base)
+        self.assertEqual((self.SB.lane_dir("app-1", self.repo) / "base").read_text().strip(), self.base)
         t = self.ticket(nonce)
         self.assertEqual((t["role"], t["clone"], t["worktree"]), ("lane", str(c), str(self.wt)))
         self.assertEqual(t["gateway_key_env"], "GATEWAY_KEY")
@@ -1128,7 +1128,7 @@ class SandboxPrepareTests(Scratch):
     def test_history_env_files(self):
         self.push_main(".env.example")
         self.ok_prep()
-        shutil.rmtree(self.SB.lane_dir("app-1"))
+        shutil.rmtree(self.SB.lane_dir("app-1", self.repo))
         self.push_main("sub/.env.local")
         self.no_prep(says="sub/.env.local")
 
@@ -1195,7 +1195,7 @@ class SandboxPrepareTests(Scratch):
             self.no_prep(says="read-only default workflow token")
             self.ci[leaf] = keep
         self.ok_prep()  # a user's repo: no organization secrets to ask about
-        shutil.rmtree(self.SB.lane_dir("app-1"))
+        shutil.rmtree(self.SB.lane_dir("app-1", self.repo))
         self.ci["app"] = {"owner": {"type": "Organization"}}
         self.ci["organization-secrets"] = {"total_count": 2}
         self.no_prep(says="organization secrets for the repo: 2")

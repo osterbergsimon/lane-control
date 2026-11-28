@@ -368,7 +368,7 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
         raise SB.SandboxError(f"{', '.join(missing)} not pinned: run lane-control machine setup --sandbox")
     if not lane:
         raise SB.SandboxError("--lane KEY is needed with --sandbox (the lane's identity, not the worktree's)")
-    ld = SB.lane_dir(lane)
+    ld = SB.lane_dir(lane, root)
     slug = github_slug(root)
     bad = [line for ok, line in ci_check(slug) if not ok]
     if bad:
@@ -382,6 +382,8 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
         known = json.loads((ld / "lane.json").read_text())
     except (OSError, ValueError):
         known = {}
+    if known and known.get("repo") != str(root):
+        raise SB.SandboxError(f"lane state {ld} is of another repository ({known.get('repo')}): nothing was done")
     if trole == "lane":
         branch = lane_branch(root, wt)
         other = SB.binding_file(wt)

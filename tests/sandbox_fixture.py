@@ -136,7 +136,7 @@ class Fixture:
 
     def clone(self) -> Path:
         with mock.patch.dict(os.environ, self.env, clear=True):
-            return SB.lane_dir(self.lane) / "repo"
+            return SB.lane_dir(self.lane, self.repo) / "repo"
 
 
 def tool_dirs() -> list:

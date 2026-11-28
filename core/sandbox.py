@@ -65,10 +65,38 @@ def state_root() -> Path:
     return _xdg("XDG_STATE_HOME", ".local/state") / "lane-control" / "sandbox"
 
 
-def lane_dir(lane: str) -> Path:
+def project_key(project: Path) -> str:
+    """<folder name>-<10 hex of the real path's sha256>: lane state is the project's AND the lane's, never the lane
+    key's alone (two projects may use the same key)."""
+    real = Path(project).resolve()
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", real.name)[:40] or "project"
+    return f"{name}-{hashlib.sha256(str(real).encode()).hexdigest()[:10]}"
+
+
+def lane_dir(lane: str, project: Path) -> Path:
     if not LANE_KEY.fullmatch(lane or ""):
         raise SandboxError(f"lane key {lane!r}: expected lower-case letters, digits, '.', '_' or '-'")
-    return state_root() / "lanes" / lane
+    return state_root() / "lanes" / project_key(project) / lane
+
+
+def find_lane(lane: str, project: "str | None" = None) -> Path:
+    """The one lane folder of that key (of that project, when given: its checkout path or folder name)."""
+    if not LANE_KEY.fullmatch(lane or ""):
+        raise SandboxError(f"lane key {lane!r}: expected lower-case letters, digits, '.', '_' or '-'")
+    found = []
+    for d in sorted((state_root() / "lanes").glob(f"*/{lane}")):
+        try:
+            rec = json.loads((d / "lane.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if project is None or project in (rec.get("repo"), rec.get("name")) or \
+                str(Path(project).expanduser().resolve()) == rec.get("repo"):
+            found.append(d)
+    if len(found) != 1:
+        raise SandboxError(f"lane {lane}: {len(found)} sandboxed lanes of that key" +
+                           ("" if found or project else "") +
+                           ("; give --project <checkout>" if len(found) > 1 else ""))
+    return found[0]
 
 
 def worktree_id(wt: Path) -> str:

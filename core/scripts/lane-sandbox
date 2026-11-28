@@ -445,9 +445,16 @@ def started(a) -> int:
     return 1
 
 
+PROJECT = None  # --project: which project's lane, when two use the same key
+
+
+def ldir(lane: str) -> Path:
+    return SB.find_lane(lane, PROJECT)
+
+
 def lane_rec(lane: str) -> dict:
     try:
-        return json.loads((SB.lane_dir(lane) / "lane.json").read_text())
+        return json.loads((ldir(lane) / "lane.json").read_text())
     except (OSError, ValueError):
         raise SB.SandboxError(f"no sandboxed lane {lane}") from None
 
@@ -460,7 +467,7 @@ def run_inside(lane: str, clone: Path, inner: list, role: str = "check") -> tupl
     if why:
         raise SB.SandboxError(why)
     rec = lane_rec(lane)
-    ld = SB.lane_dir(lane)
+    ld = ldir(lane)
     nonce = os.urandom(16).hex()
     td = ld / f"t-{nonce}"
     for sub in ("cache", "data", "run/inbox", "run/outbox", "launch", "broker", "gen/plugins", "gen/skills"):
@@ -496,7 +503,7 @@ INSPECT = ('h=$(git rev-parse HEAD 2>/dev/null || echo none); d=$(git status --p
 
 
 def inspect(lane: str) -> dict:
-    ld = SB.lane_dir(lane)
+    ld = ldir(lane)
     clone = ld / "repo"
     if not clone.is_dir():
         return {"head": None, "dirty": 0, "unpushed": 0, "missing": True}
@@ -531,7 +538,7 @@ def person(what: str) -> None:
 
 
 def remove_lane(lane: str) -> list:
-    ld = SB.lane_dir(lane)
+    ld = ldir(lane)
     rec = lane_rec(lane)
     gone = []
     for wt in {rec.get("worktree")} | set(rec.get("worktrees") or []):
@@ -583,7 +590,7 @@ def cmd_check(a) -> int:
     root = Path(rec["repo"])
     st = next((st for r, st in X.known() if r == root), {})
     base, base_sha = SP.base_branch(root, st, rec.get("base"))
-    clone = SP.second_clone(root, SB.lane_dir(a.lane), a.lane, "check", a.sha, base, base_sha,
+    clone = SP.second_clone(root, ldir(a.lane), a.lane, "check", a.sha, base, base_sha,
                             SP.lane_ref(root, a.lane), list(st.get("private") or rec.get("private") or []))
     rc, _ = run_inside(a.lane, clone, list(a.command))
     print(f"check {a.lane} @{a.sha[:12]}: exit {rc} (in a fresh clone, sandboxed)")
@@ -604,7 +611,7 @@ def cmd_approve(a) -> int:
     if not SP.SHA.fullmatch(a.sha):
         raise SB.SandboxError("give the full 40-hex sha the refusal named")
     person("lane-control lane approve-ci")
-    d = SB.private_dir(SB.lane_dir(a.lane) / "ci-approved")
+    d = SB.private_dir(ldir(a.lane) / "ci-approved")
     SB.write_private(d / a.sha, f"approved {time.strftime('%Y-%m-%d %H:%M')}\n")
     print(f"approve-ci {a.lane}: {a.sha[:12]} may change CI configuration; push it again")
     return 0
@@ -624,19 +631,25 @@ def main(argv: list) -> int:
     p.add_argument("--wait", type=float, default=30.0)
     p = sub.add_parser("inspect")
     p.add_argument("lane")
+    p.add_argument("--project", help="the project's checkout or name, when two projects use this lane key")
     p = sub.add_parser("close")
     p.add_argument("lane")
+    p.add_argument("--project", help="the project's checkout or name, when two projects use this lane key")
     p.add_argument("--discard", action="store_true")
     p.add_argument("--done", action="store_true", help="the owner's word that the lane is done (no merged PR)")
     p = sub.add_parser("check")
     p.add_argument("lane")
+    p.add_argument("--project", help="the project's checkout or name, when two projects use this lane key")
     p.add_argument("--sha", required=True)
     p = sub.add_parser("approve-ci")
     p.add_argument("lane")
+    p.add_argument("--project", help="the project's checkout or name, when two projects use this lane key")
     p.add_argument("sha")
     tail = argv[argv.index("--") + 1:] if "--" in argv else []
     a = ap.parse_args(argv[:argv.index("--")] if "--" in argv else argv)
     a.command = tail
+    global PROJECT
+    PROJECT = getattr(a, "project", None)
     try:
         return {"machine-setup": lambda _: setup(), "machine-check": lambda _: check(), "selftest": lambda _: selftest(),
                 "started": started, "inspect": cmd_inspect, "close": cmd_close, "check": cmd_check,

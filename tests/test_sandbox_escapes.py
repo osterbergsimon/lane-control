@@ -211,7 +211,7 @@ class Machine:
         git("fetch", "-q", "origin", cwd=self.fx.repo)
 
     def ticket_dir(self, nonce) -> Path:
-        return SB.lane_dir(self.fx.lane) / f"t-{nonce}"
+        return SB.lane_dir(self.fx.lane, self.fx.repo) / f"t-{nonce}"
 
     def stub(self, mode: str, nonce: "str | None", ro: "list | None" = None, **extra):
         td = self.ticket_dir(nonce) if nonce else None

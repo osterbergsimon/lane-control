@@ -228,6 +228,67 @@ class PushTests(BrokerCase):
                 self.assertFalse(any(w.startswith(p) for p in lane_paths), argv)
 
 
+class TwoProjectsTests(BrokerCase):
+    """r1 B2: the same lane key in two projects: each has its own clone, quarantine and base, and a push from the
+    second reaches only its own origin with only its own history."""
+
+    def test_same_key_two_projects(self):
+        fx = self.fx
+        pub = self.t / "code" / "pub"
+        pub_origin = self.t / "pub-origin.git"
+        git("init", "-q", "--bare", "-b", "main", pub_origin, cwd=self.t)
+        pub.mkdir(parents=True)
+        git("init", "-q", "-b", "main", cwd=pub)
+        (pub / "pub.txt").write_text("public\n")
+        git("add", ".", cwd=pub)
+        git("commit", "-q", "-m", "pub base", cwd=pub)
+        git("remote", "add", "origin", pub_origin, cwd=pub)
+        git("push", "-q", "origin", "main", cwd=pub)
+        git("fetch", "-q", "origin", cwd=pub)
+        wt = self.t / "orca" / "workspaces" / "pub" / "lane-1"
+        git("worktree", "add", "-q", "-b", "lane-1", wt, "main", cwd=pub)
+        store = FX.X.store_for(pub)
+        store.mkdir(parents=True)
+        st = {"root": str(pub), "name": "pub", "orchestrator": "native-orca"}
+        (store / "settings.json").write_text(json.dumps(st))
+        (fx.home / ".config" / "lane-control" / "machine.conf").write_text("SANDBOX_PROJECTS='app pub'\n")
+        ps = fx.patched()
+        for p in ps[1:]:
+            p.start()
+        try:
+            FX.SP.prepare(pub, st, wt.resolve(), "lanes", "app-1", "pub-1", say=lambda *_: None)
+        finally:
+            for p in reversed(ps[1:]):
+                p.stop()
+        t2 = SB.take_ticket(wt.resolve(), "term_pub")
+        clone2 = Path(t2["clone"])
+        self.assertNotEqual(clone2, self.clone)
+        self.assertTrue((clone2 / "pub.txt").exists())
+        self.assertFalse((clone2 / "src.txt").exists())  # not app's files
+        (clone2 / "w").write_text("w\n")
+        git("add", "w", cwd=clone2)
+        git("commit", "-q", "-m", "pub lane", cwd=clone2)
+        out2 = Path(t2["ticket_dir"]) / "run" / "outbox"
+        git("bundle", "create", "-q", out2 / "push.bundle", "lane-1", "^origin/main", cwd=clone2)
+        r = LB.handle({"request": "push"}, t2, "term_pub", self.run)
+        self.assertTrue(r["ok"], r)
+        self.assertNotEqual(subprocess.run(["git", "cat-file", "-e", self.fx.base], cwd=pub_origin).returncode, 0)
+        self.assertEqual(git("rev-parse", "lane-1~1", cwd=pub_origin), git("rev-parse", "main", cwd=pub))
+        # a lane folder whose record names another repository is refused, never resumed
+        rec = Path(t2["lane_dir"]) / "lane.json"
+        d = json.loads(rec.read_text())
+        rec.write_text(json.dumps({**d, "repo": str(fx.repo)}))
+        for p in ps[1:]:
+            p.start()
+        try:
+            with self.assertRaises(SB.SandboxError) as e:
+                FX.SP.prepare(pub, st, wt.resolve(), "lanes", "app-1", "pub-1", say=lambda *_: None)
+        finally:
+            for p in reversed(ps[1:]):
+                p.stop()
+        self.assertIn("another repository", str(e.exception))
+
+
 class FetchTests(BrokerCase):
     def push_base(self, path, text="x\n", side=False):
         w = self.t / "w"
