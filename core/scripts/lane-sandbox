@@ -83,8 +83,9 @@ def orca_overrides() -> "dict | None":
     copied into a private temp folder and the copy is opened, so committed changes still in the WAL are seen (review
     r1 M8; `immutable=1` would ignore them). None when it cannot be read: "cannot tell"."""
     ud = Path(os.environ.get("ORCA_USER_DATA_PATH") or SB._xdg("XDG_CONFIG_HOME", ".config") / "orca")
-    found = None
+    per = []
     for db in sorted((ud / "profiles").glob("*/profile-state.db")):
+        found = {}
         with tempfile.TemporaryDirectory(prefix="lc-orca-settings-") as tmp:
             copy = Path(tmp) / "s.db"
             try:
@@ -99,12 +100,22 @@ def orca_overrides() -> "dict | None":
                         d = json.loads(payload)
                         o = d.get("agentCmdOverrides") if isinstance(d, dict) else None
                         if isinstance(o, dict):
-                            found = {**(found or {}), **{k: v for k, v in o.items() if isinstance(v, str)}}
+                            found.update({k: v.strip() for k, v in o.items() if isinstance(v, str)})
                 finally:
                     con.close()
             except (sqlite3.Error, ValueError, OSError):
                 return None
-    return found
+        per.append(found)
+    if not per:
+        return None
+    out = {}
+    for agent in set().union(*per):  # review r2 m3: every profile must say the same, else cannot tell
+        vals = {p.get(agent, "") for p in per}
+        out[agent] = vals.pop() if len(vals) == 1 else DIFFER
+    return out
+
+
+DIFFER = "\0profiles differ"
 
 
 # --- pins and probes -----------------------------------------------------------------------------------------------
@@ -224,7 +235,9 @@ def check(read_only: bool = True) -> int:
     for agent, label in AGENTS.items():
         want = custom_command(agent)
         have = None if ov is None else (ov.get(agent) or "").strip()
-        state = ("cannot tell (Orca's settings could not be read)" if ov is None else "set" if have == want else
+        state = ("cannot tell (Orca's settings could not be read)" if ov is None else
+                 "cannot tell (Orca's profiles differ: set it in each)" if have == DIFFER.strip() or
+                 (ov.get(agent) == DIFFER) else "set" if have == want else
                  "not set" if not have else "set to something else")
         say(f"Orca custom command, {label} (agent {agent})",
             f"set Settings -> Agents -> {label} -> custom command to exactly: {want} [{state}]")

@@ -383,6 +383,25 @@ owner said.
     lc-um5m) (m5, m6).
   - `sandbox check` and `inspect` run in a new session with no stdin; their output reaches the caller without
     control characters (m7).
+- Review round 2 of SBX-2 (r2) changed these:
+  - The CI gate compares the tree a push would put on origin with the delivered base tip, what origin already runs:
+    any CI path that differs (added, changed, deleted, by a merge with an old parent or any other way) needs
+    `lane approve-ci`; a file byte-identical to the base's needs nothing (B1; this replaces r1's `--cc` rule).
+  - The agent is exec'd by its resolved path under its own name, and agent folders are bound at their real paths,
+    so a linked npm install starts (B2).
+  - One rule names the sandboxed projects; an unreadable or broken store, or an entry that matches no project,
+    fails closed (every linked worktree starts sandboxed or not at all) and makes the check `broken`; so do an
+    unreadable conf, ticket, binding or state folder (M1).
+  - The check and prepare share one CI verdict, `sandbox_no_ci` and the base's workflow permissions included; the
+    permissions scan passes only clearly read-only forms, block or flow (M2, M3).
+  - The repository whose CI is checked is the one every origin push and fetch URL names (an ssh alias resolved with
+    `ssh -G`); two repositories, or one that cannot be named, refuse (M4).
+  - `sandbox close` keeps the lane's pushed work as `refs/lanes-closed/<lane>-<time>`; a `refs/lanes/<lane>`
+    without the lane's own record is refused, never recreated (M5). `inspect` takes only a 40-hex head and prints
+    no lane text raw (M6).
+  - A lane on the base or origin's default branch is refused by prepare and the broker (m1); a resume keeps the
+    lane's issue (m2); Orca's profiles must agree on the custom command, else "cannot tell" (m3); a URL with a query
+    refuses, model options are an allowlist copy, and numeric settings named like tokens are not secrets (m4, m5).
 - The broker exits with the launcher that started it; the socket is bound by its relative name (a long `$HOME` would
   pass the 108-byte socket path limit).
 - `lane-control sandbox inspect|close|check` run the spec's sandboxed step through the same launcher, with the clone

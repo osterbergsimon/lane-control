@@ -189,6 +189,16 @@ class PushTests(BrokerCase):
         self.assertTrue(r["ok"], r)
         self.assertEqual(git("rev-parse", "lane-1", cwd=self.fx.origin), sha)
 
+    def test_never_pushes_the_base(self):
+        """r2 m1: a ticket whose branch is the base is refused by the broker too."""
+        self.lane_commit()
+        t = {**self.ticket, "branch": "main"}
+        self.bundle("lane-1", "^origin/main")
+        out = LB.handle({"request": "push"}, t, "term_lane", self.run)
+        self.assertFalse(out["ok"])
+        self.assertIn("never pushes it", out["error"])
+        self.assertEqual(git("rev-parse", "main", cwd=self.fx.origin), self.fx.base)
+
     def test_push_hostile_outbox(self):
         self.lane_commit()
         wip, shared = self.fx.wip_sha, self.fx.repo

@@ -2698,6 +2698,25 @@ class SandboxSetupTests(unittest.TestCase):
         self.assertEqual({p.name: p.read_bytes() for p in db.parent.iterdir()}, before)
         con.close()
 
+    def test_orca_profiles_must_agree(self):
+        """r2 m3: a custom command in one profile and none in another is 'cannot tell', never 'set'."""
+        for prof, o in (("a", {"opencode2": "/x/lane-sandbox-shim opencode2 --standalone"}), ("b", {})):
+            db = self.home / ".config" / "orca" / "profiles" / prof / "profile-state.db"
+            db.parent.mkdir(parents=True)
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE profile_state_documents (domain TEXT, payload TEXT)")
+            con.execute("INSERT INTO profile_state_documents VALUES ('settings', ?)",
+                        (json.dumps({"agentCmdOverrides": o}),))
+            con.commit()
+            con.close()
+        self.assertEqual(self.LS.orca_overrides()["opencode2"], self.LS.DIFFER)
+        self.setup_ok()
+        with self.mock.patch.object(self.LS, "orca_overrides", lambda: {"opencode2": self.LS.DIFFER,
+                                                                       "opencode": self.LS.DIFFER}):
+            rc, out = self.run_ls(self.LS.check)
+        self.assertIn("[cannot tell (Orca's profiles differ", out)
+        self.assertNotIn("sandbox: on", out)
+
     def test_front_door(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("lc_fd_sbx_t", Path(__file__).resolve().parent.parent / "core"

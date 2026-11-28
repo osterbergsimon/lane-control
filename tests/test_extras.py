@@ -1279,6 +1279,44 @@ class SandboxPrepareTests(Scratch):
         self.assertNotIn("mcp", gen)
         self.assertEqual(self.ticket(nonce)["gateway_key_env"], "GW_KEY")
 
+    def test_lane_on_the_base_branch_refused(self):
+        """r2 m1: a worktree on the base (or origin's default) branch is never a lane's."""
+        git("branch", "release", cwd=self.repo)
+        git("push", "-q", "origin", "release", cwd=self.repo)
+        git("fetch", "-q", "origin", cwd=self.repo)
+        self.wt = self.t / "workspaces" / "on-release"
+        git("worktree", "add", "-q", self.wt, "release", cwd=self.repo)
+        self.no_prep("--base", "release", says="the base or origin's default branch")
+
+    def test_resume_keeps_the_issue(self):
+        """r2 m2: a lane prepared again without --issue keeps its issue."""
+        self.ok_prep("--issue", "app-1x")
+        nonce, _ = self.ok_prep()
+        self.assertEqual(self.ticket(nonce)["issue"], "app-1x")
+        rec = json.loads((self.SB.lane_dir("app-1", self.repo) / "lane.json").read_text())
+        self.assertEqual(rec["issue"], "app-1x")
+
+    def test_url_queries_dropped_options_and_token_counts(self):
+        """r2 m4, m5: a URL with a query refuses; unknown model option keys are dropped, never copied; numeric
+        token counts are settings, not secrets."""
+        cfgf = self.home / ".config" / "opencode" / "opencode.json"
+        cfgf.write_text(json.dumps({"provider": {"gw": {"options": {
+            "baseURL": "https://gw.example.com/v1?api_key=SECRET-Q"}}}}))
+        out = self.no_prep(says="query or fragment")
+        self.assertNotIn("SECRET-Q", out)
+        cfgf.write_text(json.dumps({"provider": {"gw": {"npm": "x", "options": {"baseURL": "http://127.0.0.1:1/v1",
+                                                                                 "maxTokens": 4096},
+            "models": {"m": {"options": {"pat": "SECRET-P", "max_tokens": 100, "thinking": {
+                "type": "enabled", "budgetTokens": 2000, "note": "SECRET-X"}},
+                "variants": {"high": {"thinking": {"budgetTokens": 8000}, "pat": "SECRET-V"}}}}}}}))
+        nonce, _ = self.ok_prep()
+        gen = Path(self.ticket(nonce)["home_files"]["opencode.json"]).read_text()
+        for x in ("SECRET-P", "SECRET-X", "SECRET-V"):
+            self.assertNotIn(x, gen)
+        m = json.loads(gen)["provider"]["gw"]["models"]["m"]
+        self.assertEqual(m["options"], {"max_tokens": 100, "thinking": {"type": "enabled", "budgetTokens": 2000}})
+        self.assertEqual(m["variants"], {"high": {"thinking": {"budgetTokens": 8000}}})
+
     def test_reviewer_keeps_the_lanes_issue(self):
         """r1 m4: a reviewer prepared without --issue reads the lane's; the lane's record is not rewritten."""
         self.sprep("--issue", "app-1x")

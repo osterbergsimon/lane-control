@@ -145,6 +145,8 @@ class Broker:
         b = self.t["branch"]
         if not BRANCH.fullmatch(b) or ".." in b:
             raise Refused("the lane branch name is not one the broker passes on")
+        if b in (self.t.get("protected") or [self.t.get("base")]) or b == self.t.get("base"):
+            raise Refused(f"{b} is the base or origin's default branch: a lane never pushes it")  # review r2 m1
         return b
 
     def slug(self) -> str:

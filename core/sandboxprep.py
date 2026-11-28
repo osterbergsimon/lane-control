@@ -344,6 +344,13 @@ def base_branch(repo: Path, st: dict, given: "str | None") -> tuple:
     return base, sha
 
 
+def default_branch(repo: Path) -> list:
+    try:
+        return [git("-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").split("/", 1)[1]]
+    except (SB.SandboxError, IndexError):
+        return []
+
+
 def init_clone(clone: Path, repo: Path, base: str, base_sha: str) -> None:
     SB.private_dir(clone.parent)
     git("init", "-q", clone)
@@ -400,13 +407,34 @@ MODEL_FIELDS = ("id", "name", "limit", "modalities", "reasoning", "tool_call", "
                 "release_date", "options", "variants")
 
 
+MODEL_OPTION_FIELDS = {"thinking", "type", "budgetTokens", "reasoningEffort", "reasoningSummary", "textVerbosity",
+                       "temperature", "topP", "topK", "maxTokens", "max_tokens", "include", "store", "effort",
+                       "enabled", "parallelToolCalls"}
+
+
+def _allow(obj):
+    """Only the known model option keys, at any depth (review r2 m4); everything else is dropped."""
+    if isinstance(obj, dict):
+        return {k: _allow(v) for k, v in obj.items() if k in MODEL_OPTION_FIELDS}
+    return obj if isinstance(obj, (str, int, float, bool, list)) or obj is None else None
+
+
+def model_copy(m: dict) -> dict:
+    out = {k: m[k] for k in MODEL_FIELDS if k in m and k not in ("options", "variants")}
+    if isinstance(m.get("options"), dict):
+        out["options"] = _allow(m["options"])
+    if isinstance(m.get("variants"), dict):
+        out["variants"] = {name: _allow(v) for name, v in m["variants"].items() if isinstance(v, dict)}
+    return out
+
+
 def _no_secrets(obj, where: str, envs: set) -> None:
     """Refuse a secret-looking key whose value is not an {env:NAME} reference, at any depth, and credentials in a
     URL (review r1 M9). Every env name referenced is collected in envs."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             here = f"{where}.{k}"
-            if SECRETY.search(str(k)):
+            if SECRETY.search(str(k)) and not isinstance(v, (int, float, bool)) and v is not None:
                 m = ENV_REF.fullmatch(v) if isinstance(v, str) else None
                 if not m:
                     raise SB.SandboxError(f"the owner's OpenCode config has an inline secret at {here}: a sandboxed "
@@ -424,6 +452,9 @@ def _no_secrets(obj, where: str, envs: set) -> None:
         if re.search(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s@]+@", obj):
             raise SB.SandboxError(f"the owner's OpenCode config has credentials in a URL at {where}: nothing was "
                                   "prepared")
+        if re.match(r"(?i)[a-z][a-z0-9+.-]*://", obj) and urlparse(obj).query + urlparse(obj).fragment:
+            raise SB.SandboxError(f"the owner's OpenCode config has a URL with a query or fragment at {where} (it may "
+                                  "carry a token): nothing was prepared")
 
 
 def lane_opencode(owner: dict, model: "str | None") -> tuple:
@@ -440,8 +471,7 @@ def lane_opencode(owner: dict, model: "str | None") -> tuple:
         copy["options"] = {k: opts[k] for k in OPTION_FIELDS if k in opts}
         models = p.get("models") or {}
         if isinstance(models, dict) and models:
-            copy["models"] = {mid: {k: m[k] for k in MODEL_FIELDS if k in m} if isinstance(m, dict) else m
-                              for mid, m in models.items()}
+            copy["models"] = {mid: model_copy(m) for mid, m in models.items() if isinstance(m, dict)}
         base = opts.get("baseURL")
         if isinstance(base, str) and not gateway:
             u = urlparse(base)
@@ -627,10 +657,14 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
         known = {}
     if known and known.get("repo") != str(root):
         raise SB.SandboxError(f"lane state {ld} is of another repository ({known.get('repo')}): nothing was done")
-    if trole != "lane" and not issue:
-        issue = known.get("issue")  # review r1 m4: a reviewer reads the lane's own issue
+    if not issue:
+        issue = known.get("issue")  # review r1 m4, r2 m2: a resume or a reviewer keeps the lane's own issue
     if trole == "lane":
         branch = known.get("branch") or lane_branch(root, wt)  # r1 M5: the lane's branch from its first prepare
+        protected = {base, *default_branch(root)}
+        if branch in protected:  # review r2 m1: a lane never pushes the base (or origin's default) itself
+            raise SB.SandboxError(f"the worktree is on {branch}, the base or origin's default branch: a lane gets a "
+                                  "branch of its own; nothing was done")
     else:
         branch = known.get("branch")
         if not branch:
@@ -745,7 +779,8 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
          "persona": str(persona), "gateway_key_env": key_env, "gateway": list(gateway) if gateway else None,
          "hook_port": None, "review_files": rf, "review_write": review_write if trole == "reviewer" else None,
          "sha": sha, "private": private, "inside": str(HERE / "sandbox-inside"), "lc_tree": str(HERE.parent),
-         "checkout": checkout, "gh_repo": slug, "base_sha": base_sha, "bd_prefix": prefix, "agent_dirs":
+         "checkout": checkout, "gh_repo": slug, "base_sha": base_sha,
+         "protected": sorted({base, *default_branch(root)}), "bd_prefix": prefix, "agent_dirs":
          [p for p in (conf.get("SANDBOX_AGENT_DIRS") or "").split(":") if p], "created": time.time()}
     stale = 0  # r1 m3: a ticket prepare wrote before and no start took is never taken instead of this one
     for f in SB.tickets_dir(wt).glob("*.json") if SB.tickets_dir(wt).is_dir() else []:
