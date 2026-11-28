@@ -183,7 +183,9 @@ class ChainTests(Base):
         self.assertIn(("--ro-bind", t["persona"], "/run/lane/persona.md"), pairs)
         self.assertIn(("--ro-bind", t["home_files"]["gitconfig"], str(self.home / ".gitconfig")), pairs)
         self.assertIn(("--ro-bind", t["lc_tree"], t["lc_tree"]), pairs)
-        self.assertIn(("--ro-bind", str(Path(t["inside"]) / "bin"), str(self.home / ".agents" / "bin")), pairs)
+        self.assertIn(("--ro-bind", t["inside"], str(self.home / ".agents" / "lane-inside")), pairs)
+        self.assertIn(("--symlink", str(self.home / ".agents" / "lane-inside" / "bin"), str(self.home / ".agents" / "bin")),
+                      pairs)  # the wrappers' links resolve inside, where personas name them
         self.assertIn(("--tmpfs", str(self.home), "--ro-bind"), pairs)
 
     def test_reviewer_clone_is_its_own(self):

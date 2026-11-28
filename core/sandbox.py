@@ -252,7 +252,8 @@ def bwrap_mounts(t: dict) -> list:
     if t.get("persona"):
         m += ["--ro-bind", t["persona"], "/run/lane/persona.md"]
     m += ["--ro-bind", t["lc_tree"], t["lc_tree"],
-          "--ro-bind", str(Path(t["inside"]) / "bin"), f"{home}/.agents/bin",
+          "--ro-bind", t["inside"], f"{home}/.agents/lane-inside",
+          "--symlink", f"{home}/.agents/lane-inside/bin", f"{home}/.agents/bin",
           "--bind", str(td / "data"), f"{home}/.local/share/opencode",
           "--bind", str(td / "cache"), f"{home}/.cache",
           "--bind", t["clone"], wt,

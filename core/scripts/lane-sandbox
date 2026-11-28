@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+"""lane-sandbox: the OpenCode lane sandbox's commands outside the lane (SBX-2 tasks 7 and 8, lc-35qn). Run through the
+front door:
+
+  lane-control machine setup --sandbox      pin bubblewrap, passt, util-linux and nftables (and the lane tool list)
+                                            from nixpkgs with GC roots, refuse a setuid binary, write sandbox.conf,
+                                            probe the chain, run the selftest, offer the PATH detector links (asks)
+  lane-control machine check --sandbox      read only: each pin, the chain probe, legacy_tiocsti, the user manager,
+                                            the selftest, Orca's custom command for OpenCode (the exact text to set,
+                                            and whether it is set), the PATH detector, each sandboxed project's CI;
+                                            last line `sandbox: on|off|broken (<why>)`
+  lane-control sandbox selftest             the adversarial suite (tests/test_sandbox_escapes.py) with these pins,
+                                            through the real shim and broker; a skip is a failure; the result goes to
+                                            ~/.local/state/lane-control/sandbox/selftest.json
+  lane-control lane started <worktree> --nonce <n> --dispatch <id> [--wait S]
+                                            the coordinator, right after worker-start: the run record of that nonce,
+                                            on the dispatch's terminal, its pid alive in the recorded mount namespace;
+                                            else the worker is stopped (exit 1). Detection, not prevention.
+  lane-control sandbox inspect <lane>       a sandboxed step in the lane's clone: head, dirty files, commits not in
+                                            refs/lanes/<lane>
+  lane-control sandbox close <lane> [--discard] [--done]
+                                            the PR merged (or --done, the owner's word), a clean inspect with nothing
+                                            unpushed (or --discard, the owner's word), then the clone, quarantine and
+                                            folders are removed; the Orca worktree after that is the coordinator's
+  lane-control sandbox check <lane> --sha <sha> -- <command...>
+                                            a check rerun: a fresh clone of the pushed sha, the command run inside
+  lane-control lane approve-ci <lane> <sha> a person only: let that one push that changes CI configuration through"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shlex
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+sys.path.insert(0, str(ROOT / "core"))
+import sandbox as SB  # noqa: E402
+import sandboxprep as SP  # noqa: E402
+
+PINS = {"SANDBOX_BWRAP": ("bubblewrap", "bin/bwrap"), "SANDBOX_PASTA": ("passt", "bin/pasta"),
+        "SANDBOX_NSENTER": ("util-linux.bin", "bin/nsenter"), "SANDBOX_NFT": ("nftables", "bin/nft")}
+TOOLS = ("bashInteractive", "coreutils", "git", "python3", "gnugrep", "gnused", "findutils", "gawk", "diffutils",
+         "gnutar", "gzip", "which", "procps", "util-linux.bin", "nodejs")
+AGENTS = {"opencode": "OpenCode", "opencode2": "OpenCode 2"}
+ARGS = {"opencode": "", "opencode2": " --standalone"}
+
+
+def load(name: str, path: Path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def say(what: str, line: str) -> None:
+    print(f"sandbox: {what}: {line}", flush=True)
+
+
+def launcher() -> Path:
+    """The launcher Orca's custom command names: the installed tree's stable path (never a checkout)."""
+    import install
+    return install.data_root() / "current" / "core" / "scripts" / "lane-sandbox-shim"
+
+
+def custom_command(agent: str) -> str:
+    return f"{launcher()} {agent}{ARGS[agent]}"
+
+
+# --- reading Orca's setting (read only) ----------------------------------------------------------------------------
+
+def orca_overrides() -> "dict | None":
+    """Orca's agentCmdOverrides from its profile store, opened read-only and immutable (never written); None when it
+    cannot be read."""
+    ud = Path(os.environ.get("ORCA_USER_DATA_PATH") or SB._xdg("XDG_CONFIG_HOME", ".config") / "orca")
+    found = None
+    for db in sorted((ud / "profiles").glob("*/profile-state.db")):
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True, timeout=5)
+            try:
+                for (payload,) in con.execute("SELECT payload FROM profile_state_documents WHERE domain = 'settings'"):
+                    d = json.loads(payload)
+                    o = d.get("agentCmdOverrides") if isinstance(d, dict) else None
+                    if isinstance(o, dict):
+                        found = {**(found or {}), **{k: v for k, v in o.items() if isinstance(v, str)}}
+            finally:
+                con.close()
+        except (sqlite3.Error, ValueError, OSError):
+            continue
+    return found
+
+
+# --- pins and probes -----------------------------------------------------------------------------------------------
+
+def setuid(p: str) -> bool:
+    try:
+        return bool(os.stat(p).st_mode & (stat.S_ISUID | stat.S_ISGID))
+    except OSError:
+        return False
+
+
+def pin_problems(conf: dict) -> list:
+    out = []
+    for k, (_, rel) in PINS.items():
+        v = conf.get(k) or ""
+        if not v:
+            out.append(f"{k} not pinned")
+        elif not v.startswith("/nix/store/"):
+            out.append(f"{k} is not a /nix/store path")
+        elif not os.access(v, os.X_OK):
+            out.append(f"{k} missing ({v})")
+        elif setuid(v):
+            out.append(f"{k} is setuid or setgid")
+    return out
+
+
+def chain_probe(conf: dict) -> "str | None":
+    """None when pasta and bwrap --cap-drop ALL run a shell with no capabilities here; else why not."""
+    bash = SP.find_tool((conf.get("SANDBOX_TOOL_PATH") or "").split(":"), "bash")
+    if not bash or pin_problems(conf):
+        return "no pinned bwrap, pasta or bash"
+    argv = [conf["SANDBOX_PASTA"], "--config-net", "-q", "-f", "--no-map-gw", "-t", "none", "-u", "none", "-U",
+            "none", "-T", "none", "--", conf["SANDBOX_BWRAP"], "--cap-drop", "ALL", "--die-with-parent",
+            "--unshare-pid", "--ro-bind", "/nix/store", "/nix/store", "--proc", "/proc", "--dev", "/dev",
+            "--tmpfs", "/tmp", bash, "-c", "read -r _ c < <(grep ^CapEff: /proc/self/status); echo \"cap=$c\""]
+    try:
+        r = subprocess.run(argv, env={"PATH": "/nonexistent"}, capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"the chain did not run ({e.__class__.__name__})"
+    if r.returncode != 0:
+        return "the chain failed (unprivileged user namespaces refused, or AppArmor): " + \
+            ((r.stderr or "").strip().splitlines()[-1:] or [""])[0][:160]
+    if "cap=0000000000000000" not in r.stdout:
+        return "a process inside kept capabilities"
+    return None
+
+
+def user_manager() -> "str | None":
+    env = dict(os.environ)
+    if not (env.get("DBUS_SESSION_BUS_ADDRESS") and env.get("XDG_RUNTIME_DIR")):
+        return "no user session bus here"
+    exe = shutil.which("systemd-run")
+    if not exe:
+        return "no systemd-run"
+    try:
+        r = subprocess.run([exe, "--user", "--scope", "-q", "--", "true"], capture_output=True, timeout=20,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return "systemd-run --user did not answer"
+    return None if r.returncode == 0 else "systemd-run --user --scope failed"
+
+
+def login_shell_finds(agent: str) -> "str | None":
+    shell = os.environ.get("SHELL") or "/bin/sh"
+    try:
+        r = subprocess.run([shell, "-l", "-c", f"command -v {agent}"], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+        return (r.stdout.strip().splitlines() or [None])[-1]
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+# --- machine check --sandbox ---------------------------------------------------------------------------------------
+
+def projects(conf: dict) -> list:
+    """(name, root) of each SANDBOX_PROJECTS entry this machine knows."""
+    import extras as X
+    out = []
+    names = SP.projects_on(conf)
+    for root, st in X.known():
+        if (st.get("name") or root.name) in names or str(root) in names:
+            out.append((st.get("name") or root.name, root))
+    return out
+
+
+def check(read_only: bool = True) -> int:
+    conf = SP.read_conf()
+    broken, off = [], not SP.conf_file().is_file()
+    probs = pin_problems(conf)
+    for k, (pkg, _) in PINS.items():
+        v = conf.get(k)
+        bad = [p for p in probs if p.startswith(k)]
+        say("pin", f"{pkg}: {v or 'not pinned'}" + (f" ({bad[0][len(k) + 1:]})" if bad else " (ok)"))
+    if probs and not off:
+        broken.append("pins: " + "; ".join(probs))
+    tools = [p for p in (conf.get("SANDBOX_TOOL_PATH") or "").split(":") if p]
+    say("tool path", f"{len(tools)} store folder(s)" + ("" if tools else ": none (machine setup --sandbox)"))
+    why = None if off else chain_probe(conf)
+    say("chain probe", "not run (not set up)" if off else (why or "ok: pasta and bwrap --cap-drop ALL, CapEff 0"))
+    if why:
+        broken.append(f"chain probe: {why}")
+    tio = SB.tiocsti_allowed()
+    say("legacy_tiocsti", "1: lanes run with --new-session (no SIGWINCH to a resized pane, no /dev/tty)" if tio
+        else "0: lanes keep the pane as their terminal")
+    um = user_manager()
+    say("user manager", f"none: lanes have no memory cap ({um})" if um else "ok: each lane runs in a memory scope")
+    st = SP.selftest_current(conf)
+    say("selftest", st or "current (passed for this lane-control and these pins)")
+    if st and not off:
+        broken.append(f"selftest: {st}")
+    ov = orca_overrides()
+    unset = []
+    for agent, label in AGENTS.items():
+        want = custom_command(agent)
+        have = None if ov is None else (ov.get(agent) or "").strip()
+        state = ("cannot tell (Orca's settings could not be read)" if ov is None else "set" if have == want else
+                 "not set" if not have else "set to something else")
+        say(f"Orca custom command, {label} (agent {agent})",
+            f"set Settings -> Agents -> {label} -> custom command to exactly: {want} [{state}]")
+        if state != "set":
+            unset.append(agent)
+    real = {a: conf.get("SANDBOX_REAL_" + a.upper()) for a in AGENTS}
+    say("real OpenCode", ", ".join(f"{a}: {real[a] or 'not found'}" for a in AGENTS))
+    for agent in AGENTS:
+        found = login_shell_finds(agent)
+        shim = bool(found) and Path(found).resolve() == launcher().resolve()
+        say(f"PATH detector ({agent})", "first on the login shell's PATH (a start without the custom command is "
+            "refused)" if shim else f"not first ({found or 'not on PATH'}; optional: the custom command is the hook)")
+    for name, root in projects(conf):
+        lines = SP.ci_check(SP.github_slug(root))
+        bad = [line for ok, line in lines if not ok]
+        say(f"CI {name}", "; ".join(line for _, line in lines) + (": refuses --sandbox" if bad else ": ok"))
+        if bad:
+            broken.append(f"CI of {name}")
+    if off:
+        print("sandbox: off (not set up: lane-control machine setup --sandbox)")
+        return 1
+    if broken:
+        print(f"sandbox: broken ({'; '.join(broken)})")
+        return 1
+    if "opencode2" in unset and "opencode" in unset:
+        print("sandbox: off (Orca's custom command for OpenCode is not set: the line above names it)")
+        return 1
+    print("sandbox: on" + (f" (custom command not set for {', '.join(unset)})" if unset else ""))
+    return 0
+
+
+# --- machine setup --sandbox ---------------------------------------------------------------------------------------
+
+def nix_pin(pkg: str, roots: Path) -> str:
+    link = roots / pkg.replace(".", "-")
+    r = subprocess.run(["nix", "build", "--out-link", str(link), f"nixpkgs#{pkg}"], capture_output=True, text=True,
+                       timeout=1800, stdin=subprocess.DEVNULL)
+    if r.returncode != 0:
+        raise SB.SandboxError(f"nix build nixpkgs#{pkg} failed: {(r.stderr.strip().splitlines() or [''])[-1][:200]}")
+    return os.path.realpath(link)
+
+
+def ask(q: str) -> "bool | None":
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        return input(q).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def setup() -> int:
+    if os.geteuid() == 0:
+        print("machine setup --sandbox: refusing to run as root", file=sys.stderr)
+        return 2
+    import install
+    roots = SB.private_dir(install.data_root() / "sandbox-gcroots")
+    conf = {}
+    try:
+        for k, (pkg, rel) in PINS.items():
+            out = nix_pin(pkg, roots)
+            exe = f"{out}/{rel}"
+            if not os.access(exe, os.X_OK):
+                raise SB.SandboxError(f"{pkg}: no {rel} in {out}")
+            if setuid(exe):
+                raise SB.SandboxError(f"{exe} is setuid or setgid: never used")
+            conf[k] = exe
+            say("pin", f"{pkg}: {exe}")
+        tool_path = []
+        for pkg in TOOLS:
+            d = f"{nix_pin(pkg, roots)}/bin"
+            if Path(d).is_dir() and d not in tool_path:
+                tool_path.append(d)
+        conf["SANDBOX_TOOL_PATH"] = ":".join(tool_path)
+        say("tool path", f"{len(tool_path)} store folders")
+    except SB.SandboxError as e:
+        print(f"machine setup --sandbox: {e}; nothing written", file=sys.stderr)
+        return 1
+    for agent in AGENTS:
+        exe = shutil.which(agent)
+        if exe and Path(exe).resolve() != launcher().resolve() and Path(exe).resolve() != (HERE / "lane-sandbox-shim"):
+            conf["SANDBOX_REAL_" + agent.upper()] = exe
+    text = "# written by lane-control machine setup --sandbox: pinned store paths; never edited by hand\n" + \
+        "".join(f"{k}={shlex.quote(v)}\n" for k, v in conf.items())
+    SB.write_private(SP.conf_file(), text)
+    say("config", f"wrote {SP.conf_file()}")
+    why = chain_probe(SP.read_conf())
+    if why:
+        print(f"machine setup --sandbox: the chain probe failed ({why}): the sandbox stays off here", file=sys.stderr)
+        return 1
+    say("chain probe", "ok")
+    rc = selftest()
+    if rc != 0:
+        print("machine setup --sandbox: the selftest failed: the sandbox stays off here", file=sys.stderr)
+        return 1
+    first = Path((os.environ.get("PATH") or "").split(":")[0] or ".")
+    yes = ask(f"Link opencode and opencode2 in {first} to the sandbox's detector (a lane started without Orca's "
+              "custom command is then refused)? [y/N] ")
+    if yes:
+        for agent in AGENTS:
+            link = first / agent
+            if link.exists() or link.is_symlink():
+                say("PATH detector", f"{link} exists: left alone")
+                continue
+            link.symlink_to(launcher())
+            say("PATH detector", f"linked {link}")
+    else:
+        say("PATH detector", "not linked (" + ("no terminal to ask" if yes is None else "you said no") + ")")
+    for agent, label in AGENTS.items():
+        say("next", f"in Orca, Settings -> Agents -> {label} -> custom command: {custom_command(agent)}")
+    say("next", "add each project to SANDBOX_PROJECTS in machine.conf, then lane-control machine check --sandbox")
+    return 0
+
+
+# --- selftest ------------------------------------------------------------------------------------------------------
+
+def selftest() -> int:
+    conf = SP.read_conf()
+    probs = pin_problems(conf)
+    if probs:
+        print(f"sandbox selftest: {'; '.join(probs)}: run lane-control machine setup --sandbox", file=sys.stderr)
+        return 1
+    pins = {k: conf[k] for k in (*PINS, "SANDBOX_TOOL_PATH")}
+    env = {**os.environ, "LANE_SANDBOX_SELFTEST": "1", "LANE_SANDBOX_PINS": json.dumps(pins)}
+    out = tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False)
+    r = subprocess.run([sys.executable, "-m", "unittest", "-v", "tests.test_sandbox_escapes"], cwd=ROOT, env=env,
+                       stdout=out, stderr=subprocess.STDOUT, timeout=3600, stdin=subprocess.DEVNULL)
+    out.seek(0)
+    log = out.read()
+    out.close()
+    os.unlink(out.name)
+    ran = next((int(x.split()[1]) for x in log.splitlines() if x.startswith("Ran ")), 0)
+    skipped = log.count(" ... skipped")
+    ok = r.returncode == 0 and ran > 0 and skipped == 0
+    SB.write_private(SB.selftest_file(), json.dumps({"ok": ok, "lane_control": SP.lc_version(),
+                                                      "pins": {k: conf[k] for k in SP.PIN_KEYS}, "ran": ran,
+                                                      "skipped": skipped, "when": time.time()}, indent=1) + "\n")
+    tail = [x for x in log.splitlines() if x.startswith(("FAIL:", "ERROR:")) or " ... skipped" in x]
+    for x in tail[:20]:
+        print(f"sandbox selftest: {x}")
+    print(f"sandbox selftest: {'passed' if ok else 'FAILED'}: {ran} ran, {skipped} skipped"
+          + ("" if ok else " (a skip counts as a failure)"))
+    return 0 if ok else 1
+
+
+# --- lane lifecycle ------------------------------------------------------------------------------------------------
+
+def orca(*args) -> dict:
+    import machineconf
+    r = subprocess.run([machineconf.orca_cli(), *args, "--json"], capture_output=True, text=True, timeout=120,
+                       stdin=subprocess.DEVNULL)
+    try:
+        d = json.loads(r.stdout or "{}")
+    except ValueError:
+        d = {}
+    if r.returncode != 0 or not d.get("ok", False):
+        raise SB.SandboxError(f"orca-ide {' '.join(args[:2])} failed")
+    return d.get("result") or {}
+
+
+def find_record(nonce: str) -> "dict | None":
+    for f in sorted(SB.runs_dir().glob("*.json")) if SB.runs_dir().is_dir() else []:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if rec.get("nonce") == nonce:
+            return rec
+    return None
+
+
+def started(a) -> int:
+    wt = Path(a.worktree).expanduser().resolve()
+    proc = Path(os.environ.get("LANE_SANDBOX_PROC") or "/proc")
+    end = time.time() + a.wait
+    why = "no run record for that nonce (the agent did not start through the sandbox's launcher)"
+    while True:
+        rec = find_record(a.nonce)
+        if rec is not None:
+            why = None
+            try:
+                term = orca("orchestration", "worker-show", "--dispatch", a.dispatch).get("terminal")
+            except SB.SandboxError as e:
+                term, why = None, str(e)
+            if why is None:
+                pid, ns = rec.get("host_pid"), rec.get("mntns")
+                try:
+                    alive_ns = os.readlink(f"{proc}/{int(pid)}/ns/mnt")
+                except (OSError, TypeError, ValueError):
+                    alive_ns = None
+                if rec.get("worktree") != str(wt):
+                    why = "the run record is of another worktree"
+                elif term != rec.get("terminal"):
+                    why = "the run record's terminal is not the dispatch's"
+                elif rec.get("ended"):
+                    why = "the sandboxed agent already ended"
+                elif alive_ns is None:
+                    why = "the sandboxed process is not running"
+                elif alive_ns != f"mnt:[{ns}]":
+                    why = "the process is not in the recorded mount namespace"
+            if why is None:
+                print(f"started: sandboxed ({rec['role']} {rec['lane']}, terminal {term})")
+                return 0
+        if time.time() >= end:
+            break
+        time.sleep(1)
+    try:
+        orca("orchestration", "worker-stop", "--dispatch", a.dispatch)
+        stopped = "the worker was stopped"
+    except SB.SandboxError:
+        stopped = "the worker could NOT be stopped: stop it by hand"
+    print(f"started: NOT sandboxed: {why}; {stopped}. Check lane-control machine check --sandbox, then prepare again")
+    return 1
+
+
+def lane_rec(lane: str) -> dict:
+    try:
+        return json.loads((SB.lane_dir(lane) / "lane.json").read_text())
+    except (OSError, ValueError):
+        raise SB.SandboxError(f"no sandboxed lane {lane}") from None
+
+
+def run_inside(lane: str, clone: Path, inner: list, role: str = "check") -> tuple:
+    """Run `inner` in the sandbox with `clone` at its own path, non-interactively. Returns (status, outbox dir)."""
+    shim = load("lc_sandbox_shim", HERE / "lane-sandbox-shim")
+    conf = SP.read_conf()
+    why = shim.check_pins(conf)
+    if why:
+        raise SB.SandboxError(why)
+    rec = lane_rec(lane)
+    ld = SB.lane_dir(lane)
+    nonce = os.urandom(16).hex()
+    td = ld / f"t-{nonce}"
+    for sub in ("cache", "data", "run/inbox", "run/outbox", "launch", "broker", "gen/plugins", "gen/skills"):
+        SB.private_dir(td / sub)
+    gen = td / "gen"
+    SB.write_private(gen / "gitconfig", "[user]\n\tname = lane-control\n\temail = lane-control@localhost\n"
+                     "[safe]\n\tdirectory = *\n")
+    SB.write_private(gen / "opencode.json", "{}\n")
+    SB.write_private(gen / "resolv.conf", f"nameserver {SB.DNS}\n")
+    SB.write_private(gen / "persona.md", "check\n")
+    tools = SP.tool_path(conf, {})
+    t = {"nonce": nonce, "role": role, "lane": lane, "issue": None, "project": rec.get("name"), "repo": rec["repo"],
+         "base": rec["base"], "branch": rec["branch"], "worktree": str(clone), "clone": str(clone),
+         "lane_dir": str(ld), "ticket_dir": str(td), "home": str(Path.home()),
+         "home_files": {"gitconfig": str(gen / "gitconfig"), "opencode.json": str(gen / "opencode.json"),
+                        "resolv.conf": str(gen / "resolv.conf"), "plugins": None, "skills": None},
+         "tool_path": tools, "bash": SP.find_tool(tools, "bash") or "bash", "persona": str(gen / "persona.md"),
+         "gateway_key_env": None, "gateway": None, "hook_port": None, "review_files": [], "review_write": None,
+         "sha": None, "private": rec.get("private") or [], "inside": str(ROOT / "core" / "sandbox-inside"),
+         "lc_tree": str(ROOT), "agent_dirs": [], "orca_binds": [], "terminal": f"check-{nonce[:16]}",
+         "agent": [str(ROOT / "core" / "sandbox-inside" / "bin" / "lane-enter"), *inner]}
+    tf = td / "ticket.json"
+    SB.write_private(tf, json.dumps(t, indent=1))
+    t["ticket_file"] = str(tf)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ORCA_")}
+    rc = shim.launch(t, conf, env)
+    return rc, td / "run" / "outbox"
+
+
+INSPECT = ('h=$(git rev-parse HEAD 2>/dev/null || echo none); d=$(git status --porcelain 2>/dev/null | wc -l); '
+           'u=$(git rev-list --count "$1"..HEAD 2>/dev/null || git rev-list --count HEAD 2>/dev/null || echo 0); '
+           'printf \'{"head": "%s", "dirty": %d, "unpushed": %d}\\n\' "$h" "$d" "$u" >/run/lane/outbox/inspect.json')
+
+
+def inspect(lane: str) -> dict:
+    ld = SB.lane_dir(lane)
+    clone = ld / "repo"
+    if not clone.is_dir():
+        return {"head": None, "dirty": 0, "unpushed": 0, "missing": True}
+    pushed = SP.lane_ref(Path(lane_rec(lane)["repo"]), lane) or "refs/remotes/origin/" + lane_rec(lane)["base"]
+    conf = SP.read_conf()
+    bash = SP.find_tool(SP.tool_path(conf, {}), "bash") or "bash"
+    rc, outbox = run_inside(lane, clone, [bash, "-c", INSPECT, "inspect", pushed])
+    dst = ld / "inspect.json"
+    try:
+        SB.safe_read(outbox / "inspect.json", 4096, dst)
+        return json.loads(dst.read_text())
+    except (SB.SandboxError, ValueError):
+        raise SB.SandboxError(f"the inspect step gave no report (status {rc})") from None
+
+
+def cmd_inspect(a) -> int:
+    r = inspect(a.lane)
+    if r.get("missing"):
+        print(f"inspect {a.lane}: no clone")
+        return 0
+    print(f"inspect {a.lane}: head {r['head']}, {r['dirty']} dirty file(s), {r['unpushed']} commit(s) not pushed "
+          "(the clone's own report: a hostile clone can lie about itself)")
+    return 0 if not r["dirty"] and not r["unpushed"] else 1
+
+
+def person(what: str) -> None:
+    le = load("lc_lane_extras_sbx", HERE / "lane-extras")
+    try:
+        le.person(what)
+    except le.X.ExtrasError as e:
+        raise SB.SandboxError(str(e)) from None
+
+
+def remove_lane(lane: str) -> list:
+    ld = SB.lane_dir(lane)
+    rec = lane_rec(lane)
+    gone = []
+    for wt in {rec.get("worktree")} | set(rec.get("worktrees") or []):
+        if not wt:
+            continue
+        for p in (SB.binding_file(Path(wt)), SB.tickets_dir(Path(wt))):
+            if p.is_dir():
+                shutil.rmtree(p)
+            elif p.exists():
+                p.unlink()
+    shutil.rmtree(ld)
+    gone.append(str(ld))
+    return gone
+
+
+def cmd_close(a) -> int:
+    rec = lane_rec(a.lane)
+    if a.discard or a.done:
+        person("lane-control sandbox close --discard/--done")
+    if not a.done:
+        try:
+            r = subprocess.run(["gh", "pr", "view", rec["branch"], f"--repo={rec.get('gh_repo')}", "--json=state"],
+                               capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+            state = json.loads(r.stdout).get("state") if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            state = None
+        if state != "MERGED":
+            print(f"close {a.lane}: refused: its PR is {state or 'not found'}, not merged (the owner's word: --done)")
+            return 1
+    if not a.discard:
+        r = inspect(a.lane)
+        if not r.get("missing") and (r["dirty"] or r["unpushed"]):
+            print(f"close {a.lane}: refused: {r['dirty']} dirty file(s), {r['unpushed']} commit(s) not pushed: push "
+                  "them, or the owner's --discard throws them away")
+            return 1
+    gone = remove_lane(a.lane)
+    print(f"close {a.lane}: removed {', '.join(gone)} (clone, quarantine, tickets, folders)")
+    print(f"next: remove the Orca worktree {rec.get('worktree')} (orca-ide worktree rm), never its close checks: it "
+          "was always at the base")
+    return 0
+
+
+def cmd_check(a) -> int:
+    if not a.command:
+        print("sandbox check: give the command after --", file=sys.stderr)
+        return 2
+    rec = lane_rec(a.lane)
+    import extras as X
+    root = Path(rec["repo"])
+    st = next((st for r, st in X.known() if r == root), {})
+    wt = Path(rec.get("worktree") or root)
+    nonce = SP.prepare(root, st, wt, "check", a.lane, rec.get("issue"), a.sha, say=lambda *_: None)
+    t = next(json.loads(f.read_text()) for f in SB.tickets_dir(wt).glob(f"*-{nonce}.json"))
+    (SB.tickets_dir(wt) / next(f.name for f in SB.tickets_dir(wt).glob(f"*-{nonce}.json"))).unlink()
+    clone = Path(t["clone"])
+    rc, _ = run_inside(a.lane, clone, list(a.command))
+    print(f"check {a.lane} @{a.sha[:12]}: exit {rc} (in a fresh clone, sandboxed)")
+    return rc
+
+
+def cmd_approve(a) -> int:
+    if os.environ.get("LANE_SANDBOX"):
+        raise SB.SandboxError("refused inside a sandbox")
+    term = os.environ.get("ORCA_TERMINAL_HANDLE")
+    if term:
+        try:
+            if SB.run_record(term).is_file():
+                raise SB.SandboxError("refused from a sandboxed lane's terminal")
+        except SB.SandboxError as e:
+            if "refused" in str(e):
+                raise
+    if not SP.SHA.fullmatch(a.sha):
+        raise SB.SandboxError("give the full 40-hex sha the refusal named")
+    person("lane-control lane approve-ci")
+    d = SB.private_dir(SB.lane_dir(a.lane) / "ci-approved")
+    SB.write_private(d / a.sha, f"approved {time.strftime('%Y-%m-%d %H:%M')}\n")
+    print(f"approve-ci {a.lane}: {a.sha[:12]} may change CI configuration; push it again")
+    return 0
+
+
+def main(argv: list) -> int:
+    ap = argparse.ArgumentParser(prog="lane-sandbox", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("machine-setup")
+    sub.add_parser("machine-check")
+    sub.add_parser("selftest")
+    p = sub.add_parser("started")
+    p.add_argument("worktree")
+    p.add_argument("--nonce", required=True)
+    p.add_argument("--dispatch", required=True)
+    p.add_argument("--wait", type=float, default=30.0)
+    p = sub.add_parser("inspect")
+    p.add_argument("lane")
+    p = sub.add_parser("close")
+    p.add_argument("lane")
+    p.add_argument("--discard", action="store_true")
+    p.add_argument("--done", action="store_true", help="the owner's word that the lane is done (no merged PR)")
+    p = sub.add_parser("check")
+    p.add_argument("lane")
+    p.add_argument("--sha", required=True)
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p = sub.add_parser("approve-ci")
+    p.add_argument("lane")
+    p.add_argument("sha")
+    a = ap.parse_args(argv)
+    if getattr(a, "command", None) and a.command[:1] == ["--"]:
+        a.command = a.command[1:]
+    try:
+        return {"machine-setup": lambda _: setup(), "machine-check": lambda _: check(), "selftest": lambda _: selftest(),
+                "started": started, "inspect": cmd_inspect, "close": cmd_close, "check": cmd_check,
+                "approve-ci": cmd_approve}[a.cmd](a)
+    except SB.SandboxError as e:
+        print(f"lane-sandbox: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

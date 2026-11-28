@@ -543,6 +543,13 @@ def serve(ticket_file: str) -> int:
     os.umask(old)
     s.listen(16)
     os.replace(".broker.sock.tmp", "broker.sock")
+    parent = os.getppid()
+
+    def orphaned():  # the launcher that started this broker is gone: so is the lane
+        while os.getppid() == parent:
+            time.sleep(1)
+        os._exit(0)
+    threading.Thread(target=orphaned, daemon=True).start()
     while True:
         conn, _ = s.accept()
         threading.Thread(target=serve_one, args=(b, conn), daemon=True).start()

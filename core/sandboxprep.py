@@ -426,9 +426,13 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md", x):
             raise SB.SandboxError(f"review file {x!r}: a plain .md name in the owner's review folder")
     lane_rec = {"lane": lane, "project": str(root), "name": name, "repo": str(root), "base": base, "branch": branch,
+                "worktree": str(wt),
                 "issue": issue, "gh_repo": slug, "private": private, "bd_prefix": st.get("bd_prefix") or
                 (issue.split("-")[0] if issue and "-" in issue else None)}
     old = json.loads((ld / "lane.json").read_text()) if (ld / "lane.json").is_file() else {}
+    if trole != "lane":  # a reviewer's or check's ticket does not rebind the lane
+        lane_rec = {k: v for k, v in lane_rec.items() if k not in ("worktree", "branch") or k not in old}
+    lane_rec["worktrees"] = sorted(set(old.get("worktrees") or []) | {str(wt)})
     SB.write_private(ld / "lane.json", json.dumps({**old, **lane_rec}, indent=1) + "\n")
     t = {"nonce": nonce, "role": trole, "lane": lane, "issue": issue, "project": name, "repo": str(root),
          "base": base, "branch": branch, "worktree": str(wt), "clone": str(clone), "lane_dir": str(ld),
