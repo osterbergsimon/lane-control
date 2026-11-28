@@ -478,6 +478,43 @@ class CloseCheckTests(LifecycleCase):
         bw = [x for x in self.calls("bwrap")][-1]["argv"]
         self.assertEqual(bw[bw.index(str(c)) + 1], str(c))  # the inspect ran sandboxed, in the clone
 
+    def test_close_counts_stashes_and_side_branches(self):
+        """r1 M4: a stash, or an unpushed commit on another branch, keeps the clone; a git failure is 'cannot
+        tell', never zero."""
+        self.lane_with_push()
+        self.gh("MERGED")
+        c = self.fx.clone()
+        (c / "src.txt").write_text("stashed\n")
+        FX.git("stash", "-q", cwd=c)
+        r = self.ls("close", "app-1")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("1 stash(es)", r.stdout)
+        FX.git("stash", "drop", "-q", cwd=c)
+        FX.git("switch", "-q", "-c", "side", cwd=c)
+        (c / "side").write_text("x\n")
+        FX.git("add", "side", cwd=c)
+        FX.git("commit", "-q", "-m", "side", cwd=c)
+        FX.git("switch", "-q", "lane-1", cwd=c)
+        r = self.ls("close", "app-1")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("1 commit(s) not pushed (any branch)", r.stdout)
+        (c / ".git" / "index").write_text("not an index")  # git status fails: cannot tell
+        r = self.ls("close", "app-1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cannot tell", r.stdout + r.stderr)
+        self.assertTrue(c.is_dir())
+
+    def test_check_never_uses_the_callers_terminal(self):
+        """r1 m7: a new session, no stdin, and no control characters in what reaches the caller."""
+        sha = self.lane_with_push()
+        r = self.ls("check", "app-1", "--sha", sha, "--", "bash", "-c",
+                    "read -r x || echo no-stdin; printf 'a\\033[2Jb\\n'")
+        bw = self.calls("bwrap")[-1]["argv"]
+        self.assertIn("--new-session", bw)
+        self.assertIn("no-stdin", r.stdout)
+        self.assertIn("a?[2Jb", r.stdout)
+        self.assertNotIn("\x1b", r.stdout)
+
     def test_close_discard(self):
         self.lane_with_push()
         self.gh("MERGED")

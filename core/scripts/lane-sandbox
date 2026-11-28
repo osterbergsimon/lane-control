@@ -493,13 +493,36 @@ def run_inside(lane: str, clone: Path, inner: list, role: str = "check") -> tupl
     SB.write_private(tf, json.dumps(t, indent=1))
     t["ticket_file"] = str(tf)
     env = {k: v for k, v in os.environ.items() if not k.startswith("ORCA_")}
-    rc = shim.launch(t, conf, env)
-    return rc, td / "run" / "outbox"
+    t["new_session"] = True  # review r1 m7: never the caller's terminal: a new session, no stdin, output to a file
+    out = td / "broker" / "inside-output.log"
+    with open(out, "wb") as fh:
+        rc = shim.launch(t, conf, env, stdio={"stdin": subprocess.DEVNULL, "stdout": fh, "stderr": subprocess.STDOUT})
+    return rc, td / "run" / "outbox", out
 
 
-INSPECT = ('h=$(git rev-parse HEAD 2>/dev/null || echo none); d=$(git status --porcelain 2>/dev/null | wc -l); '
-           'u=$(git rev-list --count "$1"..HEAD 2>/dev/null || git rev-list --count HEAD 2>/dev/null || echo 0); '
-           'printf \'{"head": "%s", "dirty": %d, "unpushed": %d}\\n\' "$h" "$d" "$u" >"${LANE_OUTBOX:-/run/lane/outbox}/inspect.json"')
+def printable(path: Path, cap: int = 1 << 20) -> str:
+    """What a lane's command printed, without control characters (no escape sequences reach the caller's terminal)."""
+    try:
+        data = path.read_bytes()[-cap:]
+    except OSError:
+        return ""
+    text = data.decode("utf-8", "replace")
+    return "".join(ch if ch in "\n\t" or (ch >= " " and ch != "\x7f" and not 0x80 <= ord(ch) < 0xa0) else "?"
+                   for ch in text)
+
+
+# The inspect step, run inside in the clone. Every git failure is "cannot tell", never a zero (review r1 M4).
+INSPECT = r"""
+O=${LANE_OUTBOX:-/run/lane/outbox}
+fail() { printf '{"ok": false, "why": "%s"}\n' "$1" >"$O/inspect.json"; exit 0; }
+h=$(git rev-parse --verify HEAD) || fail "no HEAD"
+st=$(git status --porcelain --untracked-files=all) || fail "git status failed"
+d=$(printf '%s' "$st" | grep -c . || true)
+u=$(git rev-list --count HEAD --branches --not "$1" "$2") || fail "git rev-list failed"
+s=0
+if git rev-parse -q --verify refs/stash >/dev/null; then s=$(git rev-list --walk-reflogs --count refs/stash) || fail stash; fi
+printf '{"ok": true, "head": "%s", "dirty": %d, "unpushed": %d, "stashes": %d}\n' "$h" "$d" "$u" "$s" >"$O/inspect.json"
+"""
 
 
 def inspect(lane: str) -> dict:
@@ -507,16 +530,21 @@ def inspect(lane: str) -> dict:
     clone = ld / "repo"
     if not clone.is_dir():
         return {"head": None, "dirty": 0, "unpushed": 0, "missing": True}
-    pushed = SP.lane_ref(Path(lane_rec(lane)["repo"]), lane) or "refs/remotes/origin/" + lane_rec(lane)["base"]
+    base = "refs/remotes/origin/" + lane_rec(lane)["base"]
+    pushed = SP.lane_ref(Path(lane_rec(lane)["repo"]), lane) or base
     conf = SP.read_conf()
-    bash = SP.find_tool(SP.tool_path(conf, {}), "bash") or "bash"
-    rc, outbox = run_inside(lane, clone, [bash, "-c", INSPECT, "inspect", pushed])
+    bash = SP.find_tool(SP.tool_path(conf, {}), "bash") or SP.host_bash()
+    rc, outbox, _ = run_inside(lane, clone, [bash, "-c", INSPECT, "inspect", pushed, base])
     dst = ld / "inspect.json"
     try:
         SB.safe_read(outbox / "inspect.json", 4096, dst)
-        return json.loads(dst.read_text())
+        r = json.loads(dst.read_text())
     except (SB.SandboxError, ValueError):
-        raise SB.SandboxError(f"the inspect step gave no report (status {rc})") from None
+        raise SB.SandboxError(f"the inspect step gave no report (status {rc}): cannot tell, so nothing is removed") \
+            from None
+    if not r.get("ok") or not all(isinstance(r.get(k), int) for k in ("dirty", "unpushed", "stashes")):
+        raise SB.SandboxError(f"the inspect step cannot tell ({str(r.get('why'))[:80]}): nothing is removed")
+    return r
 
 
 def cmd_inspect(a) -> int:
@@ -525,8 +553,8 @@ def cmd_inspect(a) -> int:
         print(f"inspect {a.lane}: no clone")
         return 0
     print(f"inspect {a.lane}: head {r['head']}, {r['dirty']} dirty file(s), {r['unpushed']} commit(s) not pushed "
-          "(the clone's own report: a hostile clone can lie about itself)")
-    return 0 if not r["dirty"] and not r["unpushed"] else 1
+          f"(any branch), {r['stashes']} stash(es) (the clone's own report: a hostile clone can lie about itself)")
+    return 0 if not (r["dirty"] or r["unpushed"] or r["stashes"]) else 1
 
 
 def person(what: str) -> None:
@@ -570,9 +598,9 @@ def cmd_close(a) -> int:
             return 1
     if not a.discard:
         r = inspect(a.lane)
-        if not r.get("missing") and (r["dirty"] or r["unpushed"]):
-            print(f"close {a.lane}: refused: {r['dirty']} dirty file(s), {r['unpushed']} commit(s) not pushed: push "
-                  "them, or the owner's --discard throws them away")
+        if not r.get("missing") and (r["dirty"] or r["unpushed"] or r["stashes"]):
+            print(f"close {a.lane}: refused: {r['dirty']} dirty file(s), {r['unpushed']} commit(s) not pushed (any "
+                  f"branch), {r['stashes']} stash(es): push them, or the owner's --discard throws them away")
             return 1
     gone = remove_lane(a.lane)
     print(f"close {a.lane}: removed {', '.join(gone)} (clone, quarantine, tickets, folders)")
@@ -592,7 +620,8 @@ def cmd_check(a) -> int:
     base, base_sha = SP.base_branch(root, st, rec.get("base"))
     clone = SP.second_clone(root, ldir(a.lane), a.lane, "check", a.sha, base, base_sha,
                             SP.lane_ref(root, a.lane), list(st.get("private") or rec.get("private") or []))
-    rc, _ = run_inside(a.lane, clone, list(a.command))
+    rc, _, out = run_inside(a.lane, clone, list(a.command))
+    sys.stdout.write(printable(out))
     print(f"check {a.lane} @{a.sha[:12]}: exit {rc} (in a fresh clone, sandboxed)")
     return rc
 

@@ -149,6 +149,23 @@ class PushTests(BrokerCase):
         self.assertNotEqual(subprocess.run(["git", "rev-parse", "-q", "--verify", "lane-1"], cwd=self.fx.origin,
                                            capture_output=True).returncode, 0)
 
+    def test_resume_in_a_new_worktree_pushes_the_lanes_branch(self):
+        """r1 M5: the lane's branch is the one of its first prepare, even from a new Orca worktree."""
+        self.lane_commit()
+        self.bundle("lane-1", "^origin/main")
+        self.assertTrue(self.req("push")["ok"])
+        wt2 = self.t / "orca" / "workspaces" / "app" / "lane-1-again"
+        git("worktree", "add", "-q", "-b", "lane-1-again", wt2, "main", cwd=self.fx.repo)
+        self.fx.prepare(wt=wt2)
+        t2 = SB.take_ticket(wt2.resolve(), "term_lane2")
+        self.assertEqual((t2["branch"], t2["clone"]), ("lane-1", self.ticket["clone"]))
+        sha = self.lane_commit("after-resume")
+        out2 = Path(t2["ticket_dir"]) / "run" / "outbox"
+        git("bundle", "create", "-q", out2 / "push.bundle", "lane-1", "^origin/main", cwd=self.clone)
+        r = LB.handle({"request": "push"}, t2, "term_lane2", self.run)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(git("rev-parse", "lane-1", cwd=self.fx.origin), sha)
+
     def test_push_hostile_outbox(self):
         self.lane_commit()
         wip, shared = self.fx.wip_sha, self.fx.repo
