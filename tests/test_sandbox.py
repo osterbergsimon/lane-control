@@ -432,11 +432,11 @@ class HistoryTests(Base):
         r = self.repo()
         base = git("rev-parse", "HEAD", cwd=r)
         self.commit(r, "src/x.py")
-        self.assertEqual(SB.ci_hits(r, ["HEAD", f"^{base}"]), [])
+        self.assertEqual(SB.ci_hits(r, base, "HEAD"), [])
         for p in (".github/workflows/x.yml", ".GitHub/Actions/a/action.yml", "Jenkinsfile", "sub/.gitlab-ci.yml",
                   ".circleci/config.yml", "azure-pipelines.yml"):
             self.commit(r, p)
-        self.assertEqual(SB.ci_hits(r, ["HEAD", f"^{base}"]),
+        self.assertEqual(SB.ci_hits(r, base, "HEAD"),
                          [".GitHub/Actions/a/action.yml", ".circleci/config.yml", ".github/workflows/x.yml",
                           "Jenkinsfile", "azure-pipelines.yml", "sub/.gitlab-ci.yml"])
 
@@ -448,7 +448,7 @@ class HistoryTests(Base):
                  ".github/workflows/n\nx.yml"]
         for n in names:
             self.commit(r, n)
-        self.assertEqual(SB.ci_hits(r, ["HEAD", f"^{base}"]), sorted(names))
+        self.assertEqual(SB.ci_hits(r, base, "HEAD"), sorted(names))
         priv = ['fixtures/customers/a"b.csv', 'dir"x/.env', "dir\\y/.env.local", "fixtures/customers/t\tb.csv"]
         for n in priv:
             self.commit(r, n)
@@ -467,7 +467,7 @@ class HistoryTests(Base):
         os.symlink("elsewhere", r / ".github")
         git("add", ".github", cwd=r)
         git("commit", "-q", "-m", "link", cwd=r)
-        self.assertEqual(SB.ci_hits(r, ["HEAD", f"^{base}"]), [".github"])
+        self.assertEqual(SB.ci_hits(r, base, "HEAD"), [".github"])
         self.assertTrue(SB.is_ci_path(".GitHub/Workflows"))
         self.assertTrue(SB.is_ci_path(".github/workflows"))
         self.assertFalse(SB.is_ci_path(".github/CODEOWNERS"))
@@ -482,13 +482,27 @@ class HistoryTests(Base):
         self.commit(r, ".github/workflows/test.yml", "on: push\n")
         git("switch", "-q", "lane", cwd=r)
         git("merge", "-q", "--no-edit", "main", cwd=r)
-        self.assertEqual(SB.ci_hits(r, ["lane", "--not", "main", base]), [])
+        self.assertEqual(SB.ci_hits(r, "main", "lane"), [])  # byte-identical to the base's: no change
         git("switch", "-q", "-c", "evil", "lane~1", cwd=r)
         git("merge", "-q", "--no-commit", "main", cwd=r)
         (r / ".github/workflows/test.yml").write_text("on: push\npermissions: write-all\n")
         git("add", ".github", cwd=r)
         git("commit", "-q", "-m", "evil merge", cwd=r)
-        self.assertEqual(SB.ci_hits(r, ["evil", "--not", "main", base]), [".github/workflows/test.yml"])
+        self.assertEqual(SB.ci_hits(r, "main", "evil"), [".github/workflows/test.yml"])
+
+    def test_merge_of_an_old_workflow_is_flagged(self):
+        """r2 B1: a merge whose second parent is an old base commit, keeping that commit's workflow, differs from
+        what origin runs now: flagged, although it equals one of its parents."""
+        r = self.repo()
+        self.commit(r, ".github/workflows/ci.yml", "on: push\npermissions: write-all\n")
+        old = git("rev-parse", "HEAD", cwd=r)
+        self.commit(r, ".github/workflows/ci.yml", "on: pull_request\npermissions: {}\n")  # the hardened one
+        tip = git("rev-parse", "HEAD", cwd=r)
+        tree = git("rev-parse", f"{old}^{{tree}}", cwd=r)
+        evil = git("commit-tree", "-p", tip, "-p", old, "-m", "merge", tree, cwd=r)
+        self.assertEqual(SB.ci_hits(r, tip, evil), [".github/workflows/ci.yml"])
+        gone = git("commit-tree", "-p", tip, "-m", "drop", git("rev-parse", "HEAD~2^{tree}", cwd=r), cwd=r)
+        self.assertEqual(SB.ci_hits(r, tip, gone), [".github/workflows/ci.yml"])  # a deleted workflow too
 
     def test_norm(self):
         self.assertEqual(SB.norm_private(["./x/", "x/", "x", "", "  ./Y "]), ["x", "y"])

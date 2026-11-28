@@ -384,7 +384,7 @@ class Broker:
         prev = self.git("-C", q, "rev-parse", "-q", "--verify", "refs/heads/lane", check=False)
         if prev and self.cli(["git", "-C", str(q), "merge-base", "--is-ancestor", prev, new]).returncode:
             raise Refused("not a fast-forward of the lane's last push (a rewritten branch: lanes merge)")
-        hits = [] if prev == new else SB.ci_hits(q, [new, "--not", f"refs/heads/{base}", *([prev] if prev else [])])
+        hits = SB.ci_hits(q, f"refs/heads/{base}", new)  # the pushed tree against what origin's base runs
         if hits and not (Path(self.t["lane_dir"]) / "ci-approved" / new).is_file():
             raise Refused(f"changes CI configuration ({', '.join(hits[:5])}): the owner approves it with "
                           f"lane-control lane approve-ci {lane} {new}")

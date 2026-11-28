@@ -140,6 +140,29 @@ class PushTests(BrokerCase):
         self.assertTrue(out["ok"], out)
         self.assertEqual(git("rev-parse", "lane-1", cwd=self.fx.origin), sha)
 
+    def test_merge_of_an_old_workflow_refused(self):
+        """r2 B1, through the broker: the base once had a write-all workflow and hardened it; a lane merge that takes
+        the old commit as a parent and keeps its workflow needs the owner's approval."""
+        w = self.t / "w"
+        git("clone", "-q", "--no-local", self.fx.origin, w, cwd=self.t)
+        (w / ".github" / "workflows").mkdir(parents=True)
+        (w / ".github/workflows/ci.yml").write_text("on: push\npermissions: write-all\n")
+        git("add", ".github", cwd=w)
+        git("commit", "-q", "-m", "old", cwd=w)
+        old = git("rev-parse", "HEAD", cwd=w)
+        (w / ".github/workflows/ci.yml").write_text("on: pull_request\npermissions: {}\n")
+        git("commit", "-q", "-am", "harden", cwd=w)
+        git("push", "-q", "origin", "main", cwd=w)
+        self.assertTrue(self.req("fetch")["ok"])  # the lane takes the hardened base
+        inbox = Path(self.ticket["ticket_dir"]) / "run" / "inbox" / "base.bundle"
+        git("fetch", "-q", inbox, "refs/remotes/origin/main:refs/remotes/origin/main", cwd=self.clone)
+        git("merge", "-q", "--no-edit", "origin/main", cwd=self.clone)
+        tree = git("rev-parse", f"{old}^{{tree}}", cwd=self.clone)
+        evil = git("commit-tree", "-p", "HEAD", "-p", old, "-m", "merge", tree, cwd=self.clone)
+        git("update-ref", "refs/heads/lane-1", evil, cwd=self.clone)
+        self.bundle("lane-1", "^origin/main")
+        self.refused("push", says="CI configuration (.github/workflows/ci.yml)")
+
     def test_ci_workflow_with_a_quoted_name_refused(self):
         """r1 B1, through the broker: a workflow whose name git would quote."""
         (self.clone / ".github" / "workflows").mkdir(parents=True)

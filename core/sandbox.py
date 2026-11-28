@@ -616,24 +616,6 @@ def changed_paths(repo: Path, revs: list) -> set:
                              "--name-only", "--no-renames", stdin=commits))
 
 
-def ci_changed_paths(repo: Path, revs: list) -> set:
-    """The paths the lane itself changed in the delivered commits: each ordinary commit against its parent; each merge
-    only where its result differs from every parent (--cc), so merging a base that changed CI is not the lane's
-    change, while an edit made in the merge itself is."""
-    plain, merges = [], []
-    for line in _git_bytes(repo, "rev-list", "--parents", *revs).decode().split("\n"):
-        f = line.split()
-        if f:
-            (merges if len(f) > 2 else plain).append(f[0])
-    out = set()
-    if plain:
-        out |= _names(_git_bytes(repo, "diff-tree", "--stdin", "-z", "-r", "--root", "--no-commit-id",
-                                 "--name-only", "--no-renames", stdin="\n".join(plain).encode() + b"\n"))
-    for m in merges:
-        out |= _names(_git_bytes(repo, "diff-tree", "-z", "-r", "--cc", "--no-commit-id", "--name-only", m))
-    return out
-
-
 def history_hits(repo: Path, revs: list, private: list) -> list:
     """Paths in the delivered commits that are --private paths (any depth below them) or secret env files at any
     depth (a template name excepted); compared lower-cased."""
@@ -659,8 +641,12 @@ def is_ci_path(p: str) -> bool:
     return low.startswith(CI_PREFIXES) or low in CI_DIRS or low.rsplit("/", 1)[-1] in CI_FILES
 
 
-def ci_hits(repo: Path, revs: list) -> list:
-    return sorted(p for p in ci_changed_paths(repo, revs) if is_ci_path(p))
+def ci_hits(repo: Path, trusted: str, new: str) -> list:
+    """CI paths where the tree a push would put on origin (`new`) differs from what origin already runs (`trusted`:
+    the delivered base tip): added, changed or deleted, however it got there (an ordinary commit, a merge that takes
+    an old parent's version, a rename). A file byte-identical to the base's is no change (review r2 B1)."""
+    return sorted(p for p in _names(_git_bytes(repo, "diff-tree", "-r", "-z", "--name-only", "--no-renames", trusted,
+                                               new)) if is_ci_path(p))
 
 
 # --- the broker's read of the outbox -------------------------------------------------------------------------------
