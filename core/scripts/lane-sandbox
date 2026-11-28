@@ -477,7 +477,7 @@ def run_inside(lane: str, clone: Path, inner: list, role: str = "check") -> tupl
          "lane_dir": str(ld), "ticket_dir": str(td), "home": str(Path.home()),
          "home_files": {"gitconfig": str(gen / "gitconfig"), "opencode.json": str(gen / "opencode.json"),
                         "resolv.conf": str(gen / "resolv.conf"), "plugins": None, "skills": None},
-         "tool_path": tools, "bash": SP.find_tool(tools, "bash") or "bash", "persona": str(gen / "persona.md"),
+         "tool_path": tools, "bash": SP.find_tool(tools, "bash") or SP.host_bash(), "persona": str(gen / "persona.md"),
          "gateway_key_env": None, "gateway": None, "hook_port": None, "review_files": [], "review_write": None,
          "sha": None, "private": rec.get("private") or [], "inside": str(ROOT / "core" / "sandbox-inside"),
          "lc_tree": str(ROOT), "agent_dirs": [], "orca_binds": [], "terminal": f"check-{nonce[:16]}",

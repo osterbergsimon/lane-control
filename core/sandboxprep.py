@@ -338,6 +338,11 @@ def find_tool(path: list, name: str) -> "str | None":
     return None
 
 
+def host_bash() -> str:
+    """The opener runs in pasta's namespace on the host's file system, so any host bash will do."""
+    return os.path.realpath(shutil.which("bash") or "/bin/bash")
+
+
 def projects_on(conf: dict) -> list:
     return (conf.get("SANDBOX_PROJECTS") or "").split()
 
@@ -480,7 +485,7 @@ def prepare(root: Path, st: dict, wt: Path, role: str, lane: "str | None", issue
          "home_files": {"gitconfig": str(gen / "gitconfig"), "opencode.json": str(gen / "opencode.json"),
                         "resolv.conf": str(gen / "resolv.conf"), "plugins": str(gen / "plugins"),
                         "skills": str(gen / "skills")},
-         "tool_path": tools, "bash": find_tool(tools, "bash") or conf.get("SANDBOX_BASH") or "bash",
+         "tool_path": tools, "bash": find_tool(tools, "bash") or conf.get("SANDBOX_BASH") or host_bash(),
          "persona": str(persona), "gateway_key_env": key_env, "gateway": list(gateway) if gateway else None,
          "hook_port": None, "review_files": rf, "review_write": review_write if trole == "reviewer" else None,
          "sha": sha, "private": private, "inside": str(HERE / "sandbox-inside"), "lc_tree": str(HERE.parent),

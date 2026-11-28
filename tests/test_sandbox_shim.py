@@ -41,7 +41,7 @@ class ShimCase(unittest.TestCase):
         self.log = self.t / "calls.jsonl"
         self.proc = self.t / "proc"
         self.cfg = {"log": str(self.log), "proc": str(self.proc), "mntns": MNTNS, "nspid": NSPID,
-                    "host_pid": HOSTPID, "agent_rc": 7}
+                    "host_pid": HOSTPID, "agent_rc": 7, "host_path": os.environ.get("PATH", "")}
         self.fake_proc({HOSTPID: (MNTNS, [HOSTPID, NSPID, 1])})
         self.write_cfg()
         pins = {"SANDBOX_BWRAP": str(self.bin / "bwrap"), "SANDBOX_PASTA": str(self.bin / "pasta"),

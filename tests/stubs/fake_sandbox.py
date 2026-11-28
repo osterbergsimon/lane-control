@@ -39,11 +39,11 @@ if me == "systemd-run":
     rest = after_dashes(sys.argv[1:])
     if rest == ["true"]:
         sys.exit(1 if cfg.get("fail_scope") else 0)
-    os.execv(rest[0], rest)
+    os.execvp(rest[0], rest)
 elif me == "pasta":
     log()
     rest = after_dashes(sys.argv[1:])
-    os.execv(rest[0], rest)
+    os.execvp(rest[0], rest)
 elif me == "nsenter":
     log()
     sys.exit(1 if cfg.get("fail_nsenter") else 0)
@@ -67,6 +67,8 @@ elif me == "bwrap":
     for j, x in enumerate(args[:-2]):
         if x == "--bind" and args[j + 2] == "/run/lane/outbox":
             os.environ["LANE_OUTBOX"] = args[j + 1]
+    if cfg.get("host_path"):  # the tool path's folders exist inside a real sandbox; here they may be placeholders
+        os.environ["PATH"] = os.environ.get("PATH", "") + ":" + cfg["host_path"]
     child = subprocess.Popen(agent)
     (Path(cfg["proc"]) / str(cfg["host_pid"]) / "task" / str(cfg["host_pid"]) / "children").write_text(
         f"{child.pid} ")
