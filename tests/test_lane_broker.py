@@ -457,7 +457,7 @@ class ServeTests(BrokerCase):
 
     def test_heavy_slot_held_while_open(self):
         sock = self.serve()
-        state = Path(self.fx.env["XDG_STATE_HOME"]) / "lane-control"
+        state = Path(self.fx.env["LANE_STATE_DIR"])
         with self.conn(sock) as c:
             c.sendall(json.dumps({"request": "heavy-slot"}).encode() + b"\n")
             self.assertTrue(json.loads(c.recv(4096))["ok"])

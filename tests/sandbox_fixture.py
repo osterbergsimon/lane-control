@@ -36,7 +36,8 @@ class Fixture:
         self.env = {**{k: v for k, v in os.environ.items() if not k.startswith(("ORCA_", "LANE_", "XDG_"))},
                     "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"),
                     "XDG_DATA_HOME": str(self.home / ".local/share"), "XDG_STATE_HOME": str(self.home / ".local/state"),
-                    "XDG_CACHE_HOME": str(self.home / ".cache"), "GIT_CONFIG_NOSYSTEM": "1"}
+                    "XDG_CACHE_HOME": str(self.home / ".cache"), "GIT_CONFIG_NOSYSTEM": "1",
+                    "LANE_STATE_DIR": str(t / "slots")}  # lane-heavy's slots: never the machine's own
         for k in ("GITHUB_TOKEN", "GH_TOKEN", "SSH_AUTH_SOCK", "LANE_MACHINE_CONF", "LANE_SANDBOX_CONF"):
             self.env.pop(k, None)
         for f in FLOOR:

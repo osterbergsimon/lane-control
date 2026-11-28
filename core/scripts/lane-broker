@@ -455,17 +455,28 @@ def read_request(conn) -> bytes:
     return buf.split(b"\n", 1)[0]
 
 
+def slot_settings() -> tuple:
+    """lane-heavy's own slot folder and slot count, as lane-limits.sh works them out, so a sandboxed lane shares the
+    machine's limit with every other lane."""
+    limits = HERE / "lane-limits.sh"
+    r = subprocess.run(["bash", "-c", f'. "{limits}" >/dev/null 2>&1; printf "%s\\0%s" "$LANE_STATE_DIR" '
+                        '"$LANE_HEAVY_SLOTS"'], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    d, _, n = r.stdout.partition("\0")
+    try:
+        return Path(d), max(1, int(n))
+    except ValueError:
+        return Path(d or "/nonexistent"), 1
+
+
 def heavy_slot(t: dict, conn) -> None:
     """Hold one of lane-heavy's slots (its flock files) while the connection stays open."""
-    state = Path(os.environ.get("LANE_STATE_DIR") or SB._xdg("XDG_STATE_HOME", ".local/state") / "lane-control")
-    SB.private_dir(state)
-    try:
-        n = int(os.environ.get("LANE_HEAVY_SLOTS") or 2)
-    except ValueError:
-        n = 2
+    state, n = slot_settings()
+    if not state.is_absolute() or state.is_symlink():
+        raise Refused("lane-heavy's slot folder cannot be used")
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = None
     while fd is None:
-        for i in range(max(1, n)):
+        for i in range(n):
             f = os.open(state / f"heavy.{i}", os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
             try:
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
