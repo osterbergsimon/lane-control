@@ -312,6 +312,42 @@ class NftTests(unittest.TestCase):
         r = SB.nft_rules([], ("gateway.example.com", 443))  # a name on the internet: nothing to accept
         self.assertNotIn("gateway.example.com", r)
 
+    def test_lan_prefixes_multicast_and_nd(self):
+        """r1 M7: the host's on-link prefixes (a LAN with global addresses), multicast and broadcast are dropped;
+        IPv6 neighbour discovery is accepted first; a named private gateway is resolved here and accepted."""
+        r = SB.nft_rules(["192.0.2.7"], None, ["198.51.100.0/24", "2001:db8:1::/64"])
+        lines = [x.strip() for x in r.splitlines()]
+        nd = lines.index("icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept")
+        self.assertLess(nd, min(i for i, x in enumerate(lines) if x.endswith("drop")))
+        self.assertIn("ip daddr { 198.51.100.0/24 } drop", lines)
+        self.assertIn("ip6 daddr { 2001:db8:1::/64 } drop", lines)
+        for x in ("224.0.0.0/4", "255.255.255.255", "ff00::/8"):
+            self.assertIn(x, r)
+        with mock.patch("socket.getaddrinfo", lambda h, p, type=0: [(2, 1, 6, "", ("192.168.7.9", p))]):
+            r = SB.nft_rules([], ("gw.lan.example", 4000))
+        self.assertIn("ip daddr 192.168.7.9 tcp dport 4000 accept", r)
+        with mock.patch("socket.getaddrinfo", side_effect=OSError("no name")):
+            self.assertNotIn(" tcp dport 4000 accept", SB.nft_rules([], ("gw.lan.example", 4000)))
+        with self.assertRaises(SB.SandboxError):
+            SB.nft_rules([], None, ["not-a-net; flush ruleset"])
+
+    def test_host_onlink_from_proc(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "net").mkdir()
+            (d / "net" / "route").write_text(
+                "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+                "eth0\t00000000\t0102000A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"  # default via a gateway
+                "eth0\t006433C6\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n")  # 198.51.100.0/24 on-link
+            (d / "net" / "ipv6_route").write_text(
+                "20010db8000100000000000000000000 40 00000000000000000000000000000000 00 "
+                "00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0\n"
+                "fe800000000000000000000000000000 40 00000000000000000000000000000000 00 "
+                "00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0\n"
+                "00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
+                "fe800000000000000000000000000001 00000400 00000001 00000000 00000003 eth0\n")
+            self.assertEqual(SB.host_onlink(d), ["198.51.100.0/24", "2001:db8:1::/64"])
+
     def test_rejects_junk_addresses(self):
         with self.assertRaises(SB.SandboxError):
             SB.nft_rules(["1.2.3.4; flush ruleset"], None)

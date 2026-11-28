@@ -412,7 +412,8 @@ class EscapeTests(unittest.TestCase):
         r = subprocess.run([sys.executable, str(LANE_SANDBOX), "inspect", "app-1"], env=m.pane_env(
             ORCA_TERMINAL_HANDLE=None), capture_output=True, text=True, timeout=240)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("1 dirty file(s), 1 commit(s) not pushed", r.stdout)
+        # r1 M4: every branch counts: the edit's commit, and the stub's own unpushed `extra` branch
+        self.assertIn("1 dirty file(s), 2 commit(s) not pushed (any branch), 0 stash(es)", r.stdout)
         shutil.rmtree(m.fx.clone())  # the clone is lost
         n = m.prepare()
         m.stub("inspect", n, pushed=pushed)

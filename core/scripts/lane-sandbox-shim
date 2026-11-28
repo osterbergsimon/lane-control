@@ -303,7 +303,7 @@ def _launch(t: dict, conf: dict, env: dict, chain, stdio=None) -> int:
     gw = tuple(t["gateway"]) if t.get("gateway") else None
     rules = launch_dir / "nft"
     try:
-        SB.write_private(rules, SB.nft_rules(SB.host_addrs(proc if proc != Path("/proc") else Path("/proc")), gw))
+        SB.write_private(rules, SB.nft_rules(SB.host_addrs(proc), SB.gateways(gw), SB.host_onlink(proc)))
     except SB.SandboxError as e:
         chain.kill()
         return refuse(f"network filter: {e}")

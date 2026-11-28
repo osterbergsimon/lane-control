@@ -423,29 +423,101 @@ def _ip(a: str) -> "ipaddress._BaseAddress":
         raise SandboxError(f"not an address: {a!r}") from None
 
 
-def nft_rules(host_addrs: list, gateway: "tuple | None") -> str:
-    """The namespace's output filter (spec, "Route out"): pasta's DNS first, the gateway when it is on a private
-    range, then drops for the host's own addresses, link-local and the private ranges."""
+MULTICAST_V4 = ("224.0.0.0/4", "255.255.255.255")
+MULTICAST_V6 = ("ff00::/8",)
+
+
+def gateways(gateway) -> list:
+    """[(ip, port)] from a ticket's gateway: (host, port) with an address, or a host name resolved here on the
+    host, outside (a named private gateway gets its accept rule; a name that does not resolve gets none and stays
+    dropped when private)."""
+    if not gateway:
+        return []
+    host, port = str(gateway[0]), int(gateway[1])
+    try:
+        return [(str(ipaddress.ip_address(host)), port)]
+    except ValueError:
+        pass
+    import socket
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return []
+    return sorted({(i[4][0].split("%")[0], port) for i in infos})
+
+
+def nft_rules(host_addrs: list, gateway, onlink: "list | None" = None) -> str:
+    """The namespace's output filter (spec, "Route out"): pasta's DNS and IPv6 neighbour discovery first, the gateway
+    when it is on a private range or on the host's own links, then drops for the host's own addresses, its on-link
+    prefixes (LAN machines with global addresses, review r1 M7), link-local, the private ranges, multicast and
+    broadcast. gateway: a (host, port) pair, or a list of (ip, port) already resolved."""
     addrs = [_ip(a) for a in host_addrs]
     v4 = sorted({str(a) for a in addrs if a.version == 4 and not a.is_loopback})
     v6 = sorted({str(a) for a in addrs if a.version == 6 and not a.is_loopback and not a.is_link_local})
-    lines = ["table inet lane_sandbox {", "  chain out {", "    type filter hook output priority 0; policy accept;",
-             f"    ip daddr {DNS} accept"]
-    if gateway:
+    nets = []
+    for n in onlink or []:
         try:
-            g = ipaddress.ip_address(str(gateway[0]))
+            nets.append(ipaddress.ip_network(n, strict=False))
         except ValueError:
-            g = None  # a name: on the internet, which stays open in phase 1
-        if g is not None and not g.is_loopback:
+            raise SandboxError(f"not a network: {n!r}") from None
+    n4 = sorted({str(n) for n in nets if n.version == 4 and n.prefixlen > 0})
+    n6 = sorted({str(n) for n in nets if n.version == 6 and n.prefixlen > 0})
+    lines = ["table inet lane_sandbox {", "  chain out {", "    type filter hook output priority 0; policy accept;",
+             f"    ip daddr {DNS} accept",
+             "    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept"]
+    gws = gateway if isinstance(gateway, list) else gateways(gateway) if gateway else []
+    for ip, port in gws:
+        g = _ip(ip)
+        if not g.is_loopback:
             fam = "ip" if g.version == 4 else "ip6"
-            lines.append(f"    {fam} daddr {g} tcp dport {int(gateway[1])} accept")
+            lines.append(f"    {fam} daddr {g} tcp dport {int(port)} accept")
     if v4:
         lines.append("    ip daddr { " + ", ".join(v4) + " } drop")
     if v6:
         lines.append("    ip6 daddr { " + ", ".join(v6) + " } drop")
-    lines += ["    ip daddr { " + ", ".join(PRIVATE_V4) + " } drop",
-              "    ip6 daddr { " + ", ".join(PRIVATE_V6) + " } drop", "  }", "}"]
+    if n4:
+        lines.append("    ip daddr { " + ", ".join(n4) + " } drop")
+    if n6:
+        lines.append("    ip6 daddr { " + ", ".join(n6) + " } drop")
+    lines += ["    ip daddr { " + ", ".join(PRIVATE_V4 + MULTICAST_V4) + " } drop",
+              "    ip6 daddr { " + ", ".join(PRIVATE_V6 + MULTICAST_V6) + " } drop", "  }", "}"]
     return "\n".join(lines) + "\n"
+
+
+def host_onlink(proc: Path = Path("/proc")) -> list:
+    """The host's on-link prefixes (routes with no gateway), IPv4 from net/route and IPv6 from net/ipv6_route,
+    without the default route, loopback, link-local and multicast. Never printed: facts about the machine."""
+    out = []
+    try:
+        for line in (Path(proc) / "net" / "route").read_text().splitlines()[1:]:
+            f = line.split()
+            if len(f) < 8:
+                continue
+            dest, flags, mask = int(f[1], 16), int(f[3], 16), int(f[7], 16)
+            if flags & 0x2 or mask == 0:  # RTF_GATEWAY, or the default route
+                continue
+            d = ipaddress.IPv4Address(dest.to_bytes(4, "little"))
+            m = ipaddress.IPv4Address(mask.to_bytes(4, "little"))
+            n = ipaddress.IPv4Network(f"{d}/{m}", strict=False)
+            if not n.is_loopback and str(n) not in out:
+                out.append(str(n))
+    except (OSError, ValueError):
+        pass
+    try:
+        for line in (Path(proc) / "net" / "ipv6_route").read_text().splitlines():
+            f = line.split()
+            if len(f) < 10:
+                continue
+            plen, nexthop = int(f[1], 16), int(f[4], 16)
+            if plen == 0 or nexthop != 0:
+                continue
+            n = ipaddress.IPv6Network((ipaddress.IPv6Address(bytes.fromhex(f[0])), plen), strict=False)
+            if n.is_loopback or n.is_link_local or n.is_multicast or plen == 128 or str(n) in out:
+                continue
+            out.append(str(n))
+    except (OSError, ValueError):
+        pass
+    return out
 
 
 def host_addrs(proc: Path = Path("/proc")) -> list:
